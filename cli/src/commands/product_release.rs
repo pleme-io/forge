@@ -333,15 +333,21 @@ pub async fn product_release(
     // Determine target environment(s)
     let target_env = env.as_deref().unwrap_or("staging");
 
-    // Resolve git SHA for consistency across all phases
-    let git_sha = std::env::var("RELEASE_GIT_SHA").unwrap_or_default();
-    if git_sha.is_empty() {
+    // Resolve git SHA for consistency across all phases — routed
+    // through the crate-scoped `crate::git::release_git_sha_from_env`
+    // sigil so the empty-string-is-miss semantic (the Nix release
+    // wrapper exports the var unconditionally with an empty value on
+    // non-release invocations) lives at one point across the crate.
+    // Sibling consumers: `commands/push.rs::get_git_sha` and
+    // `commands/rust_service.rs::get_tag_suffix` (both route through
+    // the same sigil).
+    let Some(git_sha) = crate::git::release_git_sha_from_env() else {
         bail!(
             "RELEASE_GIT_SHA not set.\n  \
              product-release requires RELEASE_GIT_SHA to ensure consistent tagging.\n  \
              This is normally set by the nix release wrapper."
         );
-    }
+    };
 
     println!(
         "{} {} Product Release {}",
@@ -1244,6 +1250,99 @@ mod status_spawn_routing_tests {
              `run_nix_release_app`, `run_health_check` rollout-status, \
              `push_prebuilt_image` docker-tag, `push_prebuilt_image` \
              docker-push)",
+        );
+    }
+}
+
+#[cfg(test)]
+mod release_git_sha_routing_tests {
+    /// Whole-module shield: every read of the `RELEASE_GIT_SHA` env
+    /// var in this module's non-test body must route through the
+    /// shared [`crate::git::release_git_sha_from_env`] sigil, never
+    /// through an inline
+    /// `env::var("RELEASE_GIT_SHA").unwrap_or_default()` +
+    /// `git_sha.is_empty()` two-line stanza.
+    ///
+    /// Pre-lift the single consumer site — `execute` — spelled the
+    /// same `let git_sha =
+    /// std::env::var("RELEASE_GIT_SHA").unwrap_or_default(); if
+    /// git_sha.is_empty() { bail!(...) }` stanza that spelled the
+    /// empty-string-is-miss semantic inline, sibling to the
+    /// byte-equivalent `if !sha.is_empty()` copies at
+    /// `commands/push.rs::get_git_sha` and
+    /// `commands/rust_service.rs::get_tag_suffix`. Three consumers
+    /// past THEORY §VI.1's three-is-a-law threshold: the trio had to
+    /// agree on both the env-var spelling AND the
+    /// empty-string-is-miss semantic (the Nix release wrapper
+    /// exports the var unconditionally with an empty value on
+    /// non-release invocations) for the pushed image tag, the
+    /// deployed image tag, and the product-release-driven downstream
+    /// tags to resolve to the SAME code-commit SHA.
+    ///
+    /// A drift at this site (a typo `RELEASE_SHA`, or the empty-check
+    /// accidentally deleted so `Ok("")` — the shape the Nix release
+    /// wrapper exports on non-release invocations — leaks through as
+    /// a valid SHA) would silently drive the whole product-release
+    /// pipeline with an empty SHA suffix on every direct-CLI
+    /// invocation (`amd64-` bare-arch tags across `helm-release`,
+    /// `chart-dependencies`, and `deploy-service` phases) rather
+    /// than bailing loudly on the miss as the pre-lift shape did.
+    ///
+    /// A future refinement of the `RELEASE_GIT_SHA` contract — a
+    /// canonicalize hook that truncates to 7 chars, a "known length
+    /// only" filter, a swap to a typed
+    /// `substrate::ReleaseGitSha(String)` newtype, a telemetry sigil
+    /// on the resolved SHA — lands at ONE body
+    /// ([`crate::git::release_git_sha_from_env`]) and reaches every
+    /// consumer by construction (THEORY §V —
+    /// solve-once-at-the-primitive; §VI.1 —
+    /// recurring-shape-to-helper).
+    ///
+    /// The scan bounds on the whole-module boundary (from file start
+    /// to the FIRST `\n#[cfg(test)]\n` marker in source order via
+    /// [`crate::test_support::module_body_before_first_cfg_test`]) so
+    /// this shield's own docstring mentions of
+    /// `env::var("RELEASE_GIT_SHA")` — living inside a `#[cfg(test)]`
+    /// block below that first marker — stay out of scope AND every
+    /// current or future `RELEASE_GIT_SHA`-reading consumer landing
+    /// anywhere in the top-level module body cannot silently ride
+    /// along without routing through the primitive. Every hit routes
+    /// through [`crate::test_support::code_line_hits`] for
+    /// anti-docstring-self-match discipline.
+    #[test]
+    fn test_product_release_release_git_sha_routes_through_sigil() {
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            include_str!("product_release.rs"),
+            "commands/product_release.rs",
+        );
+        let raw_env_needle = "env::var(\"RELEASE_GIT_SHA\")";
+        let env_hits = crate::test_support::code_line_hits(body, raw_env_needle);
+        assert!(
+            env_hits.is_empty(),
+            "commands/product_release.rs must NOT spell \
+             `{raw_env_needle}` inline in the module body — every \
+             consumer must route through \
+             `crate::git::release_git_sha_from_env`, the shared \
+             sigil that owns the `env::var` read AND the \
+             empty-string-is-miss filter at ONE body across the \
+             crate. Found {} code-line hit(s): {env_hits:#?}. A \
+             hand-rolled inline copy re-opens the drift class the \
+             sigil was landed to close.",
+            env_hits.len()
+        );
+        let delegate_needle = "crate::git::release_git_sha_from_env()";
+        let delegate_hits = crate::test_support::code_line_hits(body, delegate_needle);
+        assert_eq!(
+            delegate_hits.len(),
+            1,
+            "commands/product_release.rs must delegate \
+             `RELEASE_GIT_SHA` resolution to \
+             `crate::git::release_git_sha_from_env()` at EXACTLY one \
+             code line — the `execute` body. Found {} code-line \
+             hit(s): {delegate_hits:#?}. A missing delegation would \
+             leave the negative scan above trivially satisfied by \
+             absence.",
+            delegate_hits.len()
         );
     }
 }

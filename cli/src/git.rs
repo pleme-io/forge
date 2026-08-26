@@ -409,6 +409,53 @@ pub async fn get_short_sha_async() -> Result<String> {
     read_head_sha_async(HeadShaForm::Short7, None).await
 }
 
+/// Crate-scoped sigil: resolve the `RELEASE_GIT_SHA` env var with
+/// empty-string-is-miss semantics. Every production site that needs
+/// the release-time SHA the Nix release wrapper captures at the START
+/// of the release — before any deploy commits shift HEAD — routes
+/// through this ONE body, so the env-var-spelling AND the
+/// empty-string-is-miss contract are honored at exactly one code line
+/// across the crate.
+///
+/// Pre-lift three byte-equivalent stanzas —
+/// `if let Ok(sha) = env::var("RELEASE_GIT_SHA") { if !sha.is_empty()
+/// { return Ok(sha); } }` at `commands/push.rs::get_git_sha` and
+/// `commands/rust_service.rs::get_tag_suffix`, plus the
+/// `env::var("RELEASE_GIT_SHA").unwrap_or_default(); if
+/// git_sha.is_empty() { bail!(...) }` at
+/// `commands/product_release.rs::execute` — lived across the crate.
+/// Three consumers past THEORY §VI.1's three-is-a-law threshold: the
+/// trio had to agree on both the env-var spelling AND the
+/// empty-string-is-miss semantic (the Nix wrapper exports the var
+/// unconditionally with an empty value on non-release invocations, so
+/// treating `Ok("")` as "set" would mis-route every direct-CLI call
+/// into the release-tagged branch). A drift at one site (e.g., a
+/// typo `RELEASE_SHA`, or the empty-check accidentally deleted)
+/// would silently mis-tag one consumer's image push relative to the
+/// others — and the mismatch would only surface as a deploy-time
+/// tag-lookup miss with no structural link back to the SHA-resolve
+/// drift.
+///
+/// # Empty-string-is-miss semantic
+///
+/// `std::env::var` returns `Ok("")` when the var is set to the empty
+/// string — as the Nix release wrapper does on non-release
+/// invocations. This sigil folds `Ok("")` into `None` via `.filter(|s|
+/// !s.is_empty())` so the caller can `if let Some(sha) = ...` without
+/// re-spelling the empty-check.
+///
+/// Sibling of [`crate::repo::get_environment`] on the `FORGE_ENV`
+/// surface and [`crate::infrastructure::attic::attic_server_alias`]
+/// on the `ATTIC_SERVER_NAME` surface — same
+/// env-var-with-substrate-contract shape lifted to one body per env
+/// var. THEORY §V (solve-once-at-the-primitive); §VI.1
+/// (recurring-shape-to-helper).
+pub fn release_git_sha_from_env() -> Option<String> {
+    std::env::var("RELEASE_GIT_SHA")
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
 /// `workdir`-scoped sibling of [`get_short_sha_async`]. Resolves the
 /// short SHA against a specific git working tree (e.g. a frontend
 /// sub-repo whose codegen commit is owned by a different working
@@ -2350,6 +2397,103 @@ mod tests {
              A regression that removed it would silently downgrade every \
              async consumer to the PATH fallback."
         );
+    }
+
+    /// Serial-safe guard for tests that mutate the `RELEASE_GIT_SHA`
+    /// process env var. [`release_git_sha_from_env`] reads it once
+    /// per call; concurrent tests that set / remove it would race the
+    /// resolved value observed by any test asserting on the
+    /// primitive's return. Same `unwrap_or_else(|p| p.into_inner())`
+    /// recovery shape as [`crate::test_support::GIT_BIN_ENV_LOCK`]
+    /// and [`crate::test_support::ROOT_FLAKE_ENV_LOCK`] so a prior
+    /// panicking test that poisoned the mutex does not chain-fail
+    /// every subsequent test sharing the lock.
+    static RELEASE_GIT_SHA_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII scope-guard that snapshots — and on drop restores — the
+    /// `RELEASE_GIT_SHA` env var. Panic-safe by construction: drop
+    /// runs on both normal scope exit and unwind, so a test that
+    /// panics mid-body cannot leak `RELEASE_GIT_SHA=<sentinel>` to
+    /// any subsequent test in the same process. Callers hold
+    /// [`RELEASE_GIT_SHA_ENV_LOCK`] for the duration of the scope.
+    struct ReleaseGitShaSnapshot {
+        prior: std::result::Result<String, std::env::VarError>,
+    }
+
+    impl ReleaseGitShaSnapshot {
+        fn capture() -> Self {
+            Self {
+                prior: std::env::var("RELEASE_GIT_SHA"),
+            }
+        }
+    }
+
+    impl Drop for ReleaseGitShaSnapshot {
+        fn drop(&mut self) {
+            match &self.prior {
+                Ok(v) => std::env::set_var("RELEASE_GIT_SHA", v),
+                Err(_) => std::env::remove_var("RELEASE_GIT_SHA"),
+            }
+        }
+    }
+
+    /// [`release_git_sha_from_env`] returns `None` when the
+    /// `RELEASE_GIT_SHA` env var is unset. Pins the "unset is a
+    /// miss" contract — every pre-lift consumer
+    /// (`commands/push.rs::get_git_sha`,
+    /// `commands/rust_service.rs::get_tag_suffix`,
+    /// `commands/product_release.rs::execute`) skipped the
+    /// release-tag branch when the var was unset, so a drift here
+    /// (e.g., a Some("") shim, or a panic-on-VarError) would
+    /// mis-route every direct-CLI call into the release-tagged
+    /// branch and silently mis-tag its image push.
+    #[test]
+    fn test_release_git_sha_from_env_none_when_unset() {
+        let _guard = RELEASE_GIT_SHA_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _snapshot = ReleaseGitShaSnapshot::capture();
+        std::env::remove_var("RELEASE_GIT_SHA");
+        assert_eq!(release_git_sha_from_env(), None);
+    }
+
+    /// [`release_git_sha_from_env`] returns `None` when the
+    /// `RELEASE_GIT_SHA` env var is set to the empty string — the
+    /// exact shape the Nix release wrapper exports on non-release
+    /// invocations. Pins the empty-string-is-miss contract that
+    /// every pre-lift consumer spelled inline via `if !sha.is_empty()
+    /// { return Ok(sha); }` or `if git_sha.is_empty() { bail!(...) }`.
+    /// A drift here (deleting the `.filter(|s| !s.is_empty())`
+    /// clause) would let a wrapper-exported empty value through as
+    /// `Some("")`, and downstream image tags would render with a
+    /// bare `amd64-` suffix rather than a real SHA — silently
+    /// clobbering the `amd64-latest` moving tag on every direct-CLI
+    /// call.
+    #[test]
+    fn test_release_git_sha_from_env_none_when_empty() {
+        let _guard = RELEASE_GIT_SHA_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _snapshot = ReleaseGitShaSnapshot::capture();
+        std::env::set_var("RELEASE_GIT_SHA", "");
+        assert_eq!(release_git_sha_from_env(), None);
+    }
+
+    /// [`release_git_sha_from_env`] returns `Some(value)` verbatim
+    /// when `RELEASE_GIT_SHA` is set to a non-empty value. Pins the
+    /// no-canonicalization read path — a future refactor (e.g., a
+    /// lowercase hook, a `--short=7` truncator, a "known length only"
+    /// filter) is caught here rather than at the consumer's
+    /// downstream image-tag composition — where a silently-rewritten
+    /// SHA would surface only as a deploy-time tag-lookup miss.
+    #[test]
+    fn test_release_git_sha_from_env_some_when_set() {
+        let _guard = RELEASE_GIT_SHA_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _snapshot = ReleaseGitShaSnapshot::capture();
+        std::env::set_var("RELEASE_GIT_SHA", "abc1234");
+        assert_eq!(release_git_sha_from_env(), Some("abc1234".to_string()));
     }
 }
 

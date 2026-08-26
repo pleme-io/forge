@@ -17,11 +17,16 @@ use crate::retry::{retry_command_logged, RetryPolicy};
 /// 2. GIT_SHA env var (alternative)
 /// 3. git rev-parse --short HEAD (fallback for direct CLI usage)
 pub async fn get_git_sha() -> Result<String> {
-    // Check for RELEASE_GIT_SHA environment variable first
-    if let Ok(sha) = std::env::var("RELEASE_GIT_SHA") {
-        if !sha.is_empty() {
-            return Ok(sha);
-        }
+    // Check for RELEASE_GIT_SHA environment variable first — routed
+    // through the crate-scoped `crate::git::release_git_sha_from_env`
+    // sigil so the empty-string-is-miss semantic (the Nix release
+    // wrapper exports the var unconditionally with an empty value on
+    // non-release invocations) lives at one point across the crate.
+    // Sibling consumers: `commands/rust_service.rs::get_tag_suffix`
+    // and `commands/product_release.rs::execute` (both route through
+    // the same sigil).
+    if let Some(sha) = crate::git::release_git_sha_from_env() {
+        return Ok(sha);
     }
 
     // Check for GIT_SHA environment variable
@@ -517,6 +522,61 @@ mod tests {
              `crate::git::git_command_async()` for the documented \
              idempotent-no-op bare-`.status()` `git commit` carve-out — \
              neither delegation string was found in update_kustomization()."
+        );
+    }
+
+    /// Regression shield: `commands/push.rs::get_git_sha` must resolve
+    /// the `RELEASE_GIT_SHA` env-var branch via
+    /// [`crate::git::release_git_sha_from_env`] rather than by
+    /// hand-spelling `env::var("RELEASE_GIT_SHA")` + the
+    /// `!sha.is_empty()` empty-check inline. Pre-lift this file and
+    /// `commands/rust_service.rs::get_tag_suffix` and
+    /// `commands/product_release.rs::execute` each carried a
+    /// byte-equivalent inline stanza; three consumers past THEORY
+    /// §VI.1's three-is-a-law threshold — the trio had to agree on
+    /// both the env-var spelling AND the empty-string-is-miss
+    /// semantic for the pushed image tag, the deployed image tag,
+    /// and the product-release-driven downstream tags to all resolve
+    /// to the SAME code-commit SHA. A drift at one site (a typo
+    /// `RELEASE_SHA`, or the empty-check accidentally deleted so
+    /// `Ok("")` — the shape the Nix release wrapper exports on
+    /// non-release invocations — leaks through as a valid SHA) would
+    /// silently render `amd64-` image tags (bare arch suffix, no
+    /// SHA) at this one consumer only, clobbering the `amd64-latest`
+    /// moving tag on every direct-CLI push while the other two
+    /// consumers stayed on the pre-lift shape.
+    ///
+    /// Structural, not behavioral — the end-to-end env-var read
+    /// semantics are pinned by
+    /// [`crate::git::tests::test_release_git_sha_from_env_none_when_unset`]
+    /// / `_none_when_empty` / `_some_when_set` on the sigil itself;
+    /// this shield only certifies that `get_git_sha()` reads through
+    /// the sigil, not through a re-copied inline stanza.
+    #[test]
+    fn test_get_git_sha_routes_release_git_sha_through_sigil_not_inline_env_var() {
+        const SOURCE: &str = include_str!("push.rs");
+
+        let fn_body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/push.rs",
+            "pub async fn get_git_sha(",
+            "\npub async fn generate_auto_tags(",
+        );
+
+        assert!(
+            !fn_body.contains("env::var(\"RELEASE_GIT_SHA\")"),
+            "get_git_sha() must NOT read `RELEASE_GIT_SHA` inline — \
+             route through `crate::git::release_git_sha_from_env()` \
+             so the env-var-spelling AND the empty-string-is-miss \
+             contract are honored at exactly ONE code line across \
+             the crate. Found the pre-lift inline \
+             `env::var(\"RELEASE_GIT_SHA\")` read in get_git_sha()."
+        );
+        assert!(
+            fn_body.contains("crate::git::release_git_sha_from_env()"),
+            "get_git_sha() must resolve the release SHA via \
+             `crate::git::release_git_sha_from_env()` — the sigil \
+             call was not found in get_git_sha()."
         );
     }
 }
