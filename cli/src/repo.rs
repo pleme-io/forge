@@ -879,33 +879,6 @@ mod tests {
     /// test sharing the lock.
     static SAFE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// RAII scope-guard that snapshots — and on drop restores — the
-    /// `SAFE` env var. Panic-safe by construction: drop runs on both
-    /// normal scope exit and unwind, so a test that panics mid-body
-    /// cannot leak `SAFE=<sentinel>` to any subsequent test in the same
-    /// process. Callers hold [`SAFE_ENV_LOCK`] for the duration of the
-    /// scope.
-    struct SafeEnvSnapshot {
-        prior: std::result::Result<String, std::env::VarError>,
-    }
-
-    impl SafeEnvSnapshot {
-        fn capture() -> Self {
-            Self {
-                prior: std::env::var("SAFE"),
-            }
-        }
-    }
-
-    impl Drop for SafeEnvSnapshot {
-        fn drop(&mut self) {
-            match &self.prior {
-                Ok(v) => std::env::set_var("SAFE", v),
-                Err(_) => std::env::remove_var("SAFE"),
-            }
-        }
-    }
-
     /// [`safe_mode_from_env`] returns `true` when the `SAFE` env var
     /// is unset. Pins the default-TRUE half of the contract every
     /// pre-lift consumer (`main.rs::main`'s `Commands::Rollout` arm,
@@ -918,7 +891,7 @@ mod tests {
     #[test]
     fn safe_mode_from_env_defaults_to_true_when_unset() {
         let _guard = SAFE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let _snapshot = SafeEnvSnapshot::capture();
+        let _snapshot = crate::test_support::EnvVarSnapshot::capture("SAFE");
         std::env::remove_var("SAFE");
         assert!(
             safe_mode_from_env(),
@@ -935,7 +908,7 @@ mod tests {
     #[test]
     fn safe_mode_from_env_is_false_for_literal_false() {
         let _guard = SAFE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let _snapshot = SafeEnvSnapshot::capture();
+        let _snapshot = crate::test_support::EnvVarSnapshot::capture("SAFE");
         std::env::set_var("SAFE", "false");
         assert!(
             !safe_mode_from_env(),
@@ -952,7 +925,7 @@ mod tests {
     #[test]
     fn safe_mode_from_env_is_false_for_literal_zero() {
         let _guard = SAFE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let _snapshot = SafeEnvSnapshot::capture();
+        let _snapshot = crate::test_support::EnvVarSnapshot::capture("SAFE");
         std::env::set_var("SAFE", "0");
         assert!(
             !safe_mode_from_env(),
@@ -971,7 +944,7 @@ mod tests {
     #[test]
     fn safe_mode_from_env_is_false_case_insensitive() {
         let _guard = SAFE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let _snapshot = SafeEnvSnapshot::capture();
+        let _snapshot = crate::test_support::EnvVarSnapshot::capture("SAFE");
         for spelling in ["FALSE", "False", "fAlSe", "FALSe"] {
             std::env::set_var("SAFE", spelling);
             assert!(
@@ -997,7 +970,7 @@ mod tests {
     #[test]
     fn safe_mode_from_env_is_true_for_empty_string() {
         let _guard = SAFE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let _snapshot = SafeEnvSnapshot::capture();
+        let _snapshot = crate::test_support::EnvVarSnapshot::capture("SAFE");
         std::env::set_var("SAFE", "");
         assert!(
             safe_mode_from_env(),
@@ -1019,7 +992,7 @@ mod tests {
     #[test]
     fn safe_mode_from_env_is_true_for_unknown_value() {
         let _guard = SAFE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let _snapshot = SafeEnvSnapshot::capture();
+        let _snapshot = crate::test_support::EnvVarSnapshot::capture("SAFE");
         for spelling in ["no", "off", "disable", "1", "true", "yes"] {
             std::env::set_var("SAFE", spelling);
             assert!(
