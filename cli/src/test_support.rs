@@ -272,39 +272,103 @@ impl Drop for EnvVarSnapshot {
     }
 }
 
-/// RAII scope-guard that sets `GIT_BIN=value` on construction and
-/// restores the pre-scope state (either the original value or unset) on
-/// drop — panic-safe by construction. Snapshots via `std::env::var` so
-/// a set-to-empty original round-trips verbatim. Every caller MUST hold
-/// [`GIT_BIN_ENV_LOCK`] for the duration of the scope; the guard does
-/// not lock the mutex itself, so the two disciplines compose without
-/// accidental re-entrancy.
+/// RAII scope-guard that MUTATES a single process env var identified by
+/// `name` — writing `value` on construction, restoring the pre-scope
+/// state (either the original value or unset) on drop. Panic-safe by
+/// construction: drop runs on both normal scope exit and unwind, so a
+/// test that panics mid-body cannot leak `<NAME>=<sentinel>` to any
+/// subsequent test in the same process. Snapshots via `std::env::var`
+/// so a set-to-empty original round-trips verbatim.
 ///
-/// Centralized here (rather than a private per-file copy) because two
-/// modules — `git.rs` and `infrastructure::git` — each carry their own
-/// `GIT_BIN`-resolving surface and each need to pin the same
-/// env-var-routes-through discipline in tests. Two occurrences already
-/// past THEORY §VI.1's three-times threshold in intent (a duplicate
-/// would drift the restore-on-drop contract silently); this lift is the
-/// law-anticipating consolidation.
-pub struct GitBinScope {
+/// Sibling of the snapshot-only [`EnvVarSnapshot`]: same restore
+/// contract (`Result<String, VarError>` + panic-safe `Drop`), but
+/// mutates on construction as well — the closed pair exhausts the
+/// hermetic-env-var-guard surface. A fresh consumer picks its guard by
+/// asking "snapshot-only ([`EnvVarSnapshot::capture`]) or set-then-
+/// restore ([`EnvVarScope::set`])?" — the closed choice a per-module
+/// inline struct declaration does not present.
+///
+/// Every caller MUST hold the appropriate per-var lock (e.g.
+/// [`GIT_BIN_ENV_LOCK`], `crate::infrastructure::kubectl::tests::
+/// KUBECTL_BIN_ENV_LOCK`) for the duration of the scope; the guard
+/// does not lock the mutex itself, so the two disciplines compose
+/// without accidental re-entrancy.
+///
+/// # Why centralized
+///
+/// Two test-support scope-guards — `test_support.rs::GitBinScope` and
+/// `infrastructure/kubectl.rs::KubectlBinScope` — each carried a
+/// byte-equivalent `struct { prior: Result<String, VarError> }` +
+/// `set(value: &str) -> Self { let prior = std::env::var(NAME);
+/// std::env::set_var(NAME, value); Self { prior } }` + `impl Drop {
+/// match &self.prior { Ok(v) => set_var(NAME, v), Err(_) =>
+/// remove_var(NAME) } }` triple, differing only in the hardcoded
+/// env-var name string. Two isomorphic copies past THEORY §VI.1's
+/// three-is-a-law threshold in intent — the pair had to agree on the
+/// field type spelling, the set-then-snapshot ordering (mutate FIRST,
+/// snapshot the pre-mutation value SECOND — the reverse ordering
+/// would restore the sentinel instead of the pre-scope value), the
+/// Drop-branch dispatch, and the panic-safety guarantee. Post-lift
+/// the two consumers route through ONE body so a future refinement
+/// (telemetry on the restore path, an unset-vs-empty-string
+/// canonicalization hook, a `tokio::task_local!` variant) lands at
+/// exactly one code line and reaches every consumer by construction.
+///
+/// The `KubectlBinScope`'s own docstring anticipated this lift ("a
+/// second test would trigger the lift to `test_support.rs`, same rule
+/// as [`make_executable_shim`] applied at the three-times threshold");
+/// with 13 kubectl_bin call sites and 40+ git_bin call sites the
+/// pre-lift docstring justification is well past the anticipated
+/// threshold. THEORY §V (solve-once-at-the-primitive); §VI.1
+/// (recurring-shape-to-helper).
+pub struct EnvVarScope {
+    name: &'static str,
     prior: std::result::Result<String, std::env::VarError>,
 }
 
-impl GitBinScope {
-    pub fn set(value: &str) -> Self {
-        let prior = std::env::var("GIT_BIN");
-        std::env::set_var("GIT_BIN", value);
-        Self { prior }
+impl EnvVarScope {
+    /// Set `name=value` and return a guard that restores the pre-scope
+    /// state on drop. `name` is `&'static str` so the caller's
+    /// site-level intent (a specific env-var spelling) is pinned at
+    /// the type-check boundary and cannot be dynamically constructed
+    /// from a mutable string that later shifts.
+    ///
+    /// Snapshot the pre-mutation value FIRST, mutate SECOND — the
+    /// reverse ordering would snapshot the sentinel itself and restore
+    /// it on drop, defeating the guard's contract.
+    pub fn set(name: &'static str, value: &str) -> Self {
+        let prior = std::env::var(name);
+        std::env::set_var(name, value);
+        Self { name, prior }
     }
 }
 
-impl Drop for GitBinScope {
+impl Drop for EnvVarScope {
     fn drop(&mut self) {
         match &self.prior {
-            Ok(v) => std::env::set_var("GIT_BIN", v),
-            Err(_) => std::env::remove_var("GIT_BIN"),
+            Ok(v) => std::env::set_var(self.name, v),
+            Err(_) => std::env::remove_var(self.name),
         }
+    }
+}
+
+/// `GitBinScope::set(value)` sets `GIT_BIN=value` and returns an
+/// [`EnvVarScope`] that restores the pre-scope state on drop. Preserved
+/// as a zero-cost named namespace so every existing call site
+/// (`let _scope = GitBinScope::set(&shim);` — 40+ across `git.rs` and
+/// `infrastructure/git.rs`) keeps its identity-at-the-call-site
+/// spelling: the env-var name lives at ONE body inside this impl
+/// rather than being copy-pasted as a literal at every consumer, so a
+/// typo `GIT_BIN` → `GIT_BINN` at a spawn shield is structurally
+/// impossible.
+///
+/// Every caller MUST hold [`GIT_BIN_ENV_LOCK`] for the duration of
+/// the scope.
+pub struct GitBinScope;
+
+impl GitBinScope {
+    pub fn set(value: &str) -> EnvVarScope {
+        EnvVarScope::set("GIT_BIN", value)
     }
 }
 
@@ -6418,12 +6482,11 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
     /// route through [`EnvVarSnapshot::capture`] instead.
     ///
     /// The needle spells `Snapshot` (not `Scope`) so the sibling
-    /// set-then-restore shape ([`GitBinScope`],
-    /// `infrastructure/kubectl.rs::KubectlBinScope`) — which shares the
-    /// `prior:` field spelling but adds a `fn set(value: &str)` mutating
-    /// constructor — is unaffected by this shield. That shape's future
-    /// lift is anticipated by `KubectlBinScope`'s own docstring but is
-    /// out of scope for this primitive.
+    /// set-then-restore [`EnvVarScope`] primitive — which shares the
+    /// `prior:` field spelling but adds a `fn set(name, value)` mutating
+    /// constructor — is unaffected by this shield. The Scope-shape
+    /// analogue is pinned separately by
+    /// [`env_var_scope_pre_lift_scope_struct_shape_confined_to_test_support`].
     ///
     /// Walks the crate source tree via a shallow recursive scan so a
     /// future file added under any subdirectory of `cli/src/` is
@@ -6470,6 +6533,241 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
              else in `cli/src/`; every snapshot-only consumer routes \
              through `crate::test_support::EnvVarSnapshot::capture(<NAME>)` \
              instead. Offending sites:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// [`EnvVarScope::set`] MUST snapshot the pre-mutation value BEFORE
+    /// writing `value` — the reverse ordering would snapshot the
+    /// sentinel itself and restore it on drop, defeating the guard's
+    /// contract. Pins the mutate-second, snapshot-first invariant on
+    /// the originally-unset direction: after drop the env var must be
+    /// unset again, not left carrying `<NAME>=<sentinel>`.
+    #[test]
+    fn env_var_scope_restores_env_when_original_unset() {
+        let env_var = "TEST_ENV_VAR_SCOPE_UNSET_ROUND_TRIP";
+        std::env::remove_var(env_var);
+        {
+            let _scope = EnvVarScope::set(env_var, "sentinel-value");
+            assert_eq!(
+                std::env::var(env_var).ok().as_deref(),
+                Some("sentinel-value"),
+                "in-scope value must be visible"
+            );
+        }
+        assert!(
+            std::env::var(env_var).is_err(),
+            "EnvVarScope must restore `{env_var}` to unset on drop \
+             when the pre-scope state was unset — a drift to \
+             `set_var(name, \"\")` or a swap of the mutate-vs-snapshot \
+             ordering would leak `{env_var}=<sentinel>` into every \
+             subsequent test in this process."
+        );
+    }
+
+    /// [`EnvVarScope::set`] restores an originally-set env var to its
+    /// pre-scope value on drop after the guarded scope overwrote it.
+    /// Pins the `Ok(v) => set_var(self.name, v)` half of the Drop
+    /// body. A drift to `Ok(_) => remove_var(self.name)` would silently
+    /// unset the operator's `GIT_BIN=<host-git>` / `KUBECTL_BIN=<host-
+    /// kubectl>` export after any test that scoped it — the exact
+    /// failure mode the pre-lift RAII scope-guards were introduced to
+    /// prevent.
+    #[test]
+    fn env_var_scope_restores_env_when_original_set() {
+        let env_var = "TEST_ENV_VAR_SCOPE_SET_ROUND_TRIP";
+        std::env::set_var(env_var, "prior-value");
+        {
+            let _scope = EnvVarScope::set(env_var, "sentinel-value");
+            assert_eq!(
+                std::env::var(env_var).ok().as_deref(),
+                Some("sentinel-value"),
+                "in-scope value must override"
+            );
+        }
+        let restored = std::env::var(env_var);
+        std::env::remove_var(env_var);
+        assert_eq!(
+            restored.ok().as_deref(),
+            Some("prior-value"),
+            "EnvVarScope must restore `{env_var}` to its pre-scope \
+             value on drop — an operator's explicit export must not \
+             be silently unset by a test that scopes it."
+        );
+    }
+
+    /// [`EnvVarScope`] preserves the observable distinction between
+    /// "set to empty string" and "unset" across the mutate-and-restore
+    /// round trip. `std::env::var` returns `Ok("")` when a caller
+    /// explicitly exports `<NAME>=""`, so the Drop body's `Ok(v) =>
+    /// set_var(name, v)` branch must restore `""` — not fall through
+    /// to `remove_var`. A drift to `.ok().filter(|s| !s.is_empty())`
+    /// at the snapshot boundary (folding `Ok("")` into `Err`) would
+    /// silently convert every explicit-empty export into an unset env
+    /// var on drop.
+    #[test]
+    fn env_var_scope_restores_env_when_original_empty_string() {
+        let env_var = "TEST_ENV_VAR_SCOPE_EMPTY_ROUND_TRIP";
+        std::env::set_var(env_var, "");
+        {
+            let _scope = EnvVarScope::set(env_var, "sentinel-value");
+            assert_eq!(
+                std::env::var(env_var).ok().as_deref(),
+                Some("sentinel-value"),
+                "in-scope value must override the empty pre-scope export"
+            );
+        }
+        let restored = std::env::var(env_var);
+        std::env::remove_var(env_var);
+        assert_eq!(
+            restored.ok().as_deref(),
+            Some(""),
+            "EnvVarScope must restore an originally-empty export \
+             (`{env_var}=\"\"`) verbatim on drop — the set-but-empty \
+             vs unset distinction is observable at the primitive \
+             boundary and must round-trip."
+        );
+    }
+
+    /// [`EnvVarScope::drop`] fires on panic-unwind, not only on normal
+    /// scope exit — the exact panic-safety property every pre-lift
+    /// RAII scope-guard was introduced to provide. A drift to a
+    /// `Drop`-less implementation (e.g., a `fn restore(self)`
+    /// consuming call the caller has to remember) would silently leak
+    /// `<NAME>=<sentinel>` to every subsequent test in the process
+    /// after any panicking test that scoped it — the exact regression
+    /// class the pre-lift `GitBinScope` / `KubectlBinScope` per-file
+    /// copies were introduced to prevent.
+    ///
+    /// `AssertUnwindSafe` on the closure — `EnvVarScope` carries only
+    /// a `&'static str` and a `Result<String, VarError>`, both
+    /// unwind-safe, so no interior mutability crosses the boundary.
+    #[test]
+    fn env_var_scope_restores_on_panic_unwind() {
+        let env_var = "TEST_ENV_VAR_SCOPE_PANIC_UNWIND";
+        std::env::remove_var(env_var);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _scope = EnvVarScope::set(env_var, "sentinel-value");
+            panic!("intentional panic to drive unwind path");
+        }));
+        assert!(
+            result.is_err(),
+            "the guarded scope must have panicked as expected"
+        );
+        assert!(
+            std::env::var(env_var).is_err(),
+            "EnvVarScope::drop must fire on panic-unwind — a leaked \
+             `{env_var}=<sentinel>` post-unwind means the panic-safety \
+             contract the RAII guard exists to provide has drifted."
+        );
+    }
+
+    /// [`GitBinScope::set`] and
+    /// `crate::infrastructure::kubectl::tests::KubectlBinScope::set`
+    /// each MUST return an [`EnvVarScope`] whose `Drop` restores the
+    /// pre-scope state on drop — the wrapper's zero-cost namespace
+    /// discipline (unit struct + `impl { pub fn set(value: &str) ->
+    /// EnvVarScope }`) must not silently degrade to returning `Self`
+    /// (a re-inlined copy of the pre-lift struct) or `()` (a scope
+    /// that leaks the sentinel on drop).
+    ///
+    /// The pin is behavioral, not structural: it drives the exact
+    /// `GitBinScope::set(...)` call site every consumer uses, checks
+    /// the returned guard mutates the env var in scope, and checks
+    /// the guard restores the pre-scope state on drop. A regression
+    /// that tidied the wrapper's return type to `()` or `Self` would
+    /// either fail to compile (the mutate-and-drop composition
+    /// requires an `EnvVarScope` return) or fail this restore check
+    /// at runtime.
+    #[test]
+    fn git_bin_scope_wrapper_delegates_to_env_var_scope_primitive() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::remove_var("GIT_BIN");
+        {
+            let _scope = GitBinScope::set("/tmp/git-bin-scope-wrapper-delegation-sentinel");
+            assert_eq!(
+                std::env::var("GIT_BIN").ok().as_deref(),
+                Some("/tmp/git-bin-scope-wrapper-delegation-sentinel"),
+                "GitBinScope::set must write `GIT_BIN=<value>` on \
+                 construction — a drift to a no-op wrapper would leave \
+                 the env var unchanged."
+            );
+        }
+        assert!(
+            std::env::var("GIT_BIN").is_err(),
+            "GitBinScope::set(...) must return an EnvVarScope whose \
+             Drop restores the pre-scope state — a drift to a \
+             leaked-on-drop return type would carry \
+             `GIT_BIN=<sentinel>` into every subsequent test."
+        );
+    }
+
+    /// Structural regression shield: the two pre-lift set-then-restore
+    /// scope-guards (`test_support.rs::GitBinScope` and
+    /// `infrastructure/kubectl.rs::tests::KubectlBinScope`) each
+    /// carried a `struct <X>Scope { prior: std::result::Result<String,
+    /// std::env::VarError> }` + `set(value: &str) -> Self { let prior
+    /// = std::env::var(NAME); std::env::set_var(NAME, value); Self {
+    /// prior } }` + panic-safe `Drop` triple — the byte-equivalent
+    /// set-then-restore shape [`EnvVarScope`] now redeems. Post-lift
+    /// no `.rs` file in `cli/src/` (other than `test_support.rs`
+    /// itself, which owns the primitive declaration) may re-introduce
+    /// a `struct <X>Scope { ... }` block carrying the `prior:
+    /// Result<String, VarError>` field: every set-then-restore
+    /// consumer must route through [`EnvVarScope::set`] (or a
+    /// zero-cost wrapper like [`GitBinScope`] whose `impl { pub fn
+    /// set(...) -> EnvVarScope }` returns the primitive's guard, not a
+    /// re-inlined copy).
+    ///
+    /// The needle spells `Scope` (not `Snapshot`) so the sibling
+    /// snapshot-only [`EnvVarSnapshot`] shape is unaffected by this
+    /// shield; that shape has its own analogue at
+    /// [`env_var_snapshot_pre_lift_snapshot_struct_shape_confined_to_test_support`].
+    ///
+    /// Walks the crate source tree via [`walk_rs_files`] so a future
+    /// file added under any subdirectory of `cli/src/` is covered
+    /// without a per-file shield update.
+    #[test]
+    fn env_var_scope_pre_lift_scope_struct_shape_confined_to_test_support() {
+        let crate_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders: Vec<String> = Vec::new();
+        walk_rs_files(&crate_src, &mut |path| {
+            if path.file_name().and_then(|s| s.to_str()) == Some("test_support.rs") {
+                return;
+            }
+            let contents =
+                std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+            let lines: Vec<&str> = contents.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                let trimmed = line.trim_start();
+                let is_scope_struct = trimmed.starts_with("struct ")
+                    && trimmed.contains("Scope")
+                    && trimmed.trim_end().ends_with('{');
+                if !is_scope_struct {
+                    continue;
+                }
+                let has_prior_field =
+                    lines.iter().skip(i + 1).take(8).any(|l| {
+                        l.contains("prior: std::result::Result<String, std::env::VarError>")
+                    });
+                if has_prior_field {
+                    let rel = path
+                        .strip_prefix(&crate_src)
+                        .unwrap_or(path)
+                        .display()
+                        .to_string();
+                    offenders.push(format!("{rel}:{}: {}", i + 1, line.trim()));
+                }
+            }
+        });
+        assert!(
+            offenders.is_empty(),
+            "a `struct <X>Scope {{ ... prior: Result<String, VarError> ... }}` \
+             declaration is reserved for `test_support.rs` — the pre-lift \
+             `GitBinScope` / `KubectlBinScope` shape must not reappear \
+             anywhere else in `cli/src/`; every set-then-restore \
+             consumer routes through `crate::test_support::EnvVarScope::set(<NAME>, <value>)` \
+             (or a zero-cost wrapper that returns it) instead. Offending sites:\n{}",
             offenders.join("\n")
         );
     }
