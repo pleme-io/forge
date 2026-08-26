@@ -311,6 +311,40 @@ pub fn bump(name: &str, language: &str, level: &str, working_dir: &str) -> Resul
     }
 
     let lang: ToolLanguage = language.parse()?;
+    // Parse `--level` at the top of the fn (before language-branch selection),
+    // then thread the typed [`version::BumpLevel`] through both arms via
+    // [`version::bump_semver_typed`]. Pre-lift each branch called the stringly
+    // [`version::bump_semver`] wrapper, which parses `level: &str` into
+    // [`version::BumpLevel`] INSIDE its own body via [`version::BumpLevel::from_str`]
+    // — so the level grammar was re-parsed at every consumer, and an invalid
+    // `--level` on either branch would (a) fire AFTER the manifest read (a
+    // wasted I/O on a bogus input the parse alone could have refused) and
+    // (b) route through the stringly wrapper's parse-then-dispatch shim
+    // rather than the typed peer's direct `SemverTriple::bumped` dispatch.
+    //
+    // Post-lift the grammar is parsed at ONE site (this `level.parse()?` call)
+    // and the typed value dispatches directly to the const arithmetic on
+    // `SemverTriple::bumped`. This mirrors the sibling `let lang: ToolLanguage
+    // = language.parse()?;` discipline (commit 73d1551) established one line
+    // above for the `--language` argument: parse at the boundary, thread the
+    // typed variant through every consumer, so a future grammar extension
+    // (a `Prerelease` variant strictly below [`version::BumpLevel::Patch`],
+    // an `Epoch` ceiling strictly above [`version::BumpLevel::Major`] for
+    // semver4 / `0ver`-style incompatible-by-design rewrites) is a compile
+    // error at every consumer site the exhaustive match on the typed sum
+    // reaches, rather than a silent parse-error surface a stringly consumer
+    // would leave unchecked.
+    //
+    // THEORY.md §V.4 typed primitives: the `--level` argument surface now
+    // carries a typed peer parsed at ONE site (this call), matching the
+    // discipline `language.parse::<ToolLanguage>()` established at the same
+    // fn's ONE `let lang: ...` site above.
+    // THEORY.md §VI.1 one-oracle discipline: the level grammar (which strings
+    // map to which [`version::BumpLevel`] variant) lives at ONE body
+    // ([`version::BumpLevel::from_str`]) that this fn — and every sibling
+    // `bump` fn — parses through, rather than at N stringly-wrapper call
+    // sites that each re-derive it via [`version::bump_semver`].
+    let level_typed: version::BumpLevel = level.parse()?;
     match lang {
         ToolLanguage::Rust => {
             // PORTED 1:1 off `cargo set-version` (cargo-edit) onto forge's own
@@ -330,7 +364,7 @@ pub fn bump(name: &str, language: &str, level: &str, working_dir: &str) -> Resul
             //     which `cargo set-version` normalizes.
             let cargo_toml = dir.join("Cargo.toml");
             let old_ver = version::read_cargo_version(&cargo_toml)?;
-            let target = version::bump_semver(&old_ver, level)?;
+            let target = version::bump_semver_typed(&old_ver, level_typed)?;
             version::write_cargo_version(&cargo_toml, &target)?;
 
             // Regenerate Cargo.nix if crate2nix is available.
@@ -350,14 +384,14 @@ pub fn bump(name: &str, language: &str, level: &str, working_dir: &str) -> Resul
             }
 
             let new_ver = version::read_cargo_version(&dir.join("Cargo.toml"))?;
-            info!("{}: bumped to {} ({})", name, new_ver, level);
+            info!("{}: bumped to {} ({})", name, new_ver, level_typed);
         }
         ToolLanguage::Zig => {
             let zon_path = dir.join("build.zig.zon");
             let old_ver = version::read_zig_version(&zon_path)?;
-            let new_ver = version::bump_semver(&old_ver, level)?;
+            let new_ver = version::bump_semver_typed(&old_ver, level_typed)?;
             version::write_zig_version(&zon_path, &new_ver)?;
-            info!("{}: {} → {} ({})", name, old_ver, new_ver, level);
+            info!("{}: {} → {} ({})", name, old_ver, new_ver, level_typed);
         }
     }
 
@@ -1612,6 +1646,118 @@ mod language_typed_dispatch_tests {
              so a regression that dropped the delegation cannot \
              leave the `Unsupported language` scan trivially \
              satisfied by absence. Hits: {parse_hits:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod bump_level_typed_dispatch_tests {
+    //! Regression-shield: [`super::bump`]'s TWO per-branch `bump_semver(&
+    //! old_ver, level)` sites (Rust arm + Zig arm) now route through the
+    //! typed peer [`crate::version::bump_semver_typed`] at ONE
+    //! top-of-function `let level_typed: version::BumpLevel = level.parse()?;`
+    //! parse. Pre-lift each branch called the stringly
+    //! [`crate::version::bump_semver`] wrapper (which parses `level: &str`
+    //! into [`crate::version::BumpLevel`] INSIDE its own body via
+    //! [`crate::version::BumpLevel::from_str`]), so the level grammar was
+    //! re-parsed at every consumer, and an invalid `--level` on either
+    //! branch fired AFTER the manifest read — a wasted I/O on a bogus
+    //! input the parse alone could have refused.
+    //!
+    //! Sibling of [`super::language_typed_dispatch_tests`] (commit
+    //! 73d1551) at the FOUR-consumer `--language` argument surface. Same
+    //! discipline: parse at the boundary, thread the typed variant
+    //! through every consumer, so a future grammar extension (a
+    //! `Prerelease` variant strictly below [`crate::version::BumpLevel::Patch`],
+    //! an `Epoch` ceiling strictly above [`crate::version::BumpLevel::Major`]
+    //! for semver4 / `0ver`-style incompatible-by-design rewrites) is a
+    //! compile error at every consumer the exhaustive match on the typed
+    //! sum reaches, rather than a silent parse-error surface a stringly
+    //! consumer would leave unchecked.
+
+    /// Regression-shield: [`super::bump`]'s function body MUST parse
+    /// `--level` at ONE top-of-function site
+    /// (`let level_typed: version::BumpLevel = level.parse()?;`) and
+    /// dispatch through the typed peer
+    /// [`crate::version::bump_semver_typed`] at BOTH per-branch bump
+    /// sites (Rust arm + Zig arm), NEVER through the stringly wrapper
+    /// [`crate::version::bump_semver`] that re-parses the level grammar
+    /// inside its own body.
+    ///
+    /// Negative side: pins that `version::bump_semver(&` — the stringly-
+    /// wrapper call form — does NOT appear as executable code inside
+    /// [`super::bump`]'s body. Positive side: pins that (a)
+    /// `version::bump_semver_typed(&` appears at EXACTLY two code lines
+    /// (one per branch arm — Rust's `let target = ...` and Zig's `let
+    /// new_ver = ...`) so a regression that dropped one delegation
+    /// cannot leave the negative scan trivially satisfied by absence,
+    /// and (b) `let level_typed: version::BumpLevel = level.parse()?;`
+    /// — the typed parse itself — appears at EXACTLY one code line
+    /// (the top-of-fn boundary parse). Both scans route through
+    /// [`crate::test_support::code_line_hits`] for anti-docstring-
+    /// self-match discipline: the docstring mentions of the forbidden
+    /// `version::bump_semver` wrapper and the delegation needle are
+    /// `//` / `///` prefixed and skipped by construction.
+    ///
+    /// Fail-before-pass-after: restoring the pre-lift shape at either
+    /// branch (parse+dispatch reverted to `let target = version::
+    /// bump_semver(&old_ver, level)?;`) fires the negative scan by
+    /// naming the forbidden `version::bump_semver(&` needle on an
+    /// executable line, and drops the positive count below the pinned
+    /// two; restoring the typed routing returns both scans to green.
+    #[test]
+    fn bump_routes_level_through_typed_peer_at_exactly_one_boundary_parse() {
+        const SOURCE: &str = include_str!("tool.rs");
+
+        let body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/tool.rs",
+            "pub fn bump(",
+            "\npub fn check(",
+        );
+
+        let stringly_needle = "version::bump_semver(&";
+        let stringly_hits = crate::test_support::code_line_hits(body, stringly_needle);
+        assert!(
+            stringly_hits.is_empty(),
+            "commands/tool.rs::bump must NOT call the stringly \
+             `version::bump_semver` wrapper on either branch — the \
+             typed peer `version::bump_semver_typed` takes an already-\
+             parsed `BumpLevel` and dispatches directly to the const \
+             arithmetic on `SemverTriple::bumped`, so parsing lives at \
+             ONE top-of-fn site rather than being re-derived inside \
+             the wrapper per consumer. Hits: {stringly_hits:?}"
+        );
+
+        let typed_needle = "version::bump_semver_typed(&";
+        let typed_hits = crate::test_support::code_line_hits(body, typed_needle);
+        assert_eq!(
+            typed_hits.len(),
+            2,
+            "commands/tool.rs::bump must call `{typed_needle}` at \
+             EXACTLY two code lines — one per language branch (Rust \
+             arm's `let target = ...` and Zig arm's `let new_ver = \
+             ...`) — so a regression that dropped one delegation \
+             cannot leave the negative `version::bump_semver(&` scan \
+             trivially satisfied by absence, and a regression that \
+             duplicated one is caught the same way. Hits: {typed_hits:?}"
+        );
+
+        let parse_needle = "let level_typed: version::BumpLevel = level.parse()?;";
+        let parse_hits = crate::test_support::code_line_hits(body, parse_needle);
+        assert_eq!(
+            parse_hits.len(),
+            1,
+            "commands/tool.rs::bump must parse `--level` at EXACTLY \
+             one top-of-fn site (`{parse_needle}`) — matching the \
+             sibling `let lang: ToolLanguage = language.parse()?;` \
+             discipline the language shield above pins. A regression \
+             that (a) dropped the boundary parse would fire the \
+             positive `version::bump_semver_typed(&` count above (the \
+             typed peer's second argument would no longer type-check \
+             on the untyped `level: &str`), and (b) duplicated it \
+             into a per-branch parse would fire this count above 1. \
+             Hits: {parse_hits:?}"
         );
     }
 }
