@@ -109,12 +109,20 @@ fn docker_compose_bin() -> String {
 /// Post-lift a future refinement of the SERVICE_DIR contract — a
 /// canonicalize hook, a substrate-path validation step, a telemetry
 /// sigil on the resolved path, or a swap to a typed
-/// `substrate::ServiceDir(PathBuf)` newtype — lands at ONE body and
-/// reaches every consumer by construction.
+/// `substrate::ServiceDir(PathBuf)` newtype — lands at ONE body
+/// ([`crate::repo::path_from_env`]) and reaches every consumer by
+/// construction. The per-module sigil now delegates to that shared
+/// primitive with the module's domain-specific miss wording preserved
+/// verbatim — the twin `commands/schema_validation.rs:41` sigil
+/// (e9e0c5b) delegates through the same primitive with its own
+/// distinct wording, so the read-and-project shape lives at ONE body
+/// across the crate while each module's operator-facing diagnostic
+/// prose stays grep-visible at the delegating call.
 fn service_path_from_env() -> Result<PathBuf> {
-    let service_dir = env::var("SERVICE_DIR")
-        .context("SERVICE_DIR not set - this should be called via substrate wrapper")?;
-    Ok(PathBuf::from(service_dir))
+    crate::repo::path_from_env(
+        "SERVICE_DIR",
+        "SERVICE_DIR not set - this should be called via substrate wrapper",
+    )
 }
 
 /// Run Rust unit tests
@@ -1073,10 +1081,10 @@ mod tests {
 
     /// Whole-module shield: every read of the `SERVICE_DIR` env var in
     /// this module's non-test body must route through the module-local
-    /// [`super::service_path_from_env`] sigil, never through an inline
-    /// `env::var("SERVICE_DIR").context("SERVICE_DIR not set - this
-    /// should be called via substrate wrapper")?` +
-    /// `Path::new(&service_dir)` two-line stanza.
+    /// [`super::service_path_from_env`] sigil, which itself delegates
+    /// to the shared [`crate::repo::path_from_env`] primitive — never
+    /// through an inline `env::var("SERVICE_DIR").context(...)?` +
+    /// `PathBuf::from(...)` two-line stanza.
     ///
     /// Pre-lift the four consumer sites (`rust_regenerate`,
     /// `rust_cargo_update`, `rust_dev`, `rust_dev_down`) each spelled
@@ -1085,11 +1093,17 @@ mod tests {
     /// convention. Four occurrences past THEORY §VI.1's
     /// three-times-is-a-law threshold; the sigil is the archetype the
     /// pillar demands, and post-lift every `SERVICE_DIR` read in this
-    /// module routes through it. A future refinement of the
-    /// `SERVICE_DIR` contract — a canonicalize hook, a substrate-path
-    /// validation step, a telemetry sigil on the resolved path, or a
-    /// swap to a typed `substrate::ServiceDir(PathBuf)` newtype — lands
-    /// at ONE body and reaches every consumer by construction.
+    /// module routes through it. Post-e9e0c5b the twin
+    /// `commands/schema_validation.rs:41` per-module sigil made the
+    /// per-module read-and-project shape itself a two-copy recurrence;
+    /// this shield now pins the shared-primitive delegation, so a
+    /// future refinement of the `SERVICE_DIR` contract — a canonicalize
+    /// hook, a substrate-path validation step, a telemetry sigil on
+    /// the resolved path, or a swap to a typed
+    /// `substrate::ServiceDir(PathBuf)` newtype — lands at ONE body
+    /// ([`crate::repo::path_from_env`]) and reaches every consumer in
+    /// this module (and the sibling `commands/schema_validation.rs`)
+    /// by construction.
     ///
     /// The scan bounds on the whole-module boundary (from the file
     /// start to the FIRST `\n#[cfg(test)]\nmod tests {` marker in
@@ -1109,32 +1123,52 @@ mod tests {
             include_str!("developer_tools.rs"),
             "commands/developer_tools.rs",
         );
-        // Negative + sigil-uniqueness side: the raw
-        // `env::var("SERVICE_DIR")` needle must appear at EXACTLY one
-        // code line — the `service_path_from_env()` sigil body. Any
-        // future consumer that re-copies the two-line stanza pushes
-        // this count above one and fails the shield before it can
-        // drift the miss wording or the Path projection away from the
-        // sigil's single point of truth.
+        // Negative side: the raw `env::var("SERVICE_DIR")` needle must
+        // NOT appear anywhere in the module body post-lift — the sigil
+        // now delegates to `crate::repo::path_from_env`, which owns the
+        // read at ONE body across the crate. A future consumer that
+        // re-copies the two-line stanza pushes this count above zero
+        // and fails the shield before it can drift the miss wording or
+        // the `PathBuf` projection away from the shared primitive's
+        // single point of truth.
         let raw_env_needle = "env::var(\"SERVICE_DIR\")";
         let env_hits = crate::test_support::code_line_hits(body, raw_env_needle);
-        assert_eq!(
-            env_hits.len(),
-            1,
-            "commands/developer_tools.rs must read `SERVICE_DIR` at \
-             EXACTLY one code line (only in the `service_path_from_env()` \
-             sigil body), not {} — every consumer must route through \
-             `service_path_from_env()`, not re-copy the \
-             `env::var(\"SERVICE_DIR\").context(...)?` + `Path::new(...)` \
-             two-line stanza inline. Found {} code-line hit(s): \
-             {env_hits:#?}. A hand-rolled inline copy re-opens the drift \
-             class the sigil was landed to close (the env-var name, the \
-             operator-facing miss wording \
-             `\"SERVICE_DIR not set - this should be called via substrate \
-             wrapper\"`, and the `PathBuf::from(...)` projection all \
-             live at ONE body).",
-            env_hits.len(),
+        assert!(
+            env_hits.is_empty(),
+            "commands/developer_tools.rs must NOT spell \
+             `{raw_env_needle}` inline in the module body — every \
+             consumer must route through `service_path_from_env()`, \
+             which delegates to `crate::repo::path_from_env`, the \
+             shared primitive that owns the `env::var` read at ONE \
+             body across the crate. Found {} code-line hit(s): \
+             {env_hits:#?}. A hand-rolled inline copy re-opens the \
+             drift class the primitive was landed to close.",
             env_hits.len()
+        );
+        // Positive side: `service_path_from_env` must delegate to
+        // `crate::repo::path_from_env(` at EXACTLY one code line — the
+        // sigil body. A regression that inlined the read back into the
+        // sigil (or into any consumer) would break the delegation and
+        // be caught here. The needle matches the call opener only
+        // (arguments may wrap across lines under rustfmt's line-width
+        // limit — the two-arg form's `miss_context` literal exceeds
+        // 100 columns and formats onto separate lines); the sibling
+        // `env::var("SERVICE_DIR")` count-eq-0 assertion above bounds
+        // the negative side, and this one bounds the positive.
+        let delegate_needle = "crate::repo::path_from_env(";
+        let delegate_hits = crate::test_support::code_line_hits(body, delegate_needle);
+        assert_eq!(
+            delegate_hits.len(),
+            1,
+            "commands/developer_tools.rs must delegate `SERVICE_DIR` \
+             resolution to `crate::repo::path_from_env(...)` at EXACTLY \
+             one code line — the `service_path_from_env()` sigil body. \
+             Found {} code-line hit(s): {delegate_hits:#?}. A missing \
+             delegation would leave the negative scan above trivially \
+             satisfied by absence (zero raw `env::var` hits, but also \
+             zero delegating calls), and the module would have stopped \
+             resolving `SERVICE_DIR` at all.",
+            delegate_hits.len()
         );
         // Sigil-defined side: `fn service_path_from_env()` must be
         // defined in the module body — a regression that removed the

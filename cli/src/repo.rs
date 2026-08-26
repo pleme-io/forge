@@ -96,6 +96,39 @@ pub fn get_tool_path(env_var: &str, fallback: &str) -> String {
     std::env::var(env_var).unwrap_or_else(|_| fallback.to_string())
 }
 
+/// Resolve a substrate-declared directory-path env var into a
+/// [`PathBuf`], surfacing `miss_context` via [`anyhow::Context`] on the
+/// unset case.
+///
+/// Result<PathBuf> peer to [`get_tool_path`] — where `get_tool_path`
+/// takes an env var and a PATH-lookup fallback (infallible, `String`),
+/// `path_from_env` takes an env var and a caller-supplied
+/// operator-facing miss wording (fallible, `PathBuf`). Every consumer
+/// that resolves a substrate-declared directory path from an env var
+/// (`SERVICE_DIR`, `REPO_ROOT`, etc.) routes through this one body so
+/// the `env::var` read and the `PathBuf::from` projection live at
+/// EXACTLY one point. A future refinement of the substrate-path
+/// contract — a canonicalize hook, a must-exist check, a swap to a
+/// typed `substrate::ServiceDir(PathBuf)` newtype, a telemetry sigil
+/// on the resolved path — lands here and reaches every caller by
+/// construction (THEORY §VI.1 — every recurring shape becomes a helper
+/// before it becomes duplicated code).
+///
+/// # Arguments
+///
+/// * `env_var` - Environment variable name to read
+/// * `miss_context` - Operator-facing wording forwarded to
+///   [`anyhow::Context`] on the miss. Each caller keeps its own
+///   domain-specific wording (`"SERVICE_DIR not set - this should be
+///   called via substrate wrapper"`, `"SERVICE_DIR environment variable
+///   not set"`, `"SERVICE_DIR not set - required for deploy.yaml
+///   lookup"`) so the consumer's downstream diagnostic prose stays
+///   grep-visible verbatim.
+pub fn path_from_env(env_var: &str, miss_context: &'static str) -> Result<PathBuf> {
+    let raw = std::env::var(env_var).context(miss_context)?;
+    Ok(PathBuf::from(raw))
+}
+
 /// Verify a directory exists and contains expected files
 ///
 /// # Arguments
@@ -397,6 +430,53 @@ mod tests {
         assert_eq!(
             get_tool_path("NONEXISTENT_TOOL", "fallback-tool"),
             "fallback-tool"
+        );
+    }
+
+    /// [`path_from_env`] surfaces `miss_context` verbatim through the
+    /// `.context(...)` chain on a `env_var`-unset environment. Pins the
+    /// contract every per-module `service_path_from_env()` sigil
+    /// (`commands/developer_tools.rs`, `commands/schema_validation.rs`)
+    /// delegates through: a future refactor that reshapes the primitive
+    /// (a swap from `.context()` to a `bail!` with drifted wording, a
+    /// lift to a typed error variant, a canonicalize prefix landed in
+    /// front of the context) cannot silently drift the operator-facing
+    /// wording every consumer's caller has been coached to grep for.
+    #[test]
+    fn test_path_from_env_surfaces_miss_context_when_unset() {
+        let env_var = "TEST_PATH_FROM_ENV_UNSET_SIGIL_SHIELD";
+        std::env::remove_var(env_var);
+        let err = path_from_env(env_var, "sentinel miss wording for shield").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("sentinel miss wording for shield"),
+            "path_from_env() must forward `miss_context` verbatim on \
+             the unset case — that is the contract every per-module \
+             `service_path_from_env()` sigil delegates through. \
+             Got: {msg}"
+        );
+    }
+
+    /// [`path_from_env`] returns `PathBuf::from(env_var_value)` when the
+    /// env var is set. Pins the `env::var → PathBuf` projection at ONE
+    /// body so a future refinement (canonicalize hook, must-exist check,
+    /// typed newtype) is caught here rather than at each consumer's
+    /// downstream `.join(...)` / `.display()` call.
+    #[test]
+    fn test_path_from_env_returns_path_of_set_env_var() {
+        let env_var = "TEST_PATH_FROM_ENV_SET_SIGIL_SHIELD";
+        let sentinel = "/tmp/forge-path-from-env-sigil-shield";
+        std::env::set_var(env_var, sentinel);
+        let result = path_from_env(env_var, "unused-context-since-var-is-set");
+        std::env::remove_var(env_var);
+        let path = result.expect("path_from_env must succeed when env var is set");
+        assert_eq!(
+            path,
+            PathBuf::from(sentinel),
+            "path_from_env() must return `PathBuf::from(<env_var_value>)` \
+             verbatim — the projection every pre-lift per-module \
+             `service_path_from_env()` sigil spelled inline via \
+             `Path::new(&service_dir)` / `PathBuf::from(service_dir)`."
         );
     }
 
