@@ -6772,6 +6772,105 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         );
     }
 
+    /// Structural regression shield: post-lift the inline snapshot-and-
+    /// restore stanza the [`EnvVarSnapshot`] primitive redeems —
+    ///
+    /// ```ignore
+    /// let prior = std::env::var("<NAME>");
+    /// // ... mutate + call under test ...
+    /// match &prior {
+    ///     Ok(v) => std::env::set_var("<NAME>", v),
+    ///     Err(_) => std::env::remove_var("<NAME>"),
+    /// }
+    /// ```
+    ///
+    /// — has NO business appearing in any `.rs` file outside
+    /// `test_support.rs`. The primitive's `capture(<NAME>)` + panic-safe
+    /// `Drop` supersedes the manual pattern verbatim AND closes an
+    /// additional defect the inline stanza silently carried: any panic
+    /// between the `let prior = ...` snapshot and the `match &prior
+    /// { ... }` restore (e.g., an `.unwrap_err()` that unexpectedly saw
+    /// `Ok`, an `.expect(...)` that fired, an assertion the pattern-
+    /// author added before the restore in a later edit) leaks
+    /// `<NAME>=<sentinel>` to every subsequent test in the process,
+    /// because the restore is a straight-line statement rather than a
+    /// `Drop` implementation. RAII closes that leak by construction —
+    /// the exact panic-safety property the sibling primitive tests
+    /// [`env_var_snapshot_restores_on_panic_unwind`]-style pins already
+    /// enforce for the two RAII guards.
+    ///
+    /// Four pre-lift consumer sites redeemed the shield:
+    /// `commands/developer_tools.rs`'s twin
+    /// `test_service_path_from_env_*` tests and
+    /// `commands/schema_validation.rs`'s twin
+    /// `test_service_path_from_env_*` tests each spelled the
+    /// five-line pattern VERBATIM around `super::service_path_from_env()`
+    /// — 4× isomorphic copies past THEORY §VI.1's three-times threshold,
+    /// each carrying the pre-lift panic-window defect.
+    ///
+    /// Detection: for each line matching `Err(_) => std::env::remove_var(`,
+    /// check the previous line for `Ok(v) => std::env::set_var(`. The
+    /// two-line pair uniquely identifies the Result-shaped restore
+    /// stanza; bare `std::env::remove_var("FOO")` calls (e.g.,
+    /// per-test env resets in `cli/src/repo.rs`) and Option-shaped
+    /// `Some(v) => set_var / None => remove_var` matches (e.g.,
+    /// `cli/src/commands/bootstrap.rs`, `cli/src/commands/helm.rs`)
+    /// stay unshielded — they are morally-adjacent shapes with their
+    /// own lift target, not this one.
+    ///
+    /// Sibling of
+    /// [`env_var_snapshot_pre_lift_snapshot_struct_shape_confined_to_test_support`]
+    /// (which shields the `struct <X>Snapshot { prior: ... }`
+    /// declaration shape) and
+    /// [`env_var_scope_pre_lift_scope_struct_shape_confined_to_test_support`]
+    /// (which shields the set-then-restore `struct <X>Scope` shape) —
+    /// the three shields exhaust the pre-lift Result-shaped env-var-
+    /// guard surface between them.
+    #[test]
+    fn env_var_snapshot_pre_lift_inline_restore_stanza_confined_to_test_support() {
+        let crate_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders: Vec<String> = Vec::new();
+        walk_rs_files(&crate_src, &mut |path| {
+            if path.file_name().and_then(|s| s.to_str()) == Some("test_support.rs") {
+                return;
+            }
+            let contents =
+                std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+            let lines: Vec<&str> = contents.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                if !line.contains("Err(_) => std::env::remove_var(") {
+                    continue;
+                }
+                let prev = match i.checked_sub(1).and_then(|j| lines.get(j)) {
+                    Some(l) => l,
+                    None => continue,
+                };
+                if !prev.contains("Ok(v) => std::env::set_var(") {
+                    continue;
+                }
+                let rel = path
+                    .strip_prefix(&crate_src)
+                    .unwrap_or(path)
+                    .display()
+                    .to_string();
+                offenders.push(format!("{rel}:{}: {}", i + 1, line.trim()));
+            }
+        });
+        assert!(
+            offenders.is_empty(),
+            "the inline `match &<prior> {{ Ok(v) => std::env::set_var(<NAME>, v), \
+             Err(_) => std::env::remove_var(<NAME>) }}` snapshot-and-restore stanza \
+             is reserved for `test_support.rs` — every consumer must route through \
+             `crate::test_support::EnvVarSnapshot::capture(<NAME>)` instead. The \
+             primitive's panic-safe `Drop` closes the pre-lift panic-window defect \
+             a straight-line manual restore silently carried (an `unwrap_err()` / \
+             `.expect(...)` / assertion between snapshot and restore leaks \
+             `<NAME>=<sentinel>` to every subsequent test in the process). \
+             Offending sites:\n{}",
+            offenders.join("\n")
+        );
+    }
+
     /// Recursively walk every `.rs` file under `dir`, invoking `visit`
     /// on each. Skips `target/` directories defensively even though
     /// none should live under `cli/src/`.
