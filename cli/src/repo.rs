@@ -168,6 +168,57 @@ pub fn verify_directory(dir: &Path, required_files: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// Resolve a substrate-declared env var into a `String`, falling back
+/// to `default` on the unset case.
+///
+/// Peer to [`get_tool_path`] on the env-var-with-`String`-fallback
+/// surface — where `get_tool_path` is documented as "env var or PATH
+/// lookup" and takes a *command name* as the fallback (a shell-name),
+/// `env_var_or_default` takes an *arbitrary substrate-supplied
+/// string* as the fallback (an environment alias, a registry URL, a
+/// server name, a cluster name). Every crate site that resolved a
+/// substrate-declared env var into a `String` with a hard-coded
+/// literal fallback — the shape
+///
+/// ```text
+/// std::env::var(<NAME>).unwrap_or_else(|_| <DEFAULT>.to_string())
+/// ```
+///
+/// — routes through this one body so the `env::var` read and the
+/// `String::from(default)` projection live at EXACTLY one point.
+///
+/// Pre-lift five per-module sigils spelled the pattern verbatim:
+///
+/// - [`get_environment`] (`FORGE_ENV` / `"staging"`)
+/// - [`crate::infrastructure::attic::attic_server_alias`]
+///   (`ATTIC_SERVER_NAME` / `"default"`)
+/// - [`crate::config::default_cluster`] (`FORGE_CLUSTER` /
+///   `"default"`)
+/// - `crate::domain::service::get_registry_base`
+///   (`SERVICE_REGISTRY_BASE` / `"ghcr.io/org/project"`)
+/// - `crate::commands::pangea::get_registry_base` (`PANGEA_REGISTRY`
+///   / `"ghcr.io/org/project"`)
+///
+/// Each per-module sigil kept its identity — the `(env_var, default)`
+/// pair is baked into the sigil's body, so the caller-facing type is
+/// still `fn() -> String` with no env-var name to typo at the call
+/// site. Post-lift a future refinement of the shape — logging every
+/// resolve, canonicalizing the value against a closed enum, a
+/// telemetry sigil separating explicit-value from default-fallback
+/// paths, or a swap to a typed `substrate::EnvVar(String)` newtype —
+/// lands here and reaches every sigil by construction (THEORY §V —
+/// solve-once-at-the-primitive; §VI.1 — recurring-shape-to-helper).
+///
+/// # Arguments
+///
+/// * `env_var` - Environment variable name to read
+/// * `default` - Literal fallback returned when the env var is unset
+///   or unreadable. Cloned into a `String` on the fallback path,
+///   consumed as `String::from(default)`.
+pub fn env_var_or_default(env_var: &str, default: &str) -> String {
+    std::env::var(env_var).unwrap_or_else(|_| default.to_string())
+}
+
 /// Get the current environment (staging, production, etc.)
 ///
 /// Reads from `FORGE_ENV` environment variable, defaults to `"staging"`.
@@ -176,18 +227,21 @@ pub fn verify_directory(dir: &Path, required_files: &[&str]) -> Result<()> {
 /// `String` with the `"staging"` default — the shape
 /// `commands/status.rs` spelled inline as `std::env::var("FORGE_ENV")
 /// .unwrap_or_else(|_| "staging".to_string())` before lifting through
-/// here. A future refinement of the `FORGE_ENV` contract — logging the
-/// resolved environment, canonicalizing it against a closed enum of
-/// known environments, a telemetry sigil on the value, or a swap to a
-/// typed `substrate::Environment(String)` newtype — lands at this one
-/// body and reaches every consumer by construction (THEORY §V —
-/// solve-once-at-the-primitive; §VI.1 — recurring-shape-to-helper).
+/// here. Routes through the crate-scoped [`env_var_or_default`]
+/// primitive so the `env::var`-read-with-`String`-fallback projection
+/// lives at ONE body across the crate — a future refinement of the
+/// shape (logging the resolved environment, canonicalizing it against
+/// a closed enum of known environments, a telemetry sigil on the
+/// value, or a swap to a typed `substrate::Environment(String)`
+/// newtype) lands at the primitive and reaches every consumer by
+/// construction (THEORY §V — solve-once-at-the-primitive; §VI.1 —
+/// recurring-shape-to-helper).
 ///
 /// The `"staging"` default matches the `#[arg(long, env = "FORGE_ENV",
 /// default_value = "staging")]` clap attribute at `cli.rs:397` so the
 /// CLI-flag path and the env-read path agree on the fallback.
 pub fn get_environment() -> String {
-    std::env::var("FORGE_ENV").unwrap_or_else(|_| "staging".to_string())
+    env_var_or_default("FORGE_ENV", "staging")
 }
 
 /// Which product-directory layouts [`find_product_dir`] accepts as terminal.
@@ -505,6 +559,91 @@ mod tests {
         std::env::set_var("FORGE_ENV", "production");
         assert_eq!(get_environment(), "production");
         std::env::remove_var("FORGE_ENV");
+    }
+
+    /// [`env_var_or_default`] returns the caller-supplied `default`
+    /// verbatim when the env var is unset. Pins the shape every
+    /// per-module sigil delegates through — [`get_environment`]
+    /// (`FORGE_ENV`/`"staging"`), the `attic_server_alias` sigil
+    /// (`ATTIC_SERVER_NAME`/`"default"`), the `default_cluster` sigil
+    /// (`FORGE_CLUSTER`/`"default"`), the `SERVICE_REGISTRY_BASE`
+    /// sigil, the `PANGEA_REGISTRY` sigil — depends on. A future
+    /// refactor that reshaped the primitive (a swap from
+    /// `unwrap_or_else(|_| _.to_string())` to a bail, a lift to a
+    /// closed-enum of known values, a canonicalize prefix landed in
+    /// front of the fallback) cannot silently drift the fallback
+    /// wording every consumer's docstring pins verbatim.
+    #[test]
+    fn env_var_or_default_returns_default_when_env_var_unset() {
+        let env_var = "TEST_ENV_VAR_OR_DEFAULT_UNSET_SIGIL_SHIELD";
+        std::env::remove_var(env_var);
+        assert_eq!(
+            env_var_or_default(env_var, "sentinel-fallback"),
+            "sentinel-fallback",
+            "env_var_or_default() must return `default.to_string()` \
+             verbatim on the unset case — that is the contract every \
+             per-module env-var-with-`String`-fallback sigil (get_environment, \
+             attic_server_alias, default_cluster, get_registry_base) \
+             delegates through."
+        );
+    }
+
+    /// [`env_var_or_default`] returns the env var's value verbatim
+    /// when it IS set — the primitive's set-path projection. Pins the
+    /// `env::var → String` shape at ONE body so a future refinement
+    /// (canonicalize hook, must-not-be-empty check, typed newtype) is
+    /// caught here rather than at each consumer's downstream `format!`
+    /// call. Sibling shield to
+    /// [`env_var_or_default_returns_default_when_env_var_unset`] on
+    /// the set path.
+    #[test]
+    fn env_var_or_default_returns_env_var_value_when_set() {
+        let env_var = "TEST_ENV_VAR_OR_DEFAULT_SET_SIGIL_SHIELD";
+        let sentinel = "explicit-value-not-the-fallback";
+        std::env::set_var(env_var, sentinel);
+        let result = env_var_or_default(env_var, "unused-fallback-should-not-appear");
+        std::env::remove_var(env_var);
+        assert_eq!(
+            result, sentinel,
+            "env_var_or_default() must return `env::var(env_var)` \
+             verbatim when set — the projection every pre-lift \
+             per-module `env::var(NAME).unwrap_or_else(|_| \
+             DEFAULT.to_string())` sigil spelled inline. A silent \
+             precedence flip that returned the fallback even when the \
+             env var was set would misroute every downstream `format!` \
+             at the sigils' consumers to the wrong registry / cluster \
+             / server alias / environment."
+        );
+    }
+
+    /// [`env_var_or_default`] treats an explicit empty-string
+    /// `env::var` value as a set env var and returns it verbatim —
+    /// NOT the fallback. Pins the shape's parity with the pre-lift
+    /// per-module sigils, each of which used `.unwrap_or_else(|_|
+    /// ...)` (fallback fires only on the `Err` case, not on
+    /// `Ok(String::new())`). A future refactor that swapped
+    /// `.unwrap_or_else` for `.ok().filter(|s| !s.is_empty())` +
+    /// fallback would silently reroute a shell-exported
+    /// `FORGE_ENV=""` / `ATTIC_SERVER_NAME=""` /
+    /// `SERVICE_REGISTRY_BASE=""` from empty-string to the
+    /// caller-supplied default, and every consumer's downstream
+    /// `format!("{}/...", ...)` would then compose against the
+    /// default host name where pre-lift it composed against the empty
+    /// leading segment. Explicit non-parity so the invariant survives
+    /// a future primitive refinement.
+    #[test]
+    fn env_var_or_default_returns_empty_string_when_env_var_set_empty() {
+        let env_var = "TEST_ENV_VAR_OR_DEFAULT_EMPTY_SIGIL_SHIELD";
+        std::env::set_var(env_var, "");
+        let result = env_var_or_default(env_var, "the-fallback-must-not-fire");
+        std::env::remove_var(env_var);
+        assert_eq!(
+            result, "",
+            "env_var_or_default() must return the empty string \
+             verbatim when the env var is set to \"\" — matches every \
+             pre-lift sigil's `.unwrap_or_else(|_| ...)` semantics, \
+             where the fallback fires only on the `Err` case."
+        );
     }
 
     /// The monorepo terminal fires at the `{product}` node when its parent

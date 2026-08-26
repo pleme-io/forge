@@ -157,7 +157,7 @@ pub fn default_environment() -> String {
 }
 
 pub fn default_cluster() -> String {
-    std::env::var("FORGE_CLUSTER").unwrap_or_else(|_| "default".to_string())
+    crate::repo::env_var_or_default("FORGE_CLUSTER", "default")
 }
 
 impl ProductConfig {
