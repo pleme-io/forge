@@ -578,6 +578,22 @@ pub fn tag_exists(tag: &str) -> Result<bool> {
 /// `--working-dir`, and answering "does this tag exist" from the PROCESS's cwd
 /// instead would silently consult the wrong repository — returning false for a
 /// tag that exists, which is exactly how a release collides with its own tag.
+///
+/// Retained as the per-tag boundary projection at the git-tag surface for a
+/// future consumer that already holds a rendered `<prefix>X.Y.Z` string and
+/// asks a ONE-tag existence question (an FFI boundary reading a specific tag
+/// off a JSON payload, a probe of "does the exact tag `v1.4.0` exist yet"
+/// against a fixed literal, an admin CLI that verifies a caller-supplied tag).
+/// Post the joint typed peer [`released_semver_tags_typed`] landing, the sole
+/// production caller (`commands/gem.rs::bump`'s `seed_from_tags` arm) reads
+/// tag membership off the joint scan's `BTreeSet<SemverTriple>` directly —
+/// pure, allocation-free, and TOTAL — so this per-tag primitive is currently
+/// unreferenced inside the crate: hence `#[allow(dead_code)]` to name the
+/// retention as intentional under the `pub`-fn dead-code lint the `bin`-crate
+/// build applies, same discipline the sibling stringly `max_released_version`,
+/// `next_free_version`, and `next_free_version_typed` boundary projections
+/// already carry.
+#[allow(dead_code)]
 pub fn tag_exists_in(tag: &str, workdir: Option<&Path>) -> Result<bool> {
     let stdout = git_capture(&["tag", "--list", tag], workdir, "tag --list")?;
     let s = String::from_utf8_lossy(&stdout);
@@ -669,22 +685,95 @@ pub fn max_released_version_typed(
     prefix: &str,
     workdir: Option<&Path>,
 ) -> Result<Option<crate::version::SemverTriple>> {
+    // Delegate through [`released_semver_tags_typed`] — the fully-typed
+    // scanner that carries the ONE `git tag --list <prefix>*` fetch and
+    // the parse/fold over its listing. `BTreeSet<SemverTriple>` is
+    // sorted by [`crate::version::SemverTriple`]'s derived `Ord`
+    // (semver-lex over the field declaration order `major, minor,
+    // patch`), so `.iter().next_back().copied()` reads the highest
+    // element in O(log n) and preserves the numeric-ordering discipline
+    // this primitive was added to close — the pre-delegation
+    // `parsed > b` fold and the delegated set's `next_back()` name the
+    // same ordering rule at exactly ONE site (`SemverTriple`'s field
+    // declaration order).
+    Ok(released_semver_tags_typed(prefix, workdir)?
+        .iter()
+        .next_back()
+        .copied())
+}
+
+/// The fully-typed scan of `<prefix>X.Y.Z` git tags: ONE
+/// `git tag --list <prefix>*` fetch, ONE
+/// [`crate::version::parse_semver_typed`] parse per listing line, and
+/// the parseable winners collected into a [`BTreeSet`] whose derived
+/// ordering matches [`crate::version::SemverTriple`]'s field-declared
+/// `Ord` (semver-lex over `major, minor, patch`).
+///
+/// # Why the joint peer
+///
+/// Every consumer that seeds a bump from released tags used to fire
+/// TWO git spawns per invocation on the fast path and up to
+/// `1 + 1024` on the pathological path: one
+/// `git tag --list <prefix>*` at [`max_released_version_typed`] to
+/// pick the seed's high-water mark, then one
+/// `git tag --list <prefix><candidate>` per collision-loop iteration
+/// at [`crate::version::next_free_version_all_typed`]'s
+/// `tag_exists` predicate — with the per-iteration lookup rebuilding
+/// the tag string via `format!("<prefix>{t}")` and swallowing the
+/// git-capture error via `.unwrap_or(false)` (so a git-binary failure
+/// silently promoted a real published tag to "does not exist" and
+/// let the loop bump straight into a collision, which is exactly how
+/// `commands/gem.rs::bump`'s `seed_from_tags` arm used to consume the
+/// scan).
+///
+/// The joint peer collapses both derived values (the numeric max, the
+/// exhaustive membership set) onto ONE `git tag --list` fetch and
+/// carries them through a pure, allocation-free predicate the
+/// collision loop consumes without a fallible boundary. The
+/// consumer's tag-exists closure becomes
+/// `|t: SemverTriple| set.contains(&t)`: pure, total, and O(log n)
+/// per iteration on the [`BTreeSet`], with the git-capture error
+/// propagated at the ONE fetch site rather than silently redeemed at
+/// every loop iteration.
+///
+/// # Boundary discipline
+///
+/// [`max_released_version_typed`] retains its `Option<SemverTriple>`
+/// return signature and delegates through this joint peer (a
+/// `.iter().next_back().copied()` projection at the boundary), so the
+/// tag-scan lives at ONE body — this one — and both entry points
+/// route through it. Same THEORY.md §VI.1 one-oracle discipline the
+/// sibling `parse_semver_typed`, `bump_semver_typed`, `bump_seed_typed`,
+/// `next_free_version_all_typed`, and `max_released_version_typed`
+/// typed peers already established across the release-arithmetic
+/// surface, here applied to the git-tag-scan primitive at the source
+/// of the seed AND collision decisions in ONE fetch.
+///
+/// THEORY.md §V.4 typed primitives: the git-tag-scan surface now
+/// carries a fully typed peer (typed prefix, typed set of triples out)
+/// — not a `(&str, Option<&Path>) -> Result<String>` shape that a
+/// future consumer would re-scan for both the max AND the membership
+/// set at two separate spawns.
+pub fn released_semver_tags_typed(
+    prefix: &str,
+    workdir: Option<&Path>,
+) -> Result<std::collections::BTreeSet<crate::version::SemverTriple>> {
     let pattern = format!("{}*", prefix);
     let stdout = git_capture(&["tag", "--list", &pattern], workdir, "tag --list")?;
     let listing = String::from_utf8_lossy(&stdout);
 
-    // Hold the running best as an `Option<SemverTriple>` rather than
-    // the raw `Option<(u64, u64, u64)>` the tuple form of
-    // `parse_semver` used to yield: `SemverTriple` derives `Ord` from
-    // the field declaration order `major, minor, patch`, so the
-    // `parsed > b` fold is a typed comparison whose semver-lex
-    // discipline is named at exactly ONE site (the struct
-    // declaration). The pre-lift shape happened to work only because
-    // the tuple was declared in that order; a future edit that
-    // destructured or re-ordered the tuple would have silently
-    // reversed this fold and picked the LOWEST tag rather than the
-    // highest.
-    let mut best: Option<crate::version::SemverTriple> = None;
+    // Collect into a `BTreeSet` rather than a `HashSet`: the derived
+    // `Ord` on `SemverTriple` (semver-lex over field declaration
+    // order) is exactly the ordering the `max_released_version_typed`
+    // delegator reads at `.iter().next_back()`, so the ONE scan
+    // yields both derived values (numeric max, membership set) from
+    // the SAME sorted structure — no separate fold over the listing,
+    // no per-element `.max()` on the boundary. Tags that do not
+    // parse as exact `X.Y.Z` (release candidates, dated tags, `v1.2`)
+    // are SKIPPED rather than failing the read — same rule the
+    // pre-delegation `parse_semver_typed`-in-fold applied, retained
+    // here so a repo that carries other tag shapes still reads.
+    let mut set = std::collections::BTreeSet::new();
     for line in listing.lines() {
         let tag = line.trim();
         let Some(candidate) = tag.strip_prefix(prefix) else {
@@ -693,11 +782,9 @@ pub fn max_released_version_typed(
         let Ok(parsed) = crate::version::parse_semver_typed(candidate) else {
             continue;
         };
-        if best.is_none_or(|b| parsed > b) {
-            best = Some(parsed);
-        }
+        set.insert(parsed);
     }
-    Ok(best)
+    Ok(set)
 }
 
 /// Create an annotated git tag.
@@ -2456,6 +2543,145 @@ mod max_released_version_tests {
             winner,
             crate::version::SemverTriple::new(0, 10, 0),
             "typed fold must pick 0.10.0 over 0.3.1 via derived Ord"
+        );
+    }
+
+    /// Every representative listing must yield the same numeric max
+    /// through the joint typed peer's `.iter().next_back().copied()`
+    /// projection as through the direct fold [`max_released_version_typed`]
+    /// used to carry — pins that the delegation
+    /// `max_released_version_typed → released_semver_tags_typed`
+    /// preserves the seeding decision at every representative shape,
+    /// so a future refactor that quietly forked one of the two
+    /// max-selection bodies cannot land silently.
+    ///
+    /// Same shape catalogue the `typed_and_stringly_max_released_version_agree`
+    /// shield already runs (numeric-lex, non-exact skip, empty, prefix
+    /// mismatch, non-`v` prefix, whitespace) — reused here to pin the
+    /// joint peer's projection is byte-equivalent to the pre-delegation
+    /// fold at every fleet-observed shape.
+    #[test]
+    fn joint_scan_projection_equals_direct_fold_at_every_representative_shape() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        for (label, listing, prefix) in [
+            ("numeric-lex ordering", "v0.3.0\\nv0.3.1\\nv0.10.0\\n", "v"),
+            (
+                "non-exact tags skipped",
+                "v1.2\\nv2.0.0-rc1\\nvNOPE\\nv0.1.0\\nv0.1.0.1\\n",
+                "v",
+            ),
+            ("empty listing", "", "v"),
+            ("prefix mismatch", "nightly\\nlatest\\n", "v"),
+            (
+                "non-v prefix",
+                "release-1.4.0\\nrelease-1.10.0\\n",
+                "release-",
+            ),
+            (
+                "surrounding whitespace tolerated",
+                "  v0.2.0  \\n\\nv0.5.0\\n  \\n",
+                "v",
+            ),
+        ] {
+            let (_d, shim) = git_listing_shim(listing);
+            let _scope = GitBinScope::set(&shim);
+            let by_joint = released_semver_tags_typed(prefix, None)
+                .unwrap()
+                .iter()
+                .next_back()
+                .copied();
+            let by_direct = max_released_version_typed(prefix, None).unwrap();
+            assert_eq!(
+                by_joint, by_direct,
+                "{label}: joint-scan max must byte-equal the direct fold — \
+                 the delegation `max_released_version_typed → \
+                 released_semver_tags_typed` preserves the seed at every \
+                 representative shape"
+            );
+        }
+    }
+
+    /// The joint scan carries EVERY parseable `<prefix>X.Y.Z` triple
+    /// through to its `BTreeSet` return, not just the max — this is
+    /// what the collision predicate consumes. Pins the primary reason
+    /// the joint peer exists over the max-only fold: a downstream
+    /// consumer that needs `contains` for the collision loop reads
+    /// the full set off ONE fetch rather than firing one
+    /// `tag_exists_in` git spawn per iteration.
+    #[test]
+    fn joint_scan_carries_every_parseable_triple_not_just_the_max() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_d, shim) = git_listing_shim("v0.1.0\\nv0.2.0\\nv0.5.0\\nv1.0.0\\n");
+        let _scope = GitBinScope::set(&shim);
+        let set = released_semver_tags_typed("v", None).unwrap();
+        assert_eq!(
+            set.len(),
+            4,
+            "every parseable X.Y.Z tag must appear in the scan set — \
+             the collision predicate reads membership off this set, \
+             not off the max"
+        );
+        for triple in [
+            crate::version::SemverTriple::new(0, 1, 0),
+            crate::version::SemverTriple::new(0, 2, 0),
+            crate::version::SemverTriple::new(0, 5, 0),
+            crate::version::SemverTriple::new(1, 0, 0),
+        ] {
+            assert!(
+                set.contains(&triple),
+                "collision predicate would miss {triple} — the joint scan \
+                 must carry every parseable triple through, not just the max"
+            );
+        }
+    }
+
+    /// Non-exact tags (release candidates, dated tags, two-part `v1.2`)
+    /// are SKIPPED from the joint scan's set, matching the
+    /// `max_released_version_typed` fold's rule — a repo carrying
+    /// mixed tag shapes must not have those shapes appear as
+    /// `SemverTriple` members of the collision predicate. Pins the
+    /// skip discipline the joint peer inherits from the delegated fold.
+    #[test]
+    fn joint_scan_skips_non_exact_tags_matching_the_fold_rule() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_d, shim) = git_listing_shim("v1.2\\nv2.0.0-rc1\\nvNOPE\\nv0.1.0\\nv0.1.0.1\\n");
+        let _scope = GitBinScope::set(&shim);
+        let set = released_semver_tags_typed("v", None).unwrap();
+        assert_eq!(
+            set.len(),
+            1,
+            "only the exact `X.Y.Z` shape counts — {set:?}"
+        );
+        assert!(
+            set.contains(&crate::version::SemverTriple::new(0, 1, 0)),
+            "the sole exact tag `v0.1.0` must be present in {set:?}"
+        );
+    }
+
+    /// The empty listing yields an empty set, matching the
+    /// `max_released_version_typed → None` boundary. Pins that a
+    /// downstream `set.iter().next_back().copied()` reads `None` and
+    /// `set.contains(&t)` reads `false` for every triple — the
+    /// "nothing released yet" state at the type level, without the
+    /// empty-string sentinel the pre-typed stringly wrapper carried.
+    #[test]
+    fn joint_scan_on_empty_listing_yields_empty_set_matching_none_max() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_d, shim) = git_listing_shim("");
+        let _scope = GitBinScope::set(&shim);
+        let set = released_semver_tags_typed("v", None).unwrap();
+        assert!(
+            set.is_empty(),
+            "empty listing must yield empty set (nothing released yet) — {set:?}"
+        );
+        assert!(
+            set.iter().next_back().is_none(),
+            "empty set yields None at the max boundary"
+        );
+        assert!(
+            !set.contains(&crate::version::SemverTriple::new(0, 0, 0)),
+            "empty set contains nothing, including 0.0.0 — the collision \
+             predicate returns false for every triple"
         );
     }
 }
