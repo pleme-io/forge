@@ -609,6 +609,19 @@ pub fn tag_exists_in(tag: &str, workdir: Option<&Path>) -> Result<bool> {
 /// `bump_seed` / `bump_seed_typed`, and
 /// `next_free_version` / `next_free_version_typed` — here applied to the
 /// git-tag-scan primitive that feeds them.
+///
+/// Retained as the stringly boundary projection at the git-tag-scan
+/// surface for a future consumer that already speaks `&str` (an FFI
+/// boundary that reads the highest tag off a JSON payload, a
+/// telemetry emitter that logs the winner as a string, a
+/// `HashMap<String, ...>` keyed by rendered tag). Post the
+/// b3527d3 lift, the sole production caller
+/// (`commands/gem.rs::bump`'s `seed_from_tags` arm) routes through
+/// [`max_released_version_typed`] directly, so this wrapper is
+/// currently unreferenced inside the crate — hence
+/// `#[allow(dead_code)]` to name the retention as intentional under
+/// the `pub`-fn dead-code lint the `bin`-crate build applies.
+#[allow(dead_code)]
 pub fn max_released_version(prefix: &str, workdir: Option<&Path>) -> Result<String> {
     Ok(max_released_version_typed(prefix, workdir)?
         .map(|t| t.to_string())

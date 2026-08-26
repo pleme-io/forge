@@ -10041,6 +10041,19 @@ pub fn bump_seed_typed(manifest: SemverTriple, max_released: Option<SemverTriple
 /// all for the other five bumpers, so 4 of 7 ecosystems could release backward.
 /// Two independent derivations of one decision is the signal to extract it; SDLC
 /// arithmetic is forge's job, and a CI action's job is to CALL this.
+///
+/// Retained as the boundary projection at the top of the surface for a
+/// future consumer that already speaks stringly `&str` (an FFI boundary,
+/// a `serde_yaml` deserialize of a release-config document that types
+/// its `level` field as `String`, a CLI subcommand that reads `--level`
+/// and `--max-released` directly from clap without a typed
+/// `ValueEnum` handler). Post the b68778b/b3527d3 lifts, the sole
+/// production caller (`commands/gem.rs::bump`'s `seed_from_tags` arm)
+/// routes through [`next_free_version_all_typed`] directly, so this
+/// wrapper is currently unreferenced inside the crate — hence
+/// `#[allow(dead_code)]` to name the retention as intentional under
+/// the `pub`-fn dead-code lint the `bin`-crate build applies.
+#[allow(dead_code)]
 pub fn next_free_version(
     manifest_version: &str,
     level: &str,
@@ -10080,6 +10093,19 @@ pub fn next_free_version(
 /// typed [`BumpLevel`] (a clap `ValueEnum`, a `serde_yaml` deserialize,
 /// a downstream typed policy record) reaches the typed peer directly
 /// without a string round-trip.
+///
+/// Retained as the middle-tier boundary projection (typed level,
+/// stringly triples in and out, stringly predicate) for a future
+/// consumer that holds a typed [`BumpLevel`] but reads its
+/// `manifest_version` / `max_released` as `&str` off a text surface
+/// (a git-blob stream, a stdin line, a `.env` line). Post the
+/// b68778b lift, the sole production caller
+/// (`commands/gem.rs::bump`'s `seed_from_tags` arm) routes through
+/// [`next_free_version_all_typed`] directly, so this middle tier is
+/// currently unreferenced inside the crate — hence
+/// `#[allow(dead_code)]` to name the retention as intentional under
+/// the `pub`-fn dead-code lint the `bin`-crate build applies.
+#[allow(dead_code)]
 pub fn next_free_version_typed(
     manifest_version: &str,
     level: BumpLevel,
