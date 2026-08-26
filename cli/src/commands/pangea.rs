@@ -302,7 +302,9 @@ fn find_external_repo(name: &str) -> Result<std::path::PathBuf> {
     }
 
     // Check standard locations relative to home directory
-    let home = std::env::var("HOME").context("HOME not set")?;
+    let home = crate::repo::path_from_env("HOME", "HOME not set")?
+        .display()
+        .to_string();
     let locations = [
         format!("{}/code/{}", home, name),
         format!("{}/.local/src/{}", home, name),
@@ -939,6 +941,68 @@ mod status_spawn_routing_tests {
             2,
             "the two `regenerate_compiler` status-only spawn sites \
              (`bundle lock --update` and `bundix`)",
+        );
+    }
+
+    /// Whole-module shield: the sole `HOME` env-var read in
+    /// `commands/pangea.rs` (the `find_external_repo` fallback that
+    /// probes `$HOME/code/<name>` and `$HOME/.local/src/<name>`)
+    /// routes through [`crate::repo::path_from_env`], never a
+    /// hand-rolled inline `std::env::var("HOME").context("HOME not
+    /// set")?` stanza.
+    ///
+    /// Pre-lift `find_external_repo` spelled the read inline; post-
+    /// lift it delegates to `crate::repo::path_from_env("HOME", "HOME
+    /// not set")`, sibling of `commands/gem.rs::push`'s two consumer
+    /// sites (test_gem_home_env_routes_through_path_from_env above) —
+    /// the third and final `env::var("HOME")` consumer in the crate,
+    /// closing the three-times-is-a-law recurrence THEORY §VI.1
+    /// admits.
+    ///
+    /// Scan bounds at the whole-module boundary via
+    /// [`crate::test_support::module_body_before_first_cfg_test`] so
+    /// this shield's docstring mentions of `env::var("HOME")` — living
+    /// inside a `#[cfg(test)]` block below that first marker — stay
+    /// out of scope. Every hit routes through
+    /// [`crate::test_support::code_line_hits`] for anti-docstring-
+    /// self-match discipline.
+    #[test]
+    fn test_pangea_home_env_routes_through_path_from_env() {
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            include_str!("pangea.rs"),
+            "commands/pangea.rs",
+        );
+        let raw_env_needle = "env::var(\"HOME\")";
+        let env_hits = crate::test_support::code_line_hits(body, raw_env_needle);
+        assert!(
+            env_hits.is_empty(),
+            "commands/pangea.rs must NOT spell `{raw_env_needle}` \
+             inline in the module body — the `find_external_repo` \
+             consumer must route through `crate::repo::path_from_env`. \
+             Found {} code-line hit(s): {env_hits:#?}",
+            env_hits.len()
+        );
+        let delegate_needle = "crate::repo::path_from_env(\"HOME\"";
+        let delegate_hits = crate::test_support::code_line_hits(body, delegate_needle);
+        assert_eq!(
+            delegate_hits.len(),
+            1,
+            "commands/pangea.rs must delegate `HOME` resolution to \
+             `crate::repo::path_from_env(\"HOME\", ...)` at EXACTLY \
+             one code line — the `find_external_repo` fallback. Found \
+             {} code-line hit(s): {delegate_hits:#?}",
+            delegate_hits.len()
+        );
+        let wording_needle = "\"HOME not set\"";
+        let wording_hits = crate::test_support::code_line_hits(body, wording_needle);
+        assert_eq!(
+            wording_hits.len(),
+            1,
+            "commands/pangea.rs must spell the canonical miss wording \
+             `{wording_needle}` at EXACTLY one code line — the \
+             delegating call's second argument. Found {} code-line \
+             hit(s): {wording_hits:#?}",
+            wording_hits.len()
         );
     }
 }
