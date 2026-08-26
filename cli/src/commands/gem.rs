@@ -341,12 +341,48 @@ pub fn bump(
             // path — this commit closes the last stringly caller
             // that redeemed a rendered/re-parsed round-trip across
             // the boundary.
+            // Fold the two derived values the seeding-and-collision arithmetic
+            // reads over `<prefix>X.Y.Z` git tags — the numeric MAX (for the
+            // seed) and MEMBERSHIP (for the collision predicate) — onto ONE
+            // `git tag --list v*` fetch via
+            // [`crate::git::released_semver_tags_typed`]. Pre-lift this arm
+            // fired TWO git spawns on the fast path and up to `1 + 1024` on
+            // the pathological path: one at [`crate::git::max_released_version_typed`]
+            // to pick the seed, then one at [`crate::git::tag_exists_in`] per
+            // collision-loop iteration — with the per-iteration lookup
+            // rebuilding the tag string via `format!("v{t}")` (a per-iter
+            // allocation the fully-typed peer had already closed inside the
+            // loop body) AND swallowing the git-capture error via
+            // `.unwrap_or(false)` (so a git failure on any iteration silently
+            // promoted a real published tag to "does not exist" and let the
+            // loop bump straight into a collision, which would land a release
+            // atop the tag the arm was ADDED to skip). The joint typed peer
+            // reads the whole prefix listing once, into a
+            // `BTreeSet<SemverTriple>` whose derived `Ord` is exactly
+            // `SemverTriple`'s field-declared semver-lex, so:
+            //   - the seed's max is `released.iter().next_back().copied()`
+            //     — the highest set element, no separate fold;
+            //   - the collision predicate is `|t| released.contains(&t)`
+            //     — pure, allocation-free, O(log n) per iteration, and
+            //     TOTAL (no fallible `Result<bool>` to swallow);
+            //   - a git-capture failure propagates at the ONE
+            //     `released_semver_tags_typed` fetch site rather than being
+            //     silently redeemed at every loop iteration.
+            //
+            // THEORY.md §V.4 typed primitives: the tag-scan surface now
+            // carries typed values end-to-end (typed prefix, typed set of
+            // triples, typed predicate over the set, typed winner) — not a
+            // stringly `tag_exists_in(&format!("v{t}"), ...).unwrap_or(false)`
+            // bridge that fell back to `false` on error.
+            // THEORY.md §VI.1 one-oracle discipline: the tag-scan lives at
+            // ONE body (`released_semver_tags_typed`) that both the seed and
+            // the collision predicate consume — no forked fetch, no
+            // double-scan, no error-swallowing bridge.
             let manifest = version::parse_semver_typed(&old_version)?;
             let level_typed: version::BumpLevel = level.parse()?;
-            let max_released = crate::git::max_released_version_typed("v", Some(dir))?;
-            let tag_exists = |t: version::SemverTriple| {
-                crate::git::tag_exists_in(&format!("v{t}"), Some(dir)).unwrap_or(false)
-            };
+            let released = crate::git::released_semver_tags_typed("v", Some(dir))?;
+            let max_released = released.iter().next_back().copied();
+            let tag_exists = |t: version::SemverTriple| released.contains(&t);
             let next = version::next_free_version_all_typed(
                 manifest,
                 level_typed,
@@ -1044,6 +1080,14 @@ mod tests {
             .expect("must find the closing brace for gem::bump");
         let body = &SOURCE[after_brace..body_end];
 
+        // Route every scan through [`crate::test_support::code_line_hits`]
+        // so the shield's own inline `//` narration inside `bump`'s
+        // body — which necessarily names the forbidden shapes verbatim
+        // (`.unwrap_or(false)`, `tag_exists_in`, `max_released_version`,
+        // `next_free_version`) as the traps this arm was lifted OFF —
+        // does not false-match. Only executable code lines count.
+        let hit = |needle: &str| crate::test_support::code_line_hits(body, needle);
+
         // The stringly wrappers must NOT appear in gem::bump's body.
         // `max_released_version(` matches only the stringly wrapper
         // because the typed peer spells `max_released_version_typed(`
@@ -1051,39 +1095,81 @@ mod tests {
         // Same discipline on `next_free_version(` vs
         // `next_free_version_all_typed(`.
         assert!(
-            !body.contains("crate::git::max_released_version("),
+            hit("crate::git::max_released_version(").is_empty(),
             "gem::bump's seed_from_tags arm must NOT call the stringly \
              `crate::git::max_released_version` wrapper — the typed peer \
              `max_released_version_typed` returns `Option<SemverTriple>` \
              at the boundary and skips the render-to-string projection. \
-             Got body: {body:?}"
+             Got: {:?}",
+            hit("crate::git::max_released_version(")
         );
         assert!(
-            !body.contains("version::next_free_version("),
+            hit("version::next_free_version(").is_empty(),
             "gem::bump's seed_from_tags arm must NOT call the stringly \
              `version::next_free_version` wrapper — the typed peer \
              `next_free_version_all_typed` takes typed (`SemverTriple`, \
              `BumpLevel`, `Option<SemverTriple>`, typed predicate) all \
              the way through and skips the parse-render round-trips at \
-             the boundary. Got body: {body:?}"
+             the boundary. Got: {:?}",
+            hit("version::next_free_version(")
         );
 
-        // The fully-typed peers MUST appear in gem::bump's body —
-        // guards against a regression that dropped both stringly
-        // calls without wiring the typed replacements (which would
-        // leave the negative scan trivially satisfied by absence).
+        // The joint typed tag-scan primitive MUST appear in gem::bump's
+        // body — the `git tag --list v*` fetch that yields BOTH derived
+        // values (the numeric max for the seed, and the typed
+        // `BTreeSet<SemverTriple>` for the collision predicate) from
+        // ONE spawn. Pre-lift this arm fired TWO git spawns on the
+        // fast path (max_released_version_typed + at least one
+        // tag_exists_in), and up to `1 + 1024` on the pathological
+        // path, plus swallowed each tag_exists_in error via
+        // `.unwrap_or(false)` — the joint peer collapses the scan
+        // AND removes the error-swallowing bridge in one lift.
         assert!(
-            body.contains("crate::git::max_released_version_typed("),
+            !hit("crate::git::released_semver_tags_typed(").is_empty(),
             "gem::bump's seed_from_tags arm must call \
-             `crate::git::max_released_version_typed` — the typed peer \
-             that returns `Option<SemverTriple>` at the boundary. \
-             Got body: {body:?}"
+             `crate::git::released_semver_tags_typed` — the joint typed \
+             peer that reads the whole `<prefix>X.Y.Z` tag listing once \
+             into a sorted `BTreeSet<SemverTriple>` and feeds both the \
+             seed's `max` AND the collision predicate's `contains` off \
+             that ONE fetch. Got body: {body:?}"
         );
         assert!(
-            body.contains("version::next_free_version_all_typed("),
+            !hit("version::next_free_version_all_typed(").is_empty(),
             "gem::bump's seed_from_tags arm must call \
              `version::next_free_version_all_typed` — the fully-typed \
              peer that takes typed values end-to-end. Got body: {body:?}"
+        );
+
+        // The pre-lift per-iteration git spawn (tag_exists_in) MUST
+        // NOT appear as executable code in the arm — the joint scan
+        // renders the collision predicate as a pure `BTreeSet::contains`,
+        // so a reintroduced tag_exists_in closure would re-open the
+        // error-swallowing boundary that used to let a git failure
+        // silently promote a real tag to "does not exist" and collide
+        // the bump.
+        assert!(
+            hit("crate::git::tag_exists_in(").is_empty(),
+            "gem::bump's seed_from_tags arm must NOT call \
+             `crate::git::tag_exists_in` per iteration — the joint typed \
+             peer `released_semver_tags_typed` reads the whole prefix \
+             listing once and answers membership via `BTreeSet::contains`, \
+             which is pure, allocation-free, and TOTAL. Got: {:?}",
+            hit("crate::git::tag_exists_in(")
+        );
+        // The specific `.unwrap_or(false)` error-swallow bridge that
+        // used to sit under the tag_exists_in closure must NOT
+        // reappear as executable code — the joint peer's
+        // `BTreeSet::contains` predicate is TOTAL, so a git failure
+        // propagates at the ONE fetch site rather than being silently
+        // redeemed at every loop iteration.
+        assert!(
+            hit(".unwrap_or(false)").is_empty(),
+            "gem::bump's seed_from_tags arm must NOT swallow a fallible \
+             tag-exists lookup via `.unwrap_or(false)` — the joint typed \
+             peer's `BTreeSet::contains` predicate is TOTAL, so a git \
+             failure propagates at the ONE fetch site rather than being \
+             silently redeemed at every loop iteration. Got: {:?}",
+            hit(".unwrap_or(false)")
         );
     }
 }
