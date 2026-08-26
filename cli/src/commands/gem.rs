@@ -255,6 +255,49 @@ pub fn bump(
         bail!("Working directory not found: {}", working_dir);
     }
 
+    // Parse `--level` at ONE top-of-fn site (before the manifest read and
+    // before the `match set_version` branch selection), then thread the
+    // typed [`version::BumpLevel`] through the seed_from_tags arm and the
+    // fallback bump arm below via [`version::bump_semver_typed`].
+    // Pre-lift the fallback `None => version::bump_semver(&old_version, level)?`
+    // arm called the stringly [`version::bump_semver`] wrapper, which
+    // parses `level: &str` into [`version::BumpLevel`] INSIDE its own
+    // body via [`version::BumpLevel::from_str`] ([`crate::version`]:1428)
+    // — so the level grammar was re-parsed at one further consumer, and
+    // an invalid `--level` on that arm fired AFTER the version-file
+    // locate + read (`find_version_file` + `read_to_string` +
+    // `VersionLiteral::find`), a wasted three-step I/O on a bogus input
+    // the parse alone could have refused.
+    //
+    // Post-lift the grammar is parsed at ONE site (this `level.parse()?`
+    // call) and the typed value dispatches directly to the const
+    // arithmetic on [`version::SemverTriple::bumped`] through the typed
+    // peer. This mirrors the sibling `commands/tool.rs::bump` discipline
+    // (commit fa0c6d9) which established the same top-of-fn parse and
+    // typed-peer dispatch across its own two per-language branches
+    // (Rust arm + Zig arm), off the same forbidden stringly-wrapper
+    // shape. The `Some(v)` set_version arm ignores `level` on purpose
+    // (the caller did the arithmetic), and clap declares `set_version`
+    // as `conflicts_with = "level"` at [`crate::cli::GemCommands::Bump`]
+    // — a user cannot pass a real `--level` alongside `--set-version`,
+    // and the clap default `"patch"` always parses cleanly through
+    // [`version::BumpLevel::from_str`], so hoisting the parse above the
+    // match does not refuse any prior-accepted invocation.
+    //
+    // THEORY.md §V.4 typed primitives: the `--level` argument surface
+    // now carries a typed peer parsed at ONE site (this call), matching
+    // the discipline the sibling seed_from_tags arm below already
+    // carried at its own inner `let level_typed: version::BumpLevel = ...`
+    // (now hoisted here), and matching commit fa0c6d9's
+    // `commands/tool.rs::bump` top-of-fn boundary parse.
+    // THEORY.md §VI.1 one-oracle discipline: the level grammar (which
+    // strings map to which [`version::BumpLevel`] variant) lives at ONE
+    // body ([`version::BumpLevel::from_str`]) that this fn — and every
+    // sibling `bump` fn — parses through, rather than at N
+    // stringly-wrapper call sites that each re-derive it via
+    // [`version::bump_semver`].
+    let level_typed: version::BumpLevel = level.parse()?;
+
     let gem_name = match name {
         Some(n) => n,
         None => detect_gem_name(dir)?,
@@ -379,7 +422,6 @@ pub fn bump(
             // the collision predicate consume — no forked fetch, no
             // double-scan, no error-swallowing bridge.
             let manifest = version::parse_semver_typed(&old_version)?;
-            let level_typed: version::BumpLevel = level.parse()?;
             let released = crate::git::released_semver_tags_typed("v", Some(dir))?;
             let max_released = released.iter().next_back().copied();
             let tag_exists = |t: version::SemverTriple| released.contains(&t);
@@ -397,7 +439,7 @@ pub fn bump(
             }
             next.to_string()
         }
-        None => version::bump_semver(&old_version, level)?,
+        None => version::bump_semver_typed(&old_version, level_typed)?,
     };
 
     // Splice over the MATCHED SPAN, and render in the form we found.
@@ -446,7 +488,7 @@ pub fn bump(
 
     info!(
         "{}: {} → {} ({})",
-        gem_name, old_version, new_version, level
+        gem_name, old_version, new_version, level_typed
     );
 
     Ok((old_version, new_version))
@@ -1170,6 +1212,115 @@ mod tests {
              failure propagates at the ONE fetch site rather than being \
              silently redeemed at every loop iteration. Got: {:?}",
             hit(".unwrap_or(false)")
+        );
+    }
+
+    /// Regression-shield: [`super::bump`]'s function body MUST parse
+    /// `--level` at ONE top-of-fn site
+    /// (`let level_typed: version::BumpLevel = level.parse()?;`) and
+    /// dispatch the fallback `None` (no `set_version`, no
+    /// `seed_from_tags`) arm through the typed peer
+    /// [`crate::version::bump_semver_typed`], NEVER through the stringly
+    /// wrapper [`crate::version::bump_semver`] that re-parses the level
+    /// grammar inside its own body.
+    ///
+    /// Sibling of [`crate::commands::tool::bump_level_typed_dispatch_tests`]
+    /// (commit fa0c6d9) at the two-consumer `commands/tool.rs::bump`
+    /// surface (Rust arm + Zig arm). Same discipline: parse at the
+    /// boundary, thread the typed variant through every consumer, so a
+    /// future grammar extension (a `Prerelease` variant strictly below
+    /// [`crate::version::BumpLevel::Patch`], an `Epoch` ceiling strictly
+    /// above [`crate::version::BumpLevel::Major`] for semver4 /
+    /// `0ver`-style incompatible-by-design rewrites) is a compile error
+    /// at every consumer the exhaustive match on the typed sum reaches,
+    /// rather than a silent parse-error surface a stringly consumer
+    /// would leave unchecked.
+    ///
+    /// Negative side: pins that `version::bump_semver(&` — the
+    /// stringly-wrapper call form — does NOT appear as executable code
+    /// inside [`super::bump`]'s body. Positive side: pins that (a)
+    /// `version::bump_semver_typed(&` appears at EXACTLY one code line
+    /// (the fallback `None => ...` arm — the seed_from_tags arm reaches
+    /// its typed result through [`crate::version::next_free_version_all_typed`]
+    /// on a different code path, so a regression that dropped this
+    /// delegation cannot leave the negative scan trivially satisfied by
+    /// absence), and (b) `let level_typed: version::BumpLevel = level.parse()?;`
+    /// — the typed parse itself — appears at EXACTLY one code line
+    /// (the top-of-fn boundary parse, before the manifest read and
+    /// before the `match set_version` branch selection). Both scans
+    /// route through [`crate::test_support::code_line_hits`] for
+    /// anti-docstring-self-match discipline: the `//` narration above
+    /// the boundary parse necessarily mentions the forbidden
+    /// `version::bump_semver` wrapper by name as the trap the lift
+    /// closes, and those `//` prefixes are skipped by construction.
+    ///
+    /// Fail-before-pass-after: restoring the pre-lift shape at the
+    /// fallback arm (`None => version::bump_semver(&old_version, level)?`)
+    /// fires the negative scan by naming the forbidden
+    /// `version::bump_semver(&` needle on an executable line, and drops
+    /// the positive `version::bump_semver_typed(&` count below the
+    /// pinned one; restoring the typed routing returns both scans to
+    /// green. Restoring the inner-arm `let level_typed: version::BumpLevel = ...`
+    /// duplicate — the pre-lift seed_from_tags arm's own parse — pushes
+    /// the parse count above one; hoisting it back to the top-of-fn
+    /// boundary returns it to one.
+    #[test]
+    fn bump_routes_level_through_typed_peer_at_exactly_one_boundary_parse() {
+        const SOURCE: &str = include_str!("gem.rs");
+
+        let body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/gem.rs",
+            "pub fn bump(",
+            "\npub fn build(",
+        );
+
+        let stringly_needle = "version::bump_semver(&";
+        let stringly_hits = crate::test_support::code_line_hits(body, stringly_needle);
+        assert!(
+            stringly_hits.is_empty(),
+            "commands/gem.rs::bump must NOT call the stringly \
+             `version::bump_semver` wrapper on the fallback `None` arm — \
+             the typed peer `version::bump_semver_typed` takes an \
+             already-parsed `BumpLevel` and dispatches directly to the \
+             const arithmetic on `SemverTriple::bumped`, so parsing \
+             lives at ONE top-of-fn site rather than being re-derived \
+             inside the wrapper per consumer. Hits: {stringly_hits:?}"
+        );
+
+        let typed_needle = "version::bump_semver_typed(&";
+        let typed_hits = crate::test_support::code_line_hits(body, typed_needle);
+        assert_eq!(
+            typed_hits.len(),
+            1,
+            "commands/gem.rs::bump must call `{typed_needle}` at \
+             EXACTLY one code line — the fallback `None` arm's \
+             `version::bump_semver_typed(&old_version, level_typed)?` \
+             — so a regression that dropped that delegation cannot \
+             leave the negative `version::bump_semver(&` scan \
+             trivially satisfied by absence, and a regression that \
+             duplicated it into (say) an added third bump path is \
+             caught the same way. The seed_from_tags arm reaches its \
+             typed result through `version::next_free_version_all_typed` \
+             (a separate code path pinned by the sibling shield above), \
+             so this count is one, not two. Hits: {typed_hits:?}"
+        );
+
+        let parse_needle = "let level_typed: version::BumpLevel = level.parse()?;";
+        let parse_hits = crate::test_support::code_line_hits(body, parse_needle);
+        assert_eq!(
+            parse_hits.len(),
+            1,
+            "commands/gem.rs::bump must parse `--level` at EXACTLY \
+             one top-of-fn site (`{parse_needle}`) — the boundary \
+             parse hoisted above the `match set_version` branch \
+             selection. A regression that (a) dropped the boundary \
+             parse would fire the positive `version::bump_semver_typed(&` \
+             count above (the typed peer's second argument would no \
+             longer type-check on the untyped `level: &str`), and (b) \
+             duplicated it back inside the seed_from_tags arm — the \
+             pre-lift shape — would fire this count above 1. Hits: \
+             {parse_hits:?}"
         );
     }
 }
