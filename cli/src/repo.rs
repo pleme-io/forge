@@ -235,6 +235,73 @@ pub fn env_var_or_default(env_var: &str, default: &str) -> String {
     std::env::var(env_var).unwrap_or_else(|_| default.to_string())
 }
 
+/// Resolve an env-var read onto `Option<String>` with empty-string-is-a-value
+/// parity — the shape every `std::env::var(NAME).ok()` inline stanza in the
+/// crate spelled verbatim.
+///
+/// # The mirror-of-[`crate::git::release_git_sha_from_env`] contract
+///
+/// Peer to [`crate::git::release_git_sha_from_env`] on the `Option<String>`
+/// surface, split by empty-string semantics: where `release_git_sha_from_env`
+/// closes the empty-string-is-MISS shape (an unset env var and a
+/// `RELEASE_GIT_SHA=""` export both fold to `None`), `env_var_optional`
+/// closes the empty-string-is-a-VALUE shape (an unset env var folds to
+/// `None`, a `DATABASE_URL=""` / `PUSHGATEWAY_URL=""` / `HOSTNAME=""`
+/// export folds to `Some(String::new())`). The two primitives split the
+/// crate's `env::var → Option<String>` surface exhaustively so a fresh
+/// consumer picks its primitive by asking "does an explicit-empty export
+/// count as a value or as a miss?" — the closed choice a per-module inline
+/// `env::var(NAME).ok()` stanza does not present.
+///
+/// # Pre-lift stanzas fused into ONE body
+///
+/// Six byte-similar inline `std::env::var(NAME).ok()` stanzas spelled the
+/// shape across three CLI-facing modules before this lift:
+///
+/// - `commands/sync.rs::generate_entities` (`DATABASE_URL`) — gate on the
+///   env var before invoking `sea-orm-cli generate entity`.
+/// - `observability.rs::EventMetadata::new` (`HOSTNAME`) — enrich every
+///   structured event with the host emitting it.
+/// - `observability.rs::EventMetadata::new` (`CI_JOB_ID` fallback of the
+///   `GITHUB_RUN_ID` primary) — the `.or_else(|| env::var("CI_JOB_ID").ok())`
+///   chain arm on the CI-job-id enrichment surface.
+/// - `observability.rs::metrics::pushgateway_url` (`PUSHGATEWAY_URL`) —
+///   gate on the env var before pushing Prometheus metrics.
+/// - `infrastructure/registry.rs::RegistryCredentials::discover_token`
+///   (`GHCR_TOKEN`) — first env-var arm of the GHCR-token discovery chain.
+/// - `infrastructure/registry.rs::RegistryCredentials::discover_token`
+///   (`GITHUB_TOKEN`) — second env-var arm of the same chain.
+///
+/// # Post-lift refinement surface
+///
+/// Post-lift a future refinement of the shape — logging every resolve, a
+/// telemetry sigil separating explicit-value from unset paths, a swap to a
+/// typed `substrate::EnvVar(Option<String>)` newtype, or canonicalizing the
+/// value against a closed enum — lands at this body and reaches every
+/// consumer by construction. The same solve-once-at-the-primitive
+/// discipline [`env_var_or_default`] closes on the `String`-fallback
+/// surface, [`path_from_env`] closes on the `Result<PathBuf>` surface,
+/// [`safe_mode_from_env`] / [`truthy_flag_from_env`] close on the `bool`
+/// surface, and [`crate::git::release_git_sha_from_env`] closes on the
+/// empty-string-is-miss `Option<String>` mirror (THEORY §V —
+/// solve-once-at-the-primitive; §VI.1 — recurring-shape-to-helper).
+///
+/// # The empty-string case
+///
+/// `Some(String::new())` on the empty-string set path — an operator's
+/// explicit-empty export (`PUSHGATEWAY_URL=""`) lands on `Some(_)`, not
+/// `None`. Parity with every pre-lift consumer's inline `.ok()`
+/// behaviour: `env::var(NAME).ok()` on an `Ok(String::new())` is
+/// `Some(String::new())`, not `None`. A future primitive refinement that
+/// swapped `.ok()` for `.ok().filter(|s| !s.is_empty())` would silently
+/// re-route every `<NAME>=""` export from `Some("")` to `None` and reopen
+/// the class the peer split closes — that is the exact projection
+/// [`crate::git::release_git_sha_from_env`] closes for the empty-is-miss
+/// half, and a callers-facing merge would defeat the split.
+pub fn env_var_optional(env_var: &str) -> Option<String> {
+    std::env::var(env_var).ok()
+}
+
 /// Get the current environment (staging, production, etc.)
 ///
 /// Reads from `FORGE_ENV` environment variable, defaults to `"staging"`.
@@ -1594,5 +1661,131 @@ mod tests {
         assert!(
             find_product_dir(&repo_root, ProductDirLayout::MonorepoOrNamedStandalone).is_none()
         );
+    }
+
+    /// [`env_var_optional`] returns `None` when the env var is unset.
+    /// Pins the `Err → None` half every pre-lift `env::var(NAME).ok()`
+    /// stanza depended on — the six `Option<String>` gate / enrichment
+    /// sites in `commands/sync.rs`, `observability.rs`, and
+    /// `infrastructure/registry.rs` all treated the unset case as
+    /// "absent" (return `Ok(false)` early, omit the field from the
+    /// event, fall through to the next `.or_else` arm). A silent flip
+    /// to `Some(String::new())` on the unset case would misroute every
+    /// consumer's `.is_none()` / `.or_else` dispatch.
+    #[test]
+    fn env_var_optional_returns_none_when_env_var_unset() {
+        let env_var = "TEST_ENV_VAR_OPTIONAL_UNSET_SIGIL_SHIELD";
+        std::env::remove_var(env_var);
+        assert_eq!(
+            env_var_optional(env_var),
+            None,
+            "env_var_optional() must return `None` on the unset case — \
+             matches every pre-lift `env::var(NAME).ok()` sigil's \
+             `Err → None` projection, the projection consumers gate on."
+        );
+    }
+
+    /// [`env_var_optional`] returns the env var's value inside `Some`
+    /// verbatim when it IS set. Pins the `Ok(v) → Some(v)` set-path
+    /// projection so a future refinement (a canonicalize prefix, a
+    /// closed-enum canonicalization, a `.map(str::trim)` fold) is
+    /// caught here rather than at each consumer's downstream unwrap.
+    #[test]
+    fn env_var_optional_returns_some_value_when_env_var_set() {
+        let env_var = "TEST_ENV_VAR_OPTIONAL_SET_SIGIL_SHIELD";
+        let sentinel = "explicit-value-not-none";
+        std::env::set_var(env_var, sentinel);
+        let result = env_var_optional(env_var);
+        std::env::remove_var(env_var);
+        assert_eq!(
+            result,
+            Some(sentinel.to_string()),
+            "env_var_optional() must return `Some(env::var(env_var))` \
+             verbatim when set — the projection every pre-lift \
+             `env::var(NAME).ok()` sigil spelled inline."
+        );
+    }
+
+    /// [`env_var_optional`] returns `Some(String::new())` — NOT `None`
+    /// — when the env var is set to `""`. Pins the empty-string-is-a-
+    /// VALUE half of the split against
+    /// [`crate::git::release_git_sha_from_env`]'s empty-string-is-MISS
+    /// mirror. A future primitive refactor that swapped `.ok()` for
+    /// `.ok().filter(|s| !s.is_empty())` would silently reroute a
+    /// shell-exported `PUSHGATEWAY_URL=""` / `HOSTNAME=""` /
+    /// `DATABASE_URL=""` from `Some("")` to `None`, collapsing the two
+    /// peers onto one body and defeating the split the two sibling
+    /// primitives close on. Sibling shield to
+    /// [`crate::git::tests`]'s empty-string-is-miss assertions on the
+    /// mirror.
+    #[test]
+    fn env_var_optional_returns_some_empty_string_when_env_var_set_empty() {
+        let env_var = "TEST_ENV_VAR_OPTIONAL_EMPTY_SIGIL_SHIELD";
+        std::env::set_var(env_var, "");
+        let result = env_var_optional(env_var);
+        std::env::remove_var(env_var);
+        assert_eq!(
+            result,
+            Some(String::new()),
+            "env_var_optional() must return `Some(String::new())` \
+             verbatim when the env var is set to \"\" — matches every \
+             pre-lift `env::var(NAME).ok()` sigil's semantics, where \
+             `Ok(String::new())` folds to `Some(String::new())`, NOT \
+             `None`. That parity is what splits this primitive from \
+             the sibling empty-is-miss `release_git_sha_from_env`."
+        );
+    }
+
+    /// Post-lift the callers migrated onto [`env_var_optional`] no
+    /// longer spell the `std::env::var(<NAME>).ok()` shape inline.
+    /// Structural regression shield — without it, a future refactor
+    /// could silently re-inline the shape (e.g. a helpful "just call
+    /// `std::env::var` directly, it's shorter" cleanup) and reopen the
+    /// duplication class this lift closed. Enforced at the module
+    /// bodies before their `#[cfg(test)]` regions so a test-support
+    /// mention of the raw shape does not defeat the shield.
+    #[test]
+    fn env_var_optional_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str, &[&str])] = &[
+            (
+                include_str!("commands/sync.rs"),
+                "commands/sync.rs",
+                &["DATABASE_URL"],
+            ),
+            (
+                include_str!("observability.rs"),
+                "observability.rs",
+                &["HOSTNAME", "GITHUB_RUN_ID", "CI_JOB_ID", "PUSHGATEWAY_URL"],
+            ),
+            (
+                include_str!("infrastructure/registry.rs"),
+                "infrastructure/registry.rs",
+                &["GHCR_TOKEN", "GITHUB_TOKEN"],
+            ),
+        ];
+        for (source, module_path, names) in CALLERS {
+            let body = crate::test_support::module_body_before_tests(source, module_path);
+            for name in *names {
+                let raw = format!("std::env::var(\"{name}\").ok()");
+                let short = format!("env::var(\"{name}\").ok()");
+                assert!(
+                    !body.contains(&raw) && !body.contains(&short),
+                    "{module_path} body must NOT spell the inline \
+                     `env::var(\"{name}\").ok()` shape — that \
+                     `Option<String>` duplication was lifted onto \
+                     `crate::repo::env_var_optional`. A re-inline would \
+                     silently reopen the class this shield exists to \
+                     close."
+                );
+                let call = format!("env_var_optional(\"{name}\")");
+                assert!(
+                    body.contains(&call),
+                    "{module_path} body must forward to \
+                     `crate::repo::env_var_optional(\"{name}\")` — the \
+                     primitive body every `Option<String>` env-var \
+                     sigil in the crate now delegates through."
+                );
+            }
+        }
     }
 }
