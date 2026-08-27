@@ -1176,13 +1176,7 @@ pub async fn execute_manual(
         anyhow::bail!("No deploy.yaml found at: {}", deploy_yaml_path.display());
     }
 
-    let yaml_content = std::fs::read_to_string(&deploy_yaml_path).context(format!(
-        "Failed to read deploy.yaml at: {}",
-        deploy_yaml_path.display()
-    ))?;
-
-    let raw_config: RawDeployYaml =
-        serde_yaml::from_str(&yaml_content).context("Failed to parse deploy.yaml")?;
+    let raw_config: RawDeployYaml = crate::repo::read_yaml_sync(&deploy_yaml_path)?;
 
     // Get integration test config
     let integration_config = raw_config

@@ -193,13 +193,7 @@ fn load_web_tests_config(service: &str, service_dir: &str) -> Result<WebTestsCon
         return Ok(WebTestsConfig::default());
     }
 
-    let yaml_content = std::fs::read_to_string(&deploy_yaml_path).context(format!(
-        "Failed to read deploy.yaml at: {}",
-        deploy_yaml_path.display()
-    ))?;
-
-    let raw_config: RawDeployYaml =
-        serde_yaml::from_str(&yaml_content).context("Failed to parse deploy.yaml")?;
+    let raw_config: RawDeployYaml = crate::repo::read_yaml_sync(&deploy_yaml_path)?;
 
     Ok(raw_config
         .deployment
