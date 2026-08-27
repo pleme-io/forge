@@ -93,10 +93,7 @@ pub fn resolve_product_dir(repo_root: &Path, product: &str) -> PathBuf {
 /// in advance.
 pub fn load_product_config_from_dir(product_dir: &Path) -> Result<ProductConfig> {
     let config_path = product_dir.join("deploy.yaml");
-    let content = std::fs::read_to_string(&config_path)
-        .with_context(|| format!("Failed to read {}", config_path.display()))?;
-    serde_yaml::from_str(&content)
-        .with_context(|| format!("Failed to parse {}", config_path.display()))
+    crate::repo::read_yaml_sync(&config_path)
 }
 
 /// Auto-discover the product name from `deploy.yaml` at the repo root.
@@ -545,13 +542,7 @@ impl DeployConfig {
             );
         }
 
-        let content = std::fs::read_to_string(&config_path)
-            .with_context(|| format!("Failed to read product config: {}", config_path.display()))?;
-
-        let config: ProductConfig = serde_yaml::from_str(&content).with_context(|| {
-            format!("Failed to parse product config: {}", config_path.display())
-        })?;
-
+        let config: ProductConfig = crate::repo::read_yaml_sync(&config_path)?;
         Ok(config)
     }
 
@@ -570,12 +561,7 @@ impl DeployConfig {
             return Ok(ProductReleaseConfig::default());
         }
 
-        let content = std::fs::read_to_string(&config_path)
-            .with_context(|| format!("Failed to read product config: {}", config_path.display()))?;
-
-        let yaml: serde_yaml::Value = serde_yaml::from_str(&content).with_context(|| {
-            format!("Failed to parse product config: {}", config_path.display())
-        })?;
+        let yaml: serde_yaml::Value = crate::repo::read_yaml_sync(&config_path)?;
 
         match yaml.get("release") {
             Some(release_val) => {
@@ -611,12 +597,7 @@ impl DeployConfig {
             return Ok(ReleaseConfig::default());
         }
 
-        let content = std::fs::read_to_string(&config_path)
-            .with_context(|| format!("Failed to read service config: {}", config_path.display()))?;
-
-        let yaml: serde_yaml::Value = serde_yaml::from_str(&content).with_context(|| {
-            format!("Failed to parse service config: {}", config_path.display())
-        })?;
+        let yaml: serde_yaml::Value = crate::repo::read_yaml_sync(&config_path)?;
 
         match yaml.get("release") {
             Some(release_val) => {
@@ -656,12 +637,7 @@ impl DeployConfig {
             .unwrap_or(service_path);
         let config_path = resolve_deploy_yaml_path(&product_dir, service_name, &service_dir);
 
-        let content = std::fs::read_to_string(&config_path)
-            .with_context(|| format!("Failed to read service config: {}", config_path.display()))?;
-
-        let yaml: serde_yaml::Value = serde_yaml::from_str(&content).with_context(|| {
-            format!("Failed to parse service config: {}", config_path.display())
-        })?;
+        let yaml: serde_yaml::Value = crate::repo::read_yaml_sync(&config_path)?;
 
         yaml.get("registry")
             .and_then(|r| r.get("url"))
@@ -688,12 +664,7 @@ impl DeployConfig {
             .unwrap_or(service_path);
         let config_path = resolve_deploy_yaml_path(&product_dir, service_name, &service_dir);
 
-        let content = std::fs::read_to_string(&config_path)
-            .with_context(|| format!("Failed to read service config: {}", config_path.display()))?;
-
-        let yaml: serde_yaml::Value = serde_yaml::from_str(&content).with_context(|| {
-            format!("Failed to parse service config: {}", config_path.display())
-        })?;
+        let yaml: serde_yaml::Value = crate::repo::read_yaml_sync(&config_path)?;
 
         // Resolve environment aliases (e.g. "production" → "production-a")
         let resolved_env = yaml

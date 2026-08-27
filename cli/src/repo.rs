@@ -4,8 +4,61 @@
 //! detecting environment, and working with paths.
 
 use anyhow::{Context, Result};
+use serde::de::DeserializeOwned;
 use std::path::{Path, PathBuf};
 use tracing::debug;
+
+/// Read a YAML file at `path` and deserialize it into `T`.
+///
+/// The sync sibling of
+/// [`crate::git::yaml_read_modify_write_async`] on the read-only arm.
+/// Where the async primitive owns the read/parse/mutate/serialize/write
+/// round-trip on the async-fs surface, `read_yaml_sync` owns the
+/// read/parse prefix on the sync-fs surface: the shape every consumer
+/// that loads a typed config off disk (a `ProductConfig`, a
+/// `ReleaseConfig`, a `serde_yaml::Value` for `.get(...)` navigation)
+/// spelled inline pre-lift.
+///
+/// # Envelope
+///
+/// Each failure branch surfaces the offending `path.display()` via
+/// [`anyhow::Context`] on the operator's next-step classifier:
+///
+/// - Read failure: `"Failed to read {path}"` — operator's next step is
+///   `ls` on the exact path.
+/// - Parse failure: `"Failed to parse {path} as YAML"` — operator's
+///   next step is `yamllint` on the exact path, not `ls`.
+///
+/// Pre-lift six sibling consumer sites in `cli/src/config/mod.rs` each
+/// carried its own per-consumer "role" label (`"product config"`,
+/// `"service config"`) inside the context string, decoupling the
+/// diagnostic wording from the offending path. Post-lift the primitive's
+/// canonical `path.display()` envelope reaches every consumer by
+/// construction; the role a config plays in the loader is preserved by
+/// the caller's function name in the anyhow backtrace, not by a redundant
+/// label inside the failure classifier.
+///
+/// # Type parameter
+///
+/// `T: DeserializeOwned` — accepts both closed-shape structs
+/// (`ProductConfig`, `ServiceConfig`, `GlobalConfig`) and the open
+/// [`serde_yaml::Value`] target (for a caller that navigates the
+/// document tree via `.get(...)` chains rather than deserializing into
+/// a struct). One primitive body serves both shapes.
+///
+/// # Errors
+///
+/// Returns `Err` if the file cannot be read (missing, unreadable, EIO)
+/// or cannot be parsed as YAML into `T` (invalid YAML syntax, schema
+/// mismatch). On the read-Err path no parse is attempted; on the
+/// parse-Err path the read has already succeeded, so the offending file
+/// is present on disk and the operator can inspect it directly.
+pub fn read_yaml_sync<T: DeserializeOwned>(path: &Path) -> Result<T> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    serde_yaml::from_str(&content)
+        .with_context(|| format!("Failed to parse {} as YAML", path.display()))
+}
 
 /// Find repository root by looking for flake.nix
 ///
@@ -2022,5 +2075,119 @@ mod tests {
              every `Option<PathBuf>` env-var-first shortcut in the \
              crate now delegates through."
         );
+    }
+
+    /// [`read_yaml_sync`] deserializes a well-formed YAML file at the
+    /// caller's target type. Pins the round-trip: a regression that
+    /// swapped the `serde_yaml::from_str` call for `serde_json::from_str`
+    /// (or that returned the raw content string instead of the parsed
+    /// value) fails here.
+    #[test]
+    fn read_yaml_sync_deserializes_well_formed_yaml_into_typed_target() {
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        struct Fixture {
+            name: String,
+            count: u32,
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("fixture.yaml");
+        std::fs::write(&path, "name: hive-router\ncount: 42\n").expect("seed write");
+
+        let value: Fixture = read_yaml_sync(&path).expect("well-formed YAML must parse");
+
+        assert_eq!(
+            value,
+            Fixture {
+                name: "hive-router".to_string(),
+                count: 42,
+            }
+        );
+    }
+
+    /// [`read_yaml_sync`]'s read arm must surface the offending
+    /// `path.display()` alongside a `"Failed to read"` classifier so the
+    /// operator's next step is `ls` on the exact path. Pins the
+    /// canonical envelope every consumer inherits: the pre-lift
+    /// per-consumer role labels (`"product config"`, `"service config"`)
+    /// decoupled the diagnostic wording from the offending path, and
+    /// this envelope closes that drift by construction.
+    #[test]
+    fn read_yaml_sync_missing_file_errors_carry_path_and_read_classifier() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("does-not-exist.yaml");
+
+        let err = read_yaml_sync::<serde_yaml::Value>(&path).unwrap_err();
+        let msg = format!("{err:#}");
+
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "read arm's envelope must carry `path.display()` so the \
+             operator can `ls` the offending path directly. Got: {msg}"
+        );
+        assert!(
+            msg.contains("Failed to read"),
+            "read arm's envelope must carry the `Failed to read` \
+             classifier so the operator's next step is `ls`, not \
+             `yamllint`. Got: {msg}"
+        );
+    }
+
+    /// [`read_yaml_sync`]'s parse arm must surface the offending
+    /// `path.display()` alongside a `"Failed to parse ... as YAML"`
+    /// classifier so the operator's next step is `yamllint` on the exact
+    /// path, not `ls` (which would find a syntactically-broken file, a
+    /// dead end). Pins the parse-failure envelope every consumer
+    /// inherits.
+    #[test]
+    fn read_yaml_sync_invalid_yaml_errors_carry_path_and_parse_classifier() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("broken.yaml");
+        std::fs::write(&path, "key: [unterminated\n").expect("seed write");
+
+        let err = read_yaml_sync::<serde_yaml::Value>(&path).unwrap_err();
+        let msg = format!("{err:#}");
+
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "parse arm's envelope must carry `path.display()` so the \
+             operator can `yamllint` the offending path directly. \
+             Got: {msg}"
+        );
+        assert!(
+            msg.contains("Failed to parse") && msg.contains("as YAML"),
+            "parse arm's envelope must carry `Failed to parse ... as \
+             YAML` so the operator's next step is `yamllint`, not `ls` \
+             (which would find a syntactically-broken file, a dead \
+             end). Got: {msg}"
+        );
+    }
+
+    /// [`read_yaml_sync`] parses at the OPEN [`serde_yaml::Value`]
+    /// target when the caller navigates via `.get(...)` chains rather
+    /// than deserializing into a closed struct. Pins that ONE primitive
+    /// body serves both the typed-struct target (e.g. `ProductConfig`
+    /// at `config::mod::load_product_config_from_dir`) and the
+    /// open-value target (e.g. `serde_yaml::Value` at
+    /// `config::mod::load_service_namespace`) — a regression that
+    /// specialized the primitive to a closed T would silently break the
+    /// four open-value consumer sites.
+    #[test]
+    fn read_yaml_sync_parses_at_open_serde_yaml_value_for_get_chain_consumers() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("nested.yaml");
+        std::fs::write(
+            &path,
+            "environments:\n  production:\n    namespace: hive-prod\n",
+        )
+        .expect("seed write");
+
+        let value: serde_yaml::Value = read_yaml_sync(&path).expect("open-value target must parse");
+
+        let namespace = value
+            .get("environments")
+            .and_then(|e| e.get("production"))
+            .and_then(|p| p.get("namespace"))
+            .and_then(|n| n.as_str());
+        assert_eq!(namespace, Some("hive-prod"));
     }
 }
