@@ -911,10 +911,7 @@ fn resolve_namespace_for_env(env: &str, namespace_override: Option<&str>) -> Res
         );
     }
 
-    let content =
-        std::fs::read_to_string(&deploy_yaml_path).context("Failed to read deploy.yaml")?;
-    let yaml: serde_yaml::Value =
-        serde_yaml::from_str(&content).context("Failed to parse deploy.yaml")?;
+    let yaml: serde_yaml::Value = crate::repo::read_yaml_sync(&deploy_yaml_path)?;
 
     // First check if there's an alias for this environment
     let resolved_env = yaml
@@ -962,10 +959,7 @@ fn get_manifest_path_for_env(env: &str) -> Result<String> {
         );
     }
 
-    let content =
-        std::fs::read_to_string(&deploy_yaml_path).context("Failed to read deploy.yaml")?;
-    let yaml: serde_yaml::Value =
-        serde_yaml::from_str(&content).context("Failed to parse deploy.yaml")?;
+    let yaml: serde_yaml::Value = crate::repo::read_yaml_sync(&deploy_yaml_path)?;
 
     // First check if there's an alias for this environment
     let resolved_env = yaml

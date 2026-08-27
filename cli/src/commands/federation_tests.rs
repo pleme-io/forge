@@ -483,9 +483,6 @@ fn create_federation_test_job(
         }
 
         // Read and parse federation-tests deploy.yaml
-        let federation_config_content = std::fs::read_to_string(&federation_deploy_yaml)
-            .context("Failed to read federation-tests deploy.yaml")?;
-
         #[derive(serde::Deserialize)]
         struct FederationTestsDeployYaml {
             federation_tests_service: FederationTestsServiceSection,
@@ -497,8 +494,7 @@ fn create_federation_test_job(
         }
 
         let federation_config: FederationTestsDeployYaml =
-            serde_yaml::from_str(&federation_config_content)
-                .context("Failed to parse federation-tests deploy.yaml")?;
+            crate::repo::read_yaml_sync(&federation_deploy_yaml)?;
 
         federation_config.federation_tests_service.image_tag
     };

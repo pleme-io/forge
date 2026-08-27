@@ -7473,6 +7473,144 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         );
     }
 
+    /// Crate-wide shield: the two-line
+    /// `std::fs::read_to_string(path).context("Failed to read ...") +
+    /// serde_yaml::from_str(&content).context("Failed to parse ...")`
+    /// sync YAML read+parse stanza is reserved for the primitive body
+    /// at [`crate::repo::read_yaml_sync`] — every consumer of the
+    /// "load a well-formed YAML file into a typed target" carve-out
+    /// must route through the primitive instead. Pre-lift the stanza
+    /// lived at nine consumer sites across `cli/src/config/mod.rs`
+    /// (six canonical + three hint-carrying, lifted at 2243a1c and
+    /// c4b65f6) plus five straggler sites in `cli/src/commands/*.rs`
+    /// (`rust_service.rs::get_namespace_from_deploy_yaml`,
+    /// `rust_service.rs::get_manifest_path_for_env`,
+    /// `status.rs::execute`, `integration_tests.rs::execute_manual`,
+    /// `test.rs::load_web_tests_config`), each carrying a per-consumer
+    /// context string that decoupled from the offending path (the
+    /// pre-lift `.context("Failed to parse deploy.yaml")` arm dropped
+    /// the path entirely, and two of the five sites dropped it from
+    /// the read arm too). The primitive owns the canonical
+    /// `"Failed to read {path}"` / `"Failed to parse {path} as YAML"`
+    /// envelope at ONE body across the crate, so every consumer
+    /// surfaces the offending path on every failure branch by
+    /// construction rather than by convention.
+    ///
+    /// # Multi-line detection via bounded regex
+    ///
+    /// The stanza spans two-to-four source lines depending on whether
+    /// the caller inlines the read/parse onto one binding, threads the
+    /// path via `.context(format!(...))`, or splits the two `?`-arms
+    /// across intermediate lets. A bounded regex
+    /// `std::fs::read_to_string\([\s\S]{0,120}?\.(?:with_)?context\
+    /// \((?:\|\|\s*)?(?:format!\()?"Failed to read[\s\S]{0,400}?\
+    /// serde_yaml::from_str\([\s\S]{0,200}?\.(?:with_)?context\
+    /// \((?:\|\|\s*)?(?:format!\()?"Failed to parse` matches the sync
+    /// read opener + up-to-120 bytes of intervening path expression +
+    /// the `"Failed to read"` classifier + up-to-400 bytes of
+    /// intervening `?; let ...` + the parse opener + up-to-200 bytes
+    /// of intervening context chain + the `"Failed to parse"`
+    /// classifier. Both `.context(` and `.with_context(||` are
+    /// covered, so a caller using `.with_context(|| format!(...))`
+    /// with the same classifier prefix is also caught. Both
+    /// `"Failed to read"` and `"Failed to parse"` classifiers are
+    /// required literals — so the sibling
+    /// `config/mod.rs::auto_discover_product` site (whose read arm
+    /// carries a domain-specific `"--product not specified and no
+    /// deploy.yaml found at"` classifier, not `"Failed to read"`) is
+    /// legitimately skipped: its envelope is not the canonical
+    /// operator-next-step shape and does not lift to the primitive.
+    ///
+    /// # Skipped files
+    ///
+    /// - `test_support.rs` — this shield's own docstring quotes the
+    ///   stanza verbatim; scanning would self-match.
+    /// - `repo.rs` — the primitive module carries the shell body itself
+    ///   AND unit tests that exercise the round-trip end-to-end. The
+    ///   comment-blind pass below strips `///` prefixes before matching,
+    ///   but the primitive body at [`crate::repo::read_yaml_sync`] is
+    ///   naturally the ONE authorized use, so skipping the whole file
+    ///   is both simpler and honest about the intent.
+    ///
+    /// # Sibling shields
+    ///
+    /// Sync sibling of
+    /// [`yaml_read_modify_write_async_pre_lift_stanza_confined_to_primitive`]
+    /// on the YAML-loading frontier. The async peer covers the
+    /// `tokio::fs::read_to_string + parse + mutate + serialize + write`
+    /// round-trip shape; this shield covers the `std::fs::read_to_string
+    /// + parse` prefix shape. Same walk-tree discipline: enumerate
+    /// every `.rs` file, name every offender with its relative path
+    /// and 1-indexed line of the `std::fs::read_to_string` opener.
+    #[test]
+    fn read_yaml_sync_pre_lift_stanza_confined_to_primitive() {
+        let crate_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let pattern = concat!(
+            r#"std::fs::read_to_string\([\s\S]{0,120}?"#,
+            r#"\.(?:with_)?context\((?:\|\|\s*)?(?:format!\()?"Failed to read"#,
+            r#"[\s\S]{0,400}?"#,
+            r#"serde_yaml::from_str\([\s\S]{0,200}?"#,
+            r#"\.(?:with_)?context\((?:\|\|\s*)?(?:format!\()?"Failed to parse"#,
+        );
+        let re = regex::Regex::new(pattern).expect("pre-lift stanza regex must compile");
+        let mut offenders: Vec<String> = Vec::new();
+        walk_rs_files(&crate_src, &mut |path| {
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if name == "test_support.rs" || name == "repo.rs" {
+                return;
+            }
+            let raw =
+                std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+            // Strip `///` / `//!` / `//` comment lines so a doc-block
+            // that quotes the stanza does not self-match. Preserve
+            // line count so 1-indexed offender lines still resolve.
+            let stripped: String = raw
+                .lines()
+                .map(|l| {
+                    let t = l.trim_start();
+                    if t.starts_with("///") || t.starts_with("//!") || t.starts_with("//") {
+                        ""
+                    } else {
+                        l
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            for m in re.find_iter(&stripped) {
+                let line = stripped[..m.start()].matches('\n').count() + 1;
+                let rel = path
+                    .strip_prefix(&crate_src)
+                    .unwrap_or(path)
+                    .display()
+                    .to_string();
+                offenders.push(format!("{rel}:{line}"));
+            }
+        });
+        assert!(
+            offenders.is_empty(),
+            "the inline `std::fs::read_to_string(...).context(\"Failed \
+             to read ...\") + serde_yaml::from_str(...).context(\"Failed \
+             to parse ...\")` sync YAML read+parse stanza is reserved \
+             for the primitive body at `crate::repo::read_yaml_sync` — \
+             every consumer of the \"load a well-formed YAML file into a \
+             typed target\" carve-out must route through the primitive \
+             instead. The primitive owns the canonical `\"Failed to read \
+             {{path}}\"` / `\"Failed to parse {{path}} as YAML\"` \
+             envelope at ONE body across the crate, so every consumer \
+             surfaces the offending path on every failure branch by \
+             construction — the pre-lift `.context(\"Failed to parse \
+             deploy.yaml\")` arm dropped the path entirely, and the \
+             primitive redeems that drop for every consumer at once. A \
+             future refinement of the envelope shape (structured \
+             telemetry on the parse arm, a canonicalized-path prefix, a \
+             hint-carrying variant already lifted at c4b65f6) lands at \
+             `read_yaml_sync` and reaches every consumer for free. \
+             Offending sites (line = `std::fs::read_to_string` \
+             opener):\n{}",
+            offenders.join("\n")
+        );
+    }
+
     /// Recursively walk every `.rs` file under `dir`, invoking `visit`
     /// on each. Skips `target/` directories defensively even though
     /// none should live under `cli/src/`.
