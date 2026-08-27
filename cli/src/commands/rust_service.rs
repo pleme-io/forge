@@ -463,18 +463,24 @@ pub async fn build_rust_service(
         // This automatically pushes EVERY built derivation (per-crate in crate2nix)
         // to Attic during the build, maximizing cache utilization
         //
-        // Auto-discovers nix-hooks package by building .#nix-hooks
+        // Auto-discovers nix-hooks package by building .#nix-hooks.
+        // Delegates the four-line argv+env splice through the canonical
+        // wire primitive `crate::nix_hooks::wire_post_build_hook_env` so
+        // a future refinement of the hook's env contract lands at ONE
+        // body and reaches every consumer by construction (THEORY §V,
+        // §VI.1).
         match crate::nix_hooks::NixHooks::discover().await {
             Ok(hooks) => {
                 if let Some(hook_path) = hooks.attic_push_hook_path() {
                     println!("   ✅ Using attic post-build-hook: {}", hook_path.dimmed());
                     println!("   (Uploads EVERY built derivation automatically)");
-                    cmd.args(&["--option", "post-build-hook", &hook_path]);
-
-                    // Set environment variables for the hook
-                    cmd.env("ATTIC_CACHE", &cache_name);
-                    cmd.env("ATTIC_SERVER", &full_cache_url);
-                    cmd.env("ATTIC_TOKEN", &token);
+                    crate::nix_hooks::wire_post_build_hook_env(
+                        &mut cmd,
+                        &hook_path,
+                        &cache_name,
+                        &full_cache_url,
+                        &token,
+                    );
                 } else {
                     println!(
                         "   {}",

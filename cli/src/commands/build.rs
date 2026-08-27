@@ -186,12 +186,19 @@ pub async fn execute(
             &arch,
         ]);
 
-    // Configure post-build-hook for per-derivation caching if available
+    // Configure post-build-hook for per-derivation caching if available.
+    // Delegate the four-line argv+env splice through the canonical wire
+    // primitive `crate::nix_hooks::wire_post_build_hook_env` so a
+    // future refinement of the hook's env contract lands at ONE body
+    // and reaches every consumer by construction (THEORY §V, §VI.1).
     if let Some(ref hook) = hook_path {
-        cmd.args(&["--option", "post-build-hook", hook]);
-        cmd.env("ATTIC_CACHE", &cache_name);
-        cmd.env("ATTIC_SERVER", &cache_url);
-        cmd.env("ATTIC_TOKEN", &attic_token);
+        crate::nix_hooks::wire_post_build_hook_env(
+            &mut cmd,
+            hook,
+            &cache_name,
+            &cache_url,
+            &attic_token,
+        );
     }
 
     // Route the status-only spawn through the canonical primitive so
