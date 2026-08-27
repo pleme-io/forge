@@ -299,22 +299,17 @@ impl DeployConfig {
             service_dir.join("deploy.yaml")
         };
         let service_config: Option<ServiceConfig> = if service_config_path.exists() {
-            let content = std::fs::read_to_string(&service_config_path).with_context(|| {
-                format!(
-                    "Failed to read service config file: {}\n  Ensure the file is readable and not corrupted.",
-                    service_config_path.display()
-                )
-            })?;
-
-            Some(serde_yaml::from_str(&content).with_context(|| {
-                format!(
-                    "Failed to parse service config: {}\n  Check YAML syntax. Common issues:\n  \
-                     - Incorrect indentation\n  \
-                     - Missing quotes around strings with special characters\n  \
-                     - Invalid field names (see CONFIGURATION.md for reference)",
-                    service_config_path.display()
-                )
-            })?)
+            Some(crate::repo::read_yaml_sync_hinted(
+                &service_config_path,
+                &crate::repo::YamlLoadHints {
+                    role: "service config",
+                    read_hint: "Ensure the file is readable and not corrupted.",
+                    parse_hint: "Check YAML syntax. Common issues:\n  \
+                                 - Incorrect indentation\n  \
+                                 - Missing quotes around strings with special characters\n  \
+                                 - Invalid field names (see CONFIGURATION.md for reference)",
+                },
+            )?)
         } else {
             None
         };
@@ -341,19 +336,14 @@ impl DeployConfig {
         // Load product-level config (optional)
         let product_config_path = product_dir.join("deploy.yaml");
         let product_config_partial: Option<ProductConfig> = if product_config_path.exists() {
-            let content = std::fs::read_to_string(&product_config_path).with_context(|| {
-                format!(
-                    "Failed to read product config file: {}\n  Ensure the file is readable.",
-                    product_config_path.display()
-                )
-            })?;
-
-            Some(serde_yaml::from_str(&content).with_context(|| {
-                format!(
-                    "Failed to parse product config: {}\n  Check YAML syntax (see CONFIGURATION.md)",
-                    product_config_path.display()
-                )
-            })?)
+            Some(crate::repo::read_yaml_sync_hinted(
+                &product_config_path,
+                &crate::repo::YamlLoadHints {
+                    role: "product config",
+                    read_hint: "Ensure the file is readable.",
+                    parse_hint: "Check YAML syntax (see CONFIGURATION.md)",
+                },
+            )?)
         } else {
             None
         };
@@ -369,19 +359,14 @@ impl DeployConfig {
 
         let global_config_path = repo_root.join("cli/deploy.yaml");
         let global_config: GlobalConfig = if global_config_path.exists() {
-            let content = std::fs::read_to_string(&global_config_path).with_context(|| {
-                format!(
-                    "Failed to read global config file: {}\n  Ensure the file is readable.",
-                    global_config_path.display()
-                )
-            })?;
-
-            serde_yaml::from_str(&content).with_context(|| {
-                format!(
-                    "Failed to parse global config: {}\n  Check YAML syntax (see CONFIGURATION.md)",
-                    global_config_path.display()
-                )
-            })?
+            crate::repo::read_yaml_sync_hinted(
+                &global_config_path,
+                &crate::repo::YamlLoadHints {
+                    role: "global config",
+                    read_hint: "Ensure the file is readable.",
+                    parse_hint: "Check YAML syntax (see CONFIGURATION.md)",
+                },
+            )?
         } else {
             GlobalConfig::default()
         };
