@@ -721,9 +721,7 @@ async fn detect_binary_name(service_path: &Path, service_name: &str) -> Result<S
         return Ok(service_name.to_string());
     }
 
-    let content = tokio::fs::read_to_string(&cargo_toml_path)
-        .await
-        .context("Failed to read Cargo.toml")?;
+    let content = crate::repo::read_text_async(&cargo_toml_path).await?;
 
     // Try to find [[bin]] section with name
     // This is a simple parser - looks for: name = "binary-name"

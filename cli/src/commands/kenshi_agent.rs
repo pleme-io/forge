@@ -124,9 +124,7 @@ async fn update_kustomization_image(
     info!("📝 Updating: {}", kustomization_path);
 
     // Read content
-    let content = tokio::fs::read_to_string(path)
-        .await
-        .context("Failed to read kustomization.yaml")?;
+    let content = crate::repo::read_text_async(path).await?;
 
     let new_image = crate::oci_manifest::image_reference(registry, new_tag);
     let mut updated_images = false;
@@ -212,9 +210,7 @@ async fn update_builder_pool_agent_image(
     info!("📝 Updating: {}", builder_pool_path);
 
     // Read content
-    let content = tokio::fs::read_to_string(path)
-        .await
-        .context("Failed to read builder-pool.yaml")?;
+    let content = crate::repo::read_text_async(path).await?;
 
     let new_image = crate::oci_manifest::image_reference(registry, new_tag);
     let mut updated = false;
