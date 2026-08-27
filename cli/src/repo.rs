@@ -54,15 +54,14 @@ pub fn find_repo_root() -> Result<PathBuf> {
     }
 
     // Check REPO_ROOT env var
-    if let Ok(repo_root) = std::env::var("REPO_ROOT") {
-        let path = PathBuf::from(&repo_root);
+    if let Some(path) = path_from_env_optional("REPO_ROOT") {
         if path.join("flake.nix").exists() {
             debug!("Found flake.nix via REPO_ROOT env var: {}", path.display());
             return Ok(path);
         }
         debug!(
             "REPO_ROOT set to {} but no flake.nix found there",
-            repo_root
+            path.display()
         );
     }
 
@@ -143,6 +142,75 @@ pub fn get_tool_path(env_var: &str, fallback: &str) -> String {
 pub fn path_from_env(env_var: &str, miss_context: &'static str) -> Result<PathBuf> {
     let raw = std::env::var(env_var).context(miss_context)?;
     Ok(PathBuf::from(raw))
+}
+
+/// Resolve a substrate-declared directory-path env var into a
+/// [`PathBuf`], folding the unset case into `None`.
+///
+/// `Option<PathBuf>` peer to [`path_from_env`] (Result<PathBuf>) and
+/// [`env_var_optional`] (Option<String>) on the env-var-projection
+/// algebra. Where [`path_from_env`] carries a caller-supplied
+/// operator-facing miss wording and surfaces the unset case as a
+/// [`Result::Err`] via [`anyhow::Context`] (the "the env var MUST be
+/// set" contract used by callers that bail immediately), and
+/// [`env_var_optional`] carries the raw `String` value forward
+/// (leaving downstream projection to the caller), `path_from_env_optional`
+/// closes the "env var MAY be set; if it is, treat it as a path"
+/// contract at one body — the shape every `if let Ok(v) =
+/// env::var(NAME) { PathBuf::from(v) }` inline stanza in the crate
+/// spelled verbatim.
+///
+/// Composed on top of [`env_var_optional`] so the empty-string-is-a-
+/// VALUE semantic is inherited by construction: an operator's
+/// explicit-empty export (`REPO_ROOT=""`, `NIX_HOOKS_PATH=""`) lands
+/// on `Some(PathBuf::new())`, not `None`. Parity with every pre-lift
+/// consumer's inline `if let Ok(v) = env::var(NAME)` shape, where
+/// `Ok(String::new())` matched the arm and flowed into
+/// `PathBuf::from("")`. A future primitive refinement that swapped
+/// `env_var_optional` for `release_git_sha_from_env`-style
+/// `.filter(|s| !s.is_empty())` semantics would silently reroute
+/// every `<NAME>=""` export from `Some(PathBuf::new())` to `None` and
+/// misroute every consumer's `if let Some(_) = ...` dispatch.
+///
+/// # Pre-lift stanzas fused into ONE body
+///
+/// Six byte-similar inline `if let Ok(v) = std::env::var(NAME) {
+/// PathBuf::from(v) }` stanzas spelled the shape across six CLI-facing
+/// modules before this lift:
+///
+/// - [`find_repo_root`] (`REPO_ROOT`) — flake.nix-validated fallback
+///   arm after the current-directory / parent-walk searches fail.
+/// - `crate::git::get_repo_root` (`REPO_ROOT`) — env-var-first
+///   shortcut before falling back to `git rev-parse --show-toplevel`.
+/// - `crate::path_builder::PathBuilder::new` (`REPO_ROOT`) —
+///   env-var-first shortcut before falling back to
+///   `DeployConfig::find_repo_root(&current_dir)`.
+/// - `commands/bootstrap.rs::get_bootstrap_dir` (`SERVICE_DIR`) —
+///   env-var-first shortcut before falling back to `find_repo_root()
+///   .join("pkgs/platform/bootstrap")`.
+/// - `commands/pangea.rs::find_external_repo` (`<NAME>_DIR`, dynamic)
+///   — env-var-first shortcut before searching standard `$HOME/code`
+///   / `$HOME/.local/src` locations.
+/// - `nix_hooks.rs::NixHooksPackage::discover` (`NIX_HOOKS_PATH`) —
+///   env-var-first shortcut before building `.#nix-hooks` via `nix
+///   build`.
+///
+/// # Post-lift refinement surface
+///
+/// Post-lift a future refinement of the shape — canonicalizing the
+/// path via `std::fs::canonicalize`, absolutizing against the current
+/// working directory, a telemetry sigil separating explicit-value from
+/// unset paths, a must-exist check via `.filter(|p| p.exists())`, or
+/// a swap to a typed `substrate::SubstratePath(PathBuf)` newtype —
+/// lands at this body and reaches every consumer by construction. The
+/// same solve-once-at-the-primitive discipline [`env_var_or_default`]
+/// closes on the `String`-fallback surface, [`path_from_env`] closes
+/// on the `Result<PathBuf>` surface, [`env_var_optional`] closes on
+/// the `Option<String>` surface, and [`safe_mode_from_env`] /
+/// [`truthy_flag_from_env`] close on the `bool` surface (THEORY §V —
+/// solve-once-at-the-primitive; §VI.1 — recurring-shape-to-helper).
+pub fn path_from_env_optional(env_var: &str) -> Option<PathBuf> {
+    env_var_optional(env_var).map(PathBuf::from)
 }
 
 /// Verify a directory exists and contains expected files
@@ -1787,5 +1855,172 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// [`path_from_env_optional`] returns `None` when the env var is
+    /// unset. Pins the `Err → None` half every pre-lift
+    /// `if let Ok(v) = env::var(NAME) { PathBuf::from(v) }` inline
+    /// stanza depended on — the six `Option<PathBuf>` env-var-first
+    /// shortcut sites in `find_repo_root`, `git::get_repo_root`,
+    /// `path_builder::PathBuilder::new`, `commands/bootstrap.rs`,
+    /// `commands/pangea.rs`, and `nix_hooks.rs` all treated the
+    /// unset case as "absent" (skip the arm and fall through to the
+    /// non-env fallback: walk parents, `git rev-parse`, `find_repo_root`,
+    /// standard `$HOME/code` locations, `nix build .#nix-hooks`). A
+    /// silent flip to `Some(PathBuf::new())` on the unset case would
+    /// misroute every consumer's fall-through arm into treating the
+    /// current working directory as the substrate root.
+    #[test]
+    fn path_from_env_optional_returns_none_when_env_var_unset() {
+        let env_var = "TEST_PATH_FROM_ENV_OPTIONAL_UNSET_SIGIL_SHIELD";
+        std::env::remove_var(env_var);
+        assert_eq!(
+            path_from_env_optional(env_var),
+            None,
+            "path_from_env_optional() must return `None` on the unset \
+             case — matches every pre-lift `if let Ok(v) = \
+             env::var(NAME) {{ PathBuf::from(v) }}` stanza's `Err → \
+             None` projection, the projection consumers gate on."
+        );
+    }
+
+    /// [`path_from_env_optional`] returns the env var's value inside
+    /// `Some(PathBuf::from(v))` verbatim when it IS set. Pins the
+    /// `Ok(v) → Some(PathBuf::from(v))` set-path projection so a
+    /// future refinement (canonicalize via `std::fs::canonicalize`, a
+    /// must-exist filter, an absolutize hook against CWD) is caught
+    /// here rather than at each consumer's downstream `.join(...)`
+    /// / `.exists()` composition.
+    #[test]
+    fn path_from_env_optional_returns_some_path_when_env_var_set() {
+        let env_var = "TEST_PATH_FROM_ENV_OPTIONAL_SET_SIGIL_SHIELD";
+        let sentinel = "/tmp/explicit-path-not-none";
+        std::env::set_var(env_var, sentinel);
+        let result = path_from_env_optional(env_var);
+        std::env::remove_var(env_var);
+        assert_eq!(
+            result,
+            Some(PathBuf::from(sentinel)),
+            "path_from_env_optional() must return \
+             `Some(PathBuf::from(env::var(env_var)))` verbatim when \
+             set — the projection every pre-lift `if let Ok(v) = \
+             env::var(NAME) {{ PathBuf::from(v) }}` stanza spelled \
+             inline."
+        );
+    }
+
+    /// [`path_from_env_optional`] returns `Some(PathBuf::new())` —
+    /// NOT `None` — when the env var is set to `""`. Pins the
+    /// empty-string-is-a-VALUE half inherited from
+    /// [`env_var_optional`] (which itself splits against
+    /// [`crate::git::release_git_sha_from_env`]'s empty-string-is-MISS
+    /// mirror). A future primitive refactor that composed on
+    /// `release_git_sha_from_env`-style
+    /// `.ok().filter(|s| !s.is_empty())` semantics instead of
+    /// [`env_var_optional`] would silently reroute a shell-exported
+    /// `REPO_ROOT=""` / `SERVICE_DIR=""` / `NIX_HOOKS_PATH=""` from
+    /// `Some(PathBuf::new())` to `None` and collapse the split the two
+    /// sibling primitives close on. Parity with the pre-lift
+    /// `if let Ok(v) = env::var(NAME)` shape, where `Ok(String::new())`
+    /// matched the arm and flowed into `PathBuf::from("")`.
+    #[test]
+    fn path_from_env_optional_returns_some_empty_path_when_env_var_set_empty() {
+        let env_var = "TEST_PATH_FROM_ENV_OPTIONAL_EMPTY_SIGIL_SHIELD";
+        std::env::set_var(env_var, "");
+        let result = path_from_env_optional(env_var);
+        std::env::remove_var(env_var);
+        assert_eq!(
+            result,
+            Some(PathBuf::new()),
+            "path_from_env_optional() must return `Some(PathBuf::new())` \
+             verbatim when the env var is set to \"\" — matches every \
+             pre-lift `if let Ok(v) = env::var(NAME) {{ PathBuf::from(v) \
+             }}` stanza's semantics, where `Ok(String::new())` matched \
+             the arm and flowed into `PathBuf::from(\"\")`. That parity \
+             is what inherits the split from the sibling \
+             `env_var_optional` primitive against the empty-is-miss \
+             `release_git_sha_from_env`."
+        );
+    }
+
+    /// Post-lift the callers migrated onto [`path_from_env_optional`]
+    /// no longer spell the `if let Ok(v) = env::var(NAME) { ...
+    /// PathBuf::from(v) ... }` shape inline. Structural regression
+    /// shield — without it, a future refactor could silently re-inline
+    /// the two-line stanza (e.g. a "just call `env::var` directly,
+    /// then `PathBuf::from`, it's shorter" cleanup) and reopen the
+    /// duplication class this lift closed. Enforced at the module
+    /// bodies before their `#[cfg(test)]` regions so a test-support
+    /// mention of the raw shape does not defeat the shield. The
+    /// two-line adjacency (line N `env::var(NAME)`, line N+1
+    /// `PathBuf::from(v)`) uniquely identifies the pre-lift shape;
+    /// bare `if let Ok(_) = env::var(NAME)` reads whose next line does
+    /// NOT hand the value to `PathBuf::from` (e.g. the
+    /// `env_var_optional`-shaped `.ok()` sigils, the truthy-flag
+    /// consumers, the boolean gates) stay unshielded — morally-
+    /// adjacent shapes with their own lift target, not this one.
+    #[test]
+    fn path_from_env_optional_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str, &[&str])] = &[
+            (include_str!("git.rs"), "git.rs", &["REPO_ROOT"]),
+            (
+                include_str!("path_builder.rs"),
+                "path_builder.rs",
+                &["REPO_ROOT"],
+            ),
+            (
+                include_str!("commands/bootstrap.rs"),
+                "commands/bootstrap.rs",
+                &["SERVICE_DIR"],
+            ),
+            (
+                include_str!("nix_hooks.rs"),
+                "nix_hooks.rs",
+                &["NIX_HOOKS_PATH"],
+            ),
+        ];
+        for (source, module_path, names) in CALLERS {
+            let body = crate::test_support::module_body_before_tests(source, module_path);
+            for name in *names {
+                let raw = format!("std::env::var(\"{name}\")");
+                let short = format!("env::var(\"{name}\")");
+                assert!(
+                    !body.contains(&raw) && !body.contains(&short),
+                    "{module_path} body must NOT spell the inline \
+                     `env::var(\"{name}\")` read — that \
+                     `Option<PathBuf>` env-var-first shortcut was \
+                     lifted onto `crate::repo::path_from_env_optional`. \
+                     A re-inline would silently reopen the class this \
+                     shield exists to close."
+                );
+                let call = format!("path_from_env_optional(\"{name}\")");
+                assert!(
+                    body.contains(&call),
+                    "{module_path} body must forward to \
+                     `crate::repo::path_from_env_optional(\"{name}\")` \
+                     — the primitive body every `Option<PathBuf>` \
+                     env-var-first shortcut in the crate now delegates \
+                     through."
+                );
+            }
+        }
+        // `commands/pangea.rs::find_external_repo` composes the env-var
+        // name dynamically as `format!("{}_DIR", name.to_uppercase())`
+        // rather than hand-spelling a literal — its delegation is
+        // shielded by needle-matching the primitive call site
+        // instead of a per-name literal, so a re-inline that dropped
+        // the dynamic-name arg would still fail the shield loudly.
+        let pangea_body = crate::test_support::module_body_before_tests(
+            include_str!("commands/pangea.rs"),
+            "commands/pangea.rs",
+        );
+        assert!(
+            pangea_body.contains("path_from_env_optional(&env_var)"),
+            "commands/pangea.rs body must forward to \
+             `crate::repo::path_from_env_optional(&env_var)` for the \
+             dynamic `<NAME>_DIR` env-var arm — the primitive body \
+             every `Option<PathBuf>` env-var-first shortcut in the \
+             crate now delegates through."
+        );
     }
 }

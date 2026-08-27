@@ -294,8 +294,7 @@ async fn build_component(component: &PangeaComponent) -> Result<String> {
 fn find_external_repo(name: &str) -> Result<std::path::PathBuf> {
     // Check environment variable first: PANGEA_DIR, etc.
     let env_var = format!("{}_DIR", name.to_uppercase());
-    if let Ok(dir) = std::env::var(&env_var) {
-        let path = std::path::PathBuf::from(&dir);
+    if let Some(path) = crate::repo::path_from_env_optional(&env_var) {
         if path.exists() {
             return Ok(path);
         }

@@ -160,8 +160,8 @@ fn stdout_string(bytes: Vec<u8>) -> Result<String> {
 /// This consolidated logic prevents duplicate implementations across commands.
 pub fn get_repo_root() -> Result<PathBuf> {
     // Try environment variable first (for CLI --repo-root parameter)
-    if let Ok(repo_root) = std::env::var("REPO_ROOT") {
-        return Ok(PathBuf::from(repo_root));
+    if let Some(repo_root) = crate::repo::path_from_env_optional("REPO_ROOT") {
+        return Ok(repo_root);
     }
 
     // Fall back to git command
