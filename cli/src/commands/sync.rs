@@ -525,7 +525,7 @@ async fn generate_entities(config: &SyncConfig) -> Result<bool> {
     }
 
     // Check for DATABASE_URL
-    let database_url = std::env::var("DATABASE_URL").ok();
+    let database_url = crate::repo::env_var_optional("DATABASE_URL");
     if database_url.is_none() {
         return Ok(false);
     }

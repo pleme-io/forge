@@ -138,8 +138,8 @@ impl RegistryCredentials {
     /// 5. kubectl secret from github-actions namespace
     pub fn discover_token(token: Option<String>) -> Result<String, RegistryError> {
         token
-            .or_else(|| std::env::var("GHCR_TOKEN").ok())
-            .or_else(|| std::env::var("GITHUB_TOKEN").ok())
+            .or_else(|| crate::repo::env_var_optional("GHCR_TOKEN"))
+            .or_else(|| crate::repo::env_var_optional("GITHUB_TOKEN"))
             .or_else(Self::try_gh_cli_token)
             .or_else(Self::try_kubectl_secret)
             .ok_or(RegistryError::TokenNotFound)

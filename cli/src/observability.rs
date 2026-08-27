@@ -98,10 +98,9 @@ impl EventMetadata {
             service: service.into(),
             environment: environment.into(),
             namespace: namespace.into(),
-            hostname: std::env::var("HOSTNAME").ok(),
-            ci_job_id: std::env::var("GITHUB_RUN_ID")
-                .ok()
-                .or_else(|| std::env::var("CI_JOB_ID").ok()),
+            hostname: crate::repo::env_var_optional("HOSTNAME"),
+            ci_job_id: crate::repo::env_var_optional("GITHUB_RUN_ID")
+                .or_else(|| crate::repo::env_var_optional("CI_JOB_ID")),
         }
     }
 }
@@ -554,7 +553,7 @@ pub mod metrics {
 
     /// Get Pushgateway URL from environment
     pub fn pushgateway_url() -> Option<String> {
-        std::env::var("PUSHGATEWAY_URL").ok()
+        crate::repo::env_var_optional("PUSHGATEWAY_URL")
     }
 
     /// Build Prometheus text format metrics for a release
