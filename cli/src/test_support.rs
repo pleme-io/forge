@@ -7218,6 +7218,126 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         );
     }
 
+    /// Crate-wide shield: the multi-line
+    /// `crate::git::git_command_async().args(["commit", "-m", &msg])` +
+    /// `.status().await.context(...)?` + `if !status.success() {
+    /// warn!/eprintln!(...) }` idempotent-`git commit` stanza is
+    /// reserved for the fusion primitive body at
+    /// [`crate::git::git_commit_idempotent`] — every consumer of the
+    /// "spawn `git commit`, treat non-zero as benign no-op, log a
+    /// warning" carve-out must route through the primitive instead.
+    /// Pre-lift the stanza lived at exactly two consumer sites:
+    /// [`crate::commands::push::update_kustomization`] and
+    /// [`crate::commands::rollback::execute`] — each with the same
+    /// intent but a drifting warning-envelope shape (one used
+    /// `tracing::warn!` on a plain string, the other used
+    /// `eprintln!("{}", "...".yellow())`). The primitive owns the
+    /// canonical `tracing::warn!("git commit returned non-zero (may be
+    /// no changes to commit)", exit_code = ?status.code())` envelope
+    /// at ONE body across the crate, so every consumer surfaces the
+    /// idempotent-no-op case through the SAME warning by construction.
+    ///
+    /// # Multi-line detection via bounded regex
+    ///
+    /// The stanza spans three-to-five source lines depending on
+    /// whether the caller inlines `.stdout(Stdio::inherit())` /
+    /// `.stderr(Stdio::inherit())`, so a per-line scan cannot bind
+    /// the `git_command_async()` opener to the `["commit", "-m", ...]`
+    /// argv. A bounded regex
+    /// `git_command_async\(\)[\s\S]{0,400}?\.args\(\[?\s*"commit",\s*"-m",`
+    /// matches the opener + up-to-400 bytes of intervening builder
+    /// calls + the fixed `["commit", "-m", ...]` argv — generous for
+    /// the widest observed shape (opener + `.args(...)` on separate
+    /// lines with `&`-prefixed message binding) yet tight enough that
+    /// a `git_command_async()` used for an unrelated shape hundreds
+    /// of lines later cannot straddle the window.
+    ///
+    /// # Skipped files
+    ///
+    /// - `test_support.rs` — this shield's own docstring quotes the
+    ///   stanza verbatim; scanning would self-match.
+    /// - `git.rs` — the primitive module carries the fusion body
+    ///   itself (`git_command_async()` + `.args(["commit", "-m", ...])`)
+    ///   AND unit tests that spawn commit shims through the primitive.
+    ///   The comment-blind pass below strips `///` prefixes before
+    ///   matching, but the primitive body at
+    ///   [`crate::git::git_commit_idempotent`] is naturally the ONE
+    ///   authorized use, so skipping the whole file is both simpler
+    ///   and honest about the intent.
+    ///
+    /// # Sibling shields
+    ///
+    /// Multi-line peer to
+    /// [`kubectl_output_spawn_anyhow_pre_lift_stanza_confined_to_primitive`]
+    /// on the kubectl frontier; same walk-tree discipline: enumerate
+    /// every `.rs` file, name every offender with its relative path
+    /// and 1-indexed line of the `git_command_async()` opener.
+    #[test]
+    fn git_commit_idempotent_pre_lift_stanza_confined_to_primitive() {
+        let crate_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let pattern = r#"git_command_async\(\)[\s\S]{0,400}?\.args\(\[?\s*"commit",\s*"-m","#;
+        let re = regex::Regex::new(pattern).expect("pre-lift stanza regex must compile");
+        let mut offenders: Vec<String> = Vec::new();
+        walk_rs_files(&crate_src, &mut |path| {
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if name == "test_support.rs" || name == "git.rs" {
+                return;
+            }
+            let raw =
+                std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+            // Strip `///` / `//!` / `//` comment lines so a doc-block
+            // that quotes the stanza does not self-match. Preserve
+            // line count so 1-indexed offender lines still resolve.
+            let stripped: String = raw
+                .lines()
+                .map(|l| {
+                    let t = l.trim_start();
+                    if t.starts_with("///") || t.starts_with("//!") || t.starts_with("//") {
+                        ""
+                    } else {
+                        l
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            for m in re.find_iter(&stripped) {
+                let line = stripped[..m.start()].matches('\n').count() + 1;
+                let rel = path
+                    .strip_prefix(&crate_src)
+                    .unwrap_or(path)
+                    .display()
+                    .to_string();
+                offenders.push(format!("{rel}:{line}"));
+            }
+        });
+        assert!(
+            offenders.is_empty(),
+            "the inline `git_command_async().args([\"commit\", \"-m\", ...])` \
+             stanza is reserved for the fusion primitive body at \
+             `crate::git::git_commit_idempotent` — every consumer of the \
+             \"spawn `git commit`, treat non-zero as benign no-op, log a \
+             warning\" idempotent-no-op carve-out must route through the \
+             primitive instead. The primitive owns the canonical warning \
+             envelope (`tracing::warn!(exit_code = ?status.code(), \"git \
+             commit returned non-zero (may be no changes to commit)\")`) at \
+             ONE body across the crate, so every consumer surfaces the \
+             idempotent-no-op case through the SAME warning by \
+             construction rather than by convention. A future refinement \
+             of the shape (structured telemetry on the no-op path, a \
+             typed `substrate::CommitOutcome` return, or a swap to a \
+             dry-run guarded variant for `--check` invocations) lands at \
+             `git_commit_idempotent` and reaches every consumer for free. \
+             If the caller wants a non-zero commit exit to BAIL (a commit \
+             that MUST land, no idempotency), reach for \
+             `crate::git::git_run_inherited_status([\"commit\", \"-m\", \
+             &msg], \"git commit\")` instead — the two primitives sit on \
+             the same async-git-mutation surface, only the failure- \
+             dispatch axis separates them. Offending sites (line = \
+             `git_command_async()` opener):\n{}",
+            offenders.join("\n")
+        );
+    }
+
     /// Recursively walk every `.rs` file under `dir`, invoking `visit`
     /// on each. Skips `target/` directories defensively even though
     /// none should live under `cli/src/`.

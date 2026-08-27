@@ -1094,9 +1094,9 @@ where
 ///   wraps the fixed-argv shape.
 /// - The caller documents an idempotent "non-zero is a benign no-op"
 ///   carve-out (e.g. `git commit` re-run against an already-committed
-///   tree) → keep the bare `git_command_async().args(...).status()` +
-///   warn-on-non-zero shape; the fusion primitive would bail where the
-///   carve-out wants a warn.
+///   tree) → route through the peer primitive
+///   [`git_commit_idempotent`] instead, which owns the
+///   spawn-then-warn-on-non-zero shape at ONE body across the crate.
 pub async fn git_run_inherited_status<I, S>(args: I, op: &str) -> anyhow::Result<()>
 where
     I: IntoIterator<Item = S>,
@@ -1105,6 +1105,75 @@ where
     let mut cmd = git_command_async();
     cmd.args(args);
     crate::retry::run_inherited_status(cmd, op).await
+}
+
+/// `git commit -m <commit_msg>` that treats a non-zero exit as a benign
+/// no-op — the canonical "commit with nothing to commit returns non-zero"
+/// idempotency carve-out the sibling [`git_run_inherited_status`]
+/// docstring explicitly names as the one case the bail-on-non-zero
+/// fusion primitive is NOT for.
+///
+/// # Peer of [`git_run_inherited_status`] on the "warn vs bail" axis
+///
+/// Same [`git_command_async`] opener, same `[commit, -m, msg]` argv,
+/// same inherited stdio contract as the sibling. Where
+/// [`git_run_inherited_status`] delegates through
+/// [`crate::retry::run_inherited_status`] and bails on non-zero via
+/// [`crate::retry::classify_inherited_status`]'s
+/// `(op, exit_code)` envelope, THIS primitive emits ONE canonical
+/// [`tracing::warn!`] diagnostic (carrying the exit code as a
+/// structured field) and returns `Ok(())`. Every consumer of the
+/// idempotent-no-op carve-out now observes the SAME warning envelope
+/// by construction rather than by convention — pre-lift
+/// [`commands/push.rs::update_kustomization`](../commands/push.rs)
+/// used `warn!(...)` on a plain string; pre-lift
+/// [`commands/rollback.rs::execute`](../commands/rollback.rs) used
+/// `eprintln!("{}", "...".yellow())`. Same intent, drifting shape;
+/// the primitive fuses both onto ONE code line.
+///
+/// # `GIT_BIN` env override
+///
+/// The `git` binary resolves through [`git_command_async`] so a
+/// Nix-hermetic runner's `GIT_BIN` override wins over ambient `PATH`
+/// — same discipline every git-mutation site in forge honors.
+///
+/// # `stdout` / `stderr`
+///
+/// Both are pinned to [`std::process::Stdio::inherit`] so `git`'s own
+/// commit-summary diagnostic (or the `nothing to commit, working tree
+/// clean` message on the idempotent no-op path) reaches the operator
+/// terminal verbatim.
+///
+/// # Return
+///
+/// Returns `Ok(())` on any exit status (success OR non-zero). Spawn
+/// failures (e.g. `GIT_BIN` resolves to an absent path) bail via `?`
+/// with `spawn_context` attached — a Nix-hermetic runner precondition
+/// still surfaces as an operator-actionable error rather than a
+/// silent-success downstream.
+///
+/// # When NOT to reach for this
+///
+/// If the caller wants a non-zero commit exit to bail (a commit that
+/// MUST land — no idempotency), reach for [`git_run_inherited_status`]
+/// with `["commit", "-m", msg]` instead. The two primitives sit on the
+/// same async-git-mutation surface; only the failure-dispatch axis
+/// separates them.
+pub async fn git_commit_idempotent(commit_msg: &str, spawn_context: &str) -> anyhow::Result<()> {
+    let status = git_command_async()
+        .args(["commit", "-m", commit_msg])
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .await
+        .with_context(|| spawn_context.to_string())?;
+    if !status.success() {
+        tracing::warn!(
+            exit_code = ?status.code(),
+            "git commit returned non-zero (may be no changes to commit)"
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2094,6 +2163,120 @@ mod tests {
             "canonical spawn-failure envelope `\"Failed to run \
              {{op}}\"` from `retry::classify_inherited_status` must \
              carry the op label, got: {msg}"
+        );
+    }
+
+    /// [`git_commit_idempotent`] MUST spawn its child through the
+    /// canonical [`git_command_async`] constructor — i.e. it inherits
+    /// the `GIT_BIN` env override the tools-registry idiom names as
+    /// the hermetic-runner contract for [`tools::GIT`], and never
+    /// hardcodes the literal `"git"` on the spawn path. The end-to-end
+    /// shape (shim exits 0, primitive returns `Ok(())`) also pins the
+    /// argv fixed-shape (`["commit", "-m", <msg>]`) and the
+    /// stdio-inherit contract to the sibling
+    /// [`test_git_run_inherited_status_forwards_args_and_returns_ok_on_zero_exit`].
+    ///
+    /// Runs under [`GIT_BIN_ENV_LOCK`] to serialize against every
+    /// other test that either mutates `GIT_BIN` or invokes a no-bin
+    /// production entry point that reads it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_git_commit_idempotent_routes_through_git_bin_and_forwards_argv() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let argv_log = crate::test_support::ArgvLog::reserve();
+        let (_shim_dir, shim) = make_git_shim(&argv_log.shim_body(""));
+        let _scope = GitBinScope::set(&shim);
+
+        git_commit_idempotent(
+            "chore: forge test commit message",
+            "spawn ctx (unused on zero exit)",
+        )
+        .await
+        .expect("zero-exit shim must surface as Ok(())");
+
+        let logged = argv_log.read_argv_log();
+        let lines: Vec<&str> = logged.lines().collect();
+        assert_eq!(
+            lines,
+            vec!["commit", "-m", "chore: forge test commit message"],
+            "git_commit_idempotent must forward the fixed \
+             `[\"commit\", \"-m\", <msg>]` argv verbatim to the \
+             GIT_BIN-resolved shim — proves the primitive routes \
+             through `git_command_async().args([...])` at exactly one \
+             body and does not re-tokenize the message on whitespace"
+        );
+    }
+
+    /// [`git_commit_idempotent`] MUST surface a non-zero exit as
+    /// `Ok(())` (the idempotent-no-op carve-out). Pins the
+    /// carve-out's whole contract: a shim exiting non-zero — the
+    /// exact "nothing to commit" scenario the sibling
+    /// [`git_run_inherited_status`] docstring names as the case NOT
+    /// to reach for that primitive — must NOT bail here. A regression
+    /// that swapped the body's `if !status.success()` warn arm for a
+    /// `bail!` or an `?` on the status would fail this test with the
+    /// `expect_err`-shaped assertion inverted.
+    ///
+    /// Runs under [`GIT_BIN_ENV_LOCK`] to serialize against every
+    /// other test that either mutates `GIT_BIN` or invokes a no-bin
+    /// production entry point that reads it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_git_commit_idempotent_non_zero_exit_is_ok() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        // Shim exits 1 to mimic `git commit` on a clean tree
+        // ("nothing to commit, working tree clean" → exit 1).
+        let (_shim_dir, shim) = make_git_shim("#!/bin/sh\nexit 1\n");
+        let _scope = GitBinScope::set(&shim);
+
+        git_commit_idempotent(
+            "chore: forge idempotent no-op",
+            "spawn ctx (unused on non-zero)",
+        )
+        .await
+        .expect(
+            "git_commit_idempotent must surface a non-zero exit as \
+                 `Ok(())` — the idempotent-no-op carve-out; a regression \
+                 that bailed would fail here",
+        );
+    }
+
+    /// [`git_commit_idempotent`] MUST bail on a spawn failure
+    /// (`GIT_BIN` resolves to an absent path) with the caller's
+    /// `spawn_context` attached to the anyhow chain. Pins the
+    /// carve-out's OTHER contract: the child never runs because the
+    /// binary can't spawn at all — a Nix-hermetic-runner precondition
+    /// must surface as an operator-actionable error rather than a
+    /// silent-success downstream against an unmutated tree.
+    ///
+    /// Runs under [`GIT_BIN_ENV_LOCK`] to serialize against every
+    /// other test that either mutates `GIT_BIN` or invokes a no-bin
+    /// production entry point that reads it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_git_commit_idempotent_spawn_error_carries_context() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _scope = GitBinScope::set(
+            "/nonexistent/dir/absolutely-not-a-git-binary-forge-commit-idempotent-shim",
+        );
+
+        let err = git_commit_idempotent(
+            "chore: forge unresolvable-bin probe",
+            "Failed to commit forge-idempotent-spawn-probe canary",
+        )
+        .await
+        .expect_err("unresolvable GIT_BIN must produce Err");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Failed to commit forge-idempotent-spawn-probe canary"),
+            "git_commit_idempotent must attach the caller's `spawn_context` \
+             to the anyhow chain on spawn failure — proves the primitive \
+             routes through `.with_context(|| ...)` on the `.status().await` \
+             `Err` branch, so a Nix-hermetic runner precondition surfaces \
+             as an operator-actionable error rather than a silent success \
+             downstream against an uncommitted tree. got: {msg:?}"
         );
     }
 

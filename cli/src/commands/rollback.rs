@@ -358,18 +358,18 @@ pub async fn execute(
             product,
             rolled_back_to.join(", ")
         );
-        let commit_status = crate::git::git_command_async()
-            .args(["commit", "-m", &commit_msg])
-            .status()
-            .await
-            .context("Failed to commit rollback tags")?;
-
-        if !commit_status.success() {
-            eprintln!(
-                "{}",
-                "Warning: git commit returned non-zero (may be no changes)".yellow()
-            );
-        }
+        // Git commit — routes through the idempotent-no-op peer of
+        // `crate::git::git_run_inherited_status`: `git commit` with
+        // nothing to commit returns non-zero, and the rollback path
+        // treats that as a benign no-op (re-run against a tree already
+        // rolled back to the previous tag). The primitive body at
+        // `crate::git::git_commit_idempotent` owns the spawn +
+        // stdio-inherit + warn-on-non-zero shape at ONE code line
+        // across the crate, so this consumer observes the same warning
+        // envelope as the sibling
+        // `commands/push.rs::update_kustomization` idempotent-commit
+        // call by construction rather than by convention.
+        crate::git::git_commit_idempotent(&commit_msg, "Failed to commit rollback tags").await?;
 
         crate::git::git_run_inherited_status(["push", "origin", "main"], "git push")
             .await
@@ -448,20 +448,28 @@ mod tests {
             !fn_body.contains("Command::new(\"git\")"),
             "execute() must NOT spawn `git` directly — route through \
              `crate::git::git_run_inherited_status(&[...], \"git …\")` \
-             (the async fusion primitive) or `crate::git::git_command_async()` \
-             so `GIT_BIN` overrides land at the shared primitive. Found the \
-             pre-migration spawn body in execute()."
+             (the async bail-on-non-zero fusion primitive), \
+             `crate::git::git_commit_idempotent(&msg, ctx)` (the async \
+             warn-on-non-zero idempotent-`git commit` peer), or \
+             `crate::git::git_command_async()` so `GIT_BIN` overrides land \
+             at the shared primitive. Found the pre-migration spawn body \
+             in execute()."
         );
         assert!(
             fn_body.contains("crate::git::git_run_inherited_status(")
+                || fn_body.contains("crate::git::git_commit_idempotent(")
                 || fn_body.contains("crate::git::git_command_async()"),
             "execute() must delegate every git spawn to \
              `crate::git::git_run_inherited_status(&[...], \"git …\")` \
-             (the async fusion primitive, which internally routes through \
-             `git_command_async()` + `run_inherited_status`) OR to \
-             `crate::git::git_command_async()` for the documented \
-             idempotent-no-op bare-`.status()` `git commit` carve-out — \
-             neither delegation string was found in execute()."
+             (the async bail-on-non-zero fusion primitive, which \
+             internally routes through `git_command_async()` + \
+             `run_inherited_status`), to `crate::git::git_commit_idempotent(\
+             &msg, ctx)` (the async warn-on-non-zero peer for the \
+             documented idempotent-no-op `git commit` carve-out, which \
+             also routes through `git_command_async()`), OR to \
+             `crate::git::git_command_async()` directly for any other \
+             specialized shape — no delegation string was found in \
+             execute()."
         );
         assert!(
             fn_body.contains("crate::git::git_run_inherited_status(")

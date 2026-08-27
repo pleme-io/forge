@@ -4,7 +4,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
 use std::process::Stdio;
 use tokio::process::Command;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::infrastructure::registry::RegistryRef;
 use crate::repo::get_tool_path;
@@ -186,24 +186,20 @@ pub async fn update_kustomization(
             .and_then(|n| n.to_str())
             .unwrap_or("unknown");
 
-        // Git commit. Intentionally retains the bare `.status()` + warn-on-
-        // non-zero shape: `git commit` with nothing to commit returns
-        // non-zero, and the kustomization-update path treats that as a
-        // benign no-op (re-run against an already-updated file). Migrating
-        // this site to `run_inherited_status` would change semantics — it
-        // would bail, breaking idempotent re-runs.
+        // Git commit — routes through the idempotent-no-op peer of
+        // `crate::git::git_run_inherited_status`: `git commit` with
+        // nothing to commit returns non-zero, and the kustomization-
+        // update path treats that as a benign no-op (re-run against an
+        // already-updated file). The primitive body at
+        // `crate::git::git_commit_idempotent` owns the spawn +
+        // stdio-inherit + warn-on-non-zero shape at ONE code line
+        // across the crate, so this consumer observes the same
+        // warning envelope as the sibling
+        // `commands/rollback.rs::execute` idempotent-commit call by
+        // construction rather than by convention.
         let commit_msg = format!("deploy: update {} to {}", service_name, new_tag);
-        let commit_status = crate::git::git_command_async()
-            .args(&["commit", "-m", &commit_msg])
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
-            .await
-            .context("Failed to commit kustomization.yaml")?;
-
-        if !commit_status.success() {
-            warn!("Git commit returned non-zero (may be no changes)");
-        }
+        crate::git::git_commit_idempotent(&commit_msg, "Failed to commit kustomization.yaml")
+            .await?;
 
         // Git push — route through `retry::run_inherited_status` so a
         // denied push (auth, branch protection, conflict) bails loudly with
@@ -507,21 +503,28 @@ mod tests {
             !fn_body.contains("Command::new(\"git\")"),
             "update_kustomization() must NOT spawn `git` directly — route \
              through `crate::git::git_run_inherited_status(&[...], \
-             \"git …\")` (the async fusion primitive) or \
+             \"git …\")` (the async bail-on-non-zero fusion primitive), \
+             `crate::git::git_commit_idempotent(&msg, ctx)` (the async \
+             warn-on-non-zero idempotent-`git commit` peer), or \
              `crate::git::git_command_async()` so `GIT_BIN` overrides land \
              at the shared primitive. Found the pre-migration spawn body \
              in update_kustomization()."
         );
         assert!(
             fn_body.contains("crate::git::git_run_inherited_status(")
+                || fn_body.contains("crate::git::git_commit_idempotent(")
                 || fn_body.contains("crate::git::git_command_async()"),
             "update_kustomization() must delegate every git spawn to \
              `crate::git::git_run_inherited_status(&[...], \"git …\")` \
-             (the async fusion primitive, which internally routes through \
-             `git_command_async()` + `run_inherited_status`) OR to \
-             `crate::git::git_command_async()` for the documented \
-             idempotent-no-op bare-`.status()` `git commit` carve-out — \
-             neither delegation string was found in update_kustomization()."
+             (the async bail-on-non-zero fusion primitive, which \
+             internally routes through `git_command_async()` + \
+             `run_inherited_status`), to `crate::git::git_commit_idempotent(\
+             &msg, ctx)` (the async warn-on-non-zero peer for the \
+             documented idempotent-no-op `git commit` carve-out, which \
+             also routes through `git_command_async()`), OR to \
+             `crate::git::git_command_async()` directly for any other \
+             specialized shape — no delegation string was found in \
+             update_kustomization()."
         );
     }
 
