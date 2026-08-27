@@ -840,15 +840,33 @@ pub enum ProductDirLayout {
 /// YAML document, a document without a top-level `name`, or a `name`
 /// whose value is not a string all return `false` (i.e. the walker
 /// CONTINUES the climb) rather than propagating a parse error.
+///
+/// Post-lift the fs-read + serde-parse prefix routes through
+/// [`try_read_yaml_sync`] — the sibling silent-probe primitive one
+/// function up in this module. Pre-lift the body spelled the same
+/// `let Ok(content) = std::fs::read_to_string(...)` +
+/// `let Ok(yaml) = serde_yaml::from_str::<serde_yaml::Value>(...)`
+/// pair `try_read_yaml_sync`'s body owns, so the primitive's own module
+/// carried a sibling that hand-rolled the shape one function down from
+/// the primitive body. Post-lift only ONE code point across the crate
+/// (the primitive body) spells the `read_to_string.ok()? +
+/// from_str.ok()` silent-probe shell (THEORY §V —
+/// solve-once-at-the-primitive; §VI.1 — every recurring shape becomes
+/// a helper before it becomes duplicated code).
+///
+/// The `is_some_and` fold on the primitive's `Option<serde_yaml::Value>`
+/// preserves the pre-lift `let Ok(...) else { return false }` `bool`
+/// contract at the caller — a `None` from `try_read_yaml_sync`
+/// (missing file OR unparseable YAML) folds to `false` by construction,
+/// same as the two pre-lift `return false` arms. A future refinement
+/// of the silent-probe contract — a canonicalize-path hook, an exists()
+/// skip optimization, a telemetry probe on the miss branch — lands at
+/// [`try_read_yaml_sync`] and reaches THIS caller (the walker's
+/// named-standalone terminal, called once per parent-climb iteration)
+/// by construction.
 fn standalone_deploy_yaml_has_name(dir: &Path) -> bool {
-    let deploy_yaml = dir.join("deploy.yaml");
-    let Ok(content) = std::fs::read_to_string(&deploy_yaml) else {
-        return false;
-    };
-    let Ok(yaml) = serde_yaml::from_str::<serde_yaml::Value>(&content) else {
-        return false;
-    };
-    yaml.get("name").and_then(|n| n.as_str()).is_some()
+    try_read_yaml_sync::<serde_yaml::Value>(&dir.join("deploy.yaml"))
+        .is_some_and(|yaml| yaml.get("name").and_then(|n| n.as_str()).is_some())
 }
 
 /// Walk up from `start` toward the filesystem root, returning the first
@@ -1738,6 +1756,151 @@ mod tests {
 
         assert!(
             find_product_dir(&repo_root, ProductDirLayout::MonorepoOrNamedStandalone).is_none()
+        );
+    }
+
+    /// Post-lift the body of [`standalone_deploy_yaml_has_name`] forwards
+    /// the fs-read + serde-parse prefix to [`try_read_yaml_sync`] — the
+    /// sibling silent-probe primitive one function up in this module.
+    /// Structural regression shield: without it, a future refactor could
+    /// silently re-inline the pre-lift
+    /// `let Ok(content) = std::fs::read_to_string(...) + let Ok(yaml)
+    /// = serde_yaml::from_str::<serde_yaml::Value>(...)` pair (e.g. a
+    /// helpful "just call read_to_string + from_str directly, it's
+    /// shorter" cleanup) and reopen the duplication class this lift
+    /// closed — a class that lived one function down from the primitive
+    /// body, so a maintainer editing either shape would need to hold
+    /// both in working memory to keep them in sync. Post-lift only the
+    /// primitive body spells the silent-probe shell; the sibling
+    /// consumer delegates through the primitive's `Option<T>` return
+    /// via `is_some_and`.
+    ///
+    /// Sibling to [`get_tool_path_body_delegates_to_env_var_or_default_sigil`]
+    /// on the structural regression shield discipline. The delegation
+    /// call literal (`try_read_yaml_sync::<serde_yaml::Value>(`) is
+    /// spelled explicitly against a `body.contains` needle so a future
+    /// rename of the primitive (a swap to `try_load_yaml`, a plural
+    /// `try_read_yaml_sync_all`) breaks the shield and forces the
+    /// rename to reach the sibling caller in the same commit rather
+    /// than drifting silently at one code point only.
+    #[test]
+    fn standalone_deploy_yaml_has_name_body_delegates_to_try_read_yaml_sync() {
+        const SOURCE: &str = include_str!("repo.rs");
+        let body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "repo.rs",
+            "fn standalone_deploy_yaml_has_name(dir: &Path) -> bool {",
+            "\n}",
+        );
+        assert!(
+            body.contains("try_read_yaml_sync::<serde_yaml::Value>("),
+            "standalone_deploy_yaml_has_name() body must forward to \
+             `try_read_yaml_sync::<serde_yaml::Value>(...)` — the \
+             silent-probe primitive body every fs-read + serde-parse \
+             pair in the crate now delegates through. Post-lift body: \
+             {body}"
+        );
+        assert!(
+            !body.contains("std::fs::read_to_string(") && !body.contains("fs::read_to_string("),
+            "standalone_deploy_yaml_has_name() body must NOT spell the \
+             inline `std::fs::read_to_string(...)` needle — that fs-read \
+             half of the silent-probe pair was lifted onto \
+             `try_read_yaml_sync`. A re-inline would silently reopen the \
+             duplication class this shield exists to close. Post-lift \
+             body: {body}"
+        );
+        assert!(
+            !body.contains("serde_yaml::from_str"),
+            "standalone_deploy_yaml_has_name() body must NOT spell the \
+             inline `serde_yaml::from_str::<...>(...)` needle — that \
+             parse half of the silent-probe pair was lifted onto \
+             `try_read_yaml_sync`. A re-inline would silently reopen the \
+             duplication class this shield exists to close. Post-lift \
+             body: {body}"
+        );
+    }
+
+    /// [`standalone_deploy_yaml_has_name`] preserves the pre-lift
+    /// `bool`-return semantics at every branch of the silent-probe
+    /// contract — the three branches the pre-lift body's twin
+    /// `let Ok(_) = ... else { return false; }` scaffold spelled
+    /// explicitly. Load-bearing: `find_product_dir`'s named-standalone
+    /// terminal calls this function once per parent-climb iteration,
+    /// and a silent branch flip (unreadable → true, unparseable → true,
+    /// missing-name → true) would silently mis-terminate the walker at
+    /// the wrong ancestor and misroute product-dir discovery at the
+    /// `config::DeployConfig` loader. The four branches:
+    ///
+    /// 1. Missing file → `false` (walker CONTINUES).
+    /// 2. Unparseable YAML → `false` (walker CONTINUES) — the primitive's
+    ///    `Option::None` on the parse arm folds through `is_some_and`
+    ///    to `false` by construction.
+    /// 3. Parseable YAML without top-level `name:` → `false` (walker
+    ///    CONTINUES) — the `.get("name").and_then(|n| n.as_str())`
+    ///    inner chain returns `None`, so `is_some()` is `false`.
+    /// 4. Parseable YAML with top-level string `name:` → `true` (walker
+    ///    TERMINATES at this node).
+    #[test]
+    fn standalone_deploy_yaml_has_name_branches_match_pre_lift_contract() {
+        let root = tempfile::tempdir().expect("root tempdir");
+
+        // (1) Missing file: dir exists, but no deploy.yaml.
+        let missing_dir = root.path().join("missing");
+        std::fs::create_dir_all(&missing_dir).expect("create missing dir");
+        assert!(
+            !standalone_deploy_yaml_has_name(&missing_dir),
+            "missing deploy.yaml must return false — the primitive's \
+             `None` on the read arm folds through `is_some_and`."
+        );
+
+        // (2) Unparseable YAML: file exists but content is garbage.
+        let unparseable_dir = root.path().join("unparseable");
+        std::fs::create_dir_all(&unparseable_dir).expect("create unparseable dir");
+        std::fs::write(unparseable_dir.join("deploy.yaml"), "\t{{\n")
+            .expect("write malformed deploy.yaml");
+        assert!(
+            !standalone_deploy_yaml_has_name(&unparseable_dir),
+            "unparseable deploy.yaml must return false — the primitive's \
+             `None` on the parse arm folds through `is_some_and`."
+        );
+
+        // (3) Parseable YAML without `name:` field.
+        let nameless_dir = root.path().join("nameless");
+        std::fs::create_dir_all(&nameless_dir).expect("create nameless dir");
+        std::fs::write(nameless_dir.join("deploy.yaml"), "kind: deploy\n")
+            .expect("write nameless deploy.yaml");
+        assert!(
+            !standalone_deploy_yaml_has_name(&nameless_dir),
+            "deploy.yaml without top-level `name:` must return false — \
+             `.get(\"name\").and_then(...)` returns `None`."
+        );
+
+        // (4) Parseable YAML with top-level string `name:` — the ONLY
+        // branch that returns true.
+        let named_dir = root.path().join("named");
+        std::fs::create_dir_all(&named_dir).expect("create named dir");
+        std::fs::write(named_dir.join("deploy.yaml"), "name: my-product\n")
+            .expect("write named deploy.yaml");
+        assert!(
+            standalone_deploy_yaml_has_name(&named_dir),
+            "deploy.yaml with top-level string `name:` must return \
+             true — the only branch of the closed silent-probe contract \
+             that satisfies the walker's terminal."
+        );
+
+        // (Corner) Parseable YAML with `name:` that is NOT a string —
+        // e.g. `name: 42` — the pre-lift `.as_str().is_some()` returned
+        // false there, matching the "genuine product-repo" gate. Pins
+        // the non-string-name branch on the falsy side.
+        let non_string_name_dir = root.path().join("non-string-name");
+        std::fs::create_dir_all(&non_string_name_dir).expect("create non-string-name dir");
+        std::fs::write(non_string_name_dir.join("deploy.yaml"), "name: 42\n")
+            .expect("write non-string-name deploy.yaml");
+        assert!(
+            !standalone_deploy_yaml_has_name(&non_string_name_dir),
+            "deploy.yaml with a non-string `name:` (e.g. `name: 42`) \
+             must return false — `.as_str()` yields `None`, matching \
+             the pre-lift `find_product_directory` acceptance rule."
         );
     }
 
