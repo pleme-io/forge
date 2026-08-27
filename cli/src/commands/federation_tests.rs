@@ -716,8 +716,8 @@ async fn wait_for_job_completion(
         }
 
         // Query job status
-        let output = kubectl_command_async()
-            .args(&[
+        let output = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
+            &[
                 "get",
                 "job",
                 job_name,
@@ -725,10 +725,10 @@ async fn wait_for_job_completion(
                 namespace,
                 "-o",
                 "jsonpath={.status.conditions[?(@.type==\"Complete\")].status},{.status.conditions[?(@.type==\"Failed\")].status}",
-            ])
-            .output()
-            .await
-            .context("Failed to query job status")?;
+            ],
+            "Failed to query job status",
+        )
+        .await?;
 
         let status = String::from_utf8_lossy(&output.stdout);
 
@@ -744,8 +744,8 @@ async fn wait_for_job_completion(
 
 /// Check if job succeeded
 async fn check_job_success(job_name: &str, namespace: &str) -> Result<bool> {
-    let output = kubectl_command_async()
-        .args(&[
+    let output = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
+        &[
             "get",
             "job",
             job_name,
@@ -753,10 +753,10 @@ async fn check_job_success(job_name: &str, namespace: &str) -> Result<bool> {
             namespace,
             "-o",
             "jsonpath={.status.succeeded}",
-        ])
-        .output()
-        .await
-        .context("Failed to check job success status")?;
+        ],
+        "Failed to check job success status",
+    )
+    .await?;
 
     let succeeded = String::from_utf8_lossy(&output.stdout);
     Ok(succeeded.trim() == "1")

@@ -93,20 +93,21 @@ pub(crate) async fn run_health_check(
     .await?;
 
     // Verify at least one pod is Running
-    let output = kubectl_command_async()
-        .args([
+    let app_selector = format!("app={}", deployment);
+    let output = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
+        &[
             "get",
             "pods",
             "-n",
             namespace,
             "-l",
-            &format!("app={}", deployment),
+            &app_selector,
             "-o",
             "jsonpath={.items[0].status.phase}",
-        ])
-        .output()
-        .await
-        .context("Failed to get pod status")?;
+        ],
+        "Failed to get pod status",
+    )
+    .await?;
 
     let phase = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if phase != "Running" {
