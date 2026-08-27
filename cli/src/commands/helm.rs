@@ -2007,10 +2007,19 @@ mod release_publish_tests {
     /// Immutability is the DEFAULT. If this ever flips, `version:` in a
     /// HelmRelease silently stops pinning bytes — which is the exact defect
     /// this pair of changes exists to close.
+    ///
+    /// Restore routes through [`crate::test_support::EnvVarSnapshot::capture`]
+    /// rather than a hand-rolled `let prev = env::var(...).ok(); ... match
+    /// prev { Some(v) => set_var, None => remove_var }` stanza — the RAII
+    /// guard's panic-safe `Drop` restores the pre-scope value on both normal
+    /// and unwind exits, closing the panic-window defect the manual match
+    /// silently carried (any assertion between snapshot and restore that
+    /// fired would leak `FORGE_HELM_REPUBLISH=<sentinel>` to every subsequent
+    /// test in the process).
     #[test]
     fn republish_is_off_unless_explicitly_enabled() {
-        // SAFETY: single-threaded scope; restored before returning.
-        let prev = std::env::var("FORGE_HELM_REPUBLISH").ok();
+        // SAFETY: single-threaded scope; restored on drop of `_snap`.
+        let _snap = crate::test_support::EnvVarSnapshot::capture("FORGE_HELM_REPUBLISH");
         unsafe { std::env::remove_var("FORGE_HELM_REPUBLISH") };
         assert!(!republish_enabled(), "republish must default to OFF");
 
@@ -2025,11 +2034,6 @@ mod release_publish_tests {
             !republish_enabled(),
             "an unrecognised value must NOT enable"
         );
-
-        match prev {
-            Some(v) => unsafe { std::env::set_var("FORGE_HELM_REPUBLISH", v) },
-            None => unsafe { std::env::remove_var("FORGE_HELM_REPUBLISH") },
-        }
     }
 
     /// The post-lift body of `republish_enabled()` is a single-line

@@ -689,12 +689,20 @@ mod tests {
     /// variable and panicked everywhere else. That is the whole of forge's
     /// red CI: 2662 passing tests and this one environment-dependent case.
     ///
-    /// Safe to set here without a guard: `get_registry_base` is the only
+    /// Safe to set here without a lock: `get_registry_base` is the only
     /// reader in the crate and this is its only test, so there is no parallel
-    /// test to race with. Restored anyway so the process is left as found.
+    /// test to race with. Restore routes through
+    /// [`crate::test_support::EnvVarSnapshot::capture`] rather than a
+    /// hand-rolled `let prev = env::var(...).ok(); ... match prev { Some(v) =>
+    /// set_var, None => remove_var }` stanza — the RAII guard's panic-safe
+    /// `Drop` restores the pre-scope value on both normal and unwind exits,
+    /// closing the panic-window defect the manual match silently carried (a
+    /// panic in `binary.registry_url()` or an assertion between snapshot
+    /// and restore would leak `BOOTSTRAP_REGISTRY=ghcr.io/pleme-io` to every
+    /// subsequent test in the process).
     #[test]
     fn test_bootstrap_binary_registry_url() {
-        let prev = std::env::var("BOOTSTRAP_REGISTRY").ok();
+        let _snap = crate::test_support::EnvVarSnapshot::capture("BOOTSTRAP_REGISTRY");
         // SAFETY: single reader, single test — see the note above.
         unsafe { std::env::set_var("BOOTSTRAP_REGISTRY", "ghcr.io/pleme-io") };
 
@@ -703,11 +711,6 @@ mod tests {
             description: "Test",
         };
         let url = binary.registry_url();
-
-        match prev {
-            Some(v) => unsafe { std::env::set_var("BOOTSTRAP_REGISTRY", v) },
-            None => unsafe { std::env::remove_var("BOOTSTRAP_REGISTRY") },
-        }
 
         assert!(url.ends_with("/test-bootstrap"), "url was {url:?}");
         assert!(
