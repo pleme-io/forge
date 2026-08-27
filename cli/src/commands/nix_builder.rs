@@ -385,9 +385,7 @@ async fn update_kustomization_image(
 
     // Write back (remove trailing newline from loop)
     let final_content = new_content.trim_end().to_string() + "\n";
-    tokio::fs::write(path, &final_content)
-        .await
-        .context("Failed to write kustomization.yaml")?;
+    crate::repo::write_text_async(path, &final_content).await?;
 
     info!("   ✅ Kustomization updated");
     Ok(())
@@ -455,9 +453,7 @@ async fn update_kenshi_builder_image(
 
     // Write back
     let final_content = new_content.trim_end().to_string() + "\n";
-    tokio::fs::write(path, &final_content)
-        .await
-        .context("Failed to write kustomization.yaml")?;
+    crate::repo::write_text_async(path, &final_content).await?;
 
     info!("   ✅ Kenshi kustomization updated");
     Ok(())
@@ -505,9 +501,7 @@ async fn update_builder_pool_builder_image(
 
     // Write back
     let final_content = new_content.trim_end().to_string() + "\n";
-    tokio::fs::write(path, &final_content)
-        .await
-        .context("Failed to write builder-pool.yaml")?;
+    crate::repo::write_text_async(path, &final_content).await?;
 
     info!("   ✅ Builder pool updated");
     Ok(())

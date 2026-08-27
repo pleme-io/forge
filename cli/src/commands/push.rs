@@ -151,9 +151,7 @@ pub async fn update_kustomization(
     if content.ends_with('\n') {
         updated_content.push('\n');
     }
-    tokio::fs::write(path, &updated_content)
-        .await
-        .context("Failed to write kustomization.yaml")?;
+    crate::repo::write_text_async(path, &updated_content).await?;
 
     info!("   ✅ Kustomization updated");
 

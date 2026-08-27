@@ -540,9 +540,7 @@ pub async fn release(
     if manifest_content.ends_with('\n') {
         updated_manifest.push('\n');
     }
-    tokio::fs::write(&kustomization_path, &updated_manifest)
-        .await
-        .context("Failed to write kustomization.yaml")?;
+    crate::repo::write_text_async(&kustomization_path, &updated_manifest).await?;
 
     // Step 3: Git commit and push (using shared GitClient)
     if skip_git {
