@@ -305,8 +305,7 @@ pub async fn execute(
 
         let json =
             serde_json::to_string_pretty(&artifact).context("Failed to serialize artifact info")?;
-        std::fs::write(&json_path, format!("{}\n", json))
-            .with_context(|| format!("Failed to write {}", json_path.display()))?;
+        crate::repo::write_text_sync(&json_path, format!("{}\n", json))?;
 
         modified_files.push(json_path.to_string_lossy().to_string());
         println!(

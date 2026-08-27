@@ -382,6 +382,80 @@ pub fn read_text_sync(path: &Path) -> Result<String> {
     std::fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))
 }
 
+/// Write `content`'s bytes to a file at `path`, on the sync fs-write
+/// surface.
+///
+/// The write-arm sibling of [`read_text_sync`]: the canonical
+/// [`std::fs::write`] + [`anyhow::Context`] composition every consumer
+/// that renders a file back to disk after a text-splice or serialization
+/// (`Cargo.toml` version splice write, `version.rb` `VERSION=` splice
+/// write, `migration-manifest.yaml` scaffold write,
+/// `deploy/<svc>.artifact.json` rollback swap) spelled inline pre-lift.
+///
+/// # Envelope
+///
+/// Write failure surfaces `"Failed to write {path}"` — operator's next
+/// step is `ls -la` and `df -h` on the offending path's ancestor
+/// (missing dir, EROFS, ENOSPC, EACCES), matching the read-arm
+/// envelope's `path.display()` discipline exactly. The classifier is
+/// distinct from the read arm (`"Failed to write"` vs `"Failed to
+/// read"`) so an operator reading the runner log can tell one bounce
+/// from the other without cross-referencing the caller.
+///
+/// Pre-lift seven sibling consumer sites spelled the primitive's OWN
+/// shape one level down from this body: a `std::fs::write(path,
+/// content).with_context(|| format!("Failed to write {}",
+/// path.display()))?` composition. Two lived inside [`crate::version`]
+/// shell primitives ([`crate::version`]'s `apply_version_write` and
+/// `apply_optional_dep_write` bodies) that already redeem write-arm
+/// duplication one layer below the fs-write surface; five more lived at
+/// straggler call sites (`commands/gem.rs::bump` for the `version.rb`
+/// literal write, `commands/rollback.rs::execute` and
+/// `commands/product_release.rs::execute` for the twin
+/// `deploy/<svc>.artifact.json` swaps that carry byte-identical shells,
+/// `commands/migration_new.rs::execute` for both the schema and data-
+/// companion scaffolds) that each re-derived the primitive's envelope
+/// by hand. Post-lift the primitive's canonical `path.display()`
+/// envelope reaches every consumer by construction; the role the file
+/// plays in the caller is preserved by the caller's function name in
+/// the anyhow backtrace, not by a redundant filename literal inside
+/// the failure classifier.
+///
+/// # Sibling primitives
+///
+/// - Sync text-mode read: [`read_text_sync`] owns the read-arm analogue
+///   at ONE code point; this primitive owns the write-arm counterpart.
+/// - Async YAML read-modify-write: [`crate::git::yaml_read_modify_write_async`]
+///   owns the full round-trip on the async surface; this primitive owns
+///   only the write arm on the sync surface, so a sync caller that
+///   already holds the rendered bytes writes them directly rather than
+///   round-tripping through a YAML parse.
+///
+/// # Verb variance is load-bearing signal
+///
+/// The `"Failed to write {path}"` envelope covers the shape "the file's
+/// final bytes could not be persisted." Two `commands/migration_new.rs`
+/// sites carry legitimately distinct verbs (`"Failed to update {path}"`,
+/// `"Failed to create {path}"`) that name the branch (append to an
+/// existing manifest vs. write a new one) rather than the fs-op, and
+/// that per-branch signal would be erased by routing through this
+/// canonical envelope. Those sites stay unlifted by design.
+///
+/// # Type parameter
+///
+/// `C: AsRef<[u8]>` — accepts every rendered-bytes form a caller holds:
+/// `&str`, `&String`, `String`, `&[u8]`, `Vec<u8>`, and the `format!(…)`
+/// output shape (`String`) some callers hand in directly.
+///
+/// # Errors
+///
+/// Returns `Err` if the file cannot be written (parent dir missing,
+/// EROFS, ENOSPC, EACCES). The offending `path.display()` is threaded
+/// through the [`anyhow::Context`] envelope on every failure branch.
+pub fn write_text_sync<C: AsRef<[u8]>>(path: &Path, content: C) -> Result<()> {
+    std::fs::write(path, content).with_context(|| format!("Failed to write {}", path.display()))
+}
+
 /// Find repository root by looking for flake.nix
 ///
 /// Search order:
@@ -3234,6 +3308,154 @@ mod tests {
              silently diverge the read arm from the seven sibling \
              text-mode consumers routing through the primitive. \
              Post-lift body: {body}"
+        );
+    }
+
+    /// [`write_text_sync`] writes the caller's bytes verbatim, so a
+    /// consumer that hands in a spliced [`crate::version`] output, a
+    /// `format!("{}\n", json)` render, or a scaffold `String` gets the
+    /// same byte-for-byte payload persisted the pre-lift inline
+    /// `std::fs::write(path, content)` did. Pins that the primitive is
+    /// a byte-mode write — NOT a serialize or a re-encode — so trailing
+    /// newlines, embedded NULs, and `\r\n` line endings survive the
+    /// round-trip.
+    #[test]
+    fn write_text_sync_persists_bytes_verbatim() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("Cargo.toml");
+        let payload = "# preserved comment\n\
+                       [package]\n\
+                       name = \"pleme-forge\"\n\
+                       version = \"0.1.0\"\n";
+
+        write_text_sync(&path, payload).expect("well-formed write must succeed");
+
+        let round_trip = std::fs::read(&path).expect("post-write read");
+        assert_eq!(
+            round_trip,
+            payload.as_bytes(),
+            "write_text_sync() must persist the caller's bytes verbatim \
+             so every text-splice consumer sees the same payload it \
+             handed in"
+        );
+    }
+
+    /// [`write_text_sync`]'s write arm must surface the offending
+    /// `path.display()` AND classify the failure as a WRITE error, so
+    /// an operator reading the runner log can tell one bounce
+    /// (`"Failed to write"` → `ls -la` on the parent dir, `df -h`) from
+    /// a read-arm bounce (`"Failed to read"` → `ls` on the exact path)
+    /// without cross-referencing the caller. Pins the primitive to the
+    /// same envelope discipline the sync read sibling [`read_text_sync`]
+    /// carries — one primitive per fs-op surface, same canonical
+    /// operator-next-step contract. Pre-lift six consumer sites each
+    /// re-derived the primitive's envelope by hand, and a future
+    /// straggler that mis-spells the classifier (`"cannot write"` vs.
+    /// `"Failed to write"`) would divorce the runner log from every
+    /// other write-arm envelope in the crate. This shield forbids that
+    /// regression at the primitive body.
+    #[test]
+    fn write_text_sync_missing_parent_dir_errors_carry_path_and_write_classifier() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("nonexistent-dir").join("out.toml");
+
+        let err = write_text_sync(&path, "payload").unwrap_err();
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Failed to write"),
+            "write-arm classifier must be 'Failed to write'; got: {msg}"
+        );
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "write-arm envelope must carry the offending path; got: {msg}"
+        );
+    }
+
+    /// Post-lift the seven straggler consumer sites lifted onto
+    /// [`write_text_sync`] must not silently re-inline the primitive's
+    /// shape at their call points — a re-inline would reopen the class
+    /// this lift closed. This source-scan shield walks every hand-lifted
+    /// consumer file and refuses the raw `std::fs::write(<path>,
+    /// <content>).with_context(|| format!("Failed to write {}",
+    /// <path>.display()))?` composition inside its consumer body
+    /// window (`commands/rollback.rs`, `commands/product_release.rs`,
+    /// `commands/gem.rs`, `commands/migration_new.rs`).
+    ///
+    /// A helpful "just inline it, it's shorter" cleanup at any one site
+    /// re-opens the duplication class this lift closed and forces every
+    /// other consumer to divorce from the primitive one edit at a time.
+    ///
+    /// The two `commands/migration_new.rs` sites that stay unlifted
+    /// (`"Failed to update {}"` on the append branch, `"Failed to
+    /// create {}"` on the initial-write branch) legitimately carry
+    /// per-branch verb signal the canonical envelope would erase; this
+    /// shield matches only the canonical `"Failed to write"` classifier
+    /// so the two `"update"` / `"create"` sites survive it by
+    /// construction.
+    #[test]
+    fn write_text_sync_consumers_do_not_reinline_the_primitive_shape() {
+        for (name, source) in [
+            ("commands/rollback.rs", include_str!("commands/rollback.rs")),
+            (
+                "commands/product_release.rs",
+                include_str!("commands/product_release.rs"),
+            ),
+            ("commands/gem.rs", include_str!("commands/gem.rs")),
+            (
+                "commands/migration_new.rs",
+                include_str!("commands/migration_new.rs"),
+            ),
+        ] {
+            assert!(
+                !source.contains("Failed to write {}\", "),
+                "{name} must NOT spell the inline write-arm envelope \
+                 `Failed to write {{}}` — that duplication was lifted \
+                 onto `crate::repo::write_text_sync`. A re-inline would \
+                 silently diverge the write arm from the seven sibling \
+                 write-mode consumers routing through the primitive.",
+            );
+        }
+    }
+
+    /// Post-lift [`crate::version::apply_version_write`]'s body must
+    /// delegate its write arm to [`write_text_sync`] rather than re-
+    /// spelling the inline `std::fs::write(path,
+    /// &updated).with_context(...)` composition — the shape this lift
+    /// closed for the six straggler consumer sites. Without this shield
+    /// a future refactor could silently re-inline the shape (e.g. a
+    /// helpful "just call `std::fs::write` directly, it's shorter"
+    /// cleanup) and reopen the duplication class this lift closed,
+    /// leaving [`crate::version::apply_version_write`]'s write arm
+    /// diverged from the sibling text-mode consumers that now route
+    /// through [`write_text_sync`].
+    ///
+    /// Sync sibling of [`read_yaml_sync_body_delegates_to_read_text_sync_on_read_arm`]
+    /// on the delegation-shield frontier — same structural discipline,
+    /// same body-slice source scan, applied to the write-arm peer.
+    #[test]
+    fn apply_version_write_body_delegates_to_write_text_sync_on_write_arm() {
+        const SOURCE: &str = include_str!("version.rs");
+        let body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "version.rs",
+            "fn apply_version_write<F>(path: &Path, new_version: &str, plan: F) -> Result<()>",
+            "\n}",
+        );
+        assert!(
+            body.contains("write_text_sync(path"),
+            "apply_version_write() body must forward its write arm to \
+             `crate::repo::write_text_sync(path, …)` — the primitive \
+             body every sync text-mode write in the crate now \
+             delegates through. Post-lift body: {body}"
+        );
+        assert!(
+            !body.contains("std::fs::write(path"),
+            "apply_version_write() body must NOT spell the inline \
+             `std::fs::write(path, …)` shape — that duplication was \
+             lifted onto `write_text_sync`. A re-inline would silently \
+             diverge the write arm from the six sibling text-mode \
+             consumers routing through the primitive. Post-lift body: {body}"
         );
     }
 }

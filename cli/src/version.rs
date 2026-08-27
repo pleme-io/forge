@@ -10442,8 +10442,7 @@ where
     let content = crate::repo::read_text_sync(path)?;
     let updated = plan(&content, new_version)
         .with_context(|| format!("cannot write a version to {}", path.display()))?;
-    std::fs::write(path, &updated)
-        .with_context(|| format!("Failed to write {}", path.display()))?;
+    crate::repo::write_text_sync(path, &updated)?;
     Ok(())
 }
 
@@ -11393,8 +11392,7 @@ where
         )
     })? {
         Some(updated) => {
-            std::fs::write(path, &updated)
-                .with_context(|| format!("Failed to write {}", path.display()))?;
+            crate::repo::write_text_sync(path, &updated)?;
             Ok(true)
         }
         None => Ok(false),

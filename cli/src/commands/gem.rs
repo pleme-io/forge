@@ -482,8 +482,7 @@ pub fn bump(
         version_literal_span,
     )?;
 
-    std::fs::write(&version_file, &new_content)
-        .with_context(|| format!("Failed to write {}", version_file.display()))?;
+    crate::repo::write_text_sync(&version_file, &new_content)?;
 
     info!(
         "{}: {} → {} ({})",
