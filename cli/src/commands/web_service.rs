@@ -57,6 +57,36 @@ fn crate2nix_bin() -> String {
     get_tool_path("CRATE2NIX", "crate2nix")
 }
 
+/// Resolve the `cargo` binary via the `CARGO` env override, falling
+/// back to `cargo` on PATH. Every `cargo` spawn in this module reads
+/// through this sigil so the two-argument resolve happens in exactly
+/// one place — mirrors the sibling `crate2nix_bin()` sigil above and
+/// the `<tool>_bin()` sigil discipline every substrate-`<TOOL>` /
+/// `<TOOL>_BIN`-routed spawn surface in forge with more than one
+/// consumer site honors (`commands/test_ci.rs::cargo_bin` per 916f1a4,
+/// `commands/e2e.rs::cargo_bin` per 170ecac,
+/// `commands/developer_tools.rs::cargo_bin` per 534ef48,
+/// `commands/prerelease.rs::cargo_bin` per 79e03a5,
+/// `commands/tool.rs::cargo_bin` per a3d51eb,
+/// `commands/comprehensive_release.rs::cargo_bin` per 08fdb86,
+/// and the `bun_bin()` siblings on `commands/codegen.rs`,
+/// `commands/codegen_validation.rs`, `commands/sync.rs` per 8407021).
+///
+/// The lone consumer is `web_cargo_update`'s Hanabi `cargo update`
+/// preamble at `Command::new(&cargo).arg("update")` — pre-lift the
+/// site spelled the two-argument resolve inline. A Nix-hermetic
+/// runner whose derivation exports `CARGO=/nix/store/…/bin/cargo`
+/// but omits `cargo` from PATH silently fell through to whatever
+/// `cargo` was first on PATH, defeating the substrate-pinned
+/// toolchain the flake declared. Post-lift the resolve lives at
+/// ONE place — this sigil body — so a future added `cargo` spawn
+/// in this module cannot silently re-copy the two-argument resolve
+/// and drift away from the `CARGO` override at exactly the tier the
+/// hermetic-runner contract binds.
+fn cargo_bin() -> String {
+    get_tool_path("CARGO", "cargo")
+}
+
 /// Regenerate deps.nix for web frontend + Cargo.nix for Hanabi (shared BFF)
 ///
 /// This command:
@@ -213,7 +243,7 @@ pub async fn web_cargo_update(product: String, service: String, repo_root: Strin
         );
     }
 
-    let cargo = get_tool_path("CARGO", "cargo");
+    let cargo = cargo_bin();
     let crate2nix = crate2nix_bin();
 
     println!("📂 Hanabi: {}", hanabi_dir.display());
@@ -372,6 +402,33 @@ mod tests {
              `crate2nix_bin()`, not re-copy the resolve inline. Hits: {:?}",
             crate2nix_resolve_hits.len(),
             crate2nix_resolve_hits
+        );
+
+        // Sigil sibling: after the `cargo_bin()` lift, `web_cargo_update`'s
+        // Hanabi `cargo update` preamble routes through the sigil, so
+        // `fn cargo_bin()` must be defined AND the two-argument resolve
+        // must appear in EXACTLY one place — only the sigil body — so a
+        // future added `cargo` spawn cannot silently re-copy the resolve
+        // inline. Mirrors the sibling `crate2nix_bin()` count-eq-1 block
+        // above and the fleet-wide `<tool>_bin()` shield discipline.
+        crate::test_support::assert_source_defines_sigil_bin_fn_code_line(
+            SOURCE,
+            "commands/web_service.rs",
+            "cargo_bin",
+            "CARGO",
+            "cargo",
+        );
+        let cargo_needle = crate::test_support::get_tool_path_two_arg_call_needle("CARGO", "cargo");
+        let cargo_resolve_hits = crate::test_support::code_line_hits(SOURCE, &cargo_needle);
+        assert_eq!(
+            cargo_resolve_hits.len(),
+            1,
+            "the two-argument resolve `{cargo_needle}` must appear \
+             exactly ONCE in the module (only in the `cargo_bin()` \
+             sigil), not {} times — every consumer must route through \
+             `cargo_bin()`, not re-copy the resolve inline. Hits: {:?}",
+            cargo_resolve_hits.len(),
+            cargo_resolve_hits
         );
     }
 }
