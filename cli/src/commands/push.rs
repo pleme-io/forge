@@ -6,7 +6,7 @@ use std::process::Stdio;
 use tokio::process::Command;
 use tracing::info;
 
-use crate::infrastructure::registry::RegistryRef;
+use crate::infrastructure::registry::{split_composed_registry_base, RegistryRef};
 use crate::repo::get_tool_path;
 use crate::retry::{retry_command_logged, RetryPolicy};
 
@@ -600,11 +600,11 @@ pub async fn push_with_retry(
     let op = format!("push {}:{}", registry, tag);
 
     // doca wants --registry/--image separately where skopeo took one composed
-    // reference. Split on the FIRST '/', and REFUSE a base with none: a wrong
-    // split pushes to the wrong repository rather than failing.
-    let (host, image) = registry.split_once('/').ok_or_else(|| {
-        anyhow::anyhow!("registry {registry:?} has no '/', cannot split host from image")
-    })?;
+    // reference. `split_composed_registry_base` names the doca-side first-'/'
+    // cut at ONE code line across the crate — a base with none is REFUSED
+    // rather than guessed at (a wrong split pushes to a different repository
+    // than intended, and the push then silently reports success).
+    let (host, image) = split_composed_registry_base(registry)?;
     let host = host.to_string();
     let image = image.to_string();
 

@@ -628,6 +628,35 @@ pub fn extract_organization(registry: &str) -> Result<String, RegistryError> {
     RegistryRef::parse(registry).map(|r| r.organization)
 }
 
+/// Split a composed OCI registry base `<host>/<image_path>` into the two
+/// slices `doca push` (`oci-push`) wants for its `--registry` and `--image`
+/// flags separately.
+///
+/// The split is on the FIRST `/` — everything before is the host, everything
+/// after (organization + subpath) is the image argument. A composed base with
+/// no `/` at all (`"ghcr.io"`, `"localhost:5000"`) is REFUSED with a diagnostic
+/// naming the offending input rather than silently guessing — a wrong split
+/// pushes to a different repository than the one intended, and the push then
+/// silently reports success.
+///
+/// This is the doca-adjacent looser peer of [`RegistryRef::parse`]: the strict
+/// grammar rejects empty segments and single-segment inputs, while this
+/// primitive only names the doca-side host/image cut two-way at the first
+/// `/`. Callers that need the organization or image-name axis route through
+/// `RegistryRef`; callers that only compose doca's `--registry` / `--image`
+/// arg pair route through this primitive at one code line rather than
+/// hand-rolling `.split_once('/').ok_or_else(...)?` with a per-site
+/// error-message spelling.
+///
+/// Returned slices borrow from `registry` — no allocation. Callers that need
+/// owned `String`s (a `.to_string()` inside an `async move` retry closure,
+/// for instance) apply `.to_string()` themselves at the call site as before.
+pub fn split_composed_registry_base(registry: &str) -> Result<(&str, &str)> {
+    registry.split_once('/').ok_or_else(|| {
+        anyhow::anyhow!("registry {registry:?} has no '/', cannot split host from image")
+    })
+}
+
 /// Generate architecture-prefixed tags
 ///
 /// Returns tags like ["amd64-abc1234", "amd64-latest"] for the given architecture
@@ -778,6 +807,67 @@ mod tests {
         let r = RegistryRef::parse("  ghcr.io/myorg/img  ").unwrap();
         assert_eq!(r.host(), "ghcr.io");
         assert_eq!(r.image_name(), "img");
+    }
+
+    #[test]
+    fn test_split_composed_registry_base_two_part() {
+        let (host, image) = split_composed_registry_base("ghcr.io/pleme-io/service").unwrap();
+        assert_eq!(host, "ghcr.io");
+        assert_eq!(image, "pleme-io/service");
+    }
+
+    #[test]
+    fn test_split_composed_registry_base_splits_on_first_slash_only() {
+        // The FIRST '/' is the host/image cut for doca; every '/' after is
+        // part of the image path (organization + subpath). A later-slash
+        // split would push to a different repository under the same host.
+        let (host, image) = split_composed_registry_base("ghcr.io/pleme-io/proj/service").unwrap();
+        assert_eq!(host, "ghcr.io");
+        assert_eq!(image, "pleme-io/proj/service");
+    }
+
+    #[test]
+    fn test_split_composed_registry_base_host_only_refused() {
+        // A composed base with no '/' has no image path to hand doca; the
+        // primitive REFUSES rather than guessing (which would push to a
+        // different repository than intended). The diagnostic names the
+        // offending input so the caller can trace it back to source.
+        let err = split_composed_registry_base("ghcr.io").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("ghcr.io"),
+            "diagnostic must name the offending input verbatim, got: {msg}"
+        );
+        assert!(
+            msg.contains("cannot split host from image"),
+            "diagnostic must name the doca-side host/image cut, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_split_composed_registry_base_empty_refused() {
+        // Empty input has no '/' either — the same refuse-not-guess arm
+        // fires. Pins that the primitive does not short-circuit an empty
+        // input to `("", "")`.
+        assert!(split_composed_registry_base("").is_err());
+    }
+
+    #[test]
+    fn test_split_composed_registry_base_slices_borrow_from_input() {
+        // The `Ok` arm returns borrowed slices of `registry` — no
+        // allocation — so callers that need owned `String`s (an
+        // `async move` retry closure that clones the values into its
+        // captures, for instance) apply `.to_string()` themselves at
+        // the call site, and callers that only interpolate the slices
+        // into a `Command::args` pay zero allocations for the split.
+        let registry = String::from("ghcr.io/pleme-io/service");
+        let (host, image) = split_composed_registry_base(&registry).unwrap();
+        // If `host` and `image` were owned `String`s the primitive
+        // would not compile against `&str` bindings; asserting the
+        // subslice identity pins the borrow at the observable level.
+        assert!(std::ptr::eq(host.as_ptr(), registry.as_ptr()));
+        let expected_image_start = unsafe { registry.as_ptr().add("ghcr.io/".len()) };
+        assert!(std::ptr::eq(image.as_ptr(), expected_image_start));
     }
 
     #[test]

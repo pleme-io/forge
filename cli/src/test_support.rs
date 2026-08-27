@@ -7611,6 +7611,118 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         );
     }
 
+    /// Crate-wide shield: the inline
+    /// `<registry>.split_once('/').ok_or_else(||
+    /// anyhow::anyhow!("registry {registry:?} has no '/', cannot split
+    /// host from image"))` (and the peer `.with_context(|| format!(...))`)
+    /// shell is reserved for the primitive body at
+    /// [`crate::infrastructure::registry::split_composed_registry_base`] —
+    /// every consumer of the "compose doca's `--registry` / `--image`
+    /// arg pair from a composed `<host>/<image_path>` base" carve-out
+    /// must route through the primitive instead. Pre-lift the stanza
+    /// lived at three doca-push sites (`commands/push.rs::push_with_retry`,
+    /// `commands/github_runner_ci.rs`'s inner push retry, and
+    /// `commands/image_release.rs::push_image`), each hand-rolling the
+    /// SAME error prose one call-file down from where the primitive
+    /// now sits. The primitive owns the canonical
+    /// `"registry {registry:?} has no '/', cannot split host from image"`
+    /// diagnostic at ONE body across the crate, so a wrong split
+    /// (silently sending an image to a different repository than
+    /// intended, then reporting success at the doca-push exit) is
+    /// prevented by construction at every consumer rather than by
+    /// convention.
+    ///
+    /// # Single-line anchor
+    ///
+    /// The stanza's shape varies (`.ok_or_else(|| anyhow!(...))`,
+    /// `.with_context(|| format!(...))`, an `anyhow::bail!` arm, a
+    /// let-else), but every pre-lift spelling carries the SAME error
+    /// prose verbatim: the phrase `has no '/', cannot split host from
+    /// image`. A single-string scan against that anchor phrase catches
+    /// every variant with no false positive: the phrase is
+    /// domain-specific to this exact doca-side host/image cut and
+    /// appears nowhere else in the crate outside the primitive and
+    /// this shield.
+    ///
+    /// The anchor is reconstructed at test time via `format!` so this
+    /// shield's own body never carries the phrase as a code-line
+    /// literal — the assertion-message copy of the phrase lives inside
+    /// the `assert!` prose which every comment-blind scan below strips
+    /// via the same `//` / `///` / `//!` prefix pass as the sibling
+    /// shields, and the shield's own docstring is stripped too. See
+    /// `read_yaml_sync_pre_lift_stanza_confined_to_primitive` for the
+    /// same discipline on the YAML frontier.
+    ///
+    /// # Skipped files
+    ///
+    /// - `test_support.rs` — this shield's own docstring quotes the
+    ///   phrase; scanning would self-match.
+    /// - `infrastructure/registry.rs` — the primitive module carries the
+    ///   canonical shell body AND unit tests that exercise the error
+    ///   diagnostic end-to-end. The comment-blind pass below strips
+    ///   `///` prefixes before matching, but the primitive body at
+    ///   [`crate::infrastructure::registry::split_composed_registry_base`]
+    ///   is naturally the ONE authorized use, so skipping the whole
+    ///   file is both simpler and honest about the intent.
+    #[test]
+    fn split_composed_registry_base_pre_lift_stanza_confined_to_primitive() {
+        let crate_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        // Reconstruct the pre-lift anchor phrase at test time via
+        // `format!` so this scan does not self-match on its own body.
+        let anchor = format!(
+            "has no {slash}, cannot split host from image",
+            slash = "'/'",
+        );
+        let mut offenders: Vec<String> = Vec::new();
+        walk_rs_files(&crate_src, &mut |path| {
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if name == "test_support.rs" || name == "registry.rs" {
+                return;
+            }
+            let raw =
+                std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+            for (i, line) in raw.lines().enumerate() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("///")
+                    || trimmed.starts_with("//!")
+                    || trimmed.starts_with("//")
+                {
+                    continue;
+                }
+                if line.contains(&anchor) {
+                    let rel = path
+                        .strip_prefix(&crate_src)
+                        .unwrap_or(path)
+                        .display()
+                        .to_string();
+                    offenders.push(format!("{rel}:{}", i + 1));
+                }
+            }
+        });
+        assert!(
+            offenders.is_empty(),
+            "the inline `<registry>.split_once('/')` composed-base host/image \
+             cut with the pre-lift error prose is reserved for the primitive \
+             body at `crate::infrastructure::registry::\
+             split_composed_registry_base` — every consumer of the \"compose \
+             doca's --registry/--image arg pair from a composed base\" \
+             carve-out must route through the primitive instead. The \
+             primitive owns the canonical diagnostic naming the offending \
+             input at ONE body across the crate, so a base with no '/' at \
+             all is REFUSED with the offending input in the message rather \
+             than silently guessed at (a wrong split pushes to a different \
+             repository than intended, and the push then reports success \
+             at doca's exit). A future refinement of the shape (a \
+             structured RegistryRef-family error variant, a validation \
+             pass on the host segment, a hint-carrying variant for a \
+             non-doca consumer that wants a different arg layout) lands \
+             at `split_composed_registry_base` and reaches every consumer \
+             for free. Offending sites (line = code-line hit of the anchor \
+             phrase):\n{}",
+            offenders.join("\n")
+        );
+    }
+
     /// Recursively walk every `.rs` file under `dir`, invoking `visit`
     /// on each. Skips `target/` directories defensively even though
     /// none should live under `cli/src/`.

@@ -881,10 +881,10 @@ async fn push_with_retry(
     let op = format!("push {}:{}", registry, tag);
 
     // doca takes --registry/--image separately; a base with no '/' is refused
-    // rather than guessed, since a wrong split pushes to the wrong repository.
-    let (host, image) = registry.split_once('/').ok_or_else(|| {
-        anyhow::anyhow!("registry {registry:?} has no '/', cannot split host from image")
-    })?;
+    // rather than guessed at (a wrong split pushes to a different repository
+    // and silently reports success). `split_composed_registry_base` names the
+    // first-'/' cut at one code line across the crate.
+    let (host, image) = crate::infrastructure::registry::split_composed_registry_base(registry)?;
     let host = host.to_string();
     let image = image.to_string();
 
