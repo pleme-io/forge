@@ -24,12 +24,11 @@ impl ProductConfig {
     /// - PASSWORD_SECRET_PATTERN: Default "{product}-backend-secrets"
     /// - PASSWORD_KEY: Default "REDIS_PASSWORD"
     fn for_product(product: &str) -> Result<Self> {
-        let valkey_pod_pattern = std::env::var("VALKEY_POD_PATTERN")
-            .unwrap_or_else(|_| "{product}-valkey-0".to_string());
-        let password_secret_pattern = std::env::var("PASSWORD_SECRET_PATTERN")
-            .unwrap_or_else(|_| "{product}-backend-secrets".to_string());
-        let password_key =
-            std::env::var("PASSWORD_KEY").unwrap_or_else(|_| "REDIS_PASSWORD".to_string());
+        let valkey_pod_pattern =
+            crate::repo::env_var_or_default("VALKEY_POD_PATTERN", "{product}-valkey-0");
+        let password_secret_pattern =
+            crate::repo::env_var_or_default("PASSWORD_SECRET_PATTERN", "{product}-backend-secrets");
+        let password_key = crate::repo::env_var_or_default("PASSWORD_KEY", "REDIS_PASSWORD");
 
         Ok(Self {
             valkey_pod: valkey_pod_pattern.replace("{product}", product),
@@ -227,6 +226,79 @@ mod tests {
         let config = ProductConfig::for_product("testapp").unwrap();
         assert_eq!(config.valkey_pod, "testapp-valkey-0");
         assert_eq!(config.password_secret, "testapp-backend-secrets");
+    }
+
+    /// Post-lift the [`ProductConfig::for_product`] body reads its
+    /// three `(env_var, default)` pairs through
+    /// [`crate::repo::env_var_or_default`] — the ONE primitive body
+    /// every env-var-with-`String`-fallback sigil in the crate now
+    /// delegates through — and no longer spells the inline
+    /// `std::env::var(NAME).unwrap_or_else(|_| DEFAULT.to_string())`
+    /// shape verbatim at any of the three sites.
+    ///
+    /// Pre-lift the three sites (`VALKEY_POD_PATTERN` /
+    /// `"{product}-valkey-0"`, `PASSWORD_SECRET_PATTERN` /
+    /// `"{product}-backend-secrets"`, `PASSWORD_KEY` /
+    /// `"REDIS_PASSWORD"`) each spelled the identical shape past
+    /// THEORY §VI.1's three-times-is-a-law threshold in one function
+    /// body — the same shape [`crate::repo::env_var_or_default`]'s
+    /// pre-lift consolidation already closed for the sibling sigils
+    /// ([`crate::repo::get_environment`],
+    /// [`crate::infrastructure::attic::attic_server_alias`],
+    /// [`crate::config::product::default_cluster`],
+    /// [`crate::tools::get_tool_path`] and its `_custom` overload,
+    /// [`crate::repo::get_tool_path`]) across the crate. Structural
+    /// regression shield: without it, a future refactor could silently
+    /// re-inline the shape ("just call `std::env::var` directly, it's
+    /// shorter") and reopen the duplication class this lift closed.
+    ///
+    /// A future primitive refinement of the shape — logging every
+    /// resolve, canonicalizing the value against a closed enum, a
+    /// telemetry sigil separating explicit-value from default-fallback
+    /// paths, or a swap to a typed `substrate::EnvVar(String)` newtype
+    /// — lands at [`crate::repo::env_var_or_default`] and reaches
+    /// every consumer (this sigil included) by construction rather
+    /// than being copy-edited at N sites. Sibling shield to
+    /// [`crate::tools::tests::get_tool_path_and_custom_bodies_delegate_to_env_var_or_default_sigil`]
+    /// on the same primitive.
+    #[test]
+    fn for_product_body_delegates_to_env_var_or_default_sigil() {
+        const SOURCE: &str = include_str!("sessions.rs");
+
+        let body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/sessions.rs",
+            "fn for_product(product: &str) -> Result<Self> {",
+            "\n    }\n",
+        );
+
+        for (env_var, default) in [
+            ("VALKEY_POD_PATTERN", "{product}-valkey-0"),
+            ("PASSWORD_SECRET_PATTERN", "{product}-backend-secrets"),
+            ("PASSWORD_KEY", "REDIS_PASSWORD"),
+        ] {
+            let expected = format!("crate::repo::env_var_or_default(\"{env_var}\", \"{default}\")");
+            assert!(
+                body.contains(&expected),
+                "commands/sessions.rs::ProductConfig::for_product body must \
+                 forward the `{env_var}` read to \
+                 `{expected}` — the primitive body every \
+                 env-var-with-`String`-fallback sigil in the crate now \
+                 delegates through. Post-lift body: {body}"
+            );
+
+            let forbidden_std = format!("std::env::var(\"{env_var}\")");
+            let forbidden_bare = format!("env::var(\"{env_var}\")");
+            assert!(
+                !body.contains(&forbidden_std) && !body.contains(&forbidden_bare),
+                "commands/sessions.rs::ProductConfig::for_product body must \
+                 NOT spell the inline `env::var(\"{env_var}\").unwrap_or_else(|_| \
+                 \"{default}\".to_string())` shape — that duplication was \
+                 lifted onto [`crate::repo::env_var_or_default`]. A re-inline \
+                 would silently reopen the class this shield exists to close. \
+                 Post-lift body: {body}"
+            );
+        }
     }
 
     /// Whole-module shield: no raw `Command::new`-with-bare-`kubectl`-
