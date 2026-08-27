@@ -179,20 +179,17 @@ pub async fn execute(
         let deploy_yaml_path = product_dir.join("deploy/backend.yaml");
 
         // Load seaorm_check_after from deploy.yaml
-        let seaorm_check_after = if let Ok(content) = std::fs::read_to_string(&deploy_yaml_path) {
-            if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
-                value
-                    .get("prerelease")
-                    .and_then(|p| p.get("migrations"))
-                    .and_then(|m| m.get("seaorm_check_after"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let seaorm_check_after = crate::repo::try_read_yaml_sync::<serde_yaml::Value>(
+            &deploy_yaml_path,
+        )
+        .and_then(|value| {
+            value
+                .get("prerelease")
+                .and_then(|p| p.get("migrations"))
+                .and_then(|m| m.get("seaorm_check_after"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        });
 
         if let Ok(rollback_result) = super::migration_validation::validate_rollback_compatibility(
             &seaorm_dir,
