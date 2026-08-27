@@ -1919,9 +1919,7 @@ pub async fn deploy_rust_service_with_tag(
     let new_tag = tag_suffix.clone();
     let updated_manifest = update_kustomization_image_tag(&manifest_content, &service, &new_tag)?;
 
-    tokio::fs::write(&manifest, &updated_manifest)
-        .await
-        .context("Failed to write updated manifest")?;
+    crate::repo::write_text_async(Path::new(&manifest), &updated_manifest).await?;
 
     // Git commit and push (in k8s repo if configured, otherwise product repo)
     let git_workdir = k8s_workdir.as_deref();

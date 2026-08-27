@@ -456,6 +456,102 @@ pub fn write_text_sync<C: AsRef<[u8]>>(path: &Path, content: C) -> Result<()> {
     std::fs::write(path, content).with_context(|| format!("Failed to write {}", path.display()))
 }
 
+/// Write `content`'s bytes to a file at `path`, on the async fs-write
+/// surface.
+///
+/// The async sibling of [`write_text_sync`] on the write arm, and the
+/// write-arm peer of [`read_text_async`] on the async surface: the
+/// canonical [`tokio::fs::write`] + [`anyhow::Context`] composition every
+/// consumer that renders a file back to disk from an in-tokio splice-and-
+/// write mutator (`kustomization.yaml` `newTag` splice, `builder-pool.yaml`
+/// `agentImage:` / `builderImage:` splice, migration job manifest scaffold
+/// write, in-place YAML round-trip's final write arm) spelled inline
+/// pre-lift.
+///
+/// # Envelope
+///
+/// Write failure surfaces `"Failed to write {path}"` — operator's next
+/// step is `ls -la` and `df -h` on the offending path's ancestor
+/// (missing dir, EROFS, ENOSPC, EACCES), matching the sync-arm sibling
+/// [`write_text_sync`]'s `path.display()` discipline exactly. The
+/// classifier is distinct from the read arm (`"Failed to write"` vs
+/// `"Failed to read"`) so an operator reading the runner log can tell
+/// one bounce from the other without cross-referencing the caller.
+///
+/// Pre-lift ten sibling consumer sites spelled the primitive's OWN
+/// shape one level down from this body: a
+/// `tokio::fs::write(path, content).await.context("Failed to write
+/// <literal>")?` composition whose per-site `.context(...)` string
+/// hard-coded a filename literal — `"kustomization.yaml"` at seven
+/// sites, `"builder-pool.yaml"` at two, `"migration job manifest"` at
+/// one, `"updated manifest"` at one — that could drift from the actual
+/// `path` argument silently, and that DROPPED the offending
+/// `path.display()` from the failure classifier entirely, so an
+/// operator reading a runner log could not tell which of several
+/// candidate paths tripped the write. One eleventh site inside
+/// [`crate::git::yaml_read_modify_write_async`]'s five-line
+/// read/parse/mutate/serialize/write shell spelled the canonical
+/// `path.display()` envelope directly (`"Failed to write {}",
+/// path.display()`); it lifts here for the same reason the read-arm
+/// prefix already lifts onto [`read_text_async`] — one primitive body
+/// per fs-op surface, same canonical operator-next-step contract.
+/// Post-lift the primitive's canonical `path.display()` envelope
+/// reaches every consumer by construction; the role the file plays in
+/// the caller is preserved by the caller's function name in the anyhow
+/// backtrace, not by a redundant filename literal inside the failure
+/// classifier.
+///
+/// # Sibling primitives
+///
+/// - Sync text-mode write: [`write_text_sync`] owns the sync analogue's
+///   write arm at ONE code point; this primitive owns the async
+///   counterpart.
+/// - Async text-mode read: [`read_text_async`] owns the read-arm
+///   analogue on the async surface; this primitive owns the write-arm
+///   counterpart.
+/// - Async YAML read-modify-write: [`crate::git::yaml_read_modify_write_async`]
+///   owns the full round-trip on the async surface with a parsed-YAML
+///   mutator contract, and post-lift its final write arm delegates
+///   here; this primitive owns only the byte-mode write arm on the
+///   async surface, so a caller that already holds the rendered bytes
+///   (a text-splice consumer that mutates line-by-line rather than
+///   round-tripping through a YAML parse) writes them directly.
+///
+/// # Verb variance is load-bearing signal
+///
+/// The `"Failed to write {path}"` envelope covers the shape "the file's
+/// final bytes could not be persisted." Two consumer sites carry
+/// legitimately distinct verbs that name what the file IS (a schema
+/// staged for codegen input, a `.version` file), not merely that a
+/// write failed: `commands/codegen_validation.rs::execute` spells
+/// `"Failed to write schema to {path}"` where "schema to" tags the
+/// staged-input role that a bare `"Failed to write {path}"` would erase,
+/// and `commands/rust_service.rs::execute` spells `"Failed to write
+/// .version file to {path}"` where ".version file to" tags the
+/// deploy-metadata role a bare envelope would erase. Those sites stay
+/// unlifted by design — the shield source-scan matches only the
+/// canonical `"Failed to write"` classifier so they survive by
+/// construction, mirroring the sync sibling [`write_text_sync`]'s
+/// discipline that leaves `commands/migration_new.rs`'s `"Failed to
+/// update"`/`"Failed to create"` sites unlifted for the same reason.
+///
+/// # Type parameter
+///
+/// `C: AsRef<[u8]>` — accepts every rendered-bytes form a caller holds:
+/// `&str`, `&String`, `String`, `&[u8]`, `Vec<u8>`, and the `format!(…)`
+/// output shape (`String`) some callers hand in directly.
+///
+/// # Errors
+///
+/// Returns `Err` if the file cannot be written (parent dir missing,
+/// EROFS, ENOSPC, EACCES). The offending `path.display()` is threaded
+/// through the [`anyhow::Context`] envelope on every failure branch.
+pub async fn write_text_async<C: AsRef<[u8]>>(path: &Path, content: C) -> Result<()> {
+    tokio::fs::write(path, content)
+        .await
+        .with_context(|| format!("Failed to write {}", path.display()))
+}
+
 /// Find repository root by looking for flake.nix
 ///
 /// Search order:
@@ -3456,6 +3552,196 @@ mod tests {
              lifted onto `write_text_sync`. A re-inline would silently \
              diverge the write arm from the six sibling text-mode \
              consumers routing through the primitive. Post-lift body: {body}"
+        );
+    }
+
+    /// [`write_text_async`] writes the caller's bytes verbatim, so the
+    /// ten line-oriented text-splice consumers across
+    /// `commands/{kenshi,kenshi_agent,nix_builder,push,bootstrap,
+    /// migrations,rust_service}.rs` plus the async YAML round-trip's
+    /// final write arm at [`crate::git::yaml_read_modify_write_async`]
+    /// each receive the same byte-for-byte payload persisted the
+    /// pre-lift inline `tokio::fs::write(path, content).await` did. Pins
+    /// that the primitive is a byte-mode write — NOT a serialize or a
+    /// re-encode — so YAML comments, trailing newlines, and CRLF
+    /// sequences (which each consumer's splice-and-write mutator relies
+    /// on to preserve source formatting) survive the round-trip.
+    #[tokio::test]
+    async fn write_text_async_persists_bytes_verbatim() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("kustomization.yaml");
+        let payload = "# preserved comment\n\
+                       images:\n  \
+                       - name: ghcr.io/pleme-io/nix-builder\n    \
+                         newTag: amd64-abcdef0\n";
+
+        write_text_async(&path, payload)
+            .await
+            .expect("well-formed write must succeed");
+
+        let round_trip = tokio::fs::read(&path).await.expect("post-write read");
+        assert_eq!(
+            round_trip,
+            payload.as_bytes(),
+            "write_text_async() must persist the caller's bytes verbatim \
+             so every line-oriented text-splice consumer sees the same \
+             payload it did pre-lift"
+        );
+    }
+
+    /// [`write_text_async`]'s write arm must surface the offending
+    /// `path.display()` AND classify the failure as a WRITE error, so
+    /// an operator reading the runner log can tell one bounce
+    /// (`"Failed to write"` → `ls -la` on the parent dir, `df -h`) from
+    /// a read-arm bounce (`"Failed to read"` → `ls` on the exact path)
+    /// without cross-referencing the caller. Pins the primitive to the
+    /// same envelope discipline the sync sibling [`write_text_sync`]
+    /// and the async read peer [`read_text_async`] carry — one
+    /// primitive per fs-op surface, same canonical operator-next-step
+    /// contract. Pre-lift ten consumer sites each hard-coded a
+    /// filename literal (`"Failed to write kustomization.yaml"`,
+    /// `"Failed to write builder-pool.yaml"`, `"Failed to write
+    /// migration job manifest"`, `"Failed to write updated manifest"`)
+    /// that (a) could drift from the actual `path` argument silently
+    /// and (b) DROPPED the offending `path.display()` from the failure
+    /// classifier entirely. This shield forbids that regression.
+    #[tokio::test]
+    async fn write_text_async_missing_parent_dir_errors_carry_path_and_write_classifier() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("nonexistent-dir").join("out.yaml");
+
+        let err = write_text_async(&path, "payload").await.unwrap_err();
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Failed to write"),
+            "write-arm classifier must be 'Failed to write'; got: {msg}"
+        );
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "write-arm envelope must carry the offending path; got: {msg}"
+        );
+    }
+
+    /// Post-lift the ten straggler consumer sites lifted onto
+    /// [`write_text_async`] must not silently re-inline the primitive's
+    /// shape at their call points — a re-inline would reopen the class
+    /// this lift closed. This source-scan shield walks every hand-lifted
+    /// consumer file and refuses the raw `tokio::fs::write(<path>,
+    /// <content>).await.context("Failed to write <literal>")?` shape
+    /// (matched via the classifier string `"Failed to write"`) inside
+    /// its consumer body window.
+    ///
+    /// A helpful "just inline it, it's shorter" cleanup at any one site
+    /// re-opens the duplication class this lift closed and forces every
+    /// other consumer to divorce from the primitive one edit at a time.
+    ///
+    /// Two sites stay unlifted (`commands/codegen_validation.rs`'s
+    /// `"Failed to write schema to {path}"` and `commands/rust_service.rs`'s
+    /// `"Failed to write .version file to {path}"`) — each legitimately
+    /// tags a role (staged codegen input, deploy-metadata file) the
+    /// canonical envelope would erase. Neither carries the bare `"Failed
+    /// to write"` needle because both interpose a role phrase (`"schema
+    /// to"`, `".version file to"`) between the classifier verb and the
+    /// path, so the substring `"Failed to write "` (with the trailing
+    /// space matching the canonical envelope's own separator) does not
+    /// occur at either site — they survive this shield by construction.
+    #[test]
+    fn write_text_async_consumers_do_not_reinline_the_primitive_shape() {
+        for (name, source) in [
+            ("commands/kenshi.rs", include_str!("commands/kenshi.rs")),
+            (
+                "commands/kenshi_agent.rs",
+                include_str!("commands/kenshi_agent.rs"),
+            ),
+            (
+                "commands/nix_builder.rs",
+                include_str!("commands/nix_builder.rs"),
+            ),
+            ("commands/push.rs", include_str!("commands/push.rs")),
+            (
+                "commands/bootstrap.rs",
+                include_str!("commands/bootstrap.rs"),
+            ),
+            (
+                "commands/migrations.rs",
+                include_str!("commands/migrations.rs"),
+            ),
+            (
+                "commands/rust_service.rs",
+                include_str!("commands/rust_service.rs"),
+            ),
+        ] {
+            assert!(
+                !source.contains("Failed to write kustomization"),
+                "{name} must NOT spell the inline write-arm envelope \
+                 `Failed to write kustomization.yaml` — that duplication \
+                 was lifted onto `crate::repo::write_text_async`. A \
+                 re-inline would silently diverge the write arm from the \
+                 ten sibling text-mode consumers routing through the \
+                 primitive.",
+            );
+            assert!(
+                !source.contains("Failed to write builder-pool"),
+                "{name} must NOT spell the inline write-arm envelope \
+                 `Failed to write builder-pool.yaml` — that duplication \
+                 was lifted onto `crate::repo::write_text_async`.",
+            );
+            assert!(
+                !source.contains("Failed to write migration job manifest"),
+                "{name} must NOT spell the inline write-arm envelope \
+                 `Failed to write migration job manifest` — that \
+                 duplication was lifted onto `crate::repo::write_text_async`.",
+            );
+            assert!(
+                !source.contains("Failed to write updated manifest"),
+                "{name} must NOT spell the inline write-arm envelope \
+                 `Failed to write updated manifest` — that duplication \
+                 was lifted onto `crate::repo::write_text_async`.",
+            );
+        }
+    }
+
+    /// Post-lift [`crate::git::yaml_read_modify_write_async`]'s body
+    /// must delegate its write arm to [`write_text_async`] rather than
+    /// re-spelling the inline `tokio::fs::write(path, updated).await`
+    /// composition — the shape this lift closed for the ten straggler
+    /// consumer sites plus this eleventh in-shell site. Without this
+    /// shield a future refactor could silently re-inline the shape
+    /// (e.g. a helpful "just call `tokio::fs::write` directly, it's
+    /// shorter" cleanup) and reopen the duplication class this lift
+    /// closed, leaving [`crate::git::yaml_read_modify_write_async`]'s
+    /// write arm diverged from the ten sibling text-mode consumers that
+    /// now route through [`write_text_async`].
+    ///
+    /// Async sibling of
+    /// [`apply_version_write_body_delegates_to_write_text_sync_on_write_arm`]
+    /// on the delegation-shield frontier — same structural discipline,
+    /// same body-slice source scan, applied to the async write-arm peer.
+    #[test]
+    fn yaml_read_modify_write_async_body_delegates_to_write_text_async_on_write_arm() {
+        const SOURCE: &str = include_str!("git.rs");
+        let body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "git.rs",
+            "async fn yaml_read_modify_write_async<F>(path: &Path, mutator: F) -> Result<()>",
+            "\n}",
+        );
+        assert!(
+            body.contains("write_text_async(path"),
+            "yaml_read_modify_write_async() body must forward its write \
+             arm to `crate::repo::write_text_async(path, …)` — the \
+             primitive body every async text-mode write in the crate \
+             now delegates through. Post-lift body: {body}"
+        );
+        assert!(
+            !body.contains("tokio::fs::write(path"),
+            "yaml_read_modify_write_async() body must NOT spell the \
+             inline `tokio::fs::write(path, …)` shape — that duplication \
+             was lifted onto `write_text_async`. A re-inline would \
+             silently diverge the write arm from the ten sibling \
+             text-mode consumers routing through the primitive. \
+             Post-lift body: {body}"
         );
     }
 }

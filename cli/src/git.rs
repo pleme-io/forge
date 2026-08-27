@@ -531,9 +531,7 @@ where
     mutator(&mut yaml).with_context(|| format!("Failed to mutate {}", path.display()))?;
     let updated = serde_yaml::to_string(&yaml)
         .with_context(|| format!("Failed to serialize {} as YAML", path.display()))?;
-    tokio::fs::write(path, updated)
-        .await
-        .with_context(|| format!("Failed to write {}", path.display()))?;
+    crate::repo::write_text_async(path, updated).await?;
     Ok(())
 }
 

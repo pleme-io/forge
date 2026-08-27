@@ -3,7 +3,7 @@
 //! Release the kenshi-agent sidecar image with updates to all cluster manifests.
 //! Handles both primary and secondary clusters in a single release.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::Path;
 use tracing::info;
 
@@ -186,9 +186,7 @@ async fn update_kustomization_image(
 
     // Write back
     let final_content = new_content.trim_end().to_string() + "\n";
-    tokio::fs::write(path, &final_content)
-        .await
-        .context("Failed to write kustomization.yaml")?;
+    crate::repo::write_text_async(path, &final_content).await?;
 
     info!("   ✅ Kustomization updated");
     Ok(())
@@ -236,9 +234,7 @@ async fn update_builder_pool_agent_image(
 
     // Write back
     let final_content = new_content.trim_end().to_string() + "\n";
-    tokio::fs::write(path, &final_content)
-        .await
-        .context("Failed to write builder-pool.yaml")?;
+    crate::repo::write_text_async(path, &final_content).await?;
 
     info!("   ✅ Builder pool updated");
     Ok(())
