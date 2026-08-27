@@ -7087,6 +7087,137 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         );
     }
 
+    /// Crate-wide shield: the multi-line
+    /// `kubectl_command_async().args(...).output().await.context("...")?;`
+    /// stanza is reserved for the fusion primitive body at
+    /// [`crate::infrastructure::kubectl::kubectl_output_spawn_anyhow`] —
+    /// every consumer of the "spawn `kubectl`, capture output, bail on
+    /// spawn `Err` with a canonical envelope, hand the raw
+    /// [`std::process::Output`] back to the caller" shape must route
+    /// through the primitive instead. Pre-lift 0e2d0cf lifted five sites
+    /// carrying this stanza verbatim modulo the per-site argv and
+    /// context string:
+    /// [`crate::services::migration_service::MigrationService::delete_existing_job`],
+    /// [`crate::services::migration_service::MigrationService::wait_for_job`]
+    /// (twin Complete / Failed condition probes),
+    /// [`crate::services::migration_service::MigrationService::get_job_logs`],
+    /// and `commands/migrations.rs::cleanup_migration_jobs`'s per-job
+    /// `delete --ignore-not-found` inside the cleanup loop. This shield
+    /// closes the surface on the five straggler sites the sibling lift
+    /// left in `commands/migrations.rs`: `reset_migration` (get + patch
+    /// DatabaseMigration status — two sites), the cleanup routine's
+    /// list-jobs and orphaned-pod-cleanup calls, and
+    /// `wait_for_shinka_migration`'s DatabaseMigration CRD pre-check.
+    /// Together with 0e2d0cf's five, ten consumers total delegate
+    /// through ONE primitive body — well past THEORY §VI.1's
+    /// three-times-is-a-law threshold — and a re-inline of the stanza
+    /// (or a new copy landing in a future `commands/` module) fires this
+    /// shield with the exact offender file and 1-indexed line of the
+    /// `kubectl_command_async()` opener.
+    ///
+    /// # Multi-line detection via bounded regex
+    ///
+    /// The stanza spans five source lines minimum, so a per-line scan
+    /// (as the sibling env-var-guard shields use) cannot bind the
+    /// `kubectl_command_async()` opener to the `.output()` /
+    /// `.await` / `.context(...)?` closers. A bounded regex
+    /// `kubectl_command_async\(\)[\s\S]{0,600}?\.output\(\)\s*\.await\s*\.context\(`
+    /// matches the opener + up-to-600 bytes of intervening argv +
+    /// closer trio — 600 bytes is generous for the widest observed
+    /// argv (nine-arg `patch databasemigration` at
+    /// `commands/migrations.rs::reset_migration`) yet tight enough
+    /// that a `kubectl_command_async()` used for an unrelated shape
+    /// hundreds of lines later cannot straddle the window.
+    ///
+    /// # Skipped files
+    ///
+    /// - `test_support.rs` — this shield's own docstring literal
+    ///   mentions the stanza verbatim; scanning would self-match.
+    /// - `infrastructure/kubectl.rs` — the primitive module carries
+    ///   the fusion body itself AND a doc-code block spelling the
+    ///   pre-lift stanza on ITS `///` lines. The comment-blind pass
+    ///   below strips `///` prefixes before matching, but the primitive
+    ///   body at [`crate::infrastructure::kubectl::kubectl_output_spawn_anyhow`]
+    ///   is naturally the ONE authorized use, so skipping the whole
+    ///   file is both simpler and honest about the intent.
+    ///
+    /// # Sibling shields
+    ///
+    /// Multi-line peer to the per-line env-var-guard shields
+    /// (e353a0c / 5b2602f / 26fc8da / 090e137 / 3866752). Same
+    /// walk-tree discipline: enumerate every `.rs` file, name every
+    /// offender with its relative path and 1-indexed line of the
+    /// `kubectl_command_async()` opener.
+    #[test]
+    fn kubectl_output_spawn_anyhow_pre_lift_stanza_confined_to_primitive() {
+        let crate_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let pattern =
+            r"kubectl_command_async\(\)[\s\S]{0,600}?\.output\(\)\s*\.await\s*\.context\(";
+        let re = regex::Regex::new(pattern).expect("pre-lift stanza regex must compile");
+        let mut offenders: Vec<String> = Vec::new();
+        walk_rs_files(&crate_src, &mut |path| {
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if name == "test_support.rs" {
+                return;
+            }
+            let parent = path
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            if parent == "infrastructure" && name == "kubectl.rs" {
+                return;
+            }
+            let raw =
+                std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+            // Strip `///` / `//!` / `//` comment lines so a doc-block
+            // that quotes the stanza does not self-match. Preserve line
+            // count so 1-indexed offender lines still resolve.
+            let stripped: String = raw
+                .lines()
+                .map(|l| {
+                    let t = l.trim_start();
+                    if t.starts_with("///") || t.starts_with("//!") || t.starts_with("//") {
+                        ""
+                    } else {
+                        l
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            for m in re.find_iter(&stripped) {
+                let line = stripped[..m.start()].matches('\n').count() + 1;
+                let rel = path
+                    .strip_prefix(&crate_src)
+                    .unwrap_or(path)
+                    .display()
+                    .to_string();
+                offenders.push(format!("{rel}:{line}"));
+            }
+        });
+        assert!(
+            offenders.is_empty(),
+            "the inline `kubectl_command_async().args(...).output().await\
+             .context(...)?;` stanza is reserved for the fusion primitive \
+             body at `crate::infrastructure::kubectl::kubectl_output_spawn_anyhow` — \
+             every consumer of the \"spawn kubectl, capture output, bail on \
+             spawn `Err`, hand the raw `Output` back\" shape must route \
+             through the primitive instead. The primitive owns the \
+             `classify_spawn_anyhow` canonical envelope at ONE body across \
+             the crate, so every consumer surfaces spawn failures through \
+             the same `\"Failed to spawn {{op}}: {{io_error}}\"` shape by \
+             construction rather than by convention. A future refinement \
+             of the shape (telemetry on the spawn path, a retry policy on \
+             transient IO errors, canonicalization of the op label \
+             against a closed enum, or a swap to a typed \
+             `substrate::KubectlOp` newtype) lands at \
+             `kubectl_output_spawn_anyhow` and reaches every consumer for \
+             free. Offending sites (line = `kubectl_command_async()` \
+             opener):\n{}",
+            offenders.join("\n")
+        );
+    }
+
     /// Recursively walk every `.rs` file under `dir`, invoking `visit`
     /// on each. Skips `target/` directories defensively even though
     /// none should live under `cli/src/`.

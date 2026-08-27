@@ -338,19 +338,20 @@ pub async fn annotate_configmap_with_hash(
     configmap_name: &str,
     hash: &str,
 ) -> Result<()> {
-    kubectl_command_async()
-        .args(&[
+    let hash_arg = format!("supergraph-hash={}", hash);
+    crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
+        &[
             "annotate",
             "configmap",
             configmap_name,
-            &format!("supergraph-hash={}", hash),
+            &hash_arg,
             "-n",
             namespace,
             "--overwrite",
-        ])
-        .output()
-        .await
-        .context("Failed to annotate ConfigMap")?;
+        ],
+        "Failed to annotate ConfigMap",
+    )
+    .await?;
 
     Ok(())
 }

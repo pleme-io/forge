@@ -281,8 +281,9 @@ async fn get_kustomize_resource_name(
 
     let name_prefix = format!("{}-{}", resource_base_name, suffix);
 
-    let output = kubectl_command_async()
-        .args(&[
+    let query_op = format!("Failed to query {} for {}", resource_type, service);
+    let output = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
+        &[
             "get",
             resource_type,
             "-n",
@@ -291,10 +292,10 @@ async fn get_kustomize_resource_name(
             &label_selector,
             "-o",
             "jsonpath={.items[*].metadata.name}",
-        ])
-        .output()
-        .await
-        .context(format!("Failed to query {} for {}", resource_type, service))?;
+        ],
+        &query_op,
+    )
+    .await?;
 
     let names = String::from_utf8_lossy(&output.stdout);
     let names: Vec<&str> = names.split_whitespace().collect();
@@ -836,8 +837,8 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
     );
 
     // Check if DatabaseMigration exists
-    let check = kubectl_command_async()
-        .args(&[
+    let check = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
+        &[
             "get",
             "databasemigration",
             service,
@@ -845,10 +846,10 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
             namespace,
             "-o",
             "jsonpath={.status.phase}",
-        ])
-        .output()
-        .await
-        .context("Failed to check DatabaseMigration status")?;
+        ],
+        "Failed to check DatabaseMigration status",
+    )
+    .await?;
 
     let current_phase = String::from_utf8_lossy(&check.stdout).to_string();
 
@@ -863,8 +864,8 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
     println!("   Current phase: {}", current_phase.trim());
 
     // Reset the status to Pending with retry count 0
-    let patch_result = kubectl_command_async()
-        .args(&[
+    let patch_result = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
+        &[
             "patch",
             "databasemigration",
             service,
@@ -874,10 +875,10 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
             "--subresource=status",
             "-p",
             r#"{"status":{"phase":"Pending","retryCount":0}}"#,
-        ])
-        .output()
-        .await
-        .context("Failed to patch DatabaseMigration status")?;
+        ],
+        "Failed to patch DatabaseMigration status",
+    )
+    .await?;
 
     if !patch_result.status.success() {
         let stderr = String::from_utf8_lossy(&patch_result.stderr);
@@ -891,8 +892,8 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
 
     // First, find and delete any migration jobs for this service
     // This is critical because Shinka will fail with "already exists" if old jobs remain
-    let list_jobs = kubectl_command_async()
-        .args(&[
+    let list_jobs = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
+        &[
             "get",
             "jobs",
             "-n",
@@ -901,10 +902,10 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
             &format!("app={}", service),
             "-o",
             "jsonpath={.items[*].metadata.name}",
-        ])
-        .output()
-        .await
-        .context("Failed to list migration jobs")?;
+        ],
+        "Failed to list migration jobs",
+    )
+    .await?;
 
     let jobs_str = String::from_utf8_lossy(&list_jobs.stdout).to_string();
     let jobs: Vec<&str> = jobs_str
@@ -932,8 +933,8 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
     if cleanup_jobs {
         println!("🧹 Cleaning up orphaned migration pods...");
 
-        let cleanup_pods = kubectl_command_async()
-            .args(&[
+        let cleanup_pods = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
+            &[
                 "delete",
                 "pods",
                 "-n",
@@ -942,10 +943,10 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
                 &format!("app={},component=migration", service),
                 "--field-selector=status.phase!=Running",
                 "--ignore-not-found",
-            ])
-            .output()
-            .await
-            .context("Failed to clean up migration pods")?;
+            ],
+            "Failed to clean up migration pods",
+        )
+        .await?;
 
         let output = String::from_utf8_lossy(&cleanup_pods.stdout);
         if output.contains("deleted") {
@@ -1017,8 +1018,8 @@ pub async fn wait_for_shinka_migration(
     );
 
     // Pre-check: verify the DatabaseMigration CRD exists
-    let check = kubectl_command_async()
-        .args([
+    let check = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
+        &[
             "get",
             "databasemigration",
             &migration_name,
@@ -1026,10 +1027,10 @@ pub async fn wait_for_shinka_migration(
             namespace,
             "-o",
             "name",
-        ])
-        .output()
-        .await
-        .context("Failed to check DatabaseMigration CRD")?;
+        ],
+        "Failed to check DatabaseMigration CRD",
+    )
+    .await?;
 
     if !check.status.success() || check.stdout.is_empty() {
         bail!(
