@@ -73,13 +73,9 @@ use std::path::{Path, PathBuf};
 /// Monorepo: falls back to `{repo_root}/pkgs/products/{product}`.
 pub fn resolve_product_dir(repo_root: &Path, product: &str) -> PathBuf {
     let root_deploy = repo_root.join("deploy.yaml");
-    if root_deploy.exists() {
-        if let Ok(content) = std::fs::read_to_string(&root_deploy) {
-            if let Ok(yaml) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
-                if yaml.get("name").and_then(|n| n.as_str()) == Some(product) {
-                    return repo_root.to_path_buf();
-                }
-            }
+    if let Some(yaml) = crate::repo::try_read_yaml_sync::<serde_yaml::Value>(&root_deploy) {
+        if yaml.get("name").and_then(|n| n.as_str()) == Some(product) {
+            return repo_root.to_path_buf();
         }
     }
     repo_root.join("pkgs/products").join(product)
@@ -237,14 +233,10 @@ pub fn load_artifact_info(
 
     // Fallback: read from deploy.yaml for backward compatibility
     let yaml_path = resolve_deploy_yaml_path(product_dir, service_name, service_dir);
-    if yaml_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&yaml_path) {
-            if let Ok(yaml) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
-                if let Some(release) = yaml.get("release") {
-                    if let Some(artifact) = release.get("artifact") {
-                        return serde_yaml::from_value(artifact.clone()).ok();
-                    }
-                }
+    if let Some(yaml) = crate::repo::try_read_yaml_sync::<serde_yaml::Value>(&yaml_path) {
+        if let Some(release) = yaml.get("release") {
+            if let Some(artifact) = release.get("artifact") {
+                return serde_yaml::from_value(artifact.clone()).ok();
             }
         }
     }

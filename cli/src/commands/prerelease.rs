@@ -251,31 +251,27 @@ fn load_gates_config(working_dir: &Path) -> PreReleaseGatesConfig {
             working_dir.join("services/rust/backend/deploy.yaml")
         }
     };
-    if let Ok(content) = std::fs::read_to_string(&backend_deploy_yaml) {
+    if let Some(value) = crate::repo::try_read_yaml_sync::<serde_yaml::Value>(&backend_deploy_yaml)
+    {
         // Parse the YAML and extract prerelease config
-        if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
-            if let Some(prerelease) = value.get("prerelease") {
-                if let Ok(config) =
-                    serde_yaml::from_value::<PreReleaseGatesConfig>(prerelease.clone())
-                {
-                    eprintln!("📋 Loaded gate configuration from backend/deploy.yaml");
-                    return config;
-                }
+        if let Some(prerelease) = value.get("prerelease") {
+            if let Ok(config) = serde_yaml::from_value::<PreReleaseGatesConfig>(prerelease.clone())
+            {
+                eprintln!("📋 Loaded gate configuration from backend/deploy.yaml");
+                return config;
             }
         }
     }
 
     // Try to load from product-level deploy.yaml
     let product_deploy_yaml = working_dir.join("deploy.yaml");
-    if let Ok(content) = std::fs::read_to_string(&product_deploy_yaml) {
-        if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
-            if let Some(prerelease) = value.get("prerelease") {
-                if let Ok(config) =
-                    serde_yaml::from_value::<PreReleaseGatesConfig>(prerelease.clone())
-                {
-                    eprintln!("📋 Loaded gate configuration from product/deploy.yaml");
-                    return config;
-                }
+    if let Some(value) = crate::repo::try_read_yaml_sync::<serde_yaml::Value>(&product_deploy_yaml)
+    {
+        if let Some(prerelease) = value.get("prerelease") {
+            if let Ok(config) = serde_yaml::from_value::<PreReleaseGatesConfig>(prerelease.clone())
+            {
+                eprintln!("📋 Loaded gate configuration from product/deploy.yaml");
+                return config;
             }
         }
     }

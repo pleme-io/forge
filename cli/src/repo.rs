@@ -154,6 +154,60 @@ pub fn read_yaml_sync_hinted<T: DeserializeOwned>(
     })
 }
 
+/// Best-effort YAML load — returns `Some(T)` iff the file exists, is
+/// readable, AND parses as YAML into `T`. Any failure (missing file,
+/// read error, parse error) collapses to `None`.
+///
+/// The silent-probe sibling of [`read_yaml_sync`] on the fs-read arm.
+/// Where the canonical form propagates every failure with a rich
+/// `?`-shaped envelope (path + classifier), this form absorbs every
+/// failure at the primitive body so a caller's control flow reads as
+/// a simple `if let Some(yaml) = try_read_yaml_sync(&path) { ... }`.
+///
+/// # When to reach for this form
+///
+/// Reach for this primitive when a missing/malformed file is a
+/// LEGITIMATE fall-through, not an operator-visible defect — a probe
+/// that walks a chain of candidate paths, a backward-compatibility
+/// fallback whose `None` triggers a stricter loader downstream, a
+/// best-effort optional-config load whose absence means "use
+/// defaults". Reach for [`read_yaml_sync`] (or the hinted peer) when
+/// a missing/malformed file IS an operator-visible defect the
+/// runner's log must surface. The two primitives partition the fs-
+/// read arm cleanly: propagate-with-envelope on the operator-visible
+/// arm, silently-collapse-to-`None` on the probe arm. One primitive
+/// per side, no drift possible.
+///
+/// # Type parameter
+///
+/// `T: DeserializeOwned` — the same generic bound as
+/// [`read_yaml_sync`]. Consumers today all pass
+/// [`serde_yaml::Value`] and navigate via `.get(...)` chains, but a
+/// future consumer parsing into a closed struct (an `Option<Config>`
+/// probe) inherits the primitive by writing exactly ONE line.
+///
+/// # The pre-lift `.exists()` guard is redundant
+///
+/// Five pre-lift consumer sites (three in `config/mod.rs`, two in
+/// `commands/prerelease.rs`, one in `commands/rollback.rs`) split
+/// four ways in the outer control flow: two guarded the read arm
+/// with an outer `if path.exists()` before opening the file, three
+/// did not. Both shapes collapse identically at the primitive
+/// because `std::fs::read_to_string` returns `Err` (ENOENT) for a
+/// missing file — the `.ok()` on the read result absorbs it. Post-
+/// lift every consumer converges on the outer-guard-free shape by
+/// construction, closing a TOCTOU (time-of-check-to-time-of-use)
+/// class of defect that lived at the two guarded sites: pre-lift a
+/// concurrent `mv` between the `.exists()` sniff and the
+/// `read_to_string` call turned the "path missing" probe into a
+/// "path unreadable" error the outer guard promised to catch. The
+/// primitive collapses BOTH ENOENT paths at ONE code point, so no
+/// window remains.
+pub fn try_read_yaml_sync<T: DeserializeOwned>(path: &Path) -> Option<T> {
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_yaml::from_str(&content).ok()
+}
+
 /// Find repository root by looking for flake.nix
 ///
 /// Search order:
@@ -2410,5 +2464,98 @@ mod tests {
             .and_then(|p| p.get("namespace"))
             .and_then(|n| n.as_str());
         assert_eq!(namespace, Some("hive-prod"));
+    }
+
+    /// [`try_read_yaml_sync`] returns `Some(T)` on the happy path
+    /// against a well-formed YAML document, so the caller's
+    /// `if let Some(yaml) = try_read_yaml_sync(&path) { ... }`
+    /// shape enters the success branch and can navigate the document
+    /// tree. A regression that hard-coded a `None` return on the parse
+    /// arm (or that returned `Some(Default::default())` instead of the
+    /// actual parsed value) would fail here.
+    #[test]
+    fn try_read_yaml_sync_returns_some_on_well_formed_yaml() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("probe.yaml");
+        std::fs::write(&path, "name: hive-router\nreplicas: 3\n").expect("seed write");
+
+        let value: Option<serde_yaml::Value> = try_read_yaml_sync(&path);
+
+        let value = value.expect("well-formed YAML must probe as Some");
+        assert_eq!(
+            value.get("name").and_then(|n| n.as_str()),
+            Some("hive-router")
+        );
+        assert_eq!(value.get("replicas").and_then(|r| r.as_u64()), Some(3));
+    }
+
+    /// [`try_read_yaml_sync`] returns `None` for a missing path
+    /// WITHOUT propagating the underlying `std::io::Error` — the
+    /// caller uses this shape when a missing file is a legitimate
+    /// fall-through (a probe, a backward-compatibility fallback, an
+    /// optional-config load whose absence means "use defaults"), so
+    /// the primitive must ABSORB the ENOENT rather than propagate a
+    /// classifier. Pins the silent-probe contract on the read arm.
+    #[test]
+    fn try_read_yaml_sync_returns_none_on_missing_file_without_propagating() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("does-not-exist.yaml");
+
+        let value: Option<serde_yaml::Value> = try_read_yaml_sync(&path);
+
+        assert!(
+            value.is_none(),
+            "missing file must probe as None; got Some — the silent-probe \
+             contract on the read arm is broken"
+        );
+    }
+
+    /// [`try_read_yaml_sync`] returns `None` for a syntactically-
+    /// broken YAML file WITHOUT propagating the underlying
+    /// `serde_yaml::Error` — same silent-probe contract as the
+    /// missing-file arm, on the parse side. The caller has committed
+    /// to a fall-through and does not want a runner log to surface
+    /// this as an operator-visible error. Pins the parse-arm branch.
+    #[test]
+    fn try_read_yaml_sync_returns_none_on_invalid_yaml_without_propagating() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("broken.yaml");
+        std::fs::write(&path, "key: [unterminated\n").expect("seed write");
+
+        let value: Option<serde_yaml::Value> = try_read_yaml_sync(&path);
+
+        assert!(
+            value.is_none(),
+            "syntactically-broken YAML must probe as None; got Some — the \
+             silent-probe contract on the parse arm is broken"
+        );
+    }
+
+    /// [`try_read_yaml_sync`] parses at a closed target when the
+    /// caller wants an `Option<Config>`-shaped probe rather than an
+    /// `Option<serde_yaml::Value>` navigation. Pins that the primitive
+    /// is generic over `T: DeserializeOwned` — a regression that
+    /// specialized it to `serde_yaml::Value` would silently break any
+    /// future consumer that probes into a closed struct.
+    #[test]
+    fn try_read_yaml_sync_parses_at_closed_struct_target_when_caller_asks() {
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        struct Fixture {
+            name: String,
+            replicas: u32,
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("closed.yaml");
+        std::fs::write(&path, "name: hive-router\nreplicas: 3\n").expect("seed write");
+
+        let value: Option<Fixture> = try_read_yaml_sync(&path);
+
+        assert_eq!(
+            value,
+            Some(Fixture {
+                name: "hive-router".to_string(),
+                replicas: 3,
+            })
+        );
     }
 }
