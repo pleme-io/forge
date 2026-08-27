@@ -43,6 +43,45 @@ use crate::nix::build_docker_image_from_dir;
 use crate::repo::{find_repo_root, get_tool_path, in_directory, verify_directory};
 
 // ============================================================================
+// Tool sigils
+// ============================================================================
+
+/// Resolve the `cargo` binary via the `CARGO` env override, falling
+/// back to `cargo` on PATH. Every `cargo` spawn in this module reads
+/// through this sigil so the two-argument resolve happens in exactly
+/// one place — mirrors the sibling `crate2nix_bin()` sigil below and
+/// the `<tool>_bin()` sigil discipline every substrate-`<TOOL>` /
+/// `<TOOL>_BIN`-routed spawn surface in forge honors (`test_ci.rs`,
+/// `e2e.rs`, `developer_tools.rs`, `prerelease.rs`, `tool.rs`,
+/// `comprehensive_release.rs`, and the `bun_bin()` siblings on
+/// `codegen.rs`, `codegen_validation.rs`, `sync.rs` per 8407021).
+///
+/// The lone consumer is `regenerate`'s `run_cargo_update(&cargo)`
+/// call. Pre-lift the site spelled the two-argument resolve inline.
+/// A Nix-hermetic runner whose derivation exports
+/// `CARGO=/nix/store/…/bin/cargo` but omits `cargo` from PATH
+/// silently fell through to whatever `cargo` was first on PATH,
+/// defeating the substrate-pinned toolchain the bootstrap flake
+/// declared. Post-lift the resolve lives at ONE place — this sigil
+/// body — so a future added `cargo` spawn cannot silently re-copy
+/// the resolve inline and drift away from the `CARGO` override.
+fn cargo_bin() -> String {
+    get_tool_path("CARGO", "cargo")
+}
+
+/// Resolve the `crate2nix` binary via the `CRATE2NIX` env override,
+/// falling back to `crate2nix` on PATH. Same sigil discipline as
+/// `cargo_bin()` above; the lone consumer is `regenerate`'s
+/// `run_crate2nix(&crate2nix)` call. Post-lift the two-argument
+/// resolve lives at ONE place — this sigil body — so a future added
+/// `crate2nix` spawn cannot silently re-copy the resolve inline and
+/// drift away from the `CRATE2NIX` override at exactly the tier the
+/// hermetic-runner contract binds.
+fn crate2nix_bin() -> String {
+    get_tool_path("CRATE2NIX", "crate2nix")
+}
+
+// ============================================================================
 // Configuration
 // ============================================================================
 
@@ -628,8 +667,8 @@ pub async fn regenerate() -> Result<()> {
     verify_directory(&bootstrap_dir, &["Cargo.toml"])?;
 
     // Get tool paths
-    let cargo = get_tool_path("CARGO", "cargo");
-    let crate2nix = get_tool_path("CRATE2NIX", "crate2nix");
+    let cargo = cargo_bin();
+    let crate2nix = crate2nix_bin();
 
     info!("🔧 Using cargo: {}", cargo);
     info!("🔧 Using crate2nix: {}", crate2nix);
@@ -712,6 +751,59 @@ mod tests {
         assert!(
             url.starts_with("ghcr.io/pleme-io"),
             "must honour the env var: {url:?}"
+        );
+    }
+
+    /// Whole-module shield: no raw `Command::new("cargo")` may live in
+    /// `commands/bootstrap.rs`'s non-test body, `fn cargo_bin()` must
+    /// be defined, and the two-argument resolve must appear exactly
+    /// ONCE (only in the sigil body).
+    ///
+    /// Pre-lift `regenerate` spelled `let cargo = get_tool_path("CARGO",
+    /// "cargo");` inline. Post-lift the binding is
+    /// `let cargo = cargo_bin();` and the two-argument resolve appears
+    /// only in the sigil body. Same three-invariant discipline every
+    /// migrated `<tool>_bin()` shield enforces via the canonical
+    /// primitive — see the sibling `bun_bin()` landings on
+    /// `commands/codegen.rs`, `commands/codegen_validation.rs`, and
+    /// `commands/sync.rs` per 8407021, and the `cargo_bin()` sibling on
+    /// `commands/comprehensive_release.rs` per 08fdb86. A Nix-hermetic
+    /// runner exporting `CARGO=/nix/store/…-cargo/bin/cargo` while
+    /// omitting `cargo` from PATH would previously make a future added
+    /// consumer re-derive the same two-argument resolve independently,
+    /// so an edit to the override contract (say, switching to a derived
+    /// `CARGO_BIN` spelling) would have to touch every site rather than
+    /// this sigil's one body. Scan bounds run from file start to the
+    /// FIRST `\n#[cfg(test)]\n` marker so this shield's own docstring
+    /// mentions of the forbidden literal stay out of scope.
+    #[test]
+    fn test_bootstrap_routes_cargo_through_cargo_bin_sigil_not_raw_command() {
+        crate::test_support::assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resolve(
+            include_str!("bootstrap.rs"),
+            "commands/bootstrap.rs",
+            "cargo",
+            "CARGO",
+        );
+    }
+
+    /// Whole-module shield: no raw `Command::new("crate2nix")` may live
+    /// in `commands/bootstrap.rs`'s non-test body, `fn crate2nix_bin()`
+    /// must be defined, and the two-argument resolve must appear
+    /// exactly ONCE (only in the sigil body).
+    ///
+    /// Pre-lift `regenerate` spelled `let crate2nix = get_tool_path(
+    /// "CRATE2NIX", "crate2nix");` inline. Post-lift the binding is
+    /// `let crate2nix = crate2nix_bin();` and the resolve appears only
+    /// in the sigil body. Sibling to the `cargo_bin()` shield above
+    /// and the `crate2nix_bin()` sigils on `commands/web_service.rs`
+    /// and `commands/tool.rs`.
+    #[test]
+    fn test_bootstrap_routes_crate2nix_through_crate2nix_bin_sigil_not_raw_command() {
+        crate::test_support::assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resolve(
+            include_str!("bootstrap.rs"),
+            "commands/bootstrap.rs",
+            "crate2nix",
+            "CRATE2NIX",
         );
     }
 }
