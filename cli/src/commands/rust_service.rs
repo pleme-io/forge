@@ -334,7 +334,7 @@ pub async fn build_rust_service(
     }
 
     // Detect cross-compilation availability
-    let build_arm64 = env::var("BUILD_ARM64").unwrap_or_else(|_| "auto".to_string());
+    let build_arm64 = crate::repo::env_var_or_default("BUILD_ARM64", "auto");
     let should_build_arm64 = match build_arm64.as_str() {
         "no" => false,
         "force" => true,

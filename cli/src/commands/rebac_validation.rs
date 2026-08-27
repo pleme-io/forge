@@ -504,8 +504,7 @@ async fn check_redis_connectivity(
         println!("{}", "Check 6: Redis Connectivity".blue());
     }
 
-    let redis_url =
-        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
+    let redis_url = crate::repo::env_var_or_default("REDIS_URL", "redis://localhost:6379");
 
     // Try to ping Redis
     let redis_cli = redis_cli_bin();
