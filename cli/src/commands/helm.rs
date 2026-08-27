@@ -1862,15 +1862,46 @@ fn discover_charts(charts_dir: &str, exclude_name: &str) -> Result<Vec<String>> 
 
 /// Whether a chart opts OUT of OCI auto-release via
 /// `annotations["pleme.io/oci-auto-release"] == "false"` in its Chart.yaml.
+///
+/// The silent-probe fs-read + serde-parse prefix routes through
+/// [`crate::repo::try_read_yaml_sync`] — the primitive body 083018f
+/// closed on the missing-or-malformed-file-is-a-legitimate-fall-through
+/// contract. Pre-lift the body spelled the primitive's OWN shape
+/// verbatim (`std::fs::read_to_string(chart_dir.join("Chart.yaml"))
+/// .ok().and_then(|c| serde_yaml::from_str::<ChartYaml>(&c).ok())`),
+/// byte-similar to the primitive's `read_to_string(...).ok()? +
+/// serde_yaml::from_str(...).ok()` body at `repo.rs:206-208`. Post-lift
+/// the caller's body opens with a single-expression
+/// `try_read_yaml_sync::<ChartYaml>(&chart_dir.join("Chart.yaml"))`
+/// probe and threads the primitive's `Option<ChartYaml>` return through
+/// the pre-lift `.and_then / .map / .unwrap_or(false)` fold — the FIVE
+/// branches of the closed silent-probe contract (missing file,
+/// unparseable YAML, YAML without an `annotations:` map, YAML whose
+/// `annotations:` map lacks `pleme.io/oci-auto-release`, YAML whose
+/// annotation value is not the string `"false"`) all collapse to
+/// `false` by construction rather than by four separate `.unwrap_or`
+/// / `.and_then(None-yielding)` arms.
+///
+/// Sibling to [`crate::repo::standalone_deploy_yaml_has_name`] (929d911)
+/// on the discipline: both callers hand-rolled the primitive's OWN
+/// shape one function down from the primitive body pre-lift; post-lift
+/// both delegate through [`crate::repo::try_read_yaml_sync`] so the
+/// crate has EXACTLY ONE `read_to_string.ok()? + from_str.ok()` shell
+/// across production code. A future refinement of the silent-probe
+/// contract (an `.exists()` skip optimization, a canonicalize hook, a
+/// telemetry probe on the miss branch, a swap to
+/// `.filter(|s| !s.trim().is_empty())` semantics on the read arm) lands
+/// at the primitive body and reaches THIS caller (called once per
+/// chart-directory in `release_all`/`lint_all`'s discovery filter) by
+/// construction (THEORY §V — solve-once-at-the-primitive; §VI.1 —
+/// recurring-shape-to-helper).
 fn chart_oci_auto_release_disabled(chart_dir: &Path) -> bool {
     #[derive(serde::Deserialize)]
     struct ChartYaml {
         #[serde(default)]
         annotations: std::collections::BTreeMap<String, String>,
     }
-    std::fs::read_to_string(chart_dir.join("Chart.yaml"))
-        .ok()
-        .and_then(|c| serde_yaml::from_str::<ChartYaml>(&c).ok())
+    crate::repo::try_read_yaml_sync::<ChartYaml>(&chart_dir.join("Chart.yaml"))
         .and_then(|c| c.annotations.get("pleme.io/oci-auto-release").cloned())
         .map(|v| v == "false")
         .unwrap_or(false)
@@ -2113,6 +2144,170 @@ mod release_publish_tests {
         assert!(
             !chart_oci_auto_release_disabled(&lib2),
             "default must publish"
+        );
+    }
+
+    /// Post-lift the body of [`super::chart_oci_auto_release_disabled`]
+    /// forwards the fs-read + serde-parse prefix to
+    /// [`crate::repo::try_read_yaml_sync`] — the silent-probe primitive
+    /// body 083018f closed. Structural regression shield: without it, a
+    /// future refactor could silently re-inline the pre-lift
+    /// `std::fs::read_to_string(...).ok().and_then(|c|
+    /// serde_yaml::from_str::<ChartYaml>(&c).ok())` pair (e.g. a
+    /// helpful "just call read_to_string + from_str directly, it's
+    /// shorter" cleanup, a rename of the primitive that misses this
+    /// caller in the same commit) and reopen the duplication class this
+    /// lift closed — the same class the sibling
+    /// [`crate::repo::standalone_deploy_yaml_has_name`] shield (929d911)
+    /// pins for the walker's named-standalone terminal one function
+    /// down from the primitive body.
+    ///
+    /// Sibling to
+    /// `standalone_deploy_yaml_has_name_body_delegates_to_try_read_yaml_sync`
+    /// on the structural regression shield discipline. The delegation
+    /// call literal (`try_read_yaml_sync::<ChartYaml>(`) is spelled
+    /// explicitly against a `body.contains` needle so a future rename
+    /// of the primitive (a swap to `try_load_yaml`, a plural
+    /// `try_read_yaml_sync_all`) breaks the shield and forces the
+    /// rename to reach this consumer in the same commit rather than
+    /// drifting silently at one code point only.
+    #[test]
+    fn chart_oci_auto_release_disabled_body_delegates_to_try_read_yaml_sync() {
+        const SOURCE: &str = include_str!("helm.rs");
+        let body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/helm.rs",
+            "fn chart_oci_auto_release_disabled(chart_dir: &Path) -> bool {",
+            "\n}",
+        );
+        assert!(
+            body.contains("try_read_yaml_sync::<ChartYaml>("),
+            "chart_oci_auto_release_disabled() body must forward to \
+             `crate::repo::try_read_yaml_sync::<ChartYaml>(...)` — the \
+             silent-probe primitive body every fs-read + serde-parse \
+             pair in the crate now delegates through. Post-lift body: \
+             {body}"
+        );
+        assert!(
+            !body.contains("std::fs::read_to_string(") && !body.contains("fs::read_to_string("),
+            "chart_oci_auto_release_disabled() body must NOT spell the \
+             inline `std::fs::read_to_string(...)` needle — that fs-read \
+             half of the silent-probe pair was lifted onto \
+             `try_read_yaml_sync`. A re-inline would silently reopen the \
+             duplication class this shield exists to close. Post-lift \
+             body: {body}"
+        );
+        assert!(
+            !body.contains("serde_yaml::from_str"),
+            "chart_oci_auto_release_disabled() body must NOT spell the \
+             inline `serde_yaml::from_str::<ChartYaml>(...)` needle — that \
+             parse half of the silent-probe pair was lifted onto \
+             `try_read_yaml_sync`. A re-inline would silently reopen the \
+             duplication class this shield exists to close. Post-lift \
+             body: {body}"
+        );
+    }
+
+    /// [`super::chart_oci_auto_release_disabled`] preserves the pre-lift
+    /// `bool`-return semantics at every branch of the silent-probe
+    /// contract. Load-bearing: called once per chart-directory in the
+    /// `release_all` / `lint_all` discovery filter, and a silent branch
+    /// flip (missing → true, unparseable → true, no-annotations → true,
+    /// annotation-not-`"false"` → true) would either MISS a legitimate
+    /// opt-out (bogus republish of a forked library chart into the
+    /// shared registry, where versions are immutable) or SPUURIOUSLY
+    /// opt out an in-scope chart (silent skip of the release). The
+    /// five branches:
+    ///
+    /// 1. Missing Chart.yaml → `false` (the primitive's `None` on the
+    ///    read arm folds through `.and_then / .map / .unwrap_or(false)`).
+    /// 2. Unparseable Chart.yaml → `false` (the primitive's `None` on
+    ///    the parse arm folds through).
+    /// 3. Parseable Chart.yaml without an `annotations:` map → `false`
+    ///    (`serde(default)` yields an empty `BTreeMap`, so the inner
+    ///    `.get("pleme.io/oci-auto-release")` returns `None`).
+    /// 4. Parseable Chart.yaml with `annotations:` but no
+    ///    `pleme.io/oci-auto-release` key → `false` (same inner
+    ///    `.get(...) -> None`).
+    /// 5. Parseable Chart.yaml with `pleme.io/oci-auto-release: "true"`
+    ///    (or any non-`"false"` scalar) → `false` (the outer
+    ///    `.map(|v| v == "false")` yields `Some(false)`).
+    ///
+    /// The ONE branch that returns `true` — annotation present AND
+    /// equal to the string `"false"` — is already pinned by
+    /// [`a_lib_chart_can_opt_out_of_publishing`] above; this test pins
+    /// the four negative arms so the silent-probe contract at the
+    /// discovery-filter callsite cannot silently flip.
+    #[test]
+    fn chart_oci_auto_release_disabled_branches_match_pre_lift_contract() {
+        use super::chart_oci_auto_release_disabled;
+        let root = tempfile::tempdir().expect("root tempdir");
+
+        // (1) Missing Chart.yaml: dir exists, no file.
+        let missing_dir = root.path().join("missing");
+        std::fs::create_dir_all(&missing_dir).expect("create missing dir");
+        assert!(
+            !chart_oci_auto_release_disabled(&missing_dir),
+            "missing Chart.yaml must return false — the primitive's \
+             `None` on the read arm folds through `.and_then/.map/.unwrap_or`."
+        );
+
+        // (2) Unparseable Chart.yaml.
+        let unparseable_dir = root.path().join("unparseable");
+        std::fs::create_dir_all(&unparseable_dir).expect("create unparseable dir");
+        std::fs::write(unparseable_dir.join("Chart.yaml"), "\t{{\n")
+            .expect("write malformed Chart.yaml");
+        assert!(
+            !chart_oci_auto_release_disabled(&unparseable_dir),
+            "unparseable Chart.yaml must return false — the primitive's \
+             `None` on the parse arm folds through."
+        );
+
+        // (3) Parseable Chart.yaml without an `annotations:` map at all.
+        let no_ann_dir = root.path().join("no-annotations");
+        std::fs::create_dir_all(&no_ann_dir).expect("create no-annotations dir");
+        std::fs::write(
+            no_ann_dir.join("Chart.yaml"),
+            "apiVersion: v2\nname: c\nversion: 0.1.0\n",
+        )
+        .expect("write annotation-less Chart.yaml");
+        assert!(
+            !chart_oci_auto_release_disabled(&no_ann_dir),
+            "Chart.yaml without `annotations:` must return false — \
+             `serde(default)` yields an empty map, so \
+             `.get(\"pleme.io/oci-auto-release\")` returns None."
+        );
+
+        // (4) Parseable Chart.yaml with `annotations:` but WITHOUT the
+        // `pleme.io/oci-auto-release` key.
+        let unrelated_ann_dir = root.path().join("unrelated-annotation");
+        std::fs::create_dir_all(&unrelated_ann_dir).expect("create unrelated-annotation dir");
+        std::fs::write(
+            unrelated_ann_dir.join("Chart.yaml"),
+            "apiVersion: v2\nname: c\nversion: 0.1.0\n\
+             annotations:\n  pleme.io/some-other-key: \"anything\"\n",
+        )
+        .expect("write unrelated-annotation Chart.yaml");
+        assert!(
+            !chart_oci_auto_release_disabled(&unrelated_ann_dir),
+            "Chart.yaml whose annotations map lacks \
+             `pleme.io/oci-auto-release` must return false."
+        );
+
+        // (5) Annotation present but its value is NOT `"false"`.
+        let truthy_ann_dir = root.path().join("truthy-annotation");
+        std::fs::create_dir_all(&truthy_ann_dir).expect("create truthy-annotation dir");
+        std::fs::write(
+            truthy_ann_dir.join("Chart.yaml"),
+            "apiVersion: v2\nname: c\nversion: 0.1.0\n\
+             annotations:\n  pleme.io/oci-auto-release: \"true\"\n",
+        )
+        .expect("write truthy-annotation Chart.yaml");
+        assert!(
+            !chart_oci_auto_release_disabled(&truthy_ann_dir),
+            "Chart.yaml with `pleme.io/oci-auto-release: \"true\"` must \
+             return false — the outer `.map(|v| v == \"false\")` yields \
+             Some(false); only the string `\"false\"` opts out."
         );
     }
 
