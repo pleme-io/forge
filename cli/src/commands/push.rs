@@ -91,9 +91,7 @@ pub async fn update_kustomization(
     info!("📝 Updating kustomization: {}", kustomization_path);
 
     // Read current content
-    let content = tokio::fs::read_to_string(path)
-        .await
-        .context("Failed to read kustomization.yaml")?;
+    let content = crate::repo::read_text_async(path).await?;
 
     // Extract service name from registry for matching (last path component).
     // Falls back to the raw input only when the registry string has no

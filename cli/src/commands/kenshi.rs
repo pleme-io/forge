@@ -104,9 +104,7 @@ async fn update_kustomization_image(
     info!("📝 Updating: {}", kustomization_path);
 
     // Read content
-    let content = tokio::fs::read_to_string(path)
-        .await
-        .context("Failed to read kustomization.yaml")?;
+    let content = crate::repo::read_text_async(path).await?;
 
     let mut updated = false;
     let mut new_content = String::new();

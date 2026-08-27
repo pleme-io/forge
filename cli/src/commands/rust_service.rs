@@ -1914,9 +1914,7 @@ pub async fn deploy_rust_service_with_tag(
     // Read manifest and update image tag using targeted text replacement.
     // CRITICAL: Do NOT round-trip through serde_yaml - it destroys comments,
     // reformats multi-line strings (patch: | blocks), and can corrupt the file.
-    let manifest_content = tokio::fs::read_to_string(&manifest)
-        .await
-        .context("Failed to read manifest")?;
+    let manifest_content = crate::repo::read_text_async(Path::new(&manifest)).await?;
 
     let new_tag = tag_suffix.clone();
     let updated_manifest = update_kustomization_image_tag(&manifest_content, &service, &new_tag)?;

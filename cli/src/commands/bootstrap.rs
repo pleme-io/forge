@@ -504,9 +504,7 @@ pub async fn release(
     // Read kustomization and update bootstrap image tags using targeted text replacement.
     // CRITICAL: Do NOT round-trip through serde_yaml - it destroys comments,
     // reformats multi-line strings (patch: | blocks), and can corrupt the file.
-    let manifest_content = tokio::fs::read_to_string(&kustomization_path)
-        .await
-        .context("Failed to read kustomization.yaml")?;
+    let manifest_content = crate::repo::read_text_async(&kustomization_path).await?;
 
     let lines: Vec<&str> = manifest_content.lines().collect();
     let mut result = Vec::with_capacity(lines.len());

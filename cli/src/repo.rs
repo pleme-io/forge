@@ -266,11 +266,60 @@ pub fn try_read_yaml_sync<T: DeserializeOwned>(path: &Path) -> Option<T> {
 /// parse-Err path the read has already succeeded, so the offending
 /// file is present on disk and the operator can inspect it directly.
 pub async fn read_yaml_async<T: DeserializeOwned>(path: &Path) -> Result<T> {
-    let content = tokio::fs::read_to_string(path)
-        .await
-        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let content = read_text_async(path).await?;
     serde_yaml::from_str(&content)
         .with_context(|| format!("Failed to parse {} as YAML", path.display()))
+}
+
+/// Read the entire contents of a file at `path` into a `String`, on the
+/// async fs-read surface.
+///
+/// The text-mode sibling of [`read_yaml_async`] on the read arm: the
+/// canonical [`tokio::fs::read_to_string`] + [`anyhow::Context`] prefix
+/// every consumer that loads a file for line-oriented text mutation
+/// (`kustomization.yaml` `newTag:` splice, `Cargo.toml` `[[bin]]`
+/// sniff, `builder-pool.yaml` `agentImage:` splice) spelled inline
+/// pre-lift.
+///
+/// # Envelope
+///
+/// Read failure surfaces `"Failed to read {path}"` — operator's next
+/// step is `ls` on the exact path, matching the canonical read-arm
+/// envelope [`read_yaml_sync`] / [`read_yaml_async`] already carry.
+///
+/// Pre-lift ten sibling consumer sites spelled the primitive's OWN
+/// shape one level down from this body: a
+/// `tokio::fs::read_to_string(path).await.context("Failed to read
+/// <literal>")?` composition whose per-site `.context(...)` string
+/// (a) hard-coded a filename literal — `"kustomization.yaml"` at eight
+/// sites, `"builder-pool.yaml"` at one, `"Cargo.toml"` at one, `"manifest"`
+/// at one — that could drift from the actual `path` argument
+/// silently, and (b) DROPPED the offending `path.display()` from the
+/// failure classifier entirely, so an operator reading a runner log
+/// could not tell which of several candidate paths tripped the read.
+/// Post-lift the primitive's canonical `path.display()` envelope
+/// reaches every consumer by construction; the role the file plays in
+/// the caller is preserved by the caller's function name in the
+/// anyhow backtrace, not by a redundant filename literal inside the
+/// failure classifier.
+///
+/// # Sibling primitives
+///
+/// - YAML parse extension on the async surface: [`read_yaml_async`]
+///   composes over this primitive's read arm.
+/// - Sync YAML parse: [`read_yaml_sync`] owns the sync analogue's
+///   read+parse prefix at one code point; this primitive owns the
+///   async text-mode read only.
+///
+/// # Errors
+///
+/// Returns `Err` if the file cannot be read (missing, unreadable,
+/// EIO). The offending `path.display()` is threaded through the
+/// [`anyhow::Context`] envelope on every failure branch.
+pub async fn read_text_async(path: &Path) -> Result<String> {
+    tokio::fs::read_to_string(path)
+        .await
+        .with_context(|| format!("Failed to read {}", path.display()))
 }
 
 /// Find repository root by looking for flake.nix
@@ -2917,5 +2966,110 @@ mod tests {
             .and_then(|img| img.get("newTag"))
             .and_then(|tag| tag.as_str());
         assert_eq!(new_tag, Some("abcdef0"));
+    }
+
+    /// [`read_text_async`] returns the file's full contents verbatim,
+    /// so line-oriented consumers ([`crate::commands::push::
+    /// update_kustomization`] and its nine peers across
+    /// `commands/{kenshi,kenshi_agent,nix_builder,bootstrap,rust_service,
+    /// developer_tools}.rs`) receive the same byte-for-byte payload the
+    /// pre-lift inline `tokio::fs::read_to_string(path).await` did.
+    /// Pins that the primitive is a text-mode read — NOT a parse or a
+    /// trim — so YAML comments, trailing newlines, and CRLF sequences
+    /// (which each of the ten consumers relies on to preserve source
+    /// formatting through its splice-and-write mutator) survive the
+    /// round-trip.
+    #[tokio::test]
+    async fn read_text_async_returns_contents_verbatim() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("kustomization.yaml");
+        let payload = "# preserved comment\n\
+                       images:\n  \
+                       - name: ghcr.io/pleme-io/nix-builder\n    \
+                         newTag: amd64-abcdef0\n";
+        tokio::fs::write(&path, payload).await.expect("seed write");
+
+        let content = read_text_async(&path)
+            .await
+            .expect("well-formed file must read");
+
+        assert_eq!(
+            content, payload,
+            "read_text_async() must return the file bytes verbatim so \
+             every line-oriented text-splice consumer sees the same \
+             payload it did pre-lift"
+        );
+    }
+
+    /// [`read_text_async`]'s read arm must surface the offending
+    /// `path.display()` AND classify the failure as a READ error, so
+    /// the operator's next step is `ls` on the exact path. Pins the
+    /// primitive to the same envelope discipline the async YAML
+    /// sibling [`read_yaml_async`] and the sync sibling
+    /// [`read_yaml_sync`] carry — one primitive per fs-read surface,
+    /// same canonical operator-next-step contract. Pre-lift ten
+    /// consumer sites carried their own per-site literal
+    /// (`"Failed to read kustomization.yaml"`,
+    /// `"Failed to read builder-pool.yaml"`,
+    /// `"Failed to read Cargo.toml"`, `"Failed to read manifest"`)
+    /// that (a) hard-coded a filename that could drift from the actual
+    /// `path` argument silently and (b) DROPPED the offending
+    /// `path.display()` from the failure classifier entirely, so an
+    /// operator reading a runner log could not tell which of several
+    /// candidate paths tripped the read. This shield forbids that
+    /// regression.
+    #[tokio::test]
+    async fn read_text_async_missing_file_errors_carry_path_and_read_classifier() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("missing.yaml");
+
+        let err = read_text_async(&path).await.unwrap_err();
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Failed to read"),
+            "read-arm classifier must be 'Failed to read'; got: {msg}"
+        );
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "read-arm envelope must carry the offending path; got: {msg}"
+        );
+    }
+
+    /// Post-lift [`read_yaml_async`]'s body must delegate its read arm
+    /// to [`read_text_async`] rather than re-spelling the inline
+    /// `tokio::fs::read_to_string(path).await` composition — the shape
+    /// this lift closed for the ten straggler consumer sites. Without
+    /// this shield a future refactor could silently re-inline the
+    /// shape (e.g. a helpful "just call `tokio::fs::read_to_string`
+    /// directly, it's shorter" cleanup) and reopen the duplication
+    /// class this lift closed, leaving [`read_yaml_async`]'s read arm
+    /// diverged from the ten sibling text-mode consumers that now
+    /// route through [`read_text_async`].
+    #[test]
+    fn read_yaml_async_body_delegates_to_read_text_async_on_read_arm() {
+        const SOURCE: &str = include_str!("repo.rs");
+        let body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "repo.rs",
+            "pub async fn read_yaml_async<T: DeserializeOwned>(path: &Path) -> Result<T> {",
+            "\n}",
+        );
+        assert!(
+            body.contains("read_text_async(path)"),
+            "read_yaml_async() body must forward its read arm to \
+             `read_text_async(path)` — the primitive body every \
+             async text-mode read in the crate now delegates through. \
+             Post-lift body: {body}"
+        );
+        assert!(
+            !body.contains("tokio::fs::read_to_string(path)"),
+            "read_yaml_async() body must NOT spell the inline \
+             `tokio::fs::read_to_string(path).await` shape — that \
+             duplication was lifted onto `read_text_async`. A \
+             re-inline would silently diverge the read arm from the \
+             ten sibling text-mode consumers routing through the \
+             primitive. Post-lift body: {body}"
+        );
     }
 }
