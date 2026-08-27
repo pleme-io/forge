@@ -464,37 +464,96 @@ pub async fn get_short_sha_async_in(workdir: &Path) -> Result<String> {
     read_head_sha_async(HeadShaForm::Short7, Some(workdir)).await
 }
 
+/// The async YAML read-modify-write shell.
+///
+/// Reads `path` as UTF-8, parses it as a [`serde_yaml::Value`], hands
+/// `mutator` a `&mut` reference so the caller can splice into the parsed
+/// document in place, then serializes the (possibly-mutated) value and
+/// writes it back to `path`. Every error carries `path.display()` in its
+/// [`anyhow::Context`] so a Nix-hermetic runner sees the exact file that
+/// failed instead of a per-consumer semantic-role label that decouples
+/// from the offending path.
+///
+/// # Why this primitive
+///
+/// Pre-lift two byte-similar consumer sites in this module — [`update_manifest`]
+/// (kustomization.yaml `images[].newTag` splice) and
+/// [`update_configmap_git_sha`] (ConfigMap `data.GIT_SHA` splice, plus a
+/// web-specific `env.js` `GIT_SHA_PLACEHOLDER` sub-replace) — each hand-
+/// rolled the same five-line
+/// `tokio::fs::read_to_string + .context(?) + serde_yaml::from_str +
+/// .context(?) + mutate + serde_yaml::to_string + .context(?) +
+/// tokio::fs::write + .context(?)` shell around their per-site mutation.
+/// The two shells carried the load-bearing per-consumer envelope drift
+/// this primitive redeems: the read-context strings were
+/// `"Failed to read kustomization.yaml"` vs `"Failed to read ConfigMap file"`,
+/// the parse-context strings were
+/// `"Failed to parse kustomization.yaml as YAML"` vs
+/// `"Failed to parse ConfigMap as YAML"`, the write-context strings were
+/// `"Failed to write kustomization.yaml"` vs `"Failed to write ConfigMap"`
+/// — a fleet-wide grep for the offending YAML site's diagnostic returned
+/// six different needles, and the pre-lift per-consumer role labels
+/// (`kustomization.yaml`, `ConfigMap file`, `ConfigMap`) were decoupled
+/// from the actual path a Nix-hermetic runner failed on. The primitive's
+/// canonical `"Failed to <op> {}", path.display()` envelope surfaces the
+/// exact file on every branch by construction.
+///
+/// # THEORY grounding
+///
+/// - THEORY.md §V (solve-once-at-the-primitive): the async YAML read-
+///   modify-write shell (including its canonical
+///   read/parse/serialize/write envelope) now lives at exactly one code
+///   line across the crate (`yaml_read_modify_write_async` at
+///   `git.rs`), so every consumer observes the same envelope by
+///   construction rather than by convention.
+/// - THEORY.md §VI.1 (recurring-shape-to-helper): two byte-similar
+///   five-line stanzas across two consumer sites in the same module,
+///   each spelling the same async-fs + serde_yaml round-trip.
+///
+/// # Sibling primitive
+///
+/// Sync sibling on the version-writer frontier:
+/// [`crate::version::apply_version_write`], which drives an arbitrary
+/// content transformer (`FnOnce(&str, &str) -> Result<String>`) on
+/// `std::fs::read_to_string` + `std::fs::write`. This primitive lifts
+/// the async half of the surface and specializes on parsed-YAML in-
+/// place mutation (`FnOnce(&mut serde_yaml::Value) -> Result<()>`) —
+/// the shape both consumer sites already had.
+async fn yaml_read_modify_write_async<F>(path: &Path, mutator: F) -> Result<()>
+where
+    F: FnOnce(&mut serde_yaml::Value) -> Result<()>,
+{
+    let content = tokio::fs::read_to_string(path)
+        .await
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let mut yaml: serde_yaml::Value = serde_yaml::from_str(&content)
+        .with_context(|| format!("Failed to parse {} as YAML", path.display()))?;
+    mutator(&mut yaml).with_context(|| format!("Failed to mutate {}", path.display()))?;
+    let updated = serde_yaml::to_string(&yaml)
+        .with_context(|| format!("Failed to serialize {} as YAML", path.display()))?;
+    tokio::fs::write(path, updated)
+        .await
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+    Ok(())
+}
+
 /// Update kustomization.yaml with new image tag
 /// This function updates the `images[].newTag` field in a Kustomize file
 pub async fn update_manifest(manifest_path: &Path, _old_tag: &str, new_tag: &str) -> Result<()> {
-    let content = tokio::fs::read_to_string(manifest_path)
-        .await
-        .context("Failed to read kustomization.yaml")?;
-
-    // Parse YAML
-    let mut yaml: serde_yaml::Value =
-        serde_yaml::from_str(&content).context("Failed to parse kustomization.yaml as YAML")?;
-
-    // Update images[].newTag field
-    if let Some(images) = yaml.get_mut("images").and_then(|v| v.as_sequence_mut()) {
-        for image in images {
-            if let Some(new_tag_field) = image.get_mut("newTag") {
-                // Replace the newTag value
-                *new_tag_field = serde_yaml::Value::String(new_tag.to_string());
+    let new_tag = new_tag.to_string();
+    yaml_read_modify_write_async(manifest_path, move |yaml| {
+        if let Some(images) = yaml.get_mut("images").and_then(|v| v.as_sequence_mut()) {
+            for image in images {
+                if let Some(new_tag_field) = image.get_mut("newTag") {
+                    *new_tag_field = serde_yaml::Value::String(new_tag.clone());
+                }
             }
+        } else {
+            anyhow::bail!("No 'images' section found in kustomization.yaml");
         }
-    } else {
-        anyhow::bail!("No 'images' section found in kustomization.yaml");
-    }
-
-    // Serialize back to YAML with proper formatting
-    let updated = serde_yaml::to_string(&yaml).context("Failed to serialize YAML")?;
-
-    tokio::fs::write(manifest_path, updated)
-        .await
-        .context("Failed to write kustomization.yaml")?;
-
-    Ok(())
+        Ok(())
+    })
+    .await
 }
 
 /// Update service ConfigMap with GIT_SHA
@@ -527,42 +586,31 @@ pub async fn update_configmap_git_sha(manifest_path: &Path, git_sha: &str) -> Re
         return Ok(());
     }
 
-    let content = tokio::fs::read_to_string(&config_map_path)
-        .await
-        .context("Failed to read ConfigMap file")?;
+    let is_web = service_name == "web";
+    let git_sha = git_sha.to_string();
+    yaml_read_modify_write_async(&config_map_path, move |yaml| {
+        if let Some(data) = yaml.get_mut("data").and_then(|v| v.as_mapping_mut()) {
+            data.insert(
+                serde_yaml::Value::String("GIT_SHA".to_string()),
+                serde_yaml::Value::String(git_sha.clone()),
+            );
 
-    // Parse YAML
-    let mut yaml: serde_yaml::Value =
-        serde_yaml::from_str(&content).context("Failed to parse ConfigMap as YAML")?;
-
-    // Update data.GIT_SHA field
-    if let Some(data) = yaml.get_mut("data").and_then(|v| v.as_mapping_mut()) {
-        data.insert(
-            serde_yaml::Value::String("GIT_SHA".to_string()),
-            serde_yaml::Value::String(git_sha.to_string()),
-        );
-
-        // For web service, also replace GIT_SHA_PLACEHOLDER in env.js
-        if service_name == "web" {
-            if let Some(env_js) = data.get_mut(&serde_yaml::Value::String("env.js".to_string())) {
-                if let Some(env_js_str) = env_js.as_str() {
-                    let updated_env_js = env_js_str.replace("GIT_SHA_PLACEHOLDER", git_sha);
-                    *env_js = serde_yaml::Value::String(updated_env_js);
+            // For web service, also replace GIT_SHA_PLACEHOLDER in env.js
+            if is_web {
+                if let Some(env_js) = data.get_mut(&serde_yaml::Value::String("env.js".to_string()))
+                {
+                    if let Some(env_js_str) = env_js.as_str() {
+                        let updated_env_js = env_js_str.replace("GIT_SHA_PLACEHOLDER", &git_sha);
+                        *env_js = serde_yaml::Value::String(updated_env_js);
+                    }
                 }
             }
+        } else {
+            anyhow::bail!("No 'data' section found in ConfigMap");
         }
-    } else {
-        anyhow::bail!("No 'data' section found in ConfigMap");
-    }
-
-    // Serialize back to YAML with proper formatting
-    let updated = serde_yaml::to_string(&yaml).context("Failed to serialize YAML")?;
-
-    tokio::fs::write(&config_map_path, updated)
-        .await
-        .context("Failed to write ConfigMap")?;
-
-    Ok(())
+        Ok(())
+    })
+    .await
 }
 
 /// Commit and push changes in an explicit working directory.
@@ -1192,6 +1240,143 @@ mod tests {
     /// `nix.rs`'s `make_nix_shim` and `attic.rs`'s `make_attic_shim`.
     fn make_git_shim(body: &str) -> (tempfile::TempDir, String) {
         make_executable_shim("git", body)
+    }
+
+    /// [`yaml_read_modify_write_async`] delegates the mutation callback
+    /// on a well-formed YAML round-trip: read succeeds, parse succeeds,
+    /// mutator observes the parsed [`serde_yaml::Value`] tree, and the
+    /// mutated form lands on disk. Pins the primitive's contract that a
+    /// mutator's edits are what appears in the post-write bytes — a
+    /// regression that dropped the mutator call (or serialized the pre-
+    /// mutation value) would fail this test.
+    #[tokio::test]
+    async fn test_yaml_read_modify_write_async_delegates_mutation_and_writes_result() {
+        let dir = tempfile::tempdir().expect("scratch tempdir");
+        let path = dir.path().join("doc.yaml");
+        std::fs::write(&path, "images:\n- name: web\n  newTag: v1.0.0\n").expect("seed");
+
+        yaml_read_modify_write_async(&path, |yaml| {
+            let images = yaml
+                .get_mut("images")
+                .and_then(|v| v.as_sequence_mut())
+                .expect("images sequence");
+            for image in images {
+                if let Some(new_tag) = image.get_mut("newTag") {
+                    *new_tag = serde_yaml::Value::String("v2.0.0".to_string());
+                }
+            }
+            Ok(())
+        })
+        .await
+        .expect("read-modify-write must succeed on a valid document");
+
+        let written = std::fs::read_to_string(&path).expect("post-write read");
+        assert!(
+            written.contains("v2.0.0"),
+            "mutator's splice must appear in the post-write bytes: {written:?}"
+        );
+        assert!(
+            !written.contains("v1.0.0"),
+            "pre-mutation value must not appear in the post-write bytes: {written:?}"
+        );
+    }
+
+    /// [`yaml_read_modify_write_async`]'s read arm must surface a read
+    /// failure with `path.display()` in the anyhow context. Pins that a
+    /// Nix-hermetic runner observing the failure can grep the failing
+    /// path directly out of the anyhow chain rather than needing to
+    /// correlate a per-consumer semantic-role label with the offending
+    /// file.
+    #[tokio::test]
+    async fn test_yaml_read_modify_write_async_missing_file_errors_carry_path() {
+        let dir = tempfile::tempdir().expect("scratch tempdir");
+        let path = dir.path().join("does-not-exist.yaml");
+
+        let err = yaml_read_modify_write_async(&path, |_| Ok(()))
+            .await
+            .expect_err("missing file must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "read failure must carry the offending path in the anyhow \
+             chain (not a per-consumer semantic-role label decoupled \
+             from the actual file): {msg:?}"
+        );
+        assert!(
+            msg.contains("Failed to read"),
+            "read failure must classify as a read failure so an operator's \
+             next step is `ls` on the path, not `yamllint`: {msg:?}"
+        );
+    }
+
+    /// [`yaml_read_modify_write_async`]'s parse arm must surface a
+    /// parse failure with `path.display()` and a `Failed to parse ... as
+    /// YAML` classifier — proves the primitive distinguishes a
+    /// syntactic-YAML failure from a read failure so an operator's next
+    /// step is `yamllint` on the path, not `ls` or `cat`.
+    #[tokio::test]
+    async fn test_yaml_read_modify_write_async_invalid_yaml_errors_carry_path() {
+        let dir = tempfile::tempdir().expect("scratch tempdir");
+        let path = dir.path().join("broken.yaml");
+        // Unclosed flow mapping — parses as an error rather than a
+        // structural warning.
+        std::fs::write(&path, "{a: 1, b: 2\n").expect("seed broken YAML");
+
+        let err = yaml_read_modify_write_async(&path, |_| Ok(()))
+            .await
+            .expect_err("invalid YAML must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "parse failure must carry the offending path in the anyhow \
+             chain: {msg:?}"
+        );
+        assert!(
+            msg.contains("Failed to parse") && msg.contains("as YAML"),
+            "parse failure must classify as a YAML parse failure so an \
+             operator's next step is `yamllint` on the path, not `ls` or \
+             a re-write: {msg:?}"
+        );
+    }
+
+    /// A mutator that returns `Err` must bubble the error verbatim
+    /// through `yaml_read_modify_write_async`'s `.context()` envelope,
+    /// and no write must land on disk. Pins the primitive's contract
+    /// that a mutator-refused mutation is a HARD failure — never
+    /// silently discarded — and that the pre-mutation bytes remain
+    /// authoritative until a successful serialize+write. A regression
+    /// that swapped the `?` propagation for a `let _ = mutator(...)`
+    /// would fail this test.
+    #[tokio::test]
+    async fn test_yaml_read_modify_write_async_mutator_error_bubbles_and_leaves_file_untouched() {
+        let dir = tempfile::tempdir().expect("scratch tempdir");
+        let path = dir.path().join("doc.yaml");
+        let seed = "key: value\n";
+        std::fs::write(&path, seed).expect("seed");
+
+        let err =
+            yaml_read_modify_write_async(&path, |_| anyhow::bail!("mutator refuses to write"))
+                .await
+                .expect_err("mutator error must bubble");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("mutator refuses to write"),
+            "mutator error must be preserved verbatim in the anyhow \
+             chain: {msg:?}"
+        );
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "mutator failure must carry the offending path in the \
+             anyhow chain: {msg:?}"
+        );
+
+        let on_disk = std::fs::read_to_string(&path).expect("read post-fail");
+        assert_eq!(
+            on_disk, seed,
+            "mutator failure must leave the file byte-identical to its \
+             pre-call content — a partial write on the mutator-Err path \
+             would corrupt state on a re-run"
+        );
     }
 
     /// When the resolved git binary cannot be spawned,

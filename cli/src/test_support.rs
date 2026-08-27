@@ -7338,6 +7338,141 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         );
     }
 
+    /// Crate-wide shield: the multi-line
+    /// `tokio::fs::read_to_string(path).await + serde_yaml::from_str +
+    /// ...mutate... + serde_yaml::to_string + tokio::fs::write(path,
+    /// updated).await` async YAML read-modify-write stanza is reserved
+    /// for the shell primitive body at
+    /// [`crate::git::yaml_read_modify_write_async`] — every consumer
+    /// of the "read a YAML file, splice into the parsed document, write
+    /// the result back" carve-out must route through the primitive
+    /// instead. Pre-lift the stanza lived at exactly two consumer
+    /// sites in `cli/src/git.rs`:
+    /// [`crate::git::update_manifest`] (kustomization.yaml
+    /// `images[].newTag` splice) and
+    /// [`crate::git::update_configmap_git_sha`] (ConfigMap `data.GIT_SHA`
+    /// splice), each carrying its own read/parse/write context strings
+    /// that decoupled from the offending path. The primitive owns the
+    /// canonical `"Failed to <op> {}", path.display()` envelope at ONE
+    /// body across the crate, so every consumer surfaces the offending
+    /// path on every failure branch by construction rather than by
+    /// convention.
+    ///
+    /// # Multi-line detection via bounded regex
+    ///
+    /// The stanza spans eight-to-sixteen source lines depending on
+    /// whether the caller inlines the read/parse/serialize/write onto
+    /// one binding or splits each across intermediate lets and how
+    /// deep the in-place mutation nests. A bounded regex
+    /// `tokio::fs::read_to_string\([\s\S]{0,400}?serde_yaml::from_str\
+    /// [\s\S]{0,1200}?serde_yaml::to_string\([\s\S]{0,400}?\
+    /// tokio::fs::write` matches the read opener + up-to-400 bytes of
+    /// intervening await/context + the parse opener + up-to-1200 bytes
+    /// of intervening in-place mutation + the serialize closer +
+    /// up-to-400 bytes of intervening await/context + the write closer
+    /// — generous for the widest observed shape (async read + parse +
+    /// multi-step in-place mutation across a nested `if let
+    /// Some(...)` block + serialize + async write) yet tight enough
+    /// that an unrelated `serde_yaml::from_str` (used to sniff a
+    /// document's `kind` inside a `for` loop, e.g., the multi-document
+    /// hive-router deployment splice at
+    /// `commands/federation.rs::synchronize_supergraph_across_services`)
+    /// cannot straddle the window. Requiring both the async-`fs::read`
+    /// opener AND the async-`fs::write` closer bounds the shield to
+    /// the "read a WHOLE file, splice, write it back" shape the
+    /// primitive redeems — a multi-document-split-and-recombine
+    /// consumer (which writes the joined `\n---\n`-separated documents,
+    /// not the parsed value's `to_string` output) is a distinct shape
+    /// that is not what this primitive is for.
+    ///
+    /// # Skipped files
+    ///
+    /// - `test_support.rs` — this shield's own docstring quotes the
+    ///   stanza verbatim; scanning would self-match.
+    /// - `git.rs` — the primitive module carries the shell body itself
+    ///   AND unit tests that exercise the round-trip end-to-end. The
+    ///   comment-blind pass below strips `///` prefixes before matching,
+    ///   but the primitive body at
+    ///   [`crate::git::yaml_read_modify_write_async`] is naturally the
+    ///   ONE authorized use, so skipping the whole file is both simpler
+    ///   and honest about the intent.
+    ///
+    /// # Sibling shields
+    ///
+    /// Multi-line peer to
+    /// [`kubectl_output_spawn_anyhow_pre_lift_stanza_confined_to_primitive`]
+    /// and
+    /// [`git_commit_idempotent_pre_lift_stanza_confined_to_primitive`]
+    /// on the shell frontier; same walk-tree discipline: enumerate
+    /// every `.rs` file, name every offender with its relative path
+    /// and 1-indexed line of the `serde_yaml::from_str` opener.
+    #[test]
+    fn yaml_read_modify_write_async_pre_lift_stanza_confined_to_primitive() {
+        let crate_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let pattern = concat!(
+            r#"tokio::fs::read_to_string\([\s\S]{0,400}?"#,
+            r#"serde_yaml::from_str[\s\S]{0,1200}?"#,
+            r#"serde_yaml::to_string\([\s\S]{0,400}?"#,
+            r#"tokio::fs::write"#,
+        );
+        let re = regex::Regex::new(pattern).expect("pre-lift stanza regex must compile");
+        let mut offenders: Vec<String> = Vec::new();
+        walk_rs_files(&crate_src, &mut |path| {
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if name == "test_support.rs" || name == "git.rs" {
+                return;
+            }
+            let raw =
+                std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+            // Strip `///` / `//!` / `//` comment lines so a doc-block
+            // that quotes the stanza does not self-match. Preserve
+            // line count so 1-indexed offender lines still resolve.
+            let stripped: String = raw
+                .lines()
+                .map(|l| {
+                    let t = l.trim_start();
+                    if t.starts_with("///") || t.starts_with("//!") || t.starts_with("//") {
+                        ""
+                    } else {
+                        l
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            for m in re.find_iter(&stripped) {
+                let line = stripped[..m.start()].matches('\n').count() + 1;
+                let rel = path
+                    .strip_prefix(&crate_src)
+                    .unwrap_or(path)
+                    .display()
+                    .to_string();
+                offenders.push(format!("{rel}:{line}"));
+            }
+        });
+        assert!(
+            offenders.is_empty(),
+            "the inline `serde_yaml::from_str(...) + ...mutate... + \
+             serde_yaml::to_string(...)` YAML read-modify-write stanza \
+             is reserved for the shell primitive body at \
+             `crate::git::yaml_read_modify_write_async` — every \
+             consumer of the \"read a YAML file, splice into the parsed \
+             document, write the result back\" carve-out must route \
+             through the primitive instead. The primitive owns the \
+             canonical `\"Failed to <op> {{}}\", path.display()` envelope \
+             at ONE body across the crate, so every consumer surfaces \
+             the offending path on every failure branch by \
+             construction. A future refinement of the shape (structured \
+             telemetry on the parse-failure path, a swap to `serde_yml` \
+             for the round-trip, a dry-run guarded variant that computes \
+             the mutated content without writing, or a byte-length \
+             delta check between pre- and post-mutation content) lands \
+             at `yaml_read_modify_write_async` and reaches every \
+             consumer for free. Offending sites (line = \
+             `serde_yaml::from_str` opener):\n{}",
+            offenders.join("\n")
+        );
+    }
+
     /// Recursively walk every `.rs` file under `dir`, invoking `visit`
     /// on each. Skips `target/` directories defensively even though
     /// none should live under `cli/src/`.
