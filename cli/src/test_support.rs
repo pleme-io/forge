@@ -6984,6 +6984,109 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         );
     }
 
+    /// Crate-wide shield: the inline
+    /// `env::var("<NAME>").unwrap_or_else(|_| "<DEFAULT>".to_string())`
+    /// sigil is reserved for the primitive body at
+    /// [`crate::repo::env_var_or_default`] — every consumer of the
+    /// env-var-with-`String`-fallback shape must route through the
+    /// primitive instead. Pre-lift eleven sibling sigils across the
+    /// crate spelled the shape verbatim (`crate::repo::get_environment`
+    /// at repo.rs:392, `crate::infrastructure::attic::attic_server_alias`
+    /// at infrastructure/attic.rs:88,
+    /// `crate::config::product::default_cluster` at config/product.rs:160,
+    /// `crate::repo::get_tool_path` at repo.rs and its `_custom`
+    /// overload at tools.rs — lifted at 24a69b6, the two `get_registry_base`
+    /// sites — lifted at 59ac303, and the three
+    /// `commands/sessions.rs::ProductConfig::for_product` sites lifted
+    /// at ef11d3c). This shield closes the remaining two sites the
+    /// sibling per-consumer shields left un-audited: `BUILD_ARM64` at
+    /// `commands/rust_service.rs:337` and `REDIS_URL` at
+    /// `commands/rebac_validation.rs:508` — both spelling the identical
+    /// shape past THEORY §VI.1's three-times threshold when combined
+    /// with the eleven prior consumers. Post-lift the two sites each
+    /// forward to `crate::repo::env_var_or_default(NAME, DEFAULT)`
+    /// verbatim; a re-inline would silently reopen the shape at the
+    /// crate-wide surface and this shield fires with the exact
+    /// offender file and line.
+    ///
+    /// # Comment-blind scan
+    ///
+    /// The scanner skips `//` / `///` / `//!` lines before matching
+    /// so a doc comment that mentions the pre-lift shape verbatim
+    /// (`/// like `env::var(...)... `.to_string())` — DON'T`) does
+    /// not inflate the tally. The primitive body at repo.rs:303 —
+    /// `std::env::var(env_var).unwrap_or_else(|_| default.to_string())`
+    /// — is naturally excluded: its `env::var` argument is the
+    /// parameter binding `env_var`, not a `"<CAPS_LITERAL>"` string,
+    /// so it fails the string-literal predicate the scanner applies.
+    /// `test_support.rs` is skipped by path so this shield's own
+    /// docstring literal mentions do not self-match.
+    ///
+    /// # Sibling shields
+    ///
+    /// Fifth crate-wide walk-tree shield in the same family as
+    /// [`env_var_snapshot_pre_lift_inline_restore_stanza_confined_to_test_support`]
+    /// (Result-shaped inline stanza — e353a0c),
+    /// [`env_var_snapshot_pre_lift_snapshot_struct_shape_confined_to_test_support`]
+    /// (snapshot struct — 5b2602f),
+    /// [`env_var_scope_pre_lift_scope_struct_shape_confined_to_test_support`]
+    /// (scope struct — 26fc8da), and
+    /// [`env_var_snapshot_pre_lift_option_shaped_restore_stanza_confined_to_test_support`]
+    /// (Option-shaped inline stanza — 090e137). Same walk-tree
+    /// discipline: enumerate every `.rs` file, filter comments,
+    /// name every offender with its relative path and 1-indexed line.
+    #[test]
+    fn env_var_or_default_pre_lift_inline_sigil_confined_to_repo() {
+        let crate_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders: Vec<String> = Vec::new();
+        walk_rs_files(&crate_src, &mut |path| {
+            if path.file_name().and_then(|s| s.to_str()) == Some("test_support.rs") {
+                return;
+            }
+            let contents =
+                std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+            for (i, line) in contents.lines().enumerate() {
+                let t = line.trim_start();
+                if t.starts_with("///") || t.starts_with("//!") || t.starts_with("//") {
+                    continue;
+                }
+                if !line.contains("env::var(\"") {
+                    continue;
+                }
+                if !line.contains(".unwrap_or_else(|_|") {
+                    continue;
+                }
+                if !line.contains(".to_string())") {
+                    continue;
+                }
+                let rel = path
+                    .strip_prefix(&crate_src)
+                    .unwrap_or(path)
+                    .display()
+                    .to_string();
+                offenders.push(format!("{rel}:{}: {}", i + 1, line.trim()));
+            }
+        });
+        assert!(
+            offenders.is_empty(),
+            "the inline `env::var(\"<NAME>\").unwrap_or_else(|_| \
+             \"<DEFAULT>\".to_string())` sigil is reserved for the \
+             primitive body at `crate::repo::env_var_or_default` — every \
+             consumer of the env-var-with-`String`-fallback shape must \
+             route through the primitive instead. The primitive owns the \
+             `.unwrap_or_else(|_| ...)` empty-string-parity semantics at \
+             ONE body across the crate, so every consumer observes the \
+             same projection by construction rather than by convention. \
+             A future refinement of the shape (logging every resolve, \
+             canonicalizing the value against a closed enum, telemetry \
+             separating explicit-value from default-fallback paths, or a \
+             swap to a typed `substrate::EnvVar(String)` newtype) lands \
+             at `env_var_or_default` and reaches every consumer for free. \
+             Offending sites:\n{}",
+            offenders.join("\n")
+        );
+    }
+
     /// Recursively walk every `.rs` file under `dir`, invoking `visit`
     /// on each. Skips `target/` directories defensively even though
     /// none should live under `cli/src/`.
