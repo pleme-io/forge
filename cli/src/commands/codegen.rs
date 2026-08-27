@@ -14,6 +14,37 @@ use tokio::process::Command;
 
 use crate::repo::get_tool_path;
 
+/// Resolve the `bun` binary via the `BUN_BIN` env override, falling back
+/// to `bun` on `PATH`. Wired through [`crate::repo::get_tool_path`] —
+/// the canonical env-var-or-PATH lookup every bun-invocation site in
+/// forge honors. Landing of the `bun_bin()` sigil onto
+/// `commands/codegen.rs` alongside the sibling landings on
+/// `commands/frontend_validation.rs::bun_bin` (9986f11) and
+/// `commands/e2e.rs::bun_bin` — the pattern is proven; this module
+/// was one of the three remaining call sites (with
+/// `commands/codegen_validation.rs` and `commands/sync.rs`) still
+/// respelling the two-argument `BUN_BIN` resolve inline at its bun
+/// spawns.
+///
+/// Solve-once at the sigil (THEORY §I.5 — duplication budget zero;
+/// every recurring shape becomes a helper before it becomes duplicated
+/// code) means a future added `bun` spawn in this module cannot
+/// silently re-copy the two-argument resolve and drift away from the
+/// `BUN_BIN` override at exactly the tier the hermetic-runner contract
+/// binds — the surface `forge codegen` invokes on every
+/// schema-export-then-graphql-codegen run, where a wrong-`bun` resolve
+/// produces stale generated hooks attributed to whichever `bun` PATH
+/// resolved first rather than to the substrate-pinned `bun` derivation
+/// the flake declared. The whole-module shield below asserts three
+/// invariants via
+/// [`crate::test_support::assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resolve`]:
+/// no bare-literal `bun` spawn in the module body, `fn bun_bin()` is
+/// defined, and the two-argument resolve appears in EXACTLY one place
+/// — only the sigil body.
+fn bun_bin() -> String {
+    get_tool_path("BUN_BIN", "bun")
+}
+
 /// Result of codegen execution
 #[derive(Debug)]
 pub struct CodegenResult {
@@ -89,7 +120,7 @@ pub async fn execute(backend_dir: &Path, web_dir: &Path) -> Result<CodegenResult
     println!("{}", "Step 2: Installing dependencies...".bold());
     let install_start = Instant::now();
 
-    let bun = get_tool_path("BUN_BIN", "bun");
+    let bun = bun_bin();
     // Owns the async captured-output spawn + classify ritual at the
     // canonical `crate::retry::run_capture_anyhow` primitive.
     // `.current_dir(web_dir)` is preserved through the builder chain;
@@ -193,6 +224,55 @@ pub async fn export_schema_only(backend_dir: &Path, output_path: &Path) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whole-module shield: no raw `Command::new("bun")` may live in
+    /// `commands/codegen.rs`'s non-test body, `fn bun_bin()` must be
+    /// defined, and the two-argument resolve
+    /// `get_tool_path("BUN_BIN", "bun")` must appear exactly ONCE
+    /// (only in the sigil body).
+    ///
+    /// Pre-lift the two consumer sites — the `bun install
+    /// --frozen-lockfile` preamble at Step 2 and the `bun x
+    /// graphql-codegen` capture at Step 3 — shared one
+    /// `let bun = get_tool_path("BUN_BIN", "bun");` binding. Post-lift
+    /// the binding is `let bun = bun_bin();` and the two-argument
+    /// resolve appears in exactly ONE place (the sigil body). Same
+    /// three-invariant discipline the sibling `<tool>_bin()` shields
+    /// enforce on `commands/frontend_validation.rs::bun_bin`
+    /// (9986f11), `commands/e2e.rs::bun_bin`,
+    /// `commands/test_ci.rs::cargo_bin`, and every other migrated
+    /// module.
+    ///
+    /// A Nix-hermetic runner whose derivation exports
+    /// `BUN_BIN=/nix/store/…-bun/bin/bun` but omits `bun` from PATH
+    /// silently fell through to whatever `bun` was first on PATH at
+    /// each pre-lift site — the codegen verdict was attributed to
+    /// whichever `bun` PATH resolved first, not to the substrate-pinned
+    /// bun derivation the flake declared. Same silent-PATH-fallback
+    /// bug class the sibling
+    /// `commands/frontend_validation.rs::bun_bin` shield closes for
+    /// the pre-release frontend-validation surface, here closed for
+    /// the schema-export + codegen surface.
+    ///
+    /// The two-argument-resolve needle is reconstructed via `format!`
+    /// inside
+    /// [`crate::test_support::get_tool_path_two_arg_call_needle`], so
+    /// this shield's own source never contains the literal
+    /// `get_tool_path("BUN_BIN", "bun")` string and cannot false-match
+    /// itself on the count-eq-1 assertion. The scan bounds run from
+    /// file start to the FIRST `\n#[cfg(test)]\n` marker (this test
+    /// module's own opener), so every current or future bun-spawning
+    /// helper landing anywhere in the top-level module body cannot
+    /// silently ride along without going through `bun_bin()`.
+    #[test]
+    fn test_codegen_routes_bun_through_bun_bin_sigil_not_raw_command() {
+        crate::test_support::assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resolve(
+            include_str!("codegen.rs"),
+            "commands/codegen.rs",
+            "bun",
+            "BUN_BIN",
+        );
+    }
 
     #[test]
     fn test_codegen_result() {
