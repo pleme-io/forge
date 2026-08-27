@@ -165,8 +165,8 @@ fn find_binary(name: &str) -> Result<&'static BootstrapBinary> {
 /// Get the bootstrap directory path
 fn get_bootstrap_dir() -> Result<std::path::PathBuf> {
     // Check SERVICE_DIR env var first (set by Nix wrapper)
-    if let Ok(dir) = std::env::var("SERVICE_DIR") {
-        return Ok(std::path::PathBuf::from(dir));
+    if let Some(dir) = crate::repo::path_from_env_optional("SERVICE_DIR") {
+        return Ok(dir);
     }
 
     // Otherwise, find repo root and compute path
@@ -623,9 +623,8 @@ pub async fn regenerate() -> Result<()> {
     info!("📁 Repository root: {}", repo_root.display());
 
     // Get bootstrap directory
-    let bootstrap_dir = std::env::var("SERVICE_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| repo_root.join("pkgs/platform/bootstrap"));
+    let bootstrap_dir = crate::repo::path_from_env_optional("SERVICE_DIR")
+        .unwrap_or_else(|| repo_root.join("pkgs/platform/bootstrap"));
 
     info!("📁 Bootstrap directory: {}", bootstrap_dir.display());
 

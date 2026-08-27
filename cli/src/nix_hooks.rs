@@ -32,7 +32,6 @@
 //! ```
 
 use anyhow::{Context, Result};
-use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use tokio::process::Command;
@@ -67,16 +66,18 @@ impl NixHooks {
         }
 
         // Try environment variable first
-        if let Ok(path) = env::var("NIX_HOOKS_PATH") {
-            let path_buf = PathBuf::from(&path);
+        if let Some(path_buf) = crate::repo::path_from_env_optional("NIX_HOOKS_PATH") {
             if path_buf.exists() {
-                info!("🔧 Using NIX_HOOKS_PATH: {}", path);
+                info!("🔧 Using NIX_HOOKS_PATH: {}", path_buf.display());
                 let _ = NIX_HOOKS_PATH.set(Some(path_buf.clone()));
                 return Ok(Self {
                     package_path: Some(path_buf),
                 });
             } else {
-                warn!("⚠️  NIX_HOOKS_PATH is set but path doesn't exist: {}", path);
+                warn!(
+                    "⚠️  NIX_HOOKS_PATH is set but path doesn't exist: {}",
+                    path_buf.display()
+                );
             }
         }
 

@@ -38,8 +38,8 @@ impl<'a> PathBuilder<'a> {
     pub fn new(config: &'a DeployConfig) -> Result<Self> {
         // Try to get repo root from environment variable first (set by --repo-root parameter)
         // Otherwise use find_repo_root to walk up directory tree
-        let repo_root = if let Ok(root) = std::env::var("REPO_ROOT") {
-            PathBuf::from(root)
+        let repo_root = if let Some(root) = crate::repo::path_from_env_optional("REPO_ROOT") {
+            root
         } else {
             let current_dir = std::env::current_dir().context("Failed to get current directory")?;
             DeployConfig::find_repo_root(&current_dir)?
