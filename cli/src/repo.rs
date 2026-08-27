@@ -208,6 +208,71 @@ pub fn try_read_yaml_sync<T: DeserializeOwned>(path: &Path) -> Option<T> {
     serde_yaml::from_str(&content).ok()
 }
 
+/// Read a YAML file at `path` and deserialize it into `T`, on the async
+/// fs-read surface.
+///
+/// The async sibling of [`read_yaml_sync`] on the `?`-propagating arm.
+/// Where the sync form owns the [`std::fs::read_to_string`] +
+/// [`serde_yaml::from_str`] prefix at ONE code point, this form owns
+/// the [`tokio::fs::read_to_string`] + [`serde_yaml::from_str`] prefix
+/// at ONE code point — every consumer that loads a typed config off
+/// disk from an async context (a `kustomization.yaml` `.newTag` sniff,
+/// a `MigrationManifest` for the migrations gate) routes through here
+/// so the operator-next-step envelope stays canonical.
+///
+/// # Envelope
+///
+/// Each failure branch surfaces the offending `path.display()` via
+/// [`anyhow::Context`] on the operator's next-step classifier:
+///
+/// - Read failure: `"Failed to read {path}"` — operator's next step is
+///   `ls` on the exact path.
+/// - Parse failure: `"Failed to parse {path} as YAML"` — operator's
+///   next step is `yamllint` on the exact path, not `ls`.
+///
+/// Pre-lift four sibling consumer sites each carried its own per-
+/// consumer wording inside the `.context(...)` string, and two of the
+/// four DROPPED the offending path entirely from both arms
+/// (`commands/deploy.rs::execute`, `commands/github_runner_ci.rs::
+/// update_manifest_and_deploy`). Post-lift the primitive's canonical
+/// `path.display()` envelope reaches every consumer by construction;
+/// the role the file plays in the loader is preserved by the caller's
+/// function name in the anyhow backtrace, not by a redundant label
+/// inside the failure classifier.
+///
+/// # Sibling primitives
+///
+/// - Sync `?`-propagating arm: [`read_yaml_sync`].
+/// - Sync hint-carrying `?`-propagating arm: [`read_yaml_sync_hinted`].
+/// - Sync silent-probe arm: [`try_read_yaml_sync`].
+/// - Async read-modify-write shell: [`crate::git::
+///   yaml_read_modify_write_async`] (owns the full round-trip; this
+///   primitive owns the read/parse prefix only, for consumers that
+///   inspect the parsed document without writing it back).
+///
+/// # Type parameter
+///
+/// `T: DeserializeOwned` — accepts both closed-shape structs (e.g.
+/// `MigrationManifest` at `commands/migration_validation.rs`) and the
+/// open [`serde_yaml::Value`] target (e.g. `commands/deploy.rs`
+/// navigating a `.get("images")` chain). One primitive body serves
+/// both shapes, as with the sync sibling.
+///
+/// # Errors
+///
+/// Returns `Err` if the file cannot be read (missing, unreadable, EIO)
+/// or cannot be parsed as YAML into `T` (invalid YAML syntax, schema
+/// mismatch). On the read-Err path no parse is attempted; on the
+/// parse-Err path the read has already succeeded, so the offending
+/// file is present on disk and the operator can inspect it directly.
+pub async fn read_yaml_async<T: DeserializeOwned>(path: &Path) -> Result<T> {
+    let content = tokio::fs::read_to_string(path)
+        .await
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    serde_yaml::from_str(&content)
+        .with_context(|| format!("Failed to parse {} as YAML", path.display()))
+}
+
 /// Find repository root by looking for flake.nix
 ///
 /// Search order:
@@ -2557,5 +2622,137 @@ mod tests {
                 replicas: 3,
             })
         );
+    }
+
+    /// [`read_yaml_async`]'s read arm must surface the offending
+    /// `path.display()` AND classify the failure as a READ error, so
+    /// the operator's next step is `ls` on the exact path, not
+    /// `yamllint`. Pins the async sibling to the same envelope
+    /// discipline the sync sibling [`read_yaml_sync`] carries — one
+    /// primitive per fs-read surface, same canonical operator-next-
+    /// step contract.
+    #[tokio::test]
+    async fn read_yaml_async_missing_file_errors_carry_path_and_read_classifier() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("missing.yaml");
+
+        let err = read_yaml_async::<serde_yaml::Value>(&path)
+            .await
+            .unwrap_err();
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Failed to read"),
+            "read-arm classifier must be 'Failed to read'; got: {msg}"
+        );
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "read-arm envelope must carry the offending path; got: {msg}"
+        );
+        assert!(
+            !msg.contains("Failed to parse"),
+            "no parse attempted on read-Err path; got: {msg}"
+        );
+    }
+
+    /// [`read_yaml_async`]'s parse arm must surface the offending
+    /// `path.display()` AND classify the failure as a PARSE error, so
+    /// the operator's next step is `yamllint` on the exact path, not
+    /// `ls`. Pins that the read succeeded (a good file on disk) and
+    /// the parse is what failed — a diagnostic a pre-lift consumer
+    /// that dropped the path from the parse arm (github_runner_ci.rs,
+    /// deploy.rs) could not deliver.
+    #[tokio::test]
+    async fn read_yaml_async_invalid_yaml_errors_carry_path_and_parse_classifier() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("broken.yaml");
+        tokio::fs::write(&path, "key: [unterminated\n")
+            .await
+            .expect("seed write");
+
+        let err = read_yaml_async::<serde_yaml::Value>(&path)
+            .await
+            .unwrap_err();
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Failed to parse"),
+            "parse-arm classifier must be 'Failed to parse'; got: {msg}"
+        );
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "parse-arm envelope must carry the offending path; got: {msg}"
+        );
+        assert!(
+            msg.contains("as YAML"),
+            "parse-arm classifier must name the format as YAML so the \
+             operator reaches for yamllint, not jq; got: {msg}"
+        );
+    }
+
+    /// [`read_yaml_async`] deserializes a well-formed YAML file at
+    /// the caller's target type. Pins the async round-trip so a
+    /// regression that swapped [`serde_yaml::from_str`] for
+    /// [`serde_json::from_str`] (or hard-coded a `Default::default()`
+    /// return) fails here at the closed-struct target the four
+    /// present-day consumer sites (github_runner_ci.rs → Value,
+    /// deploy.rs → Value, migration_validation.rs → MigrationManifest
+    /// x2) collectively span.
+    #[tokio::test]
+    async fn read_yaml_async_happy_path_returns_typed_target() {
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        struct Fixture {
+            name: String,
+            replicas: u32,
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("fixture.yaml");
+        tokio::fs::write(&path, "name: hive-router\nreplicas: 3\n")
+            .await
+            .expect("seed write");
+
+        let value: Fixture = read_yaml_async(&path)
+            .await
+            .expect("well-formed YAML must parse");
+
+        assert_eq!(
+            value,
+            Fixture {
+                name: "hive-router".to_string(),
+                replicas: 3,
+            }
+        );
+    }
+
+    /// [`read_yaml_async`] parses at the OPEN [`serde_yaml::Value`]
+    /// target when the caller navigates via `.get(...)` chains
+    /// rather than deserializing into a closed struct — the shape
+    /// both async-side consumers (`commands/deploy.rs`,
+    /// `commands/github_runner_ci.rs`) pick today for their
+    /// `images[0].newTag` sniff. A regression that specialized the
+    /// primitive to a closed T would silently break both open-value
+    /// consumer sites.
+    #[tokio::test]
+    async fn read_yaml_async_parses_at_open_serde_yaml_value_for_get_chain_consumers() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("kustomization.yaml");
+        tokio::fs::write(
+            &path,
+            "images:\n  - name: ghcr.io/pleme-io/github-runner\n    newTag: abcdef0\n",
+        )
+        .await
+        .expect("seed write");
+
+        let value: serde_yaml::Value = read_yaml_async(&path)
+            .await
+            .expect("open-value target must parse");
+
+        let new_tag = value
+            .get("images")
+            .and_then(|images| images.as_sequence())
+            .and_then(|seq| seq.first())
+            .and_then(|img| img.get("newTag"))
+            .and_then(|tag| tag.as_str());
+        assert_eq!(new_tag, Some("abcdef0"));
     }
 }
