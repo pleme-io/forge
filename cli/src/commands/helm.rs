@@ -2569,8 +2569,7 @@ fn stage_file_sibling_deps(
     if !chart_yaml.exists() {
         return Ok(());
     }
-    let content = std::fs::read_to_string(&chart_yaml)
-        .with_context(|| format!("Failed to read {}", chart_yaml.display()))?;
+    let content = crate::repo::read_text_sync(&chart_yaml)?;
 
     for rel in file_dep_paths(&content) {
         let rel_path = rel.strip_prefix("file://").unwrap_or(&rel);

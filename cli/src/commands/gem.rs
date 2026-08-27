@@ -304,8 +304,7 @@ pub fn bump(
     };
 
     let version_file = find_version_file(dir, &gem_name)?;
-    let content = std::fs::read_to_string(&version_file)
-        .with_context(|| format!("Failed to read {}", version_file.display()))?;
+    let content = crate::repo::read_text_sync(&version_file)?;
 
     let found = VersionLiteral::find(&content).with_context(|| {
         format!(

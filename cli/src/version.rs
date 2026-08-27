@@ -10439,8 +10439,7 @@ fn apply_version_write<F>(path: &Path, new_version: &str, plan: F) -> Result<()>
 where
     F: FnOnce(&str, &str) -> Result<String>,
 {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let content = crate::repo::read_text_sync(path)?;
     let updated = plan(&content, new_version)
         .with_context(|| format!("cannot write a version to {}", path.display()))?;
     std::fs::write(path, &updated)
@@ -10473,8 +10472,7 @@ fn read_version_by_span<F>(path: &Path, locator: F) -> Result<String>
 where
     F: FnOnce(&str) -> Result<std::ops::Range<usize>>,
 {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let content = crate::repo::read_text_sync(path)?;
     let span = locator(&content)
         .with_context(|| format!("cannot read a version from {}", path.display()))?;
     Ok(content[span].to_string())
@@ -11387,8 +11385,7 @@ fn apply_optional_dep_write<F>(
 where
     F: FnOnce(&str, &str, &str) -> Result<Option<String>>,
 {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let content = crate::repo::read_text_sync(path)?;
     match plan(&content, dep_name, new_value).with_context(|| {
         format!(
             "cannot write dependency {dep_name} {field_label} to {}",

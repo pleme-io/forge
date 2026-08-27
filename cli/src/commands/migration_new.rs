@@ -97,8 +97,7 @@ pub async fn execute(
     );
 
     if manifest_path.exists() {
-        let mut content = std::fs::read_to_string(&manifest_path)
-            .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
+        let mut content = crate::repo::read_text_sync(&manifest_path)?;
 
         // Append the new entry
         content.push_str(&manifest_entry);
