@@ -54,8 +54,7 @@ use tracing::debug;
 /// parse-Err path the read has already succeeded, so the offending file
 /// is present on disk and the operator can inspect it directly.
 pub fn read_yaml_sync<T: DeserializeOwned>(path: &Path) -> Result<T> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let content = read_text_sync(path)?;
     serde_yaml::from_str(&content)
         .with_context(|| format!("Failed to parse {} as YAML", path.display()))
 }
@@ -320,6 +319,67 @@ pub async fn read_text_async(path: &Path) -> Result<String> {
     tokio::fs::read_to_string(path)
         .await
         .with_context(|| format!("Failed to read {}", path.display()))
+}
+
+/// Read the entire contents of a file at `path` into a `String`, on the
+/// sync fs-read surface.
+///
+/// The sync sibling of [`read_text_async`] on the read arm: the
+/// canonical [`std::fs::read_to_string`] + [`anyhow::Context`] prefix
+/// every consumer that loads a file for line-oriented text mutation
+/// (`Cargo.toml` version splice, `Chart.yaml` `file://` dep splice,
+/// `version.rb` `VERSION=` splice, `seed/profiles.toml` TOML load,
+/// `migration-manifest.yaml` append) spelled inline pre-lift.
+///
+/// # Envelope
+///
+/// Read failure surfaces `"Failed to read {path}"` — operator's next
+/// step is `ls` on the exact path, matching the canonical read-arm
+/// envelope [`read_yaml_sync`] / [`read_yaml_async`] / [`read_text_async`]
+/// already carry.
+///
+/// Pre-lift seven sibling consumer sites spelled the primitive's OWN
+/// shape one level down from this body: a
+/// `std::fs::read_to_string(path).with_context(|| format!("Failed to
+/// read {}", path.display()))?` composition. Three lived inside
+/// [`crate::version`] shell primitives ([`crate::version`]'s
+/// `apply_version_write`, `read_version_by_span`, and
+/// `apply_optional_dep_write` bodies) that already redeem duplication
+/// two layers below the fs-read arm; four more lived at straggler call
+/// sites (`commands/helm.rs::stage_file_sibling_deps` for Chart.yaml
+/// `file://` dep staging, `commands/gem.rs::bump` for the version.rb
+/// literal read, `commands/seed.rs::load_profiles` for the profiles.toml
+/// load, `commands/migration_new.rs::migration_new` for the manifest
+/// append) that each re-derived the primitive's envelope by hand. Post-
+/// lift the primitive's canonical `path.display()` envelope reaches
+/// every consumer by construction; the role the file plays in the
+/// caller is preserved by the caller's function name in the anyhow
+/// backtrace, not by a redundant filename literal inside the failure
+/// classifier.
+///
+/// # Sibling primitives
+///
+/// - Async text-mode read: [`read_text_async`] owns the async analogue
+///   at ONE code point; this primitive owns the sync surface.
+/// - Sync YAML parse: [`read_yaml_sync`] composes over this primitive's
+///   read arm and adds the [`serde_yaml::from_str`] parse arm — post-
+///   lift its body is one line (`let content = read_text_sync(path)?;`)
+///   plus the parse arm.
+/// - Sync hint-carrying YAML parse: [`read_yaml_sync_hinted`] carries a
+///   distinct envelope (`"Failed to read {role} file: {path}\n  {hint}"`)
+///   for the three `load_for_service` config sites that thread
+///   remediation prose per role; that shape does not lift here.
+/// - Sync silent-probe YAML: [`try_read_yaml_sync`] collapses read AND
+///   parse failures to `None`; this primitive propagates read failure
+///   with an envelope.
+///
+/// # Errors
+///
+/// Returns `Err` if the file cannot be read (missing, unreadable,
+/// EIO). The offending `path.display()` is threaded through the
+/// [`anyhow::Context`] envelope on every failure branch.
+pub fn read_text_sync(path: &Path) -> Result<String> {
+    std::fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))
 }
 
 /// Find repository root by looking for flake.nix
@@ -3070,6 +3130,110 @@ mod tests {
              re-inline would silently diverge the read arm from the \
              ten sibling text-mode consumers routing through the \
              primitive. Post-lift body: {body}"
+        );
+    }
+
+    /// [`read_text_sync`] returns the file's full contents verbatim,
+    /// so line-oriented consumers (the three shell primitives inside
+    /// [`crate::version`] — `apply_version_write`,
+    /// `read_version_by_span`, `apply_optional_dep_write` — plus four
+    /// straggler sites at `commands/{helm,gem,seed,migration_new}.rs`)
+    /// receive the same byte-for-byte payload the pre-lift inline
+    /// `std::fs::read_to_string(path)` did. Pins that the primitive is
+    /// a text-mode read — NOT a parse or a trim — so TOML comments,
+    /// Chart.yaml `file://` dep entries, `VERSION = %(...).freeze`
+    /// literals, and trailing newlines (which every consumer relies on
+    /// to preserve source formatting through its splice-and-write
+    /// mutator) survive the round-trip.
+    #[test]
+    fn read_text_sync_returns_contents_verbatim() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("Cargo.toml");
+        let payload = "# preserved comment\n\
+                       [package]\n\
+                       name = \"pleme-forge\"\n\
+                       version = \"0.1.0\"\n";
+        std::fs::write(&path, payload).expect("seed write");
+
+        let content = read_text_sync(&path).expect("well-formed file must read");
+
+        assert_eq!(
+            content, payload,
+            "read_text_sync() must return the file bytes verbatim so \
+             every line-oriented text-splice consumer sees the same \
+             payload it did pre-lift"
+        );
+    }
+
+    /// [`read_text_sync`]'s read arm must surface the offending
+    /// `path.display()` AND classify the failure as a READ error, so
+    /// the operator's next step is `ls` on the exact path. Pins the
+    /// primitive to the same envelope discipline the sync YAML sibling
+    /// [`read_yaml_sync`] and the async sibling [`read_text_async`]
+    /// carry — one primitive per fs-read surface, same canonical
+    /// operator-next-step contract. Pre-lift seven consumer sites each
+    /// re-derived the primitive's envelope by hand, and a future
+    /// straggler that mis-spells the classifier (`"cannot read"` vs.
+    /// `"Failed to read"`) would divorce the runner log from every
+    /// other read-arm envelope in the crate. This shield forbids that
+    /// regression at the primitive body.
+    #[test]
+    fn read_text_sync_missing_file_errors_carry_path_and_read_classifier() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("missing.toml");
+
+        let err = read_text_sync(&path).unwrap_err();
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Failed to read"),
+            "read-arm classifier must be 'Failed to read'; got: {msg}"
+        );
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "read-arm envelope must carry the offending path; got: {msg}"
+        );
+    }
+
+    /// Post-lift [`read_yaml_sync`]'s body must delegate its read arm
+    /// to [`read_text_sync`] rather than re-spelling the inline
+    /// `std::fs::read_to_string(path).with_context(...)` composition —
+    /// the shape this lift closed for the seven straggler consumer
+    /// sites. Without this shield a future refactor could silently
+    /// re-inline the shape (e.g. a helpful "just call
+    /// `std::fs::read_to_string` directly, it's shorter" cleanup) and
+    /// reopen the duplication class this lift closed, leaving
+    /// [`read_yaml_sync`]'s read arm diverged from the seven sibling
+    /// text-mode consumers that now route through [`read_text_sync`].
+    ///
+    /// Sync sibling of
+    /// [`read_yaml_async_body_delegates_to_read_text_async_on_read_arm`]
+    /// on the delegation-shield frontier — same structural discipline,
+    /// same body-slice source scan.
+    #[test]
+    fn read_yaml_sync_body_delegates_to_read_text_sync_on_read_arm() {
+        const SOURCE: &str = include_str!("repo.rs");
+        let body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "repo.rs",
+            "pub fn read_yaml_sync<T: DeserializeOwned>(path: &Path) -> Result<T> {",
+            "\n}",
+        );
+        assert!(
+            body.contains("read_text_sync(path)"),
+            "read_yaml_sync() body must forward its read arm to \
+             `read_text_sync(path)` — the primitive body every sync \
+             text-mode read in the crate now delegates through. \
+             Post-lift body: {body}"
+        );
+        assert!(
+            !body.contains("std::fs::read_to_string(path)"),
+            "read_yaml_sync() body must NOT spell the inline \
+             `std::fs::read_to_string(path)` shape — that duplication \
+             was lifted onto `read_text_sync`. A re-inline would \
+             silently diverge the read arm from the seven sibling \
+             text-mode consumers routing through the primitive. \
+             Post-lift body: {body}"
         );
     }
 }

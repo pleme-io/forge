@@ -277,8 +277,7 @@ fn generate_unseed_sql(email_domain: &str) -> String {
 /// Load profiles from TOML file
 fn load_profiles(working_dir: &Path) -> Result<Vec<ProfileDef>> {
     let toml_path = working_dir.join("seed/profiles.toml");
-    let content = std::fs::read_to_string(&toml_path)
-        .with_context(|| format!("Failed to read {}", toml_path.display()))?;
+    let content = crate::repo::read_text_sync(&toml_path)?;
     let file: ProfilesFile = toml::from_str(&content)
         .with_context(|| format!("Failed to parse {}", toml_path.display()))?;
     Ok(file.profiles)
