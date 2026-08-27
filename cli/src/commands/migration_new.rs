@@ -67,8 +67,7 @@ pub async fn execute(
 
     // Write the schema migration file
     let scaffold = generate_migration_scaffold(&migration_name);
-    std::fs::write(&migration_path, &scaffold)
-        .with_context(|| format!("Failed to write {}", migration_path.display()))?;
+    crate::repo::write_text_sync(&migration_path, &scaffold)?;
     println!("   {} Created {}", "✅".green(), migration_path.display());
 
     // If --with-data, also create companion data migration
@@ -79,8 +78,7 @@ pub async fn execute(
         let data_path = migrations_dir.join(&data_file);
 
         let data_scaffold = generate_data_migration_scaffold(&data_name);
-        std::fs::write(&data_path, &data_scaffold)
-            .with_context(|| format!("Failed to write {}", data_path.display()))?;
+        crate::repo::write_text_sync(&data_path, &data_scaffold)?;
         println!("   {} Created {}", "✅".green(), data_path.display());
 
         Some(data_name)
