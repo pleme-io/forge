@@ -60,6 +60,100 @@ pub fn read_yaml_sync<T: DeserializeOwned>(path: &Path) -> Result<T> {
         .with_context(|| format!("Failed to parse {} as YAML", path.display()))
 }
 
+/// Remediation hints threaded into the [`read_yaml_sync_hinted`] envelope.
+///
+/// The canonical [`read_yaml_sync`] envelope carries only the operator's
+/// next-step classifier (`"Failed to read {path}"` → `ls`,
+/// `"Failed to parse {path} as YAML"` → `yamllint`) and the offending
+/// `path.display()`. Three consumer sites in
+/// `cli/src/config/mod.rs::DeployConfig::load_for_service` (service,
+/// product, global config paths) legitimately carry richer per-config
+/// remediation prose — the read-arm hint may add "and not corrupted"
+/// or a service-specific context; the parse-arm hint may enumerate
+/// common YAML-syntax pitfalls or point at `CONFIGURATION.md`. That
+/// prose is load-bearing signal the canonical envelope would erase, so
+/// this struct threads it through the primitive at ONE typed boundary
+/// rather than at N inline call sites.
+///
+/// The struct-shape (rather than a two-`&str` positional API) prevents
+/// a caller from silently swapping `read_hint` and `parse_hint` at a
+/// call site — a swap the compiler could not catch on
+/// `read_yaml_sync_hinted(path, "hint-A", "hint-B")` but rejects on
+/// `YamlLoadHints { role, read_hint: ..., parse_hint: ... }` because
+/// the field names are named at the point of construction.
+#[derive(Debug, Clone, Copy)]
+pub struct YamlLoadHints<'a> {
+    /// Prose describing the config's role (e.g. `"service config"`,
+    /// `"product config"`, `"global config"`). Threads into BOTH the
+    /// read-arm and parse-arm classifiers so an operator reading the
+    /// runner log knows which of the three configs failed without
+    /// having to cross-reference the offending path against the loader
+    /// source.
+    pub role: &'a str,
+    /// Remediation prose appended to the read-arm envelope after the
+    /// offending path. Operator's next step is still `ls`; the hint
+    /// may add "and not corrupted" or a service-specific reason to
+    /// look at the file's byte-level state.
+    pub read_hint: &'a str,
+    /// Remediation prose appended to the parse-arm envelope after the
+    /// offending path. Operator's next step is still `yamllint`; the
+    /// hint may list common indentation/quoting pitfalls or point at
+    /// `CONFIGURATION.md` for the schema.
+    pub parse_hint: &'a str,
+}
+
+/// Read a YAML file at `path` and deserialize it into `T`, threading
+/// [`YamlLoadHints`] into BOTH failure envelopes.
+///
+/// The hinted sibling of [`read_yaml_sync`]: where the canonical form
+/// carries only the operator's next-step classifier and the offending
+/// path, this form additionally threads `hints.role` into both
+/// classifiers and appends `hints.read_hint` / `hints.parse_hint` after
+/// the path.
+///
+/// # Envelope
+///
+/// - Read failure: `"Failed to read {role} file: {path}\n  {read_hint}"`
+///   — operator's next step is `ls` on the exact path; the hint may
+///   name a corruption class to look for.
+/// - Parse failure: `"Failed to parse {role}: {path}\n  {parse_hint}"`
+///   — operator's next step is `yamllint` on the exact path; the hint
+///   may enumerate syntax pitfalls or point at `CONFIGURATION.md`.
+///
+/// The parse-arm envelope omits the canonical `"as YAML"` classifier
+/// suffix because the hint prose (`"Check YAML syntax ..."` at the
+/// three consumer sites) already tells the operator the parser is
+/// YAML — the classifier's job (name the tool) is filled by the
+/// hint. A future refinement that promotes `"as YAML"` back into the
+/// classifier lands here and reaches all three consumers by
+/// construction.
+///
+/// # Errors
+///
+/// Same shape as [`read_yaml_sync`]: `Err` on read failure or parse
+/// failure. On the read-Err path no parse is attempted.
+pub fn read_yaml_sync_hinted<T: DeserializeOwned>(
+    path: &Path,
+    hints: &YamlLoadHints<'_>,
+) -> Result<T> {
+    let content = std::fs::read_to_string(path).with_context(|| {
+        format!(
+            "Failed to read {} file: {}\n  {}",
+            hints.role,
+            path.display(),
+            hints.read_hint
+        )
+    })?;
+    serde_yaml::from_str(&content).with_context(|| {
+        format!(
+            "Failed to parse {}: {}\n  {}",
+            hints.role,
+            path.display(),
+            hints.parse_hint
+        )
+    })
+}
+
 /// Find repository root by looking for flake.nix
 ///
 /// Search order:
@@ -2159,6 +2253,133 @@ mod tests {
              YAML` so the operator's next step is `yamllint`, not `ls` \
              (which would find a syntactically-broken file, a dead \
              end). Got: {msg}"
+        );
+    }
+
+    /// [`read_yaml_sync_hinted`]'s read arm must surface the offending
+    /// `path.display()`, the `hints.role` label (so an operator can
+    /// tell WHICH of service/product/global config failed without
+    /// cross-referencing the offending path against the loader
+    /// source), AND the `hints.read_hint` remediation prose. Pins the
+    /// canonical hinted envelope every consumer inherits.
+    #[test]
+    fn read_yaml_sync_hinted_missing_file_carries_path_role_and_read_hint() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("does-not-exist.yaml");
+        let hints = YamlLoadHints {
+            role: "service config",
+            read_hint: "Ensure the file is readable and not corrupted.",
+            parse_hint: "Check YAML syntax (see CONFIGURATION.md)",
+        };
+
+        let err = read_yaml_sync_hinted::<serde_yaml::Value>(&path, &hints).unwrap_err();
+        let msg = format!("{err:#}");
+
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "hinted read arm's envelope must carry `path.display()` \
+             so the operator can `ls` the offending path directly. \
+             Got: {msg}"
+        );
+        assert!(
+            msg.contains("service config"),
+            "hinted read arm's envelope must carry `hints.role` so an \
+             operator can tell which of service/product/global failed \
+             without reading the loader source. Got: {msg}"
+        );
+        assert!(
+            msg.contains("Failed to read"),
+            "hinted read arm's envelope must carry the `Failed to \
+             read` classifier so the operator's next step is `ls`, \
+             not `yamllint`. Got: {msg}"
+        );
+        assert!(
+            msg.contains("Ensure the file is readable and not corrupted."),
+            "hinted read arm's envelope must carry `hints.read_hint` \
+             remediation prose verbatim — the load-bearing signal the \
+             canonical envelope would have erased. Got: {msg}"
+        );
+    }
+
+    /// [`read_yaml_sync_hinted`]'s parse arm must surface the
+    /// offending `path.display()`, the `hints.role` label, AND the
+    /// `hints.parse_hint` remediation prose. The parse-arm hint at
+    /// the three consumer sites lists common YAML-syntax pitfalls, so
+    /// its verbatim survival in the failure envelope is what tells
+    /// the operator `yamllint` is the next tool.
+    #[test]
+    fn read_yaml_sync_hinted_invalid_yaml_carries_path_role_and_parse_hint() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("broken.yaml");
+        std::fs::write(&path, "key: [unterminated\n").expect("seed write");
+        let hints = YamlLoadHints {
+            role: "product config",
+            read_hint: "Ensure the file is readable.",
+            parse_hint: "Check YAML syntax (see CONFIGURATION.md)",
+        };
+
+        let err = read_yaml_sync_hinted::<serde_yaml::Value>(&path, &hints).unwrap_err();
+        let msg = format!("{err:#}");
+
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "hinted parse arm's envelope must carry `path.display()` \
+             so the operator can `yamllint` the offending path \
+             directly. Got: {msg}"
+        );
+        assert!(
+            msg.contains("product config"),
+            "hinted parse arm's envelope must carry `hints.role` so \
+             an operator can tell which of service/product/global \
+             failed to parse without reading the loader source. Got: \
+             {msg}"
+        );
+        assert!(
+            msg.contains("Failed to parse"),
+            "hinted parse arm's envelope must carry the `Failed to \
+             parse` classifier. Got: {msg}"
+        );
+        assert!(
+            msg.contains("Check YAML syntax (see CONFIGURATION.md)"),
+            "hinted parse arm's envelope must carry `hints.parse_hint` \
+             remediation prose verbatim — this is what tells the \
+             operator `yamllint` is the next tool, since the canonical \
+             `as YAML` classifier suffix is delegated to the hint. \
+             Got: {msg}"
+        );
+    }
+
+    /// [`read_yaml_sync_hinted`] deserializes a well-formed YAML file
+    /// at the caller's target type on the happy path — no hints appear
+    /// in the returned value, only in the failure envelopes. Pins that
+    /// the hint-threading does NOT contaminate the success path (a
+    /// regression that folded the hint prose into the parsed content
+    /// would fail here).
+    #[test]
+    fn read_yaml_sync_hinted_happy_path_returns_typed_target_with_no_hint_leakage() {
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        struct Fixture {
+            name: String,
+            replicas: u32,
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("service.yaml");
+        std::fs::write(&path, "name: hive-router\nreplicas: 3\n").expect("seed write");
+        let hints = YamlLoadHints {
+            role: "service config",
+            read_hint: "Ensure the file is readable and not corrupted.",
+            parse_hint: "Check YAML syntax (see CONFIGURATION.md)",
+        };
+
+        let value: Fixture =
+            read_yaml_sync_hinted(&path, &hints).expect("well-formed YAML must parse");
+
+        assert_eq!(
+            value,
+            Fixture {
+                name: "hive-router".to_string(),
+                replicas: 3,
+            }
         );
     }
 
