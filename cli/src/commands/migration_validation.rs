@@ -1031,20 +1031,10 @@ pub async fn validate_migration_manifest(
 
     let manifest_path = seaorm_dir.join("migration-manifest.yaml");
 
-    // Load manifest
+    // Load manifest via the async YAML load primitive so the envelope
+    // carries the offending path in both arms.
     let manifest = if manifest_path.exists() {
-        let content = fs::read_to_string(&manifest_path).await.with_context(|| {
-            format!(
-                "Failed to read migration manifest: {}",
-                manifest_path.display()
-            )
-        })?;
-        serde_yaml::from_str::<MigrationManifest>(&content).with_context(|| {
-            format!(
-                "Failed to parse migration manifest: {}",
-                manifest_path.display()
-            )
-        })?
+        crate::repo::read_yaml_async::<MigrationManifest>(&manifest_path).await?
     } else {
         println!(
             "   {} No migration-manifest.yaml found at {}",
@@ -1262,8 +1252,7 @@ pub async fn validate_rollback_compatibility(
         });
     }
 
-    let content = fs::read_to_string(&manifest_path).await?;
-    let manifest: MigrationManifest = serde_yaml::from_str(&content)?;
+    let manifest: MigrationManifest = crate::repo::read_yaml_async(&manifest_path).await?;
 
     for (name, entry) in &manifest.migrations {
         if entry.classification == MigrationClassification::SchemaAndData

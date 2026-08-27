@@ -485,14 +485,9 @@ pub async fn execute(
 
     let manifest_path = std::path::Path::new(repo_root_str).join(&manifest);
 
-    // Read current tag from manifest
-    let manifest_content = tokio::fs::read_to_string(&manifest_path)
-        .await
-        .context("Failed to read manifest")?;
-
-    // Parse YAML to get current tag from images[].newTag field
-    let yaml: serde_yaml::Value =
-        serde_yaml::from_str(&manifest_content).context("Failed to parse manifest as YAML")?;
+    // Read + parse manifest via the async YAML load primitive so the
+    // envelope carries the offending path in both arms.
+    let yaml: serde_yaml::Value = crate::repo::read_yaml_async(&manifest_path).await?;
 
     let old_tag = yaml
         .get("images")

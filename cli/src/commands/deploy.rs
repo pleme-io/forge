@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
@@ -86,14 +86,9 @@ pub async fn execute(
     // The manifest parameter should point to kustomization.yaml
     let kustomization_path = Path::new(&manifest);
 
-    // Read current tag from kustomization.yaml
-    let kustomization_content = tokio::fs::read_to_string(kustomization_path)
-        .await
-        .context("Failed to read kustomization.yaml")?;
-
-    // Parse YAML to extract current tag from images[].newTag
-    let yaml: serde_yaml::Value = serde_yaml::from_str(&kustomization_content)
-        .context("Failed to parse kustomization.yaml")?;
+    // Read + parse kustomization via the async YAML load primitive so
+    // the envelope carries the offending path in both arms.
+    let yaml: serde_yaml::Value = crate::repo::read_yaml_async(kustomization_path).await?;
 
     let old_tag = yaml
         .get("images")
