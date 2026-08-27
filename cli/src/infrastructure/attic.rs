@@ -259,7 +259,53 @@ impl AtticClient {
         Command::new(self.resolve_attic_bin())
     }
 
-    /// Discover Attic token from environment
+    /// Discover Attic token from environment.
+    ///
+    /// `Option<String>` env-var-first primitive on the `ATTIC_TOKEN`
+    /// surface — owns the ONE `std::env::var("ATTIC_TOKEN")` read
+    /// across the crate, with the empty-string-is-a-miss filter
+    /// (`.filter(|s| !s.is_empty())`) enforced uniformly at the
+    /// primitive body so an operator's explicit `ATTIC_TOKEN=""`
+    /// export lands on `None` rather than `Some("")`. The empty-is-a-
+    /// miss semantic mirrors the sibling
+    /// [`crate::git::release_git_sha_from_env`] primitive on the
+    /// `RELEASE_GIT_SHA` surface — both credential-shaped env vars
+    /// where an empty export is invariably a shell-level accident
+    /// (unset variable expansion), never an intentional value.
+    ///
+    /// # Pre-lift stanzas fused into ONE body
+    ///
+    /// Three byte-similar inline `std::env::var("ATTIC_TOKEN").ok()`
+    /// stanzas spelled the env-var-first shape across the crate
+    /// before this primitive owned it:
+    ///
+    /// - This body (`AtticClient::discover_token`) — the primitive.
+    /// - `commands/build.rs::execute` — env-var-first shortcut before
+    ///   the `kubectl -n infrastructure get secret attic-secrets`
+    ///   fallback (spelled `.ok()` without the empty-is-a-miss filter
+    ///   pre-lift, so `ATTIC_TOKEN=""` bypassed the kubectl fallback
+    ///   and surfaced as a downstream attic authentication failure
+    ///   with no structural link back to the empty-export root cause).
+    /// - `commands/github_runner_ci.rs::execute` — env-var-first
+    ///   shortcut before the `kubectl -n github-actions get secret
+    ///   attic-secrets` (+ `ATTIC_FALLBACK_NAMESPACE` retry) fallback,
+    ///   same pre-lift `.ok()`-without-filter shape and same silent
+    ///   empty-token misroute.
+    ///
+    /// # Post-lift refinement surface
+    ///
+    /// A future refinement of the discovery shape — a `~/.attic-token`
+    /// fallback file read (Nix-idiomatic per-user credential storage),
+    /// a telemetry sigil separating explicit-value from unset paths,
+    /// a `keyring`-crate-backed OS-secrets lookup, or a swap to a
+    /// typed `substrate::AtticToken(String)` newtype — now lands at
+    /// ONE point and reaches every `Option<String>` consumer by
+    /// construction. The two `commands/*.rs::execute` sites' downstream
+    /// `.or_else(kubectl_fallback)` compositions are unchanged; each
+    /// caller keeps its own kubectl-namespace policy (a distinction the
+    /// primitive intentionally does not close: `build.rs` targets
+    /// `infrastructure`, `github_runner_ci.rs` targets `github-actions`
+    /// with `ATTIC_FALLBACK_NAMESPACE` retry).
     pub fn discover_token() -> Option<String> {
         std::env::var("ATTIC_TOKEN").ok().filter(|s| !s.is_empty())
     }
@@ -2201,5 +2247,174 @@ mod tests {
         let _snapshot = crate::test_support::EnvVarSnapshot::capture("ATTIC_SERVER_NAME");
         std::env::set_var("ATTIC_SERVER_NAME", "my-server-alias");
         assert_eq!(attic_server_alias(), "my-server-alias");
+    }
+
+    /// Serial-safe guard for tests that mutate the `ATTIC_TOKEN`
+    /// process env var. [`AtticClient::discover_token`] reads it once
+    /// per call; concurrent tests that set / remove it would race the
+    /// resolved value observed by any test asserting on the primitive's
+    /// return. Same `unwrap_or_else(|p| p.into_inner())` recovery shape
+    /// as [`crate::test_support::GIT_BIN_ENV_LOCK`] and the sibling
+    /// [`ATTIC_SERVER_NAME_ENV_LOCK`] so a prior panicking test that
+    /// poisoned the mutex does not chain-fail every subsequent test
+    /// sharing the lock.
+    static ATTIC_TOKEN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// [`AtticClient::discover_token`] returns `None` when
+    /// `ATTIC_TOKEN` is unset. Pins the `Err → None` half of the
+    /// `env::var → Option<String>` projection so a future refactor
+    /// (e.g., a default-empty fallback that silently returns
+    /// `Some("")`, or a swap to a `TokenRequired`-typed error that
+    /// changes the return shape) is caught here rather than at the
+    /// consumers' downstream `.or_else(kubectl_fallback)` composition
+    /// — where a silently-drifted `Some("")` would bypass the fallback
+    /// and pass an empty token forward to the underlying attic
+    /// operation.
+    #[test]
+    fn test_discover_token_returns_none_when_env_var_unset() {
+        let _guard = ATTIC_TOKEN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _snapshot = crate::test_support::EnvVarSnapshot::capture("ATTIC_TOKEN");
+        std::env::remove_var("ATTIC_TOKEN");
+        assert_eq!(AtticClient::discover_token(), None);
+    }
+
+    /// [`AtticClient::discover_token`] returns `Some(value)` verbatim
+    /// when `ATTIC_TOKEN` is set to a non-empty string. Pins the
+    /// `Ok(v) → Some(v)` half of the projection so a future refactor
+    /// (e.g., a canonicalize hook that trims whitespace, a
+    /// prefix-stripping shape that rewrites `Bearer <token>` inputs)
+    /// is caught here rather than at the consumers' downstream
+    /// `cmd.env("ATTIC_TOKEN", &attic_token)` argv injection — where
+    /// a silently-transformed token would surface only as an opaque
+    /// 401 from the attic backend.
+    #[test]
+    fn test_discover_token_returns_some_when_env_var_set_nonempty() {
+        let _guard = ATTIC_TOKEN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _snapshot = crate::test_support::EnvVarSnapshot::capture("ATTIC_TOKEN");
+        std::env::set_var("ATTIC_TOKEN", "sekrit-abc-123");
+        assert_eq!(
+            AtticClient::discover_token(),
+            Some("sekrit-abc-123".to_string())
+        );
+    }
+
+    /// [`AtticClient::discover_token`] returns `None` when
+    /// `ATTIC_TOKEN` is set to the empty string. Pins the
+    /// empty-string-is-a-miss filter (`.filter(|s| !s.is_empty())`)
+    /// so an operator's explicit `ATTIC_TOKEN=""` export lands on
+    /// `None` and routes through the consumer's downstream
+    /// `.or_else(kubectl_fallback)` fallback rather than passing the
+    /// empty token forward to the underlying attic operation (where
+    /// it surfaces as an opaque authentication failure with no
+    /// structural link back to the empty-export root cause).
+    ///
+    /// This is the load-bearing invariant that made lifting the two
+    /// `commands/*.rs::execute` sites onto this primitive a semantic
+    /// tightening rather than a byte-preserving refactor — pre-lift
+    /// both sites spelled `std::env::var("ATTIC_TOKEN").ok()` without
+    /// the filter, so `ATTIC_TOKEN=""` bypassed the kubectl fallback
+    /// at each caller. Post-lift the filter is uniformly enforced at
+    /// ONE body across the crate.
+    #[test]
+    fn test_discover_token_returns_none_when_env_var_set_empty() {
+        let _guard = ATTIC_TOKEN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _snapshot = crate::test_support::EnvVarSnapshot::capture("ATTIC_TOKEN");
+        std::env::set_var("ATTIC_TOKEN", "");
+        assert_eq!(
+            AtticClient::discover_token(),
+            None,
+            "ATTIC_TOKEN='' must be treated as unset — otherwise the \
+             consumers' `.or_else(kubectl_fallback)` composition is \
+             bypassed and an empty token is passed forward to the \
+             attic operation as an opaque 401"
+        );
+    }
+
+    /// Structural regression shield: `commands/build.rs::execute` and
+    /// `commands/github_runner_ci.rs::execute` must both discover the
+    /// `ATTIC_TOKEN` env var through [`AtticClient::discover_token`]
+    /// rather than spelling `std::env::var("ATTIC_TOKEN").ok()` inline.
+    ///
+    /// Pre-lift both `execute()` bodies carried the raw
+    /// `std::env::var("ATTIC_TOKEN").ok()` shape verbatim, differing
+    /// only in their downstream `.or_else(kubectl_fallback)`
+    /// namespace-policy specialization. The two inline sites +
+    /// [`AtticClient::discover_token`] primitive body sum to three
+    /// occurrences past THEORY §VI.1's three-times-is-a-law threshold
+    /// ("two occurrences is a coincidence; three is a law"), and each
+    /// site had to agree on the env-var-name spelling verbatim AND on
+    /// the semantic (`.ok()` vs `.ok().filter(|s| !s.is_empty())` —
+    /// the two inline sites drifted to the un-filtered arm and silently
+    /// misrouted `ATTIC_TOKEN=""` past the kubectl fallback).
+    ///
+    /// Structural (substring on the source text) rather than
+    /// behavioral — a behavioral test would require wiring up each
+    /// full `execute()` flow with mocked nix / attic / kubectl / build
+    /// surfaces, which is disproportionate to the invariant being
+    /// pinned. Same shield discipline as
+    /// `crate::repo::path_from_env_optional_callers_delegate_through_primitive`
+    /// (commit bbe35f0) and the sibling
+    /// `crate::infrastructure::attic::attic_server_alias`-caller
+    /// shields.
+    ///
+    /// The scan window is bounded to each `execute()` body via
+    /// [`crate::test_support::fn_body_slice_between_markers`] so this
+    /// test's own docstring — which legitimately spells the pre-lift
+    /// `std::env::var("ATTIC_TOKEN")` needle for context — is excluded.
+    #[test]
+    fn test_discover_token_callers_delegate_through_primitive() {
+        // Both consumers must call the primitive by full path — the
+        // callers spell it as `crate::infrastructure::attic::
+        // AtticClient::discover_token()`, and the substring test tolerates
+        // the intra-path whitespace/wrapping variation via matching the
+        // stable tail `AtticClient::discover_token()`.
+        const CALL_NEEDLE: &str = "AtticClient::discover_token()";
+        // The two pre-lift raw needles the shield must NOT observe in
+        // either execute() body post-lift.
+        const RAW_NEEDLES: &[&str] = &[
+            "std::env::var(\"ATTIC_TOKEN\")",
+            "env::var(\"ATTIC_TOKEN\")",
+        ];
+
+        for (source, module_path) in [
+            (include_str!("../commands/build.rs"), "commands/build.rs"),
+            (
+                include_str!("../commands/github_runner_ci.rs"),
+                "commands/github_runner_ci.rs",
+            ),
+        ] {
+            let execute_body = crate::test_support::fn_body_slice_between_markers(
+                source,
+                module_path,
+                "pub async fn execute(",
+                "\n#[cfg(test)]",
+            );
+
+            for raw in RAW_NEEDLES {
+                assert!(
+                    !execute_body.contains(raw),
+                    "{module_path}: `execute()` must NOT spell the raw \
+                     `{raw}` env-var read — route through \
+                     `crate::infrastructure::attic::AtticClient::discover_token()` \
+                     so the empty-string-is-a-miss filter is honored at \
+                     the shared primitive. Found the pre-lift raw \
+                     env-var read in execute()."
+                );
+            }
+
+            assert!(
+                execute_body.contains(CALL_NEEDLE),
+                "{module_path}: `execute()` must call \
+                 `AtticClient::discover_token()` to discover \
+                 `ATTIC_TOKEN` — the call string `{CALL_NEEDLE}` was \
+                 not found in execute()."
+            );
+        }
     }
 }

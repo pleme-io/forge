@@ -174,8 +174,20 @@ pub async fn execute(
 
         // Get ATTIC_TOKEN from environment or kubernetes secret
         // Fallback namespace can be configured via ATTIC_FALLBACK_NAMESPACE env var
-        let attic_token = std::env::var("ATTIC_TOKEN")
-            .ok()
+        //
+        // Env-var-first discovery — routes through the crate-scoped
+        // `crate::infrastructure::attic::AtticClient::discover_token`
+        // primitive so the `ATTIC_TOKEN`-with-empty-is-a-miss contract
+        // is honored at exactly ONE body across the crate (sibling
+        // consumers: `commands/build.rs::execute`, `AtticClient::discover`).
+        // The empty-string-is-a-miss filter uniformly routes an
+        // operator's explicit `ATTIC_TOKEN=""` export through the
+        // kubectl-secret fallback below rather than passing the empty
+        // token forward to the downstream attic operation. A future
+        // refinement of the discovery shape lands at the sigil body and
+        // reaches this consumer by construction — THEORY §V
+        // solve-once-at-the-primitive; §VI.1 recurring-shape-to-helper.
+        let attic_token = crate::infrastructure::attic::AtticClient::discover_token()
             .or_else(|| {
                 debug!("ATTIC_TOKEN not in env, trying kubectl...");
                 let primary = crate::infrastructure::kubectl::fetch_secret_value(
