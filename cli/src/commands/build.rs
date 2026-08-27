@@ -39,8 +39,23 @@ pub async fn execute(
     info!("   URL: {}", cache_url);
     info!("   Cache: {}", cache_name);
 
-    let attic_token = std::env::var("ATTIC_TOKEN")
-        .ok()
+    // ATTIC_TOKEN env-var-first discovery — routes through the
+    // crate-scoped `crate::infrastructure::attic::AtticClient::discover_token`
+    // primitive so the `ATTIC_TOKEN`-with-empty-is-a-miss contract is
+    // honored at exactly ONE body across the crate (sibling consumers:
+    // `commands/github_runner_ci.rs::execute`, `AtticClient::discover`).
+    // The empty-string-is-a-miss filter uniformly routes an operator's
+    // explicit `ATTIC_TOKEN=""` export through the kubectl-secret
+    // fallback below rather than passing the empty token forward to
+    // the downstream attic operation (where it surfaces as an opaque
+    // authentication failure with no structural link back to the
+    // empty-export root cause). A future refinement of the discovery
+    // shape (a `~/.attic-token` fallback file, a telemetry sigil
+    // separating explicit-value from unset paths, a swap to a typed
+    // `substrate::AtticToken(String)` newtype) lands at the sigil body
+    // and reaches this consumer by construction — THEORY §V
+    // solve-once-at-the-primitive; §VI.1 recurring-shape-to-helper.
+    let attic_token = crate::infrastructure::attic::AtticClient::discover_token()
         .or_else(|| {
             crate::infrastructure::kubectl::fetch_secret_value(
                 "attic-secrets",
