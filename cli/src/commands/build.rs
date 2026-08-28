@@ -227,10 +227,11 @@ pub async fn execute(
         let result_path = format!("{}/result", working_dir);
         let output_path = format!("{}/{}", working_dir, output);
 
-        tokio::fs::remove_file(&output_path).await.ok(); // Ignore if doesn't exist
-        tokio::fs::symlink(&result_path, &output_path)
-            .await
-            .context("Failed to create symlink")?;
+        crate::repo::replace_symlink_async(
+            std::path::Path::new(&result_path),
+            std::path::Path::new(&output_path),
+        )
+        .await?;
 
         info!("✅ Build complete: {}", output);
     } else {
