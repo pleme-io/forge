@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::path::Path;
 use std::process::Stdio;
 use tokio::process::Command;
 use tracing::info;
@@ -83,10 +82,7 @@ pub async fn update_kustomization(
     new_tag: &str,
     commit: bool,
 ) -> Result<()> {
-    let path = Path::new(kustomization_path);
-    if !path.exists() {
-        anyhow::bail!("Kustomization file not found: {}", kustomization_path);
-    }
+    let path = crate::repo::require_existing_labeled(kustomization_path, "Kustomization file")?;
 
     info!("📝 Updating kustomization: {}", kustomization_path);
 

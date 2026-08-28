@@ -110,9 +110,7 @@ pub fn function_release(
     if !Path::new(package_root).join("crossplane.yaml").exists() {
         bail!("no crossplane.yaml under package-root {}", package_root);
     }
-    if !Path::new(runtime_image).exists() {
-        bail!("runtime image tarball not found: {}", runtime_image);
-    }
+    crate::repo::require_existing_labeled(runtime_image, "runtime image tarball")?;
 
     // Typed RAII scratch surface — `_out_dir` is the guard whose `Drop`
     // unlinks the whole tempdir + the xpkg inside it, panic-safe across

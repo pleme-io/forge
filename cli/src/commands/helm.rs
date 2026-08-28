@@ -1004,9 +1004,7 @@ pub fn package(chart_dir: &str, output: &str, version: Option<&str>) -> Result<S
 
 /// Push a chart tarball to an OCI registry.
 pub fn push(chart: &str, registry: &str) -> Result<()> {
-    if !Path::new(chart).exists() {
-        bail!("Chart tarball not found: {}", chart);
-    }
+    crate::repo::require_existing_labeled(chart, "Chart tarball")?;
 
     info!("Pushing {} → {}", chart, registry);
 

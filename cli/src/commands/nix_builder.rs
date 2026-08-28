@@ -4,7 +4,6 @@
 //! Used for Mac (ARM) to Linux (AMD64) cross-compilation.
 
 use anyhow::{Context, Result};
-use std::path::Path;
 use std::process::Command;
 use tracing::{info, warn};
 
@@ -332,10 +331,7 @@ async fn update_kustomization_image(
     registry: &str,
     new_tag: &str,
 ) -> Result<()> {
-    let path = Path::new(kustomization_path);
-    if !path.exists() {
-        anyhow::bail!("Kustomization file not found: {}", kustomization_path);
-    }
+    let path = crate::repo::require_existing_labeled(kustomization_path, "Kustomization file")?;
 
     info!("📝 Updating: {}", kustomization_path);
 
@@ -400,10 +396,7 @@ async fn update_kenshi_builder_image(
     registry: &str,
     new_tag: &str,
 ) -> Result<()> {
-    let path = Path::new(kustomization_path);
-    if !path.exists() {
-        anyhow::bail!("Kustomization file not found: {}", kustomization_path);
-    }
+    let path = crate::repo::require_existing_labeled(kustomization_path, "Kustomization file")?;
 
     info!("📝 Updating: {}", kustomization_path);
 
@@ -467,10 +460,7 @@ async fn update_builder_pool_builder_image(
     registry: &str,
     new_tag: &str,
 ) -> Result<()> {
-    let path = Path::new(builder_pool_path);
-    if !path.exists() {
-        anyhow::bail!("Builder pool file not found: {}", builder_pool_path);
-    }
+    let path = crate::repo::require_existing_labeled(builder_pool_path, "Builder pool file")?;
 
     info!("📝 Updating: {}", builder_pool_path);
 
