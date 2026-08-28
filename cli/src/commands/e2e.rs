@@ -824,10 +824,7 @@ fn resolve_repo_root(repo_root: Option<String>) -> Result<String> {
     }
 
     // Fall back to current directory
-    Ok(std::env::current_dir()
-        .context("Failed to get current directory")?
-        .to_string_lossy()
-        .to_string())
+    Ok(crate::repo::current_dir()?.to_string_lossy().to_string())
 }
 
 /// Verify Docker daemon is running

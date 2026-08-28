@@ -125,7 +125,7 @@ pub async fn update_federation(
     }
 
     // Get repo root for path resolution (not current service directory)
-    let current_dir = env::current_dir()?;
+    let current_dir = crate::repo::current_dir()?;
     let repo_root = DeployConfig::find_repo_root(&current_dir)?;
 
     // Initialize PathBuilder for config-driven path construction

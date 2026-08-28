@@ -41,7 +41,7 @@ impl<'a> PathBuilder<'a> {
         let repo_root = if let Some(root) = crate::repo::path_from_env_optional("REPO_ROOT") {
             root
         } else {
-            let current_dir = std::env::current_dir().context("Failed to get current directory")?;
+            let current_dir = crate::repo::current_dir()?;
             DeployConfig::find_repo_root(&current_dir)?
         };
 
