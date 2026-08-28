@@ -431,7 +431,7 @@ fn extract_table_name_from_truncate(line: &str) -> Option<String> {
 
 /// Check if a file should be excluded from validation
 fn should_exclude_file(file_path: &Path, config: &MigrationGatesConfig) -> bool {
-    let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let filename = crate::repo::file_name_str(file_path);
 
     // Check check_after threshold
     if let Some(ref threshold) = config.check_after {
@@ -649,7 +649,7 @@ const WARNING_PATTERNS: &[(&str, &str)] = &[
 
 /// Check if a SeaORM migration file should be excluded
 fn should_exclude_seaorm_file(file_path: &Path, config: &MigrationGatesConfig) -> bool {
-    let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let filename = crate::repo::file_name_str(file_path);
 
     // Check seaorm_check_after threshold (e.g., "m20260128")
     if let Some(ref threshold) = config.seaorm_check_after {
@@ -1057,7 +1057,7 @@ pub async fn validate_migration_manifest(
     let mut issues = Vec::new();
 
     for file_path in &migration_files {
-        let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let filename = crate::repo::file_name_str(file_path);
         // Strip .rs extension to get the migration name
         let migration_name = filename.trim_end_matches(".rs");
 

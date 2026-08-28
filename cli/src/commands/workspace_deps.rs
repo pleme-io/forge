@@ -160,7 +160,7 @@ async fn discover_packages(libs_dir: &Path) -> Result<Vec<WorkspacePackage>> {
             continue;
         }
 
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let name = crate::repo::file_name_str(&path);
 
         if !name.starts_with("pleme-") {
             continue;
