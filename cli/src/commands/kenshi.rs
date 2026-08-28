@@ -4,7 +4,6 @@
 //! Handles both primary and secondary clusters in a single release.
 
 use anyhow::Result;
-use std::path::Path;
 use tracing::info;
 
 use crate::commands::push;
@@ -96,10 +95,7 @@ async fn update_kustomization_image(
     registry: &str,
     new_tag: &str,
 ) -> Result<()> {
-    let path = Path::new(kustomization_path);
-    if !path.exists() {
-        anyhow::bail!("Kustomization file not found: {}", kustomization_path);
-    }
+    let path = crate::repo::require_existing_labeled(kustomization_path, "Kustomization file")?;
 
     info!("📝 Updating: {}", kustomization_path);
 

@@ -1093,11 +1093,98 @@ pub fn verify_directory(dir: &Path, required_files: &[&str]) -> Result<()> {
 /// - [`path_from_env`] — the `env-var-name → Result<PathBuf>` peer at
 ///   the env-var-sourced-path surface.
 pub fn require_existing_working_dir(working_dir: &str) -> Result<&Path> {
-    let dir = Path::new(working_dir);
-    if !dir.exists() {
-        anyhow::bail!("Working directory not found: {}", working_dir);
+    require_existing_labeled(working_dir, "Working directory")
+}
+
+/// Resolve a caller-owned `path: &str` into a lifetime-borrowed [`Path`]
+/// after asserting it exists on disk, interpolating a caller-supplied
+/// `label` into the `"{label} not found: {path}"` bail envelope.
+///
+/// The generalized `&str + &str` peer of [`require_existing_working_dir`]
+/// on the `path-string + role-noun → Result<&Path>` surface — pre-lift
+/// nine sibling command-module sites spelled the 3-line
+/// `let path = Path::new(<str>); if !path.exists() { bail!("<Label> not
+/// found: {}", <str>); }` stanza verbatim, each with a different noun
+/// (`"Kustomization file"`, `"Builder pool file"`, `"Chart tarball"`,
+/// `"runtime image tarball"`, `"Working directory"`) fixed at its own
+/// call site. Post-lift the [`Path::new`] construction, the
+/// [`Path::exists`] gate, the exact `"{label} not found: {path}"` bail
+/// wording, and the `&Path` return-shape all live at ONE body; the
+/// per-site noun is threaded through as a `label: &str` parameter and
+/// the caller's compile-time-known role reaches the operator's log
+/// verbatim.
+///
+/// # Pre-lift sites fused into ONE body
+///
+/// - [`crate::commands::kenshi_agent::release`] x2 —
+///   `"Kustomization file"` + `"Builder pool file"`.
+/// - [`crate::commands::kenshi::release`] — `"Kustomization file"`.
+/// - [`crate::commands::push::update_kustomization`] —
+///   `"Kustomization file"`.
+/// - [`crate::commands::nix_builder::release`] x3 — two
+///   `"Kustomization file"` sites and one `"Builder pool file"` site.
+/// - [`crate::commands::crossplane::function_release`] —
+///   `"runtime image tarball"`.
+/// - [`crate::commands::helm::push`] — `"Chart tarball"`.
+///
+/// [`require_existing_working_dir`] itself delegates through this body
+/// with `label = "Working directory"`, so the ten
+/// `working_dir: &str` command-entry-point sites at
+/// [`require_existing_working_dir`]'s pre-lift trace also route through
+/// here transitively — the `Path::new` / `.exists()` / bail-envelope
+/// discipline appears at EXACTLY one primitive across the whole crate.
+///
+/// # Envelope
+///
+/// The bail wording is `"{label} not found: {path}"`, interpolating the
+/// `path: &str` argument VERBATIM (NOT `Path::new(path).display()`) —
+/// pre-lift every consumer bailed with the raw string, so the operator
+/// sees the value they passed on the CLI (or an env var, or a config
+/// row) without a trailing-slash normalization or a redundant
+/// re-projection through [`Path::display`]. A drift that swapped the
+/// interpolation to `p.display()` would silently change the operator-
+/// facing wording for every one of the nine consumers.
+///
+/// # Return
+///
+/// Returns a lifetime-borrowed `&Path` (bound to the `path: &str` input
+/// via the `'a` lifetime on both parameters and the return) rather than
+/// an owned [`PathBuf`], so the caller's downstream
+/// `crate::repo::read_text_async(path).await?;` or `.join(...)` reads
+/// are zero-alloc and structurally identical to the pre-lift
+/// `let path = Path::new(<str>);` idiom the nine sites relied on. A
+/// future refinement of the shape — canonicalize hook, a
+/// must-be-a-file check that upgrades the `.exists()` gate to
+/// `.is_file()`, a symlink-resolution branch — lands here and reaches
+/// every consumer by construction (THEORY §V.1 —
+/// Types → Invariants → Proofs; §VI.1 — three-times rule, extract an
+/// archetype and generate from it).
+///
+/// # Type contract
+///
+/// The `'a` lifetime binds the returned `&Path` to the `path: &str`
+/// argument's lifetime (via the explicit `'a` annotation on the input
+/// and the return, not lifetime elision — the two-arg signature makes
+/// the elided version ambiguous). The `label: &str` argument has an
+/// independent, unnamed lifetime so a caller passing a static `&'static
+/// str` literal for `label` and a function-parameter `&str` for `path`
+/// compiles without lifetime coercion.
+///
+/// # Errors
+///
+/// Returns `Err` if the resolved [`Path`] does not exist on disk. On
+/// the miss arm the caller-facing wording is
+/// `"{label} not found: {path}"`; the primitive does NOT probe why the
+/// path is missing (permission denied, ENOENT on an intermediate
+/// component, dangling symlink) — the discipline is a next-step `ls
+/// {path}` for the operator, not a diagnostic tree at the primitive
+/// body.
+pub fn require_existing_labeled<'a>(path: &'a str, label: &str) -> Result<&'a Path> {
+    let p = Path::new(path);
+    if !p.exists() {
+        anyhow::bail!("{} not found: {}", label, path);
     }
-    Ok(dir)
+    Ok(p)
 }
 
 /// Resolve a substrate-declared env var into a `String`, falling back
@@ -4259,6 +4346,190 @@ mod tests {
              prefix) would silently change the operator-facing message for \
              every one of the ten consumer sites. Got: {msg}"
         );
+    }
+
+    /// [`require_existing_labeled`] returns a lifetime-borrowed [`Path`]
+    /// pointing at the `path: &str` input verbatim on the exists-hit case
+    /// — the primitive's zero-alloc success return, structurally identical
+    /// to the pre-lift `let path = Path::new(<str>);` idiom every one of
+    /// the nine command-module consumer sites relied on. A drift that
+    /// swapped the return to an owned `PathBuf` (via `.to_path_buf()` /
+    /// `.canonicalize()`) would silently allocate at every one of the
+    /// nine call sites, breaking the borrow-only discipline the pre-lift
+    /// sites carried and forcing a downstream `read_text_async(&path)`
+    /// through an unnecessary indirection.
+    #[test]
+    fn require_existing_labeled_returns_borrowed_path_on_exists_hit() {
+        let dir = std::env::temp_dir();
+        let dir_str = dir.to_str().expect("temp_dir must be UTF-8");
+        let result = require_existing_labeled(dir_str, "Scratch dir")
+            .expect("require_existing_labeled must succeed on an existing path");
+        assert_eq!(
+            result,
+            Path::new(dir_str),
+            "require_existing_labeled() must return `Path::new(path)` \
+             verbatim on the exists-hit case — no owned-PathBuf allocation, \
+             no `.canonicalize()` normalization, structurally identical to \
+             the pre-lift `let path = Path::new(<str>);` idiom the nine \
+             consumer sites relied on."
+        );
+    }
+
+    /// [`require_existing_labeled`] bails with the exact wording
+    /// `"{label} not found: {path}"` interpolating BOTH the caller-supplied
+    /// `label` prefix AND the raw `path: &str` VERBATIM (NOT
+    /// `Path::new(path).display()`) — pre-lift every consumer bailed with
+    /// the raw string, so the operator sees the value they passed on the
+    /// CLI without a trailing-slash normalization or a redundant
+    /// re-projection through [`Path::display`]. A drift that swapped the
+    /// interpolation to `p.display()` (or reordered the wording to
+    /// `"not found: {path} ({label})"`) would silently change the
+    /// operator-facing message for every one of the nine consumer sites,
+    /// so this shield pins both the label-then-path ordering and the
+    /// raw-string interpolation at the primitive body.
+    ///
+    /// Two label spellings are exercised: `"Kustomization file"` (the
+    /// most frequent consumer noun, five sites) and `"runtime image
+    /// tarball"` (a lowercase-noun consumer, one site) — the two shapes
+    /// prove the primitive interpolates the label VERBATIM without a
+    /// hidden capitalization or trim pass.
+    #[test]
+    fn require_existing_labeled_bails_with_label_and_path_verbatim_on_miss() {
+        let sentinel =
+            "/tmp/forge-require-existing-labeled-sigil-shield-nonexistent-path-9876543210";
+        assert!(
+            !Path::new(sentinel).exists(),
+            "test sentinel must not exist for the shield to be meaningful"
+        );
+        for label in ["Kustomization file", "runtime image tarball"] {
+            let err = require_existing_labeled(sentinel, label)
+                .expect_err("require_existing_labeled must bail on a nonexistent path");
+            let msg = format!("{err:#}");
+            assert_eq!(
+                msg,
+                format!("{label} not found: {sentinel}"),
+                "require_existing_labeled() must bail with the EXACT \
+                 wording `\"{{label}} not found: {{path}}\"` interpolating \
+                 the caller-supplied label and the raw path verbatim — \
+                 pre-lift every consumer spelled \
+                 `bail!(\"<Label> not found: {{}}\", <path>);` with the \
+                 label baked in as a fixed literal, so a drift that \
+                 lowercased/uppercased/normalized the label or \
+                 re-projected the path through `Path::display` would \
+                 silently change the operator-facing message for every \
+                 one of the nine consumer sites. Got: {msg}"
+            );
+        }
+    }
+
+    /// [`require_existing_working_dir`] must delegate its body through
+    /// [`require_existing_labeled`] with `label = "Working directory"`
+    /// rather than re-spelling the `Path::new + .exists() + bail!` shape
+    /// inline. Pins the "one body per shape" discipline every sibling
+    /// primitive in this module already carries: post-lift the
+    /// [`Path::new`] construction, the [`Path::exists`] gate, and the
+    /// bail-envelope wording live at ONE code line, so a future refinement
+    /// (canonicalize, a must-be-a-dir check, a symlink-resolution branch)
+    /// lands at the peer and reaches the working-dir consumers by
+    /// construction. A re-inline of the three-line shape at
+    /// [`require_existing_working_dir`]'s body would silently fork the
+    /// working-dir specialization from the nine sibling stringly-key
+    /// consumers routing through [`require_existing_labeled`], and drift
+    /// the bail wording one specialization at a time.
+    #[test]
+    fn require_existing_working_dir_body_delegates_to_require_existing_labeled() {
+        const SOURCE: &str = include_str!("repo.rs");
+        let body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "repo.rs",
+            "pub fn require_existing_working_dir(working_dir: &str) -> Result<&Path> {",
+            "\n}",
+        );
+        assert!(
+            body.contains("require_existing_labeled(working_dir, \"Working directory\")"),
+            "require_existing_working_dir() body must forward through \
+             `require_existing_labeled(working_dir, \"Working directory\")` — \
+             the primitive body every `<str> + <role-noun> → Result<&Path>` \
+             existence gate in the crate now delegates through. \
+             Post-lift body: {body}"
+        );
+        assert!(
+            !body.contains("Path::new(working_dir)"),
+            "require_existing_working_dir() body must NOT spell the inline \
+             `Path::new(working_dir)` construction — that duplication was \
+             lifted onto `require_existing_labeled`. A re-inline would \
+             silently diverge the working-dir specialization from the nine \
+             sibling stringly-key consumers routing through the peer. \
+             Post-lift body: {body}"
+        );
+        assert!(
+            !body.contains("Working directory not found"),
+            "require_existing_working_dir() body must NOT spell the inline \
+             `\"Working directory not found: {{}}\"` bail wording — the \
+             `\"{{label}} not found: {{path}}\"` envelope now lives at the \
+             `require_existing_labeled` body and reaches this specialization \
+             through the delegated `label = \"Working directory\"` argument. \
+             Post-lift body: {body}"
+        );
+    }
+
+    /// Post-lift the nine consumer sites lifted onto
+    /// [`require_existing_labeled`] must not silently re-inline the
+    /// `Path::new(<str>) + .exists() + bail!("<Label> not found: {}",
+    /// <str>)` shape at their call points — a re-inline would reopen the
+    /// class this lift closed. This source-scan shield walks every
+    /// hand-lifted consumer file and refuses the raw label-and-path bail
+    /// wordings the pre-lift sites carried, as well as the two-line
+    /// `let path = Path::new(<str>); if !path.exists() { … }` scaffold
+    /// they used to build up to it.
+    ///
+    /// A helpful "just inline it, it's shorter" cleanup at any one site
+    /// re-opens the duplication class this lift closed and forces every
+    /// other consumer to divorce from the primitive one edit at a time.
+    ///
+    /// The primitive body and its doc-comment code blocks legitimately
+    /// spell the shape at their own body; this shield does NOT scan
+    /// `repo.rs` so the sibling primitive survives it by construction,
+    /// mirroring the discipline every sibling shield test in this module
+    /// already carries.
+    #[test]
+    fn require_existing_labeled_consumers_do_not_reinline_the_primitive_shape() {
+        for (name, source) in [
+            (
+                "commands/kenshi_agent.rs",
+                include_str!("commands/kenshi_agent.rs"),
+            ),
+            ("commands/kenshi.rs", include_str!("commands/kenshi.rs")),
+            ("commands/push.rs", include_str!("commands/push.rs")),
+            (
+                "commands/nix_builder.rs",
+                include_str!("commands/nix_builder.rs"),
+            ),
+            (
+                "commands/crossplane.rs",
+                include_str!("commands/crossplane.rs"),
+            ),
+            ("commands/helm.rs", include_str!("commands/helm.rs")),
+        ] {
+            for needle in [
+                "Kustomization file not found:",
+                "Builder pool file not found:",
+                "runtime image tarball not found:",
+                "Chart tarball not found:",
+            ] {
+                assert!(
+                    !source.contains(needle),
+                    "{name} must NOT spell the inline `{needle}` bail \
+                     wording — that duplication was lifted onto \
+                     `crate::repo::require_existing_labeled(<path>, <label>)`. \
+                     A re-inline would silently diverge the label-and-path \
+                     envelope from the nine sibling consumers routing \
+                     through the primitive, and fork the bail wording into \
+                     a hand-typed literal that could drift from the \
+                     primitive one consumer at a time."
+                );
+            }
+        }
     }
 
     /// [`create_dir_all_sync`] scaffolds a nested output directory that
