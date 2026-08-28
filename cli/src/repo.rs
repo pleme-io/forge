@@ -1552,6 +1552,101 @@ where
     })
 }
 
+/// Change the process working directory to `dir` permanently, labeling
+/// the failure envelope with a short human-readable directory role.
+///
+/// The sibling of [`in_directory`] on the permanent-pivot arm: where
+/// [`in_directory`] swaps cwd for a closure's duration and restores on
+/// drop, this primitive pivots cwd for the remainder of the process — the
+/// shape every consumer that pivots ahead of a subsequent [`Command`]
+/// spawn (`rust dev up`, `rust dev down`, `rust cargo regenerate`,
+/// `rust cargo update`, `federation compose`) spelled inline pre-lift.
+///
+/// [`Command`]: tokio::process::Command
+///
+/// Pre-lift five sibling consumer sites spelled the primitive's OWN shape
+/// one level down from this body, each a
+/// `env::set_current_dir(<path>).context("Failed to change to <label>
+/// directory")?;` composition whose per-site `.context(...)` string
+/// baked the role label (`"workspace"`, `"service"`, `"federation"`)
+/// into a hand-typed literal that could drift from the actual role the
+/// pivot served silently, and whose per-site `env::set_current_dir` call
+/// spelled the same three-token shape at five points across two files:
+///
+/// - `crate::commands::federation::update_federation` (`federation_dir`,
+///   `"federation"`)
+/// - `crate::commands::developer_tools::rust_regenerate`
+///   (`workspace_root`, `"workspace"`)
+/// - `crate::commands::developer_tools::rust_cargo_update`
+///   (`workspace_root`, `"workspace"`)
+/// - `crate::commands::developer_tools::rust_dev` (`service_path`,
+///   `"service"`)
+/// - `crate::commands::developer_tools::rust_dev_down` (`service_path`,
+///   `"service"`)
+///
+/// Post-lift each collapses to `crate::repo::set_current_dir_labeled(<
+/// path>, "<label>")?;` — the [`std::env::set_current_dir`] call and the
+/// exact `"Failed to change to {label} directory"` classifier all live
+/// at ONE body.
+///
+/// # Envelope
+///
+/// Failure surfaces `"Failed to change to {label} directory"` —
+/// interpolating the caller-supplied `label` VERBATIM. The operator-
+/// facing prose reads the SAME as the pre-lift five sites, so a runner
+/// log that grep-matched `"Failed to change to workspace directory"`
+/// keeps matching post-lift. A future refinement of the shape (structured
+/// failure telemetry that discriminates permission-denied from
+/// not-a-directory, a canonicalize hook on the `dir` argument, a swap to
+/// a typed `WorkingDir(PathBuf)` newtype) lands here and reaches every
+/// consumer by construction (THEORY §V — solve-once-at-the-primitive;
+/// §VI.1 — recurring-shape-to-helper).
+///
+/// # Sibling primitives
+///
+/// - [`in_directory`] — closure-scope temporary cwd swap on the async
+///   surface with automatic RAII restore on drop; this primitive is the
+///   permanent-pivot sync peer for consumers that stay in the target
+///   directory for the remainder of the process (subsequent [`Command`]
+///   spawns, subsequent path-relative reads).
+/// - [`activate_root_flake`] — publishes `REPO_ROOT` / `SERVICE_DIR` env
+///   vars AND pivots cwd to `repo_root` with the load-bearing
+///   `"Failed to change working directory to repo root: {path}"`
+///   envelope that names the raw path (not a label). This primitive owns
+///   the general-purpose labeled-pivot surface for consumers where the
+///   directory's ROLE (workspace / service / federation) is the load-
+///   bearing operator-facing signal, not the raw path.
+/// - [`require_existing_working_dir`] — pre-check `&str` → `&Path` peer
+///   on the working-directory surface; a caller that must both pre-check
+///   and pivot writes `let dir = require_existing_working_dir(<str>)?;
+///   set_current_dir_labeled(dir, "working")?;` through two canonically-
+///   enveloped primitives rather than re-deriving both envelopes inline.
+///
+/// # Arguments
+///
+/// * `dir` - Target directory to pivot cwd to. Passed verbatim to
+///   [`std::env::set_current_dir`], so the OS-level semantics
+///   (permission checks, symlink following, ENOTDIR on a regular-file
+///   component) match the underlying call exactly.
+/// * `label` - Short human-readable directory role (e.g. `"workspace"`,
+///   `"service"`, `"federation"`); interpolated into the failure
+///   envelope's `"Failed to change to {label} directory"` classifier
+///   VERBATIM. A drift that swapped the interpolation to `dir.display()`
+///   would silently change the operator-facing wording for every one of
+///   the five consumers.
+///
+/// # Errors
+///
+/// Returns `Err` if the underlying [`std::env::set_current_dir`] fails
+/// (`dir` does not exist — ENOENT, the process lacks permission to
+/// enter it — EACCES, `dir` is not a directory — ENOTDIR). The failure
+/// envelope carries the `label` in the classifier; the offending
+/// `dir.display()` is NOT interpolated (mirroring the pre-lift five
+/// sites' envelope shape exactly).
+pub fn set_current_dir_labeled(dir: &Path, label: &str) -> Result<()> {
+    std::env::set_current_dir(dir).with_context(|| format!("Failed to change to {label} directory"))
+}
+
 /// Run a command in a specific directory, restoring the original directory afterward
 ///
 /// # Arguments
@@ -4359,6 +4454,142 @@ mod tests {
                  symlink-staging consumers routing through the primitive, \
                  and drop both the offending `link_name.display()` and \
                  the intended `target.display()` from the failure envelope."
+            );
+        }
+    }
+
+    /// [`set_current_dir_labeled`] pivots the process cwd to the caller-
+    /// supplied `dir` and returns Ok on success — pins the primitive's
+    /// happy path to the same observable-cwd shape every pre-lift
+    /// `env::set_current_dir(<path>).context("Failed to change to <label>
+    /// directory")?;` consumer relied on. A future refactor that dropped
+    /// the [`std::env::set_current_dir`] call (or replaced it with a
+    /// no-op stub returning Ok) would break every one of the five
+    /// consumer sites at their next `Command` spawn — subsequent argv
+    /// would spawn from the pre-lift cwd rather than the pivoted-to
+    /// workspace / service / federation directory — and this test would
+    /// fail HERE by observing an unchanged cwd. Cwd is a process-global
+    /// singleton so the test acquires [`crate::test_support::
+    /// ROOT_FLAKE_ENV_LOCK`] and captures a
+    /// [`crate::test_support::RootFlakeEnvSnapshot`] to restore cwd on
+    /// drop (both normal exit and panic), matching the discipline every
+    /// sibling `activate_root_flake_*` test in this module already
+    /// carries.
+    #[test]
+    fn set_current_dir_labeled_pivots_cwd_to_target_dir() {
+        let _guard = crate::test_support::ROOT_FLAKE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env = crate::test_support::RootFlakeEnvSnapshot::capture();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("target-workspace");
+        std::fs::create_dir_all(&target).expect("create target dir");
+
+        set_current_dir_labeled(&target, "workspace").expect("well-formed pivot must succeed");
+
+        let observed = std::env::current_dir().expect("cwd after pivot");
+        // Both sides go through canonicalize so a `/private/var/...` vs
+        // `/var/...` symlink prefix at the tempdir root does not flake
+        // the equality reading — same discipline as the
+        // `activate_root_flake_chdirs_to_repo_root_not_service_dir` peer.
+        let expected = target.canonicalize().expect("canonicalize target");
+        let observed = observed.canonicalize().expect("canonicalize observed");
+        assert_eq!(
+            observed, expected,
+            "set_current_dir_labeled() must pivot the process cwd to the \
+             caller-supplied `dir` — the exact shape every pre-lift \
+             `env::set_current_dir(<path>).context(...)?` consumer \
+             relied on for its subsequent `Command` spawns"
+        );
+    }
+
+    /// [`set_current_dir_labeled`]'s failure arm must surface the
+    /// caller-supplied `label` VERBATIM in the classifier — pins the
+    /// envelope to the same `"Failed to change to <label> directory"`
+    /// shape every pre-lift consumer relied on, so a runner log that
+    /// grep-matched `"Failed to change to workspace directory"` keeps
+    /// matching post-lift. A drift that swapped the interpolation to
+    /// `dir.display()`, dropped the trailing `" directory"` token, or
+    /// changed the leading `"Failed to change to "` prefix would break
+    /// operator-facing prose at every one of the five consumer sites
+    /// without a compile error, and this shield refuses that regression.
+    ///
+    /// Failure is triggered by pointing `dir` at a slot that does not
+    /// exist under a hermetic tempdir — a
+    /// [`std::env::set_current_dir`] to such a path surfaces `ENOENT`
+    /// deterministically without depending on process EUID or a
+    /// pre-mounted read-only branch. Cwd is not mutated on the failure
+    /// arm (the underlying [`std::env::set_current_dir`] call errors
+    /// before the process cwd is touched), so the test needs no
+    /// cwd-restore guard.
+    #[test]
+    fn set_current_dir_labeled_missing_target_envelope_carries_label() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing = tmp.path().join("does-not-exist-workspace-dir");
+
+        let err = set_current_dir_labeled(&missing, "federation").unwrap_err();
+        let msg = format!("{err:#}");
+
+        assert!(
+            msg.contains("Failed to change to federation directory"),
+            "chdir-arm envelope must carry the caller-supplied label \
+             verbatim in a `Failed to change to <label> directory` \
+             classifier; got: {msg}"
+        );
+    }
+
+    /// Post-lift the five consumer sites lifted onto
+    /// [`set_current_dir_labeled`] must not silently re-inline the
+    /// primitive's shape at their call points — a re-inline would
+    /// reopen the class this lift closed. This source-scan shield walks
+    /// every hand-lifted consumer file and refuses the raw
+    /// `"Failed to change to "` classifier substring inside its consumer
+    /// body window (`commands/federation.rs`,
+    /// `commands/developer_tools.rs`) — the exact shape the five lifted
+    /// sites carried pre-lift, whose per-site `.context(...)` string
+    /// baked the role label into a hand-typed literal that could drift
+    /// from the actual role the pivot served silently.
+    ///
+    /// A helpful "just inline it, it's shorter" cleanup at any one site
+    /// re-opens the duplication class this lift closed and forces every
+    /// other consumer to divorce from the primitive one edit at a time.
+    ///
+    /// The [`in_directory`] primitive body in `repo.rs` legitimately
+    /// carries `"Failed to change to directory: {path}"` (path-tagged,
+    /// not label-tagged) at its own body; this shield does NOT scan
+    /// `repo.rs` so the sibling primitive survives it by construction,
+    /// mirroring the discipline sibling shield tests already carry.
+    ///
+    /// [`activate_root_flake`]'s `"Failed to change working directory to
+    /// repo root: {path}"` envelope legitimately carries the raw path
+    /// (not a label) because the load-bearing operator-facing signal at
+    /// that ONE consumer is which repo-root path failed to activate,
+    /// not the role; this shield's `"Failed to change to "` needle does
+    /// NOT match `"Failed to change working directory"` (different
+    /// substring), so the primitive survives it by construction.
+    #[test]
+    fn set_current_dir_labeled_consumers_do_not_reinline_the_primitive_shape() {
+        for (name, source) in [
+            (
+                "commands/federation.rs",
+                include_str!("commands/federation.rs"),
+            ),
+            (
+                "commands/developer_tools.rs",
+                include_str!("commands/developer_tools.rs"),
+            ),
+        ] {
+            assert!(
+                !source.contains("Failed to change to "),
+                "{name} must NOT spell the inline \
+                 `.context(\"Failed to change to <label> directory\")` \
+                 classifier — that duplication was lifted onto \
+                 `crate::repo::set_current_dir_labeled`. A re-inline \
+                 would silently diverge the chdir arm from the five \
+                 sibling cwd-pivoting consumers routing through the \
+                 primitive, and reopen the drift class where a hand-typed \
+                 `<label>` literal could diverge from the role the pivot \
+                 served."
             );
         }
     }

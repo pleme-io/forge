@@ -132,7 +132,7 @@ pub async fn update_federation(
     let paths = PathBuilder::new(deploy_config)?;
 
     // Change to federation directory
-    env::set_current_dir(&federation_dir).context("Failed to change to federation directory")?;
+    crate::repo::set_current_dir_labeled(&federation_dir, "federation")?;
 
     // PRE-COMPOSITION VALIDATION
     use crate::commands::supergraph_verification::{
