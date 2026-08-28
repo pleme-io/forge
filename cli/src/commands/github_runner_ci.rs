@@ -371,9 +371,6 @@ pub async fn execute(
 
         outcome?;
 
-        // Create result-runner symlink - use just "result" as relative path
-        tokio::fs::remove_file(&build_output).await.ok(); // Ignore if doesn't exist
-
         // Read the nix store path from result symlink
         let result_path = format!("{}/result", working_dir);
         let target = tokio::fs::read_link(&result_path)
@@ -381,9 +378,7 @@ pub async fn execute(
             .context("Failed to read result symlink")?;
 
         // Create result-runner symlink pointing to the same nix store path
-        tokio::fs::symlink(&target, &build_output)
-            .await
-            .context("Failed to create result-runner symlink")?;
+        crate::repo::replace_symlink_async(&target, std::path::Path::new(&build_output)).await?;
 
         info!("✅ Build complete: result-runner");
         println!();

@@ -638,6 +638,94 @@ pub fn create_dir_all_sync(path: &Path) -> Result<()> {
         .with_context(|| format!("Failed to create directory {}", path.display()))
 }
 
+/// Replace the symlink at `link_name` so it points at `target`, on the
+/// async fs surface.
+///
+/// The atomic-symlink-replace primitive on the async fs surface: the
+/// canonical "silently drop any existing entry at `link_name`, then
+/// create a fresh symlink pointing at `target`" composition every
+/// consumer that stages a build-output symlink at a well-known path
+/// (`{working_dir}/{output}` in `commands/build.rs`, `{repo_root}/result`
+/// in `commands/comprehensive_release.rs`, `{working_dir}/result-runner`
+/// in `commands/github_runner_ci.rs`) spelled inline pre-lift.
+///
+/// # Envelope
+///
+/// Failure surfaces `"Failed to create symlink {link_name} -> {target}"`
+/// — operator's next step is `ls -la` on `link_name`'s parent (a missing
+/// dir, EACCES on the writable ancestor, ENOSPC on the mount, or EEXIST
+/// when the pre-remove failed to clear the slot because `link_name` was
+/// a non-empty directory rather than a file or symlink) and a probe of
+/// `target` (a missing target is not itself an error at symlink-creation
+/// time — Unix symlinks may dangle — but the operator can then confirm
+/// the intended target still exists in the nix store). The classifier
+/// renders BOTH paths so an operator reading the runner log can tell
+/// which of several staged symlinks tripped without cross-referencing
+/// the caller, and can tell target from link at a glance. Pre-lift the
+/// three inline consumer sites spelled `"Failed to create symlink"` /
+/// `"Failed to create result symlink"` / `"Failed to create result-runner
+/// symlink"` — no target, no link, operator had to grep for the call
+/// context to know which build-output symlink stage bounced.
+///
+/// # Silent remove-arm is load-bearing
+///
+/// The pre-existence sweep is intentionally best-effort. Pre-lift every
+/// consumer spelled `tokio::fs::remove_file(link).await.ok();` (or
+/// `let _ = tokio::fs::remove_file(link).await;`) explicitly — the sweep
+/// exists solely to reserve the `link_name` slot from the underlying
+/// [`tokio::fs::symlink`] (which fails with `EEXIST` when `link_name`
+/// already exists), and every well-defined outcome except "the slot is
+/// now clear" surfaces on the create arm anyway (the create's `EEXIST`
+/// if the remove did not actually clear the slot surfaces post-lift on
+/// this primitive's own `"Failed to create symlink"` envelope, and the
+/// operator inspects `link_name` directly). Threading the remove's
+/// `io::Error` back to the caller would surface spurious `ENOENT` on
+/// the first-run path — the sweep is expected to no-op when the link
+/// does not exist yet — the exact opposite of the semantics every
+/// pre-lift consumer relied on.
+///
+/// # Arg order
+///
+/// `(target, link_name)` — matches Unix `symlink(2)`, the underlying
+/// [`tokio::fs::symlink`], and every pre-lift consumer's spelling
+/// (`tokio::fs::symlink(&target, &link_name).await…`). A drift that
+/// swapped the two would silently create the inverse symlink (a link
+/// whose target is the original link path and a target with no reader),
+/// and the shield tests below pin both the shape and the order.
+///
+/// # Sibling primitives
+///
+/// - Sync directory scaffold: [`create_dir_all_sync`] owns the
+///   materialize-a-directory arm on the sync fs surface; a caller that
+///   must both scaffold the parent of the symlink and stage the link
+///   writes `create_dir_all_sync(link_name.parent().unwrap_or(…))?;`
+///   ahead of `replace_symlink_async(target, link_name).await?`. The
+///   two primitives compose without either re-deriving the other's
+///   envelope.
+///
+/// # Errors
+///
+/// Returns `Err` if the symlink cannot be created (parent dir missing —
+/// ENOENT, the writable ancestor is read-only — EROFS, the mount is
+/// full — ENOSPC, the process lacks write permission — EACCES, or the
+/// pre-remove failed to clear the slot — EEXIST). Both
+/// `link_name.display()` and `target.display()` are threaded through
+/// the [`anyhow::Context`] envelope on every failure branch. A
+/// `remove_file` failure on the pre-existence sweep is silently
+/// discarded by design (see "Silent remove-arm is load-bearing" above).
+pub async fn replace_symlink_async(target: &Path, link_name: &Path) -> Result<()> {
+    tokio::fs::remove_file(link_name).await.ok();
+    tokio::fs::symlink(target, link_name)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to create symlink {} -> {}",
+                link_name.display(),
+                target.display()
+            )
+        })
+}
+
 /// Find repository root by looking for flake.nix
 ///
 /// Search order:
@@ -4104,6 +4192,174 @@ mod tests {
                      create-dir consumers routing through the primitive."
                 );
             }
+        }
+    }
+
+    /// [`replace_symlink_async`] stages a symlink at a well-known
+    /// `link_name` whose slot is empty pre-call and threads the caller's
+    /// `target` verbatim into the on-disk symlink. Pins the primitive's
+    /// success arm to the same shape every pre-lift `tokio::fs::symlink(&
+    /// target, &link_name).await.context(...)` consumer relied on —
+    /// [`tokio::fs::symlink`] IS the underlying primitive, so a future
+    /// refactor that swapped the symlink direction (`(&link_name,
+    /// &target)`) or re-encoded `target` through a normalization pass
+    /// (which would silently canonicalize a relative
+    /// `nix-store/…-derivation` path into an absolute one) would flip
+    /// the on-disk semantics beneath every one of the three consumer
+    /// sites, and this shield refuses that regression.
+    #[tokio::test]
+    async fn replace_symlink_async_stages_link_pointing_at_target() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("result-store-path");
+        std::fs::write(&target, b"sentinel derivation output").expect("seed target");
+        let link_name = tmp.path().join("result-runner");
+
+        replace_symlink_async(&target, &link_name)
+            .await
+            .expect("well-formed replace must succeed");
+
+        let read_back = tokio::fs::read_link(&link_name)
+            .await
+            .expect("post-replace read_link");
+        assert_eq!(
+            read_back, target,
+            "replace_symlink_async() must persist the caller's `target` \
+             verbatim into the on-disk symlink, so every consumer that \
+             stages a build-output symlink sees the same target it did \
+             pre-lift"
+        );
+    }
+
+    /// [`replace_symlink_async`]'s remove-arm must silently drop an
+    /// existing symlink at `link_name` before the create — the exact
+    /// semantics every pre-lift consumer relied on via
+    /// `tokio::fs::remove_file(&link).await.ok();` (or the `let _ = …`
+    /// spelling). Pre-lift the three consumer sites each staged the
+    /// build-output symlink at a slot that MAY already carry an old
+    /// symlink from a prior run (a stale `result-runner` from the last
+    /// CI build, a stale `result` at the repo root from the last
+    /// deploy) — the pre-existence sweep is what makes the primitive
+    /// idempotent across reruns. A future refactor that dropped the
+    /// remove (or upgraded it to an errorful `remove_file(…)?`) would
+    /// surface `EEXIST` on every rerun and break the CI's
+    /// build-then-deploy loop at the second iteration.
+    #[tokio::test]
+    async fn replace_symlink_async_replaces_pre_existing_symlink() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let stale_target = tmp.path().join("stale-store-path");
+        let fresh_target = tmp.path().join("fresh-store-path");
+        std::fs::write(&stale_target, b"stale").expect("seed stale");
+        std::fs::write(&fresh_target, b"fresh").expect("seed fresh");
+        let link_name = tmp.path().join("result");
+
+        tokio::fs::symlink(&stale_target, &link_name)
+            .await
+            .expect("seed the pre-existing symlink");
+
+        replace_symlink_async(&fresh_target, &link_name)
+            .await
+            .expect("replace over a pre-existing symlink must succeed");
+
+        let read_back = tokio::fs::read_link(&link_name)
+            .await
+            .expect("post-replace read_link");
+        assert_eq!(
+            read_back, fresh_target,
+            "replace_symlink_async() must drop the stale symlink and \
+             stage a fresh one pointing at the new target — the exact \
+             idempotence contract every rerun-tolerant build-output \
+             consumer relies on"
+        );
+    }
+
+    /// [`replace_symlink_async`]'s create-arm must surface BOTH the
+    /// offending `link_name.display()` AND the intended
+    /// `target.display()` on the failure envelope, so an operator
+    /// reading the runner log can tell one bounce
+    /// (`"Failed to create symlink"`) from other fs-op bounces
+    /// (`"Failed to write"` on a file, `"Failed to create directory"` on
+    /// a mkdir) without cross-referencing the caller, and can tell
+    /// which link and which target were involved without re-deriving
+    /// the site's call context. Pins the primitive to the same envelope
+    /// discipline every sibling fs-op primitive on the sync / async
+    /// surfaces already carries — one primitive per fs-op surface,
+    /// same canonical operator-next-step contract. Pre-lift the three
+    /// consumer sites carried bare `.context("Failed to create
+    /// symlink")` / `.context("Failed to create result symlink")` /
+    /// `.context("Failed to create result-runner symlink")` strings
+    /// with NO path in the envelope; this shield forbids that
+    /// regression.
+    ///
+    /// Failure is triggered by pointing `link_name` at a slot whose
+    /// parent does not exist — a `tokio::fs::symlink(target, link_name)`
+    /// under such a missing parent surfaces `ENOENT` deterministically
+    /// without depending on process EUID or a pre-mounted read-only
+    /// branch.
+    #[tokio::test]
+    async fn replace_symlink_async_missing_parent_dir_errors_carry_both_paths_and_symlink_classifier(
+    ) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("some-target");
+        let link_name = tmp.path().join("does-not-exist-dir").join("result");
+
+        let err = replace_symlink_async(&target, &link_name)
+            .await
+            .unwrap_err();
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Failed to create symlink"),
+            "symlink-arm classifier must be 'Failed to create symlink'; got: {msg}"
+        );
+        assert!(
+            msg.contains(&link_name.display().to_string()),
+            "symlink-arm envelope must carry the offending link_name; got: {msg}"
+        );
+        assert!(
+            msg.contains(&target.display().to_string()),
+            "symlink-arm envelope must carry the intended target; got: {msg}"
+        );
+    }
+
+    /// Post-lift the three straggler consumer sites lifted onto
+    /// [`replace_symlink_async`] must not silently re-inline the
+    /// primitive's shape at their call points — a re-inline would
+    /// reopen the class this lift closed. This source-scan shield
+    /// walks every hand-lifted consumer file and refuses the raw
+    /// `tokio::fs::symlink(…)` composition inside its consumer body
+    /// window (`commands/build.rs`, `commands/comprehensive_release.rs`,
+    /// `commands/github_runner_ci.rs`) — the exact shape the three
+    /// lifted sites carried pre-lift, which dropped both the offending
+    /// `link_name.display()` and the intended `target.display()` from
+    /// every failure classifier.
+    ///
+    /// A helpful "just inline it, it's shorter" cleanup at any one site
+    /// re-opens the duplication class this lift closed and forces
+    /// every other consumer to divorce from the primitive one edit at
+    /// a time.
+    #[test]
+    fn replace_symlink_async_consumers_do_not_reinline_the_primitive_shape() {
+        for (name, source) in [
+            ("commands/build.rs", include_str!("commands/build.rs")),
+            (
+                "commands/comprehensive_release.rs",
+                include_str!("commands/comprehensive_release.rs"),
+            ),
+            (
+                "commands/github_runner_ci.rs",
+                include_str!("commands/github_runner_ci.rs"),
+            ),
+        ] {
+            assert!(
+                !source.contains("tokio::fs::symlink("),
+                "{name} must NOT spell the inline `tokio::fs::symlink(…)` \
+                 create-arm — that duplication was lifted onto \
+                 `crate::repo::replace_symlink_async`. A re-inline would \
+                 silently diverge the create arm from the three sibling \
+                 symlink-staging consumers routing through the primitive, \
+                 and drop both the offending `link_name.display()` and \
+                 the intended `target.display()` from the failure envelope."
+            );
         }
     }
 }

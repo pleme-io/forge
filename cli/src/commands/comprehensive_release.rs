@@ -790,13 +790,7 @@ pub async fn execute(
         let result_link = std::path::Path::new(repo_root_str).join("result");
         let work_dir_result = std::path::Path::new(&working_dir).join(build_output);
 
-        // Remove existing symlink
-        let _ = tokio::fs::remove_file(&result_link).await;
-
-        // Create new symlink
-        tokio::fs::symlink(&work_dir_result, &result_link)
-            .await
-            .context("Failed to create result symlink")?;
+        crate::repo::replace_symlink_async(&work_dir_result, &result_link).await?;
 
         commands::deploy::execute(
             manifest.clone(),
