@@ -232,7 +232,7 @@ async fn scan_entities(config: &DashboardConfig) -> Result<Vec<ObservedEntity>> 
 /// Parse #[observe] attributes from Rust source
 fn parse_observed_entities(content: &str, path: &Path) -> Result<Vec<ObservedEntity>> {
     let mut entities = Vec::new();
-    let module_path = path.to_string_lossy().to_string();
+    let module_path = crate::repo::path_to_string_lossy(path);
 
     // Pattern: #[observe(entity = "...", ...)]
     let re = regex::Regex::new(
@@ -281,7 +281,7 @@ fn parse_seaorm_entities(
     metric_prefix: &str,
 ) -> Result<Vec<ObservedEntity>> {
     let mut entities = Vec::new();
-    let module_path = path.to_string_lossy().to_string();
+    let module_path = crate::repo::path_to_string_lossy(path);
 
     // Pattern: #[sea_orm(table_name = "...")]
     let re = regex::Regex::new(r#"#\[sea_orm\s*\(\s*table_name\s*=\s*"([^"]+)"\s*\)\]"#)?;

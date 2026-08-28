@@ -307,7 +307,7 @@ pub async fn execute(
             serde_json::to_string_pretty(&artifact).context("Failed to serialize artifact info")?;
         crate::repo::write_text_sync(&json_path, format!("{}\n", json))?;
 
-        modified_files.push(json_path.to_string_lossy().to_string());
+        modified_files.push(crate::repo::path_to_string_lossy(&json_path));
         println!(
             "   {} Swapped tags in deploy/{}.artifact.json",
             "OK".green(),

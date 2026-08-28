@@ -1633,7 +1633,7 @@ pub fn bump(
         // before any downstream spawn.
         let repo_root =
             crate::git::try_repo_root_via_rev_parse().context("Failed to run git rev-parse")?;
-        let repo_root = repo_root.to_string_lossy().to_string();
+        let repo_root = crate::repo::path_to_string_lossy(&repo_root);
 
         let status = crate::git::git_command_sync()
             .args(["add", &format!("{}/*/Chart.yaml", charts_dir)])
@@ -1762,7 +1762,7 @@ fn release_lib_chart(
         return Ok(None);
     }
 
-    let lib_str = lib_path.to_string_lossy().to_string();
+    let lib_str = crate::repo::path_to_string_lossy(&lib_path);
     let version = chart_version_at(&lib_str)?;
 
     println!();
@@ -1957,7 +1957,7 @@ fn prepare_chart_workspace(
     // redirected. Requires the subchart to have been mirrored first.
     redirect_remote_deps_to_mirror(&dst_chart, PLEME_OCI_REGISTRY)?;
 
-    let chart_path = dst_chart.to_string_lossy().to_string();
+    let chart_path = crate::repo::path_to_string_lossy(&dst_chart);
     Ok((tmpdir, chart_path))
 }
 

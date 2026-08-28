@@ -1036,7 +1036,7 @@ async fn deploy_to_environment(
     // Deploy via GitOps (updates manifest, commits)
     let git_sha = deploy_rust_service_with_tag(
         service.to_string(),
-        full_manifest_path.to_string_lossy().to_string(),
+        crate::repo::path_to_string_lossy(&full_manifest_path),
         registry.to_string(),
         namespace.to_string(),
         watch,
@@ -2357,7 +2357,7 @@ pub async fn release_rust_service(
 
     // Compute manifest path from configuration
     let manifest_path = deploy_config.k8s_manifest_path()?;
-    let manifest = manifest_path.to_string_lossy().to_string();
+    let manifest = crate::repo::path_to_string_lossy(&manifest_path);
 
     println!("📋 Configuration loaded:");
     println!("   Product: {}", deploy_config.product.name);

@@ -1845,6 +1845,58 @@ pub fn file_name_str(path: &Path) -> &str {
         .unwrap_or("")
 }
 
+/// Project a caller-owned [`Path`] into an owned [`String`] via the
+/// lossy UTF-8 repair every pre-lift consumer relied on: a non-UTF-8
+/// byte is replaced by [`U+FFFD REPLACEMENT CHARACTER`], and the
+/// resulting string is returned owned. The exact shape every pre-lift
+/// consumer spelled inline (`path.to_string_lossy().to_string()`), now
+/// with ONE body owning the projection.
+///
+/// # Duplication lift (the one-primitive-per-projection discipline)
+///
+/// The pre-lift shape recurred at eleven sibling call sites across
+/// five command modules — `commands/product_release.rs` ×3,
+/// `commands/helm.rs` ×3, `commands/rust_service.rs` ×2,
+/// `commands/rollback.rs` ×1, `commands/dashboards.rs` ×2 — every one
+/// of them spelling the same `.to_string_lossy().to_string()` two-step
+/// projection over a `PathBuf` or `&Path` receiver.
+///
+/// Fanned out across eleven hand-typed spellings, the shape was
+/// invisible to the borrow-checker: a helpful "let's make this
+/// [`std::borrow::Cow`]-shaped for zero-alloc UTF-8 paths" cleanup at
+/// any one site would quietly fork one consumer at a time from its ten
+/// siblings. Lifting to a single primitive with one owner keeps the
+/// projection uniform and refuses drift by construction.
+///
+/// # The `.into_owned()` alternative to `.to_string()`
+///
+/// The primitive body calls [`std::borrow::Cow::into_owned`] rather
+/// than the [`ToString::to_string`] tail every pre-lift site spelled.
+/// On the [`std::borrow::Cow::Borrowed`] arm (the path is already
+/// valid UTF-8) both spellings allocate one fresh [`String`] and are
+/// bytewise indistinguishable. On the [`std::borrow::Cow::Owned`] arm
+/// (the path carried non-UTF-8 bytes and [`Path::to_string_lossy`]
+/// synthesized a repair-string), `.into_owned()` unwraps the already-
+/// owned [`String`] in place while `.to_string()` allocates a second
+/// [`String`] and copies through it — a silent double-alloc the
+/// pre-lift shape carried at every site. On Linux CI the observable
+/// difference is nil (every path is UTF-8), so this is not a
+/// behavioral change; it is a canonical shape the primitive owns once
+/// on behalf of every consumer.
+///
+/// # Peer
+///
+/// Sibling to [`file_name_str`] on the caller-owned-path-projection
+/// surface: [`file_name_str`] is the borrow-only, zero-alloc peer that
+/// projects a [`Path`] into a borrowed `&str` (the file-name segment);
+/// [`path_to_string_lossy`] is the owned, one-alloc peer that projects
+/// a [`Path`] into an owned [`String`] (the full path). Together they
+/// discharge the `<path> → <string-shape>` primitive family the
+/// `crate::repo::*` surface owns.
+pub fn path_to_string_lossy(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
 /// Run a command in a specific directory, restoring the original directory afterward
 ///
 /// # Arguments
@@ -5181,6 +5233,151 @@ mod tests {
                      the primitive, and fork the miss-arm unit (`\"\"`) \
                      into a hand-typed literal that could drift from \
                      the primitive one consumer at a time."
+                );
+            }
+        }
+    }
+
+    /// [`path_to_string_lossy`] projects a path into an owned
+    /// [`String`] verbatim through the lossy UTF-8 repair: an
+    /// ASCII-only path passes through byte-identical, so the output
+    /// aliases the input segment-for-segment and no consumer needs
+    /// a separate short-circuit for the "trivially UTF-8" arm.
+    ///
+    /// Pinning the byte-identity on the ASCII arm is the load-bearing
+    /// half of the contract: every one of the eleven lifted consumer
+    /// sites feeds the returned [`String`] into a downstream
+    /// [`std::process::Command::current_dir`], a
+    /// `git add <path>` argv slot, a `--working-dir <path>` CLI flag
+    /// forwarded through [`run_forge_subcommand`], or a `serde_json`
+    /// `modified_files` list eventually surfaced to the operator —
+    /// every one of them relies on the path bytes surviving the round
+    /// trip through the primitive verbatim. A drift to a
+    /// [`Path::display`]-normalized shape (which collapses trailing
+    /// slashes and canonicalizes empty segments) would silently walk
+    /// one of those spawn-time paths off the caller-supplied argv.
+    #[test]
+    fn path_to_string_lossy_returns_owned_string_byte_identical_on_utf8_hit() {
+        let path = std::path::Path::new("/tmp/forge-workspace/pleme-linker-cli/src/main.rs");
+        let projected = path_to_string_lossy(path);
+        assert_eq!(
+            projected, "/tmp/forge-workspace/pleme-linker-cli/src/main.rs",
+            "path_to_string_lossy() must project the ASCII input path \
+             byte-identical on the UTF-8 hit arm — the exact shape \
+             every pre-lift consumer relied on for its downstream \
+             argv slot / `current_dir` / `--working-dir` flag / \
+             `modified_files` push. Got: {projected:?}"
+        );
+    }
+
+    /// [`path_to_string_lossy`] uses [`std::borrow::Cow::into_owned`]
+    /// at its tail rather than the pre-lift `.to_string()` spelling —
+    /// see the primitive body's doc-comment for the one-alloc vs
+    /// two-alloc distinction on the [`std::borrow::Cow::Owned`] arm.
+    /// A body-slice source-scan shield keeps future drift on the tail
+    /// (a helpful "let's be consistent with `.to_string()` everywhere"
+    /// cleanup would silently reintroduce the double-alloc the
+    /// primitive discharges).
+    #[test]
+    fn path_to_string_lossy_body_ends_with_into_owned_not_to_string() {
+        let source = include_str!("repo.rs");
+        let signature = "pub fn path_to_string_lossy(path: &Path) -> String {";
+        let start = source
+            .find(signature)
+            .expect("path_to_string_lossy signature must appear in repo.rs");
+        let body_slice = &source[start..start + 200];
+        assert!(
+            body_slice.contains(".into_owned()"),
+            "path_to_string_lossy body must end with `.into_owned()` \
+             to keep the one-alloc discipline on the \
+             `Cow::Owned` (non-UTF-8) arm — a drift to `.to_string()` \
+             reintroduces the silent double-alloc every pre-lift site \
+             carried and this primitive was lifted to discharge. \
+             Body slice: {body_slice}"
+        );
+        assert!(
+            !body_slice.contains(".to_string_lossy().to_string()"),
+            "path_to_string_lossy body must NOT respell the pre-lift \
+             `.to_string_lossy().to_string()` two-alloc shape at its \
+             own body — that is the exact shape the eleven consumer \
+             sites were lifted to escape. Body slice: {body_slice}"
+        );
+    }
+
+    /// Post-lift the eleven consumer sites lifted onto
+    /// [`path_to_string_lossy`] must not silently re-inline the
+    /// primitive's shape at their call points — a re-inline reopens
+    /// the class this lift closed. This source-scan shield walks
+    /// every hand-lifted consumer file and refuses the exact
+    /// `<ident>.to_string_lossy().to_string()` composition each site
+    /// carried pre-lift, keyed by the concrete identifier every
+    /// consumer bound.
+    ///
+    /// The chained-receiver variants that survive by construction
+    /// (`product_dir.join(&svc.path).to_string_lossy().to_string()`
+    /// at `commands/product_release.rs:708` and
+    /// `commands/rollback.rs:238`, `tmp.path().to_string_lossy()
+    /// .to_string()` at `commands/helm.rs:1169`,
+    /// `entry.file_name().to_string_lossy().to_string()` at
+    /// `commands/helm.rs:1841`, `e.path().to_string_lossy()
+    /// .to_string()` at `commands/helm.rs:2930`) are legitimately
+    /// different in shape from the identifier-single form this lift
+    /// consolidated: the receiver is an inline expression whose
+    /// result type ([`std::ffi::OsString`], the returned
+    /// [`std::path::PathBuf`] of [`Path::join`], etc.) differs from
+    /// the caller-owned `PathBuf` / `&Path` binding the primitive
+    /// takes. Those sites are out-of-scope for this lift; the
+    /// identifier-keyed needles below leave them untouched.
+    #[test]
+    fn path_to_string_lossy_consumers_do_not_reinline_the_primitive_shape() {
+        for (name, source, needles) in [
+            (
+                "commands/product_release.rs",
+                include_str!("commands/product_release.rs"),
+                &[
+                    "json_path.to_string_lossy().to_string()",
+                    "product_dir.to_string_lossy().to_string()",
+                ][..],
+            ),
+            (
+                "commands/helm.rs",
+                include_str!("commands/helm.rs"),
+                &[
+                    "repo_root.to_string_lossy().to_string()",
+                    "lib_path.to_string_lossy().to_string()",
+                    "dst_chart.to_string_lossy().to_string()",
+                ][..],
+            ),
+            (
+                "commands/rust_service.rs",
+                include_str!("commands/rust_service.rs"),
+                &[
+                    "full_manifest_path.to_string_lossy().to_string()",
+                    "manifest_path.to_string_lossy().to_string()",
+                ][..],
+            ),
+            (
+                "commands/rollback.rs",
+                include_str!("commands/rollback.rs"),
+                &["json_path.to_string_lossy().to_string()"][..],
+            ),
+            (
+                "commands/dashboards.rs",
+                include_str!("commands/dashboards.rs"),
+                &["path.to_string_lossy().to_string()"][..],
+            ),
+        ] {
+            for needle in needles {
+                assert!(
+                    !source.contains(needle),
+                    "{name} must NOT spell the inline `{needle}` \
+                     two-step projection — that duplication was \
+                     lifted onto `crate::repo::path_to_string_lossy`. \
+                     A re-inline would silently diverge the \
+                     path-to-owned-string projection from the eleven \
+                     sibling consumers routing through the primitive, \
+                     and re-open the double-alloc discipline on the \
+                     `Cow::Owned` (non-UTF-8) arm this lift discharged."
                 );
             }
         }

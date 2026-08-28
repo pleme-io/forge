@@ -236,7 +236,7 @@ async fn write_artifact_tags(
             serde_json::to_string_pretty(&artifact).context("Failed to serialize artifact info")?;
         crate::repo::write_text_sync(&json_path, format!("{}\n", json))?;
 
-        modified_files.push(json_path.to_string_lossy().to_string());
+        modified_files.push(crate::repo::path_to_string_lossy(&json_path));
         println!(
             "   {} Updated artifact tag in deploy/{}.artifact.json",
             "OK".green(),
@@ -384,7 +384,7 @@ pub async fn product_release(
         println!("{}", "Phase 0: Pre-release gates".bold());
         let product_dir =
             crate::config::resolve_product_dir(std::path::Path::new(&repo_root), &product);
-        let product_dir_str = product_dir.to_string_lossy().to_string();
+        let product_dir_str = crate::repo::path_to_string_lossy(&product_dir);
 
         run_forge_subcommand(&["prerelease", "--working-dir", &product_dir_str]).await?;
 
@@ -769,7 +769,7 @@ pub async fn product_release(
         println!("{}", "Phase 4: Dashboard sync".bold());
         let product_dir =
             crate::config::resolve_product_dir(std::path::Path::new(&repo_root), &product);
-        let product_dir_str = product_dir.to_string_lossy().to_string();
+        let product_dir_str = crate::repo::path_to_string_lossy(&product_dir);
         run_forge_subcommand(&["dashboards", "--working-dir", &product_dir_str]).await?;
         println!();
     } else {
