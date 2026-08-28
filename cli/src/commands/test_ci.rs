@@ -2,12 +2,11 @@
 //!
 //! Replaces product-sdlc.nix::test:ci.
 
-use anyhow::{bail, Result};
-use std::path::Path;
+use anyhow::Result;
 use std::process::Command;
 use tracing::info;
 
-use crate::repo::get_tool_path;
+use crate::repo::{get_tool_path, require_existing_working_dir};
 use crate::retry::run_inherited_status_sync;
 
 /// Resolve the `cargo` binary via `CARGO`, falling back to PATH. Every
@@ -32,10 +31,7 @@ fn cargo_bin() -> String {
 
 /// Run tests in CI mode: prefer cargo-nextest, fall back to cargo test.
 pub fn execute(working_dir: &str, threads: u32) -> Result<()> {
-    let dir = Path::new(working_dir);
-    if !dir.exists() {
-        bail!("Working directory not found: {}", working_dir);
-    }
+    let dir = require_existing_working_dir(working_dir)?;
 
     let cargo = cargo_bin();
 
@@ -75,10 +71,7 @@ pub fn execute(working_dir: &str, threads: u32) -> Result<()> {
 
 /// Run tests with coverage via cargo-tarpaulin.
 pub fn coverage(working_dir: &str, format: &str) -> Result<()> {
-    let dir = Path::new(working_dir);
-    if !dir.exists() {
-        bail!("Working directory not found: {}", working_dir);
-    }
+    let dir = require_existing_working_dir(working_dir)?;
 
     let cargo = cargo_bin();
 
