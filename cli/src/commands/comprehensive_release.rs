@@ -137,6 +137,56 @@ fn cargo_bin() -> String {
     get_tool_path("CARGO", "cargo")
 }
 
+/// Resolve the `docker` binary via the `DOCKER_BIN` env override,
+/// falling back to `docker` on PATH. Every `docker` spawn in this
+/// module reads through this sigil so the two-argument resolve
+/// appears in exactly ONE place (this sigil body) — mirrors the
+/// sibling `docker_bin()` sigils at `commands/local.rs:31`,
+/// `commands/infra.rs:33`, `commands/e2e.rs:36`, and
+/// `commands/prerelease.rs:77`. Solve-once at the sigil (THEORY
+/// §I.5 — duplication budget zero) means a future added `docker`
+/// spawn cannot silently re-copy the resolve inline and drift from
+/// the `DOCKER_BIN` override at exactly the tier the hermetic-runner
+/// contract binds. The two-argument resolve string is spelled only
+/// in the sigil body below, never in this docstring, so the
+/// count-eq-1 shield in the test module cannot self-match against
+/// this comment.
+fn docker_bin() -> String {
+    get_tool_path("DOCKER_BIN", "docker")
+}
+
+/// Resolve the `docker-compose` binary via the `DOCKER_COMPOSE_BIN`
+/// env override, falling back to `docker-compose` on PATH. Every
+/// `docker-compose` spawn in this module reads through this sigil
+/// so the two-argument resolve appears in exactly ONE place (this
+/// sigil body) — mirrors the sibling `docker_compose_bin()` sigil
+/// at `commands/developer_tools.rs:86`. The pre-lift inline resolve
+/// at the top of the integration-test step bound one var and passed
+/// it through three consumer sites (`up -d`, `ps` poll, final
+/// `down -v`); post-lift the resolve moves to the sigil body so a
+/// future added docker-compose spawn cannot silently re-copy the
+/// two-argument resolve inline. The two-argument resolve string is
+/// spelled only in the sigil body below, never in this docstring,
+/// so the count-eq-1 shield in the test module cannot self-match
+/// against this comment.
+fn docker_compose_bin() -> String {
+    get_tool_path("DOCKER_COMPOSE_BIN", "docker-compose")
+}
+
+/// Resolve the `sqlx` binary via the `SQLX_BIN` env override,
+/// falling back to `sqlx` on PATH. Every `sqlx` spawn in this
+/// module reads through this sigil so the two-argument resolve
+/// appears in exactly ONE place (this sigil body). Solve-once at
+/// the sigil closes the silent-PATH-fallback bug class on the
+/// `sqlx` surface the sibling `docker_bin` / `docker_compose_bin` /
+/// `cargo_bin` sigils close elsewhere in this same module. The
+/// two-argument resolve string is spelled only in the sigil body
+/// below, never in this docstring, so the count-eq-1 shield in the
+/// test module cannot self-match against this comment.
+fn sqlx_bin() -> String {
+    get_tool_path("SQLX_BIN", "sqlx")
+}
+
 /// Comprehensive release workflow with full testing
 ///
 /// Workflow:
@@ -372,10 +422,9 @@ pub async fn execute(
                 // `commands/infra.rs::docker_bin`,
                 // `commands/e2e.rs::docker_bin`,
                 // `commands/product_release.rs::push_prebuilt_image`) and
-                // the file's own established `get_tool_path(
-                // "DOCKER_COMPOSE_BIN", "docker-compose")` idiom for the
-                // seven docker-compose spawn sites below.
-                let docker = get_tool_path("DOCKER_BIN", "docker");
+                // the file's own established `docker_compose_bin()`
+                // sigil for the docker-compose spawn sites below.
+                let docker = docker_bin();
 
                 // Load Docker image
                 let load_result = Command::new(&docker)
@@ -439,7 +488,7 @@ pub async fn execute(
                 println!();
                 info!("🚀 Starting docker-compose environment...");
 
-                let docker_compose = get_tool_path("DOCKER_COMPOSE_BIN", "docker-compose");
+                let docker_compose = docker_compose_bin();
 
                 // Start docker-compose
                 let up_result = Command::new(&docker_compose)
@@ -546,7 +595,7 @@ pub async fn execute(
                     // the module body, so this comment names the bug class
                     // without spelling the exact string the shield scans
                     // for.
-                    let sqlx_bin = get_tool_path("SQLX_BIN", "sqlx");
+                    let sqlx_bin = sqlx_bin();
                     let migrate_result = Command::new(&sqlx_bin)
                         .args(&[
                             "migrate",
@@ -1119,17 +1168,11 @@ mod tests {
     #[test]
     fn test_comprehensive_release_routes_docker_compose_through_docker_compose_bin_not_raw_command()
     {
-        let body = crate::test_support::module_body_before_tests(
+        crate::test_support::assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resolve(
             include_str!("comprehensive_release.rs"),
             "commands/comprehensive_release.rs",
-        );
-        assert!(
-            !body.contains("Command::new(\"docker-compose\")"),
-            "commands/comprehensive_release.rs must not spawn `docker-compose` via the bare literal — \
-             every `docker-compose` spawn must resolve `DOCKER_COMPOSE_BIN` via \
-             `crate::repo::get_tool_path(\"DOCKER_COMPOSE_BIN\", \"docker-compose\")` first. \
-             A raw `Command::new(\"docker-compose\")` bypasses the hermetic-runner \
-             contract substrate's mkRuntimeToolsEnv exports."
+            "docker-compose",
+            "DOCKER_COMPOSE_BIN",
         );
     }
 
@@ -1167,23 +1210,11 @@ mod tests {
     /// docker-compose shield above.
     #[test]
     fn test_comprehensive_release_routes_docker_through_docker_bin_not_raw_command() {
-        let body = crate::test_support::module_body_before_tests(
+        crate::test_support::assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resolve(
             include_str!("comprehensive_release.rs"),
             "commands/comprehensive_release.rs",
-        );
-        assert!(
-            !body.contains("Command::new(\"docker\")"),
-            "commands/comprehensive_release.rs must not spawn `docker` via the bare literal — \
-             every `docker` spawn must resolve `DOCKER_BIN` via \
-             `crate::repo::get_tool_path(\"DOCKER_BIN\", \"docker\")` first. \
-             A raw `Command::new(\"docker\")` bypasses the hermetic-runner \
-             contract substrate's mkRuntimeToolsEnv exports."
-        );
-        assert!(
-            body.contains("get_tool_path(\"DOCKER_BIN\", \"docker\")"),
-            "commands/comprehensive_release.rs must resolve the `docker` binary via \
-             `get_tool_path(\"DOCKER_BIN\", \"docker\")` — the canonical lookup \
-             was not found in the module body."
+            "docker",
+            "DOCKER_BIN",
         );
     }
 
@@ -1285,24 +1316,11 @@ mod tests {
     /// the sibling `SEA_ORM_CLI_BIN` shield (b037895) established.
     #[test]
     fn test_comprehensive_release_routes_sqlx_through_sqlx_bin_not_raw_command() {
-        let body = crate::test_support::module_body_before_tests(
+        crate::test_support::assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resolve(
             include_str!("comprehensive_release.rs"),
             "commands/comprehensive_release.rs",
-        );
-        let forbidden = format!("Command::new({}sqlx{})", "\"", "\"");
-        assert!(
-            !body.contains(&forbidden),
-            "commands/comprehensive_release.rs must not spawn `sqlx` via the bare literal — \
-             every `sqlx` spawn must resolve `SQLX_BIN` via \
-             `crate::repo::get_tool_path(\"SQLX_BIN\", \"sqlx\")` first. \
-             A raw `Command::new(\"sqlx\")` bypasses the hermetic-runner \
-             contract substrate's mkRuntimeToolsEnv exports."
-        );
-        assert!(
-            body.contains("get_tool_path(\"SQLX_BIN\", \"sqlx\")"),
-            "commands/comprehensive_release.rs must resolve the `sqlx` binary via \
-             `get_tool_path(\"SQLX_BIN\", \"sqlx\")` — the canonical lookup \
-             was not found in the module body."
+            "sqlx",
+            "SQLX_BIN",
         );
     }
 
