@@ -726,6 +726,59 @@ pub async fn replace_symlink_async(target: &Path, link_name: &Path) -> Result<()
         })
 }
 
+/// Read the process's current working directory into an owned
+/// [`PathBuf`], envelope-tagging the underlying [`std::io::Error`] with
+/// the operator's next-step classifier `"Failed to get current
+/// directory"`.
+///
+/// The atomic sync-fs primitive that owns the exact shape every
+/// pre-lift consumer spelled inline:
+///
+/// ```text
+/// std::env::current_dir().context("Failed to get current directory")?
+/// ```
+///
+/// Pre-lift four call sites carried the classifier shape verbatim
+/// ([`find_repo_root`] and [`in_directory`] in this module,
+/// `commands::e2e::get_working_directory`, and
+/// `path_builder::PathBuilder::new`); a fifth
+/// (`commands::federation::update_federation`) carried the shorter
+/// naked `env::current_dir()?` shape that surfaced the raw
+/// [`std::io::Error`] with no operator-facing classifier. Post-lift
+/// every one routes through this one body so the read is spelled
+/// exactly once and the envelope wording is one edit away from every
+/// caller by construction — the "solve once at the primitive" shape
+/// (THEORY §V) also every sibling `crate::repo::*` primitive on the
+/// sync-fs surface already carries.
+///
+/// # Envelope
+///
+/// A failure of the underlying [`std::env::current_dir`] (the cwd was
+/// unlinked mid-run, or the process lacks read permission on it — the
+/// classic `getcwd(3)` `ENOENT` / `EACCES` return codes) surfaces
+/// through [`anyhow::Context`] as `"Failed to get current directory"`.
+/// The offending path is not carried in the envelope because on the
+/// failure branch there is no path to carry — the query itself failed.
+///
+/// # Errors
+///
+/// Returns `Err` if [`std::env::current_dir`] fails. The most common
+/// production trigger is a cwd that has been unlinked or renamed out
+/// from under the process (a common shape in test suites that chdir
+/// into a [`tempfile::tempdir`] and then let the tempdir drop).
+///
+/// # See also
+///
+/// * [`find_repo_root`] — layers this primitive with an
+///   ancestor-walking flake.nix probe.
+/// * [`in_directory`] — layers this primitive with a scope-guarded
+///   `set_current_dir` pivot.
+/// * [`set_current_dir_labeled`] — the peer on the cwd-write surface;
+///   `current_dir` reads, `set_current_dir_labeled` writes.
+pub fn current_dir() -> Result<PathBuf> {
+    std::env::current_dir().context("Failed to get current directory")
+}
+
 /// Find repository root by looking for flake.nix
 ///
 /// Search order:
@@ -744,7 +797,7 @@ pub async fn replace_symlink_async(target: &Path, link_name: &Path) -> Result<()
 /// println!("Repository root: {}", repo_root.display());
 /// ```
 pub fn find_repo_root() -> Result<PathBuf> {
-    let current = std::env::current_dir().context("Failed to get current directory")?;
+    let current = current_dir()?;
 
     debug!("Searching for repo root from: {}", current.display());
 
@@ -1662,7 +1715,7 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
 {
-    let original_dir = std::env::current_dir().context("Failed to get current directory")?;
+    let original_dir = current_dir()?;
 
     std::env::set_current_dir(dir)
         .with_context(|| format!("Failed to change to directory: {}", dir.display()))?;
@@ -4590,6 +4643,103 @@ mod tests {
                  primitive, and reopen the drift class where a hand-typed \
                  `<label>` literal could diverge from the role the pivot \
                  served."
+            );
+        }
+    }
+
+    /// [`current_dir`] projects the underlying
+    /// [`std::env::current_dir`] return value verbatim on the Ok arm —
+    /// pins the primitive to a byte-identical projection of the
+    /// stdlib read plus the anyhow envelope, so a
+    /// `find_repo_root(&current_dir()?)` lookup that pre-lift resolved
+    /// against `X` still resolves against `X` post-lift. A future
+    /// refactor that swapped the underlying read for a hard-coded
+    /// literal (or a call through a caching layer that would
+    /// stale-read a prior chdir) would break every one of the five
+    /// consumer sites at their next `find_repo_root(&cwd)` lookup, and
+    /// this test fails HERE by observing a value that does not match
+    /// the direct stdlib read.
+    ///
+    /// Test is read-only on the cwd surface (does NOT chdir): the two
+    /// reads must observe the same value at the same instant, so the
+    /// test acquires [`crate::test_support::ROOT_FLAKE_ENV_LOCK`] to
+    /// serialize with sibling cwd-touching tests and captures no
+    /// [`crate::test_support::RootFlakeEnvSnapshot`] because no
+    /// mutation happens under the lock — the sibling
+    /// `set_current_dir_labeled_pivots_cwd_to_target_dir` peer covers
+    /// the write path on its own primitive.
+    #[test]
+    fn current_dir_returns_process_cwd() {
+        let _guard = crate::test_support::ROOT_FLAKE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let observed = current_dir().expect("current_dir must succeed on a live process cwd");
+        let direct = std::env::current_dir().expect("direct stdlib read must also succeed");
+        assert_eq!(
+            observed, direct,
+            "current_dir() must project the underlying \
+             `std::env::current_dir()` return value verbatim on the Ok \
+             arm — the exact shape every pre-lift consumer relied on \
+             for its subsequent `find_repo_root(&cwd)` / \
+             `set_current_dir(original_dir)` operations, so a lookup \
+             that pre-lift resolved against `X` still resolves against \
+             `X` post-lift"
+        );
+    }
+
+    /// Post-lift the five consumer sites lifted onto [`current_dir`]
+    /// must not silently re-inline the primitive's shape at their call
+    /// points — a re-inline would reopen the class this lift closed.
+    /// This source-scan shield walks every hand-lifted consumer file
+    /// and refuses the raw `env::current_dir(` composition inside its
+    /// consumer body window (`commands/e2e.rs`, `commands/federation.rs`,
+    /// `path_builder.rs`) — the exact shape the pre-lift sites carried,
+    /// which either dropped the classifier entirely
+    /// (`federation.rs`, bare `env::current_dir()?`) or spelled a
+    /// hand-typed `"Failed to get current directory"` string that would
+    /// silently drift away from the primitive's canonical envelope one
+    /// consumer at a time.
+    ///
+    /// A helpful "just inline it, it's shorter" cleanup at any one site
+    /// re-opens the duplication class this lift closed and forces every
+    /// other consumer to divorce from the primitive one edit at a time.
+    ///
+    /// The primitive body in `repo.rs` legitimately carries
+    /// `std::env::current_dir()` at its own body; this shield does NOT
+    /// scan `repo.rs` so the sibling primitive survives it by
+    /// construction, mirroring the discipline every sibling shield test
+    /// in this module already carries.
+    ///
+    /// Test-only cwd-reading callers (`commands/attestation.rs`'s
+    /// `std::env::current_dir().expect("cwd")` in per-test setup,
+    /// `test_support.rs`'s `RootFlakeEnvSnapshot::capture` /
+    /// `CwdRestoreGuard`) legitimately spell the raw call under a
+    /// `#[cfg(test)]` gate because a panic-on-failure semantics
+    /// (`.expect(…)`) is what the test scaffold wants, not an anyhow
+    /// envelope — this shield does NOT scan those files so the test-
+    /// only carve-out survives it by construction.
+    #[test]
+    fn current_dir_consumers_do_not_reinline_the_primitive_shape() {
+        for (name, source) in [
+            ("commands/e2e.rs", include_str!("commands/e2e.rs")),
+            (
+                "commands/federation.rs",
+                include_str!("commands/federation.rs"),
+            ),
+            ("path_builder.rs", include_str!("path_builder.rs")),
+        ] {
+            assert!(
+                !source.contains("env::current_dir("),
+                "{name} must NOT spell the inline `env::current_dir(…)` \
+                 read — that duplication was lifted onto \
+                 `crate::repo::current_dir`. A re-inline would silently \
+                 diverge the cwd-read from the five sibling consumers \
+                 routing through the primitive, and either drop the \
+                 canonical `\"Failed to get current directory\"` \
+                 classifier from the envelope (`federation.rs`'s pre-lift \
+                 naked shape) or fork a hand-typed copy that could drift \
+                 from the primitive's wording one consumer at a time \
+                 (`e2e.rs` / `path_builder.rs`'s pre-lift shape)."
             );
         }
     }
