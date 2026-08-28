@@ -7,6 +7,7 @@ use std::path::Path;
 use std::process::Command;
 use tracing::info;
 
+use crate::repo::require_existing_working_dir;
 use crate::retry::run_inherited_status_sync;
 use crate::version;
 
@@ -250,10 +251,7 @@ pub fn bump(
     set_version: Option<String>,
     seed_from_tags: bool,
 ) -> Result<(String, String)> {
-    let dir = Path::new(working_dir);
-    if !dir.exists() {
-        bail!("Working directory not found: {}", working_dir);
-    }
+    let dir = require_existing_working_dir(working_dir)?;
 
     // Parse `--level` at ONE top-of-fn site (before the manifest read and
     // before the `match set_version` branch selection), then thread the
@@ -494,10 +492,7 @@ pub fn bump(
 
 /// Build a .gem file from a gemspec.
 pub fn build(working_dir: &str, name: Option<String>) -> Result<String> {
-    let dir = Path::new(working_dir);
-    if !dir.exists() {
-        bail!("Working directory not found: {}", working_dir);
-    }
+    let dir = require_existing_working_dir(working_dir)?;
 
     let gem_name = match name {
         Some(n) => n,
@@ -601,10 +596,7 @@ pub fn push(
 
 /// Run tests for a Ruby gem using bundle exec rake spec.
 pub fn test(working_dir: &str, name: Option<String>) -> Result<()> {
-    let dir = Path::new(working_dir);
-    if !dir.exists() {
-        bail!("Working directory not found: {}", working_dir);
-    }
+    let dir = require_existing_working_dir(working_dir)?;
 
     let gem_name = match name {
         Some(n) => n,

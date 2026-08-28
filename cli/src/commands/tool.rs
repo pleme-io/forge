@@ -12,7 +12,7 @@ use tracing::{info, warn};
 
 use crate::git;
 use crate::nix::{build_flake_attr_in, run_nix_build_typed};
-use crate::repo::get_tool_path;
+use crate::repo::{get_tool_path, require_existing_working_dir};
 use crate::retry::run_inherited_status_sync;
 use crate::store_path::StorePath;
 use crate::version;
@@ -188,10 +188,7 @@ pub async fn release(
     working_dir: &str,
     dry_run: bool,
 ) -> Result<()> {
-    let dir = Path::new(working_dir);
-    if !dir.exists() {
-        bail!("Working directory not found: {}", working_dir);
-    }
+    let dir = require_existing_working_dir(working_dir)?;
 
     // 1. Read version from the appropriate manifest
     let ver = read_version_for_language(dir, language)?;
@@ -305,10 +302,7 @@ pub async fn release(
 
 /// Bump the version for a tool.
 pub fn bump(name: &str, language: &str, level: &str, working_dir: &str) -> Result<()> {
-    let dir = Path::new(working_dir);
-    if !dir.exists() {
-        bail!("Working directory not found: {}", working_dir);
-    }
+    let dir = require_existing_working_dir(working_dir)?;
 
     let lang: ToolLanguage = language.parse()?;
     // Parse `--level` at the top of the fn (before language-branch selection),
@@ -400,10 +394,7 @@ pub fn bump(name: &str, language: &str, level: &str, working_dir: &str) -> Resul
 
 /// Run checks for a tool (format, lint, test).
 pub fn check(name: &str, language: &str, working_dir: &str) -> Result<()> {
-    let dir = Path::new(working_dir);
-    if !dir.exists() {
-        bail!("Working directory not found: {}", working_dir);
-    }
+    let dir = require_existing_working_dir(working_dir)?;
 
     let lang: ToolLanguage = language.parse()?;
     match lang {
@@ -440,10 +431,7 @@ pub fn check(name: &str, language: &str, working_dir: &str) -> Result<()> {
 
 /// Regenerate lockfiles / build metadata.
 pub fn regenerate(language: &str, working_dir: &str) -> Result<()> {
-    let dir = Path::new(working_dir);
-    if !dir.exists() {
-        bail!("Working directory not found: {}", working_dir);
-    }
+    let dir = require_existing_working_dir(working_dir)?;
 
     let lang: ToolLanguage = language.parse()?;
     match lang {
@@ -477,10 +465,7 @@ fn read_version_for_language(dir: &Path, language: &str) -> Result<String> {
 /// git rev successfully built and tested on this platform. Commit the lock files
 /// to expand the confirmed compatibility matrix.
 pub async fn lock(name: &str, language: &str, platform: &str, working_dir: &str) -> Result<()> {
-    let dir = Path::new(working_dir);
-    if !dir.exists() {
-        bail!("Working directory not found: {}", working_dir);
-    }
+    let dir = require_existing_working_dir(working_dir)?;
 
     let rev = git::get_full_sha().unwrap_or_else(|_| "unknown".to_string());
     let date = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);

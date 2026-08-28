@@ -797,6 +797,82 @@ pub fn verify_directory(dir: &Path, required_files: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// Resolve a `working_dir: &str` command argument into a lifetime-borrowed
+/// [`Path`] after asserting it exists on disk. Owns the exact `"Working
+/// directory not found: {working_dir}"` bail wording every command module
+/// entry point that accepts a `working_dir: &str` and immediately gates on
+/// its existence spelled inline pre-lift.
+///
+/// # Pre-lift shape
+///
+/// 10 sibling command-entry-point sites spelled the 3-line stanza verbatim:
+///
+/// ```text
+/// let dir = Path::new(working_dir);
+/// if !dir.exists() {
+///     bail!("Working directory not found: {}", working_dir);
+/// }
+/// ```
+///
+/// The 10 sites, all authoring the same three lines independently:
+///
+/// - [`crate::commands::test_ci::execute`]
+/// - [`crate::commands::test_ci::coverage`]
+/// - [`crate::commands::gem::bump`]
+/// - [`crate::commands::gem::build`]
+/// - [`crate::commands::gem::test`]
+/// - [`crate::commands::tool::release`]
+/// - [`crate::commands::tool::bump`]
+/// - [`crate::commands::tool::check`]
+/// - [`crate::commands::tool::regenerate`]
+/// - [`crate::commands::tool::lock`]
+///
+/// Post-lift each collapses to `let dir = crate::repo::
+/// require_existing_working_dir(working_dir)?;` — the [`Path::new`]
+/// construction, the [`Path::exists`] gate, and the exact bail wording
+/// all live at ONE body.
+///
+/// # Return
+///
+/// Returns a lifetime-borrowed `&Path` (bound to the `working_dir: &str`
+/// input via lifetime elision) rather than an owned [`PathBuf`], so the
+/// caller's downstream `.join(...)` / `.current_dir(dir)` / `.display()`
+/// reads are zero-alloc and structurally identical to the pre-lift
+/// `let dir = Path::new(working_dir);` idiom. A future refinement of the
+/// shape (canonicalize hook, a must-be-a-directory check that upgrades
+/// the `.exists()` gate to `.is_dir()`, a hermetic-scratch relocation)
+/// lands here and reaches every consumer by construction (THEORY §V —
+/// solve-once-at-the-primitive; §VI.1 — recurring-shape-to-helper).
+///
+/// # Errors
+///
+/// Returns `Err` with the exact message `"Working directory not found: {}"`
+/// interpolating the `working_dir: &str` VERBATIM (NOT
+/// `Path::new(working_dir).display()`) — pre-lift every consumer bailed
+/// with the raw string, so the operator sees the value they passed on
+/// the CLI without a trailing-slash normalization or a redundant
+/// re-projection through [`Path::display`]. A drift that swapped the
+/// interpolation to `dir.display()` would silently change the operator-
+/// facing wording for every one of the ten consumers.
+///
+/// # Sibling primitives
+///
+/// - [`verify_directory`] — `&Path` + required-files, with a
+///   `"Directory not found"` prose and a next-step git-pull hint.
+///   Different consumer surface: takes a `&Path` (not `&str`), asserts
+///   the directory is-a-dir (not just exists), and enforces per-file
+///   requirements. This primitive is the smaller
+///   `&str → Result<&Path>` peer at the command-entry-point-only surface.
+/// - [`path_from_env`] — the `env-var-name → Result<PathBuf>` peer at
+///   the env-var-sourced-path surface.
+pub fn require_existing_working_dir(working_dir: &str) -> Result<&Path> {
+    let dir = Path::new(working_dir);
+    if !dir.exists() {
+        anyhow::bail!("Working directory not found: {}", working_dir);
+    }
+    Ok(dir)
+}
+
 /// Resolve a substrate-declared env var into a `String`, falling back
 /// to `default` on the unset case.
 ///
@@ -3742,6 +3818,66 @@ mod tests {
              silently diverge the write arm from the ten sibling \
              text-mode consumers routing through the primitive. \
              Post-lift body: {body}"
+        );
+    }
+
+    /// [`require_existing_working_dir`] returns a lifetime-borrowed
+    /// [`Path`] pointing at the `working_dir: &str` input verbatim on
+    /// the exists-hit case — the primitive's zero-alloc success return.
+    /// Pins the structural contract every one of the ten pre-lift
+    /// command-entry-point sites relied on inline: the returned `&Path`
+    /// must be usable exactly where the pre-lift `let dir =
+    /// Path::new(working_dir);` was, with no owned-`PathBuf` allocation
+    /// and no path-normalization drift.
+    #[test]
+    fn require_existing_working_dir_returns_borrowed_path_on_exists_hit() {
+        let dir = std::env::temp_dir();
+        let dir_str = dir.to_str().expect("temp_dir must be UTF-8");
+        let result = require_existing_working_dir(dir_str)
+            .expect("require_existing_working_dir must succeed on an existing directory");
+        assert_eq!(
+            result,
+            Path::new(dir_str),
+            "require_existing_working_dir() must return `Path::new(working_dir)` \
+             verbatim on the exists-hit case — no owned-PathBuf allocation, \
+             no `.canonicalize()` normalization, structurally identical to \
+             the pre-lift `let dir = Path::new(working_dir);` idiom the ten \
+             consumer sites relied on."
+        );
+    }
+
+    /// [`require_existing_working_dir`] bails with the exact wording
+    /// `"Working directory not found: {working_dir}"` interpolating the
+    /// `working_dir: &str` VERBATIM (NOT
+    /// `Path::new(working_dir).display()`) — pre-lift every consumer
+    /// bailed with the raw string, so the operator sees the value they
+    /// passed on the CLI without a trailing-slash normalization or a
+    /// redundant re-projection through [`Path::display`]. A drift that
+    /// swapped the interpolation to `dir.display()` would silently
+    /// change the operator-facing wording for every one of the ten
+    /// consumers, so the shield pins the raw-string interpolation at
+    /// the primitive body.
+    #[test]
+    fn require_existing_working_dir_bails_with_working_dir_str_verbatim_on_miss() {
+        let sentinel =
+            "/tmp/forge-require-existing-working-dir-sigil-shield-nonexistent-path-1234567890";
+        assert!(
+            !Path::new(sentinel).exists(),
+            "test sentinel must not exist for the shield to be meaningful"
+        );
+        let err = require_existing_working_dir(sentinel)
+            .expect_err("require_existing_working_dir must bail on a nonexistent directory");
+        let msg = format!("{err:#}");
+        assert_eq!(
+            msg,
+            format!("Working directory not found: {sentinel}"),
+            "require_existing_working_dir() must bail with the EXACT wording \
+             `\"Working directory not found: {{working_dir}}\"` interpolating \
+             the raw `working_dir: &str` verbatim — pre-lift every consumer \
+             spelled `bail!(\"Working directory not found: {{}}\", working_dir);`, \
+             so a drift that swapped to `dir.display()` (or reworded the \
+             prefix) would silently change the operator-facing message for \
+             every one of the ten consumer sites. Got: {msg}"
         );
     }
 }
