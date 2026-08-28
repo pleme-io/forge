@@ -75,7 +75,7 @@ const HEALTH_ENDPOINT_BACKOFF: RetryPolicy =
 /// the `checked_pow`-then-cap body inside [`RetryPolicy::compute_delay`]
 /// without panic.
 fn health_endpoint_retry_delay(attempt: u32) -> Duration {
-    HEALTH_ENDPOINT_BACKOFF.compute_delay(attempt.saturating_add(2))
+    HEALTH_ENDPOINT_BACKOFF.poll_iteration_delay(attempt)
 }
 
 /// Configuration for post-deploy verification

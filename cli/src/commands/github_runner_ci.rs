@@ -93,7 +93,7 @@ const GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF: RetryPolicy =
 /// `checked_pow`-then-cap body inside [`RetryPolicy::compute_delay`]
 /// without panic.
 fn github_runner_rollout_poll_delay(attempt: u32) -> Duration {
-    GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF.compute_delay(attempt.saturating_add(2))
+    GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF.poll_iteration_delay(attempt)
 }
 
 /// Check if SAFE mode is enabled (retry on errors)

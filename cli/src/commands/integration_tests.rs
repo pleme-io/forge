@@ -172,7 +172,7 @@ const POST_DEPLOYMENT_READINESS_POLL_BACKOFF: RetryPolicy =
 /// `checked_pow`-then-cap body inside [`RetryPolicy::compute_delay`]
 /// without panic.
 fn post_deployment_readiness_poll_delay(backoff_attempt: u32) -> Duration {
-    POST_DEPLOYMENT_READINESS_POLL_BACKOFF.compute_delay(backoff_attempt.saturating_add(2))
+    POST_DEPLOYMENT_READINESS_POLL_BACKOFF.poll_iteration_delay(backoff_attempt)
 }
 
 /// The typed exponential-backoff policy for
