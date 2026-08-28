@@ -552,6 +552,92 @@ pub async fn write_text_async<C: AsRef<[u8]>>(path: &Path, content: C) -> Result
         .with_context(|| format!("Failed to write {}", path.display()))
 }
 
+/// Create the directory at `path` and every missing ancestor, on the
+/// sync fs surface.
+///
+/// The directory-side sibling of [`write_text_sync`]: the canonical
+/// [`std::fs::create_dir_all`] + [`anyhow::Context`] composition every
+/// consumer that materializes an output directory ahead of a subsequent
+/// write (`helm package`'s `output` dir, `helm publish`'s `dist` dir,
+/// `copy_dir_recursive`'s destination root, `dashboards.rs`'s parent-dir
+/// scaffold, `pangea.rs`'s spec-directory scaffold, `gem.rs`'s
+/// `~/.gem` credentials dir) spelled inline pre-lift.
+///
+/// # Envelope
+///
+/// Failure surfaces `"Failed to create directory {path}"` — operator's
+/// next step is `ls -la` on the offending path's ancestor, `df -h`, and
+/// a permissions read on the writable branch (EROFS, ENOSPC, EACCES,
+/// ENOTDIR when a component is a regular file). The classifier is
+/// distinct from the file-write sibling ([`write_text_sync`]'s
+/// `"Failed to write"`) so an operator reading the runner log can tell
+/// a mkdir bounce from a write bounce without cross-referencing the
+/// caller — a real signal, because create-directory bounces almost
+/// always resolve at the parent (`chmod`, `mkdir`, a missing volume
+/// mount) while file-write bounces almost always resolve at the file
+/// (`chown`, `truncate`, `df` on the enclosing filesystem).
+///
+/// Pre-lift seven sibling consumer sites spelled the primitive's OWN
+/// shape one level down from this body: a bare
+/// `std::fs::create_dir_all(<path>)?` composition whose failure would
+/// surface only the underlying `io::Error` classifier (`No such file or
+/// directory (os error 2)`, `Permission denied (os error 13)`,
+/// `Not a directory (os error 20)`) with NO offending path, so an
+/// operator reading a runner log could not tell which of several
+/// candidate paths tripped the mkdir without re-deriving the site's
+/// call context from the anyhow backtrace. Post-lift the primitive's
+/// canonical `path.display()` envelope reaches every consumer by
+/// construction; the role the directory plays in the caller is
+/// preserved by the caller's function name in the anyhow backtrace,
+/// not by a redundant filename literal inside the failure classifier.
+///
+/// # Sibling primitives
+///
+/// - File-mode sync write: [`write_text_sync`] owns the write-arm
+///   analogue at ONE code point on the file surface; this primitive
+///   owns the directory-scaffold peer, so a caller that must both
+///   scaffold a parent directory and persist a file writes
+///   `create_dir_all_sync(parent)?; write_text_sync(&path, bytes)?;`
+///   through two canonically-enveloped primitives rather than
+///   re-deriving both envelopes inline.
+/// - File-mode sync read: [`read_text_sync`] owns the read-arm
+///   analogue on the file surface. The directory arm has no read peer —
+///   a directory's contents are read via [`std::fs::read_dir`] which
+///   yields entries, not text — so this primitive stands alone on the
+///   directory-scaffold surface.
+///
+/// # Verb variance is load-bearing signal
+///
+/// The `"Failed to create directory {path}"` envelope covers the shape
+/// "the directory could not be scaffolded." Two consumer sites carry
+/// legitimately distinct verbs that name what the directory IS (a
+/// per-tool locks scaffold, a per-service subgraph scaffold), not
+/// merely that a mkdir failed: `commands/tool.rs::execute` spells
+/// `"Failed to create locks directory: {path}"` where "locks
+/// directory" tags the per-tool-lock role a bare envelope would erase,
+/// and `commands/schema_validation.rs::execute` spells `"Failed to
+/// create subgraph directory: {path}"` where "subgraph directory" tags
+/// the codegen-input role a bare envelope would erase. Those sites
+/// stay unlifted by design — the shield source-scan matches only the
+/// canonical `"Failed to create directory"` classifier so they survive
+/// by construction, mirroring the sibling [`write_text_sync`]'s
+/// discipline that leaves `commands/migration_new.rs`'s
+/// `"Failed to update"`/`"Failed to create"` sites unlifted for the
+/// same reason.
+///
+/// # Errors
+///
+/// Returns `Err` if the directory cannot be created (a component of
+/// the path is a regular file — ENOTDIR, a writable ancestor is
+/// read-only — EROFS, an ancestor is on a full filesystem — ENOSPC,
+/// the process lacks write permission — EACCES). The offending
+/// `path.display()` is threaded through the [`anyhow::Context`]
+/// envelope on every failure branch.
+pub fn create_dir_all_sync(path: &Path) -> Result<()> {
+    std::fs::create_dir_all(path)
+        .with_context(|| format!("Failed to create directory {}", path.display()))
+}
+
 /// Find repository root by looking for flake.nix
 ///
 /// Search order:
@@ -3879,5 +3965,145 @@ mod tests {
              prefix) would silently change the operator-facing message for \
              every one of the ten consumer sites. Got: {msg}"
         );
+    }
+
+    /// [`create_dir_all_sync`] scaffolds a nested output directory that
+    /// does not exist pre-call and every missing ancestor along the way.
+    /// Pins the primitive's success arm to the same shape every pre-lift
+    /// `std::fs::create_dir_all(<path>)?` consumer relied on — the
+    /// underlying [`std::fs::create_dir_all`] is idempotent and
+    /// ancestor-covering, and this shield fires if a future refactor
+    /// swapped it to a single-level [`std::fs::create_dir`] (which
+    /// would refuse a two-deep target with ENOENT) or added a
+    /// pre-existence probe that skipped the mkdir on the "dir already
+    /// there" branch (which would silently change the error semantics
+    /// on a race with a concurrent scaffolder).
+    #[test]
+    fn create_dir_all_sync_materializes_nested_missing_directory() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let nested = tmp.path().join("a").join("b").join("c");
+
+        create_dir_all_sync(&nested).expect("well-formed create must succeed");
+
+        assert!(
+            nested.is_dir(),
+            "create_dir_all_sync() must scaffold every missing ancestor and \
+             the leaf, so a caller that then writes into the leaf sees a \
+             directory ready to receive its bytes"
+        );
+    }
+
+    /// [`create_dir_all_sync`]'s create-arm must surface the offending
+    /// `path.display()` AND classify the failure as a CREATE-DIRECTORY
+    /// error, so an operator reading the runner log can tell one bounce
+    /// (`"Failed to create directory"` → `ls -la` on the parent and a
+    /// permissions probe) from a write-arm bounce (`"Failed to write"`
+    /// → `df -h` and `ls -la` on the file's ancestor) without cross-
+    /// referencing the caller. Pins the primitive to the same envelope
+    /// discipline the sync write sibling [`write_text_sync`] carries —
+    /// one primitive per fs-op surface, same canonical operator-next-
+    /// step contract. Pre-lift seven consumer sites carried a bare
+    /// `std::fs::create_dir_all(<path>)?` shape whose failure surfaced
+    /// only the underlying `io::Error` classifier with no offending
+    /// path, and a future straggler that mis-spells the envelope
+    /// (`"cannot create dir"` vs. `"Failed to create directory"`) would
+    /// divorce the runner log from every other create-arm envelope in
+    /// the crate. This shield forbids that regression at the primitive
+    /// body.
+    ///
+    /// Failure is triggered by handing the primitive a path whose
+    /// second-to-last component is a regular file — a `create_dir_all`
+    /// under such a component surfaces `ENOTDIR` deterministically on
+    /// every Unix filesystem without depending on process EUID or a
+    /// pre-mounted read-only branch.
+    #[test]
+    fn create_dir_all_sync_missing_parent_dir_errors_carry_path_and_create_classifier() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file_component = tmp.path().join("i-am-a-file");
+        std::fs::write(&file_component, b"sentinel").expect("seed the file component");
+        let path = file_component.join("nested-dir-under-a-file");
+
+        let err = create_dir_all_sync(&path).unwrap_err();
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Failed to create directory"),
+            "create-arm classifier must be 'Failed to create directory'; got: {msg}"
+        );
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "create-arm envelope must carry the offending path; got: {msg}"
+        );
+    }
+
+    /// Post-lift the seven straggler consumer sites lifted onto
+    /// [`create_dir_all_sync`] must not silently re-inline the
+    /// primitive's shape at their call points — a re-inline would
+    /// reopen the class this lift closed. This source-scan shield
+    /// walks every hand-lifted consumer file and refuses the raw
+    /// `std::fs::create_dir_all(<path>)?;` or
+    /// `fs::create_dir_all(<path>)?;` composition — the exact
+    /// bare-`?` shape the seven lifted sites carried pre-lift, which
+    /// dropped the offending `path.display()` from every failure
+    /// classifier — inside its consumer body window
+    /// (`commands/helm.rs`, `commands/dashboards.rs`,
+    /// `commands/pangea.rs`, `commands/gem.rs`).
+    ///
+    /// A helpful "just inline it, it's shorter" cleanup at any one site
+    /// re-opens the duplication class this lift closed and forces every
+    /// other consumer to divorce from the primitive one edit at a time.
+    ///
+    /// The `commands/tool.rs` and `commands/schema_validation.rs` sites
+    /// that stay unlifted (`"Failed to create locks directory: {}"` on
+    /// the per-tool-lock scaffold, `"Failed to create subgraph
+    /// directory: {}"` on the codegen-input scaffold) legitimately
+    /// carry per-role verb signal the canonical envelope would erase;
+    /// this shield matches only the canonical
+    /// `"Failed to create directory"` classifier so the two role-tagged
+    /// sites survive it by construction — their inline shape is
+    /// `create_dir_all(<x>).with_context(…)?`, NOT the bare
+    /// `create_dir_all(<x>)?;` this shield forbids.
+    ///
+    /// Test-only tempdir scaffolding (`.unwrap()` / `.expect(…)`) is
+    /// out of scope by construction: this shield matches the literal
+    /// bare-`?;` suffix, and test bodies never spell `?;` at their
+    /// call point (they either panic on failure via `.unwrap()` /
+    /// `.expect(…)`, or thread `Result` up through a test that returns
+    /// `Result` and threads its own contextual anyhow envelope, which
+    /// carves them out from this pattern).
+    #[test]
+    fn create_dir_all_sync_consumers_do_not_reinline_the_primitive_shape() {
+        // Bare-`?;` shape only: matches production sites the lift closed,
+        // NOT `.unwrap()` / `.expect(…)` test scaffolds, NOT `.await` async
+        // arms, NOT `.with_context(…)?` role-tagged sites.
+        //
+        // Two prefix spellings cover the pre-lift call-site vocabulary:
+        // `std::fs::create_dir_all(…)?;` (helm.rs / pangea.rs / gem.rs) and
+        // the `use std::fs;` shorthand `fs::create_dir_all(…)?;`
+        // (dashboards.rs).
+        for (name, source) in [
+            ("commands/helm.rs", include_str!("commands/helm.rs")),
+            (
+                "commands/dashboards.rs",
+                include_str!("commands/dashboards.rs"),
+            ),
+            ("commands/pangea.rs", include_str!("commands/pangea.rs")),
+            ("commands/gem.rs", include_str!("commands/gem.rs")),
+        ] {
+            for line in source.lines() {
+                let trimmed = line.trim_start();
+                let is_bare_create = (trimmed.starts_with("std::fs::create_dir_all(")
+                    || trimmed.starts_with("fs::create_dir_all("))
+                    && trimmed.ends_with(")?;");
+                assert!(
+                    !is_bare_create,
+                    "{name} must NOT spell the inline bare-`?;` create-arm \
+                     shape `{trimmed}` — that duplication was lifted onto \
+                     `crate::repo::create_dir_all_sync`. A re-inline would \
+                     silently diverge the create arm from the seven sibling \
+                     create-dir consumers routing through the primitive."
+                );
+            }
+        }
     }
 }

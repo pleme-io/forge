@@ -561,7 +561,7 @@ pub fn push(
 
     // Write credentials file (gem push reads from ~/.gem/credentials)
     let gem_dir = crate::repo::path_from_env("HOME", "HOME not set")?.join(".gem");
-    std::fs::create_dir_all(&gem_dir)?;
+    crate::repo::create_dir_all_sync(&gem_dir)?;
     let creds_path = gem_dir.join("credentials");
     let creds_content = format!("---\n:rubygems_api_key: {}\n", key);
     std::fs::write(&creds_path, &creds_content)?;
