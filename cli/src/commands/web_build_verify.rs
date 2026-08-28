@@ -284,7 +284,7 @@ fn verify_cache_policy(dist_dir: &Path) -> Result<()> {
             let mut non_hashed_count = 0;
 
             for asset in &asset_files {
-                let filename = asset.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let filename = crate::repo::file_name_str(asset);
 
                 if hashed_pattern.is_match(filename) {
                     hashed_count += 1;

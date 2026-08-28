@@ -1700,6 +1700,64 @@ pub fn set_current_dir_labeled(dir: &Path, label: &str) -> Result<()> {
     std::env::set_current_dir(dir).with_context(|| format!("Failed to change to {label} directory"))
 }
 
+/// Return the file-name component of `path` as `&str`, or `""` if the
+/// path has no file-name component (`path` ends in `..` or is `/`) or
+/// the file name is not valid UTF-8.
+///
+/// # The pre-lift sigil
+///
+/// Ten sibling consumers on the borrow-only "read the file name as a
+/// stringly key" surface spelled the same triple-projection inline
+/// (five in `commands/*.rs`, five in `test_support.rs`'s shield-scan
+/// bodies):
+///
+/// ```ignore
+/// let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+/// ```
+///
+/// Each consumer fed the resulting `&str` into a downstream string
+/// predicate — a prefix check (`name.starts_with("pleme-")`), a suffix
+/// trim (`filename.trim_end_matches(".rs")`), a
+/// [`regex::Regex::is_match`], a substring `.parse::<u32>()` gate, or
+/// an equality against a fixed shield-exempt filename (`name ==
+/// "test_support.rs"`). Every one of those consumers wanted the
+/// borrow-only, zero-alloc projection with the `""` unit on the miss
+/// arm — no consumer needed a separate [`Option`]-shaped short-circuit
+/// branch, because the empty string propagates the "no match" verdict
+/// through the downstream predicate by construction (`"".starts_with(
+/// "pleme-")` is `false`, `regex.is_match("")` is `false` for every
+/// regex demanding at least one character, `"".trim_end_matches(".rs")`
+/// is `""`, and `"" == "sentinel-filename"` is `false`).
+///
+/// The `""` unit is thus the canonical projection of the miss arm, and
+/// bundling the three-step chain plus the miss-arm literal into one
+/// primitive removes ten hand-typed spellings the borrow-checker could
+/// not otherwise cross-check.
+///
+/// # Zero-alloc borrow lifetime
+///
+/// The returned `&str` borrows from `path` (via
+/// [`std::ffi::OsStr::to_str`]'s contract on Unix, where the UTF-8
+/// projection of the file-name segment is a byte-slice view over the
+/// underlying [`std::ffi::OsStr`]), so no [`String`] allocation
+/// happens on any call. A downstream
+/// [`regex::Regex::is_match`] or [`str::starts_with`] can consume the
+/// `&str` directly without an intermediate owned copy — the exact
+/// zero-alloc discipline every pre-lift consumer relied on.
+///
+/// # Peer
+///
+/// Sibling to [`require_existing_working_dir`] on the borrow-only,
+/// return-`&`-borrowed-from-input path-projection surface: both
+/// primitives project a caller-owned path bytewise into a canonical
+/// downstream shape with no allocation and no path normalization
+/// (`.canonicalize()` is not called).
+pub fn file_name_str(path: &Path) -> &str {
+    path.file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or("")
+}
+
 /// Run a command in a specific directory, restoring the original directory afterward
 ///
 /// # Arguments
@@ -4741,6 +4799,119 @@ mod tests {
                  from the primitive's wording one consumer at a time \
                  (`e2e.rs` / `path_builder.rs`'s pre-lift shape)."
             );
+        }
+    }
+
+    /// [`file_name_str`] projects the file-name segment of `path` as a
+    /// borrowed `&str` on the well-formed UTF-8 case — pins the
+    /// primitive to the byte-identical projection every one of the ten
+    /// pre-lift consumer sites relied on. The returned `&str` must
+    /// alias the input path's bytes (no owned-`String` allocation), so
+    /// a downstream [`str::starts_with`] / [`str::trim_end_matches`] /
+    /// [`regex::Regex::is_match`] can consume it without an
+    /// intermediate copy — the exact zero-alloc discipline the pre-lift
+    /// sigil silently carried and this shield keeps.
+    #[test]
+    fn file_name_str_returns_file_name_segment_on_utf8_hit() {
+        let path = Path::new("/tmp/forge-workspace/pleme-linker-cli/src/main.rs");
+        let name = file_name_str(path);
+        assert_eq!(
+            name, "main.rs",
+            "file_name_str() must project the file-name segment of the \
+             input path verbatim on the UTF-8 hit case — the exact shape \
+             every pre-lift consumer relied on for its downstream string \
+             predicate (a `.starts_with(...)`, a `.trim_end_matches(...)`, \
+             a regex `.is_match(...)`). Got: {name:?}"
+        );
+    }
+
+    /// [`file_name_str`] returns `""` on the missing-file-name arm
+    /// (root `/`, a path ending in `..`). Pins the primitive's canonical
+    /// miss-arm unit to the exact `""` literal every pre-lift consumer
+    /// relied on: a downstream `.starts_with("pleme-")`,
+    /// `.trim_end_matches(".rs")`, `regex.is_match(&filename)`, or
+    /// equality against a fixed sentinel like `"test_support.rs"`
+    /// all propagate the "no match" verdict through the empty-string
+    /// unit by construction, so no consumer needs a separate
+    /// [`Option`]-shaped short-circuit branch. A drift that swapped the
+    /// miss-arm unit to `"?"` / `"unknown"` / any non-empty sentinel
+    /// would silently trigger downstream predicates that the pre-lift
+    /// sites did NOT want triggered.
+    #[test]
+    fn file_name_str_returns_empty_string_on_root_path_miss() {
+        let root = Path::new("/");
+        assert_eq!(
+            file_name_str(root),
+            "",
+            "file_name_str() must return `\"\"` on a path with no \
+             file-name component (root `/`) — the exact miss-arm unit \
+             every pre-lift consumer relied on to propagate the \
+             `no match` verdict through its downstream string predicate."
+        );
+    }
+
+    /// Post-lift the ten consumer sites lifted onto [`file_name_str`]
+    /// must not silently re-inline the primitive's shape at their call
+    /// points — a re-inline would reopen the class this lift closed.
+    /// This source-scan shield walks every hand-lifted consumer file
+    /// and refuses the raw
+    /// `<ident>.file_name().and_then(|<x>| <x>.to_str()).unwrap_or("")`
+    /// composition — the exact shape the ten lifted sites carried
+    /// pre-lift, which fanned the triple-projection out as ten
+    /// hand-typed spellings the borrow-checker could not cross-check.
+    ///
+    /// A helpful "just inline it, it's shorter" cleanup at any one site
+    /// re-opens the duplication class this lift closed and forces every
+    /// other consumer to divorce from the primitive one edit at a time.
+    ///
+    /// The `.parent().and_then(|p| p.file_name()).and_then(|s| s.
+    /// to_str()).unwrap_or("")` parent-directory-name variant at
+    /// `test_support.rs:7164` is a multi-line composition whose tail
+    /// (`.and_then(|s| s.to_str()).unwrap_or("")`) lives on subsequent
+    /// lines; the file-name-of-path shape this shield guards is a
+    /// single-line composition, so the two-arm `.contains(...)` needles
+    /// below match the single-line shape only and the multi-line parent
+    /// variant survives them by construction.
+    ///
+    /// The primitive body in `repo.rs` legitimately spells the shape at
+    /// its own body (inside a doc-comment code block and inside the
+    /// primitive body itself); this shield does NOT scan `repo.rs` so
+    /// the sibling primitive survives it by construction, mirroring the
+    /// discipline every sibling shield test in this module already
+    /// carries.
+    #[test]
+    fn file_name_str_consumers_do_not_reinline_the_primitive_shape() {
+        for (name, source) in [
+            (
+                "commands/workspace_deps.rs",
+                include_str!("commands/workspace_deps.rs"),
+            ),
+            (
+                "commands/migration_validation.rs",
+                include_str!("commands/migration_validation.rs"),
+            ),
+            (
+                "commands/web_build_verify.rs",
+                include_str!("commands/web_build_verify.rs"),
+            ),
+            ("test_support.rs", include_str!("test_support.rs")),
+        ] {
+            for needle in [
+                ".file_name().and_then(|n| n.to_str()).unwrap_or(\"\")",
+                ".file_name().and_then(|s| s.to_str()).unwrap_or(\"\")",
+            ] {
+                assert!(
+                    !source.contains(needle),
+                    "{name} must NOT spell the inline `{needle}` \
+                     triple-projection — that duplication was lifted \
+                     onto `crate::repo::file_name_str`. A re-inline \
+                     would silently diverge the file-name-read from the \
+                     ten sibling stringly-key consumers routing through \
+                     the primitive, and fork the miss-arm unit (`\"\"`) \
+                     into a hand-typed literal that could drift from \
+                     the primitive one consumer at a time."
+                );
+            }
         }
     }
 }

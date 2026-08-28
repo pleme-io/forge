@@ -7156,7 +7156,7 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         let re = regex::Regex::new(pattern).expect("pre-lift stanza regex must compile");
         let mut offenders: Vec<String> = Vec::new();
         walk_rs_files(&crate_src, &mut |path| {
-            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            let name = crate::repo::file_name_str(path);
             if name == "test_support.rs" {
                 return;
             }
@@ -7279,7 +7279,7 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         let re = regex::Regex::new(pattern).expect("pre-lift stanza regex must compile");
         let mut offenders: Vec<String> = Vec::new();
         walk_rs_files(&crate_src, &mut |path| {
-            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            let name = crate::repo::file_name_str(path);
             if name == "test_support.rs" || name == "git.rs" {
                 return;
             }
@@ -7418,7 +7418,7 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         let re = regex::Regex::new(pattern).expect("pre-lift stanza regex must compile");
         let mut offenders: Vec<String> = Vec::new();
         walk_rs_files(&crate_src, &mut |path| {
-            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            let name = crate::repo::file_name_str(path);
             if name == "test_support.rs" || name == "git.rs" {
                 return;
             }
@@ -7555,7 +7555,7 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         let re = regex::Regex::new(pattern).expect("pre-lift stanza regex must compile");
         let mut offenders: Vec<String> = Vec::new();
         walk_rs_files(&crate_src, &mut |path| {
-            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            let name = crate::repo::file_name_str(path);
             if name == "test_support.rs" || name == "repo.rs" {
                 return;
             }
@@ -7675,7 +7675,7 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         );
         let mut offenders: Vec<String> = Vec::new();
         walk_rs_files(&crate_src, &mut |path| {
-            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            let name = crate::repo::file_name_str(path);
             if name == "test_support.rs" || name == "registry.rs" {
                 return;
             }
