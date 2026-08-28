@@ -264,7 +264,7 @@ const DOCKER_STARTUP_MAX_WAIT: Duration = Duration::from_secs(60);
 /// via the `checked_pow`-then-cap body inside
 /// [`RetryPolicy::compute_delay`] without panic.
 fn docker_startup_poll_delay(backoff_attempt: u32) -> Duration {
-    DOCKER_STARTUP_POLL_BACKOFF.compute_delay(backoff_attempt.saturating_add(2))
+    DOCKER_STARTUP_POLL_BACKOFF.poll_iteration_delay(backoff_attempt)
 }
 
 /// Test pyramid levels

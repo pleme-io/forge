@@ -191,7 +191,7 @@ const SHINKA_MIGRATION_POLL_BACKOFF: RetryPolicy =
 /// via the `checked_pow`-then-cap body inside
 /// [`RetryPolicy::compute_delay`] without panic.
 fn shinka_migration_poll_delay(attempt: u32) -> Duration {
-    SHINKA_MIGRATION_POLL_BACKOFF.compute_delay(attempt.saturating_add(2))
+    SHINKA_MIGRATION_POLL_BACKOFF.poll_iteration_delay(attempt)
 }
 
 // =============================================================================

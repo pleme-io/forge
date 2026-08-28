@@ -95,7 +95,7 @@ const FLUX_POLL_BACKOFF: RetryPolicy = RetryPolicy::wall_clock_poll(Duration::fr
 /// `checked_pow`-then-cap body inside [`RetryPolicy::compute_delay`]
 /// without panic.
 fn flux_poll_delay(attempt: u32) -> Duration {
-    FLUX_POLL_BACKOFF.compute_delay(attempt.saturating_add(2))
+    FLUX_POLL_BACKOFF.poll_iteration_delay(attempt)
 }
 
 /// FluxCD health check before and after deployments.

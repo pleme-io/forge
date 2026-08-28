@@ -147,7 +147,7 @@ const FEDERATION_JOB_POLL_BACKOFF: RetryPolicy =
 /// without panic.
 #[allow(dead_code)]
 fn federation_job_poll_delay(attempt: u32) -> Duration {
-    FEDERATION_JOB_POLL_BACKOFF.compute_delay(attempt.saturating_add(2))
+    FEDERATION_JOB_POLL_BACKOFF.poll_iteration_delay(attempt)
 }
 
 /// Reserve a hermetic on-disk destination for the federation-test
