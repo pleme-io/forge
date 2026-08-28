@@ -292,7 +292,7 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
     println!();
 
     // Change to workspace root
-    env::set_current_dir(workspace_root).context("Failed to change to workspace directory")?;
+    crate::repo::set_current_dir_labeled(workspace_root, "workspace")?;
 
     // Step 1: Remove old Cargo.lock
     let cargo_lock = workspace_root.join("Cargo.lock");
@@ -380,7 +380,7 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
     println!();
 
     // Change to workspace root
-    env::set_current_dir(workspace_root).context("Failed to change to workspace directory")?;
+    crate::repo::set_current_dir_labeled(workspace_root, "workspace")?;
 
     // Step 1: Update dependencies
     println!(
@@ -456,7 +456,7 @@ pub async fn rust_dev(
     let local_config = &config.service.local;
 
     // Change to service directory for all operations
-    env::set_current_dir(&service_path).context("Failed to change to service directory")?;
+    crate::repo::set_current_dir_labeled(&service_path, "service")?;
 
     // Step 1: Start docker-compose if not skipped
     if !skip_docker {
@@ -635,7 +635,7 @@ pub async fn rust_dev_down(service: String) -> Result<()> {
     // Get paths from environment
     let service_path = service_path_from_env()?;
 
-    env::set_current_dir(&service_path).context("Failed to change to service directory")?;
+    crate::repo::set_current_dir_labeled(&service_path, "service")?;
 
     let compose_file = find_compose_file(&service_path)?;
 
