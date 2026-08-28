@@ -957,7 +957,7 @@ pub fn package(chart_dir: &str, output: &str, version: Option<&str>) -> Result<S
         bail!("Chart directory not found: {}", chart_dir);
     }
 
-    std::fs::create_dir_all(output)?;
+    crate::repo::create_dir_all_sync(Path::new(output))?;
 
     info!("Packaging chart: {} → {}", chart_dir, output);
 
@@ -2594,7 +2594,7 @@ fn stage_file_sibling_deps(
 
 /// Recursively copy a directory.
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    std::fs::create_dir_all(dst)?;
+    crate::repo::create_dir_all_sync(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let ty = entry.file_type()?;
@@ -2682,7 +2682,7 @@ pub fn release_all(
     info!("Discovered {} charts: {}", charts.len(), charts.join(", "));
 
     let output_dir = "dist";
-    std::fs::create_dir_all(output_dir)?;
+    crate::repo::create_dir_all_sync(Path::new(output_dir))?;
 
     let mut failed: Vec<(String, String)> = Vec::new();
     let mut released = Vec::new();

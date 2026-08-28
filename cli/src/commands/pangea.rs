@@ -699,7 +699,7 @@ pub fn spec_gen(
         } else {
             // Create spec directory
             if let Some(parent) = spec_path.parent() {
-                std::fs::create_dir_all(parent)?;
+                crate::repo::create_dir_all_sync(parent)?;
             }
             std::fs::write(&spec_path, &spec_content)?;
             info!("Generated: {}", spec_path.display());

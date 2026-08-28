@@ -335,7 +335,7 @@ fn parse_seaorm_entities(
 fn generate_metadata(entities: &[ObservedEntity], output_path: &Path) -> Result<()> {
     // Ensure parent directory exists
     if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent)?;
+        crate::repo::create_dir_all_sync(parent)?;
     }
 
     let metadata = serde_json::json!({
@@ -630,7 +630,7 @@ fn write_dashboards(
     })?;
 
     // Ensure output directory exists
-    fs::create_dir_all(output_dir)?;
+    crate::repo::create_dir_all_sync(output_dir)?;
 
     for (name, dashboard) in dashboards {
         // Write JSON file
