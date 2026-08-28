@@ -326,23 +326,44 @@ pub async fn execute(
         // release proceeds past Step 1/5.
         let cargo = cargo_bin();
 
-        let test_result = Command::new(&cargo)
+        // Route the status-only unit-test spawn through the canonical
+        // `crate::retry::run_inherited_status` primitive so the pre-lift
+        // `.status().await.context("Failed to run cargo`
+        // ` test")?` + `if !test_result.success() { anyhow::bail!("Unit`
+        // ` tests failed - aborting release") }` stanza — which dropped
+        // the exit code
+        // from the operator log line (`test_result.code()` was in scope
+        // and unread) — collapses onto the primitive and the canonical
+        // `"unit tests failed (exit {code})"` envelope emerges by
+        // construction at `retry::classify_inherited_status`'s ONE
+        // body. Binding the outcome before the spinner-clear preserves
+        // the pre-existing UX (spinner clears BEFORE the red ✗ line
+        // and BEFORE the propagated bail) AND closes a latent leak on
+        // the spawn-error path: pre-lift the `?` on `.context("Failed
+        // to run cargo test")` ran BEFORE `spinner.finish_and_clear()`,
+        // so a missing-cargo bubble left the terminal with a live
+        // spinner animating beneath the printed error; post-lift the
+        // spinner clears on every path (success, non-zero exit, AND
+        // spawn error). Sibling of `commands/build.rs::execute` (72a7adf)
+        // and `commands/github_runner_ci.rs::execute` (4510026) —
+        // three `spinner + status-only cargo/nix spawn` sites past
+        // THEORY §VI.1's three-times-is-a-law threshold.
+        let mut test_cmd = Command::new(&cargo);
+        test_cmd
             .current_dir(&working_dir)
             .args(&["test", "--lib", "--bins", "--", "--show-output"])
             .env("RUST_LOG", "info")
             .env("RUST_BACKTRACE", "1")
-            .env("SQLX_OFFLINE", "true")
-            .status()
-            .await
-            .context("Failed to run cargo test")?;
+            .env("SQLX_OFFLINE", "true");
+        let outcome = crate::retry::run_inherited_status(test_cmd, "unit tests").await;
 
         spinner.finish_and_clear();
 
-        if !test_result.success() {
+        if let Err(err) = outcome {
             println!();
             println!("{}", "✗ Unit tests failed".red().bold());
             println!();
-            anyhow::bail!("Unit tests failed - aborting release");
+            return Err(err.context("aborting release"));
         }
 
         let step_duration = step_start.elapsed();
@@ -1357,10 +1378,19 @@ mod tests {
     /// cleanup branch on failure that must run BEFORE the bail), the
     /// docker-compose ps / logs / down fire-and-forget cleanups (`let _
     /// = …status().await;`), the sqlx migrate warn-on-failure spawn
-    /// (match-based dispatch, no bail), the integration-test spawn
-    /// (deferred bail so cleanup runs first), and the cargo unit-test
-    /// spawn (spinner-clear must run between the status and the bail).
-    /// None of those lift cleanly onto `run_inherited_status`, so a
+    /// (match-based dispatch, no bail), and the integration-test spawn
+    /// (deferred bail so cleanup runs first). The cargo unit-test
+    /// spawn in Step 1/5 — previously listed here as a legitimate
+    /// remaining site because "spinner-clear must run between the
+    /// status and the bail" — now routes through the same primitive
+    /// via the `let outcome = run_inherited_status(...).await;
+    /// spinner.finish_and_clear(); if let Err(err) = outcome { ...;
+    /// return Err(err.context(...)) }` shape that `commands/build.rs`
+    /// (72a7adf) and `commands/github_runner_ci.rs` (4510026) already
+    /// use for the same spinner-wrapped Nix build spawn; its shield
+    /// is `test_unit_test_spawn_routes_through_run_inherited_status`
+    /// below. None of the remaining legitimate sites lift cleanly onto
+    /// `run_inherited_status`, so a
     /// whole-module shield would false-fire on legitimate remaining
     /// sites. This shield bounds the negative scan to ONLY the docker-
     /// tag block via [`crate::test_support::fn_body_slice_between_markers`]
@@ -1509,6 +1539,108 @@ mod tests {
              duplication this commit closes. Offending hits: \
              {hits:?}",
             hits.len(),
+        );
+    }
+
+    /// Marker-scoped shield: the cargo unit-test spawn inside
+    /// [`super::execute`]'s Step 1/5 pre-build-validation block MUST
+    /// route through [`crate::retry::run_inherited_status`], never
+    /// through a hand-rolled inline builder terminated by a
+    /// `.status().await` then `.context("Failed to run cargo test")?`
+    /// then `if !test_result.success() { anyhow::bail!("Unit tests
+    /// failed - aborting release") }` stanza that drops the exit code
+    /// from the operator log line.
+    ///
+    /// Pre-lift the site spelled the fifteen-line stanza with a pair
+    /// of ad-hoc failure messages (a `.context("Failed to run cargo
+    /// test")?` builder-terminator suffix followed by a
+    /// `bail!("Unit tests failed - aborting release")` inline bail)
+    /// that named the phase but dropped the exit code
+    /// `test_result.code()` returned — the same class the async
+    /// primitive was written to close
+    /// (retry.rs `classify_inherited_status`). Post-lift the
+    /// delegation routes through the primitive and the canonical
+    /// `"unit tests failed (exit {code})"` envelope emerges by
+    /// construction at the primitive's ONE body — the shape every
+    /// sibling on the async spawn frontier (`commands/{build,
+    /// github_runner_ci, image_release, pangea, product_release,
+    /// rust_service, search_sync, typescript}.rs`) already emits.
+    /// Post-lift binding the outcome before the spinner-clear also
+    /// closes a latent leak on the spawn-error path: pre-lift the `?`
+    /// on `.context("Failed to run cargo test")` ran BEFORE
+    /// `spinner.finish_and_clear()`, so a missing-cargo bubble left
+    /// the terminal with a live spinner animating beneath the printed
+    /// error; post-lift the spinner clears on every path (success,
+    /// non-zero exit, AND spawn error) — the same latent-leak fix
+    /// `commands/build.rs::execute` (72a7adf) and
+    /// `commands/github_runner_ci.rs::execute` (4510026) landed for
+    /// the sibling spinner-wrapped Nix build spawn.
+    ///
+    /// # Why marker-scoped, not whole-module
+    ///
+    /// The sibling docstring on
+    /// `test_docker_tag_spawn_routes_through_run_inherited_status`
+    /// above enumerates the remaining legitimate `.status().await`
+    /// terminators in `super::execute` (docker-compose up with its
+    /// deferred cleanup branch, docker-compose ps / logs / down
+    /// fire-and-forget cleanups, sqlx migrate warn-on-failure,
+    /// integration-test with its deferred bail); a whole-module
+    /// shield would false-fire on those. This shield bounds the
+    /// negative scan to ONLY the Step 1/5 block via
+    /// [`crate::test_support::fn_body_slice_between_markers`]
+    /// (open marker `// STEP 1: PRE-BUILD VALIDATION (Unit Tests)`,
+    /// end marker `// STEP 2: BUILD DOCKER IMAGE`) so the discipline
+    /// is tight against the block-under-migration and leaves the
+    /// surrounding legitimate stanzas alone.
+    ///
+    /// # Anti-self-match discipline
+    ///
+    /// The pre-lift `.context(…)?` and `bail!(…)` needles are
+    /// reconstructed at test time via `format!` so this shield's own
+    /// docstring — which names the pre-lift shape only in prose above
+    /// — does not false-match itself against the module-body scan.
+    /// Positive side pins that `crate::retry::run_inherited_status(`
+    /// appears in the sliced block at ≥1 line, so a regression that
+    /// dropped the delegation cannot leave the negative scan trivially
+    /// satisfied by absence.
+    #[test]
+    fn test_unit_test_spawn_routes_through_run_inherited_status() {
+        const SOURCE: &str = include_str!("comprehensive_release.rs");
+
+        let block = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/comprehensive_release.rs",
+            "// STEP 1: PRE-BUILD VALIDATION (Unit Tests)",
+            "// STEP 2: BUILD DOCKER IMAGE",
+        );
+
+        let pre_lift_context = format!(".context({}Failed to run cargo test{})", '"', '"');
+        assert!(
+            !block.contains(&pre_lift_context),
+            "commands/comprehensive_release.rs must not re-inline the \
+             pre-lift `.context(…)?` stanza on the unit-test spawn — \
+             `crate::retry::run_inherited_status` owns the spawn-error \
+             envelope, and the pre-lift `?` on `.context(...)` also ran \
+             BEFORE `spinner.finish_and_clear()`, leaving a live spinner \
+             under the printed error on a missing-cargo bubble."
+        );
+
+        let pre_lift_bail = format!("bail!({}Unit tests failed - aborting release{})", '"', '"');
+        assert!(
+            !block.contains(&pre_lift_bail),
+            "commands/comprehensive_release.rs must not re-inline the \
+             pre-lift `bail!(…)` on the unit-test spawn — the ad-hoc \
+             message dropped the exit code `test_result.code()` \
+             returned. `run_inherited_status`'s canonical \
+             `\"{{op}} failed (exit {{code}})\"` envelope preserves it."
+        );
+
+        assert!(
+            block.contains("crate::retry::run_inherited_status("),
+            "commands/comprehensive_release.rs must dispatch its \
+             unit-test spawn through \
+             `crate::retry::run_inherited_status` — the delegation \
+             string was not found in the STEP 1 block."
         );
     }
 }
