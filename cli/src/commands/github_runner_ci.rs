@@ -764,7 +764,7 @@ pub async fn execute(
 
         match verify_result {
             Ok(output) if output.status.success() => {
-                let deployed_image = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let deployed_image = crate::repo::utf8_lossy_trim_owned(&output.stdout);
                 if deployed_image.contains(&git_sha) {
                     info!("✅ Verified: {}", deployed_image);
                 } else {

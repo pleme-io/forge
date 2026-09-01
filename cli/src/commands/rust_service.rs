@@ -755,7 +755,7 @@ async fn verify_image_in_registry(registry: &str, full_tag_suffix: &str) -> Resu
         );
     }
 
-    let digest = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let digest = crate::repo::utf8_lossy_trim_owned(&output.stdout);
     if digest.is_empty() {
         bail!("❌ Registry returned empty digest for {}", full_tag);
     }
