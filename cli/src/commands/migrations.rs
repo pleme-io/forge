@@ -575,7 +575,7 @@ spec:
     // `migration_job_manifest_file`'s docstring for the two
     // structural defects the RAII lift closes.
     let (_manifest_dir, manifest_path) = migration_job_manifest_file(config.name(), timestamp)?;
-    let manifest_path_str: String = manifest_path.to_string_lossy().into_owned();
+    let manifest_path_str: String = crate::repo::path_to_string_lossy(&manifest_path);
     crate::repo::write_text_async(&manifest_path, manifest).await?;
 
     // Apply the job

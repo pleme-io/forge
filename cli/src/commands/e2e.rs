@@ -971,7 +971,7 @@ fn build_and_load_image(repo_root: &str, name: &str, flake_attr: &str) -> Result
     // the correct lifecycle: Docker daemon now carries the image and
     // the Nix-store tarball is redundant).
     let (_output_dir, output_path) = e2e_image_output_symlink(name)?;
-    let output_path_str = output_path.to_string_lossy().into_owned();
+    let output_path_str = crate::repo::path_to_string_lossy(&output_path);
 
     // Build with Nix
     ui::print_info(&format!("Building {} image via Nix", name));

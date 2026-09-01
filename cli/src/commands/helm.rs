@@ -850,7 +850,7 @@ pub fn lint(chart_dir: &str) -> Result<()> {
     let ci_values = chart_path.join("ci").join("lint-values.yaml");
     if ci_values.exists() {
         value_args.push("-f".into());
-        value_args.push(ci_values.to_string_lossy().into_owned());
+        value_args.push(crate::repo::path_to_string_lossy(&ci_values));
     }
 
     // helm lint
