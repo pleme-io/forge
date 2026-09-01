@@ -4832,12 +4832,32 @@ mod tests {
                 include_str!("commands/crossplane.rs"),
             ),
             ("commands/helm.rs", include_str!("commands/helm.rs")),
+            (
+                "commands/typescript.rs",
+                include_str!("commands/typescript.rs"),
+            ),
+            ("commands/pangea.rs", include_str!("commands/pangea.rs")),
         ] {
             for needle in [
                 "Kustomization file not found:",
                 "Builder pool file not found:",
                 "runtime image tarball not found:",
                 "Chart tarball not found:",
+                // Ten sibling stragglers from `commands/{helm,typescript,
+                // pangea,crossplane}.rs`, lifted in a later pass onto the
+                // same `require_existing_labeled(<path>, <label>)` body.
+                // The 653592b pass caught nine, these ten completed the
+                // sweep — six in helm.rs (chart_dir + k8s_repo + charts_dir
+                // callers), one in typescript.rs (project loop), one in
+                // pangea.rs (provider_dir), two in crossplane.rs (render +
+                // validate input loops routed via a `format!`-built label).
+                "Chart directory not found:",
+                "K8s repo not found:",
+                "Charts directory not found:",
+                "Project directory not found:",
+                "Provider directory not found:",
+                "crossplane render: {} file not found:",
+                "crossplane validate: {} path not found:",
             ] {
                 assert!(
                     !source.contains(needle),
@@ -4845,9 +4865,9 @@ mod tests {
                      wording — that duplication was lifted onto \
                      `crate::repo::require_existing_labeled(<path>, <label>)`. \
                      A re-inline would silently diverge the label-and-path \
-                     envelope from the nine sibling consumers routing \
-                     through the primitive, and fork the bail wording into \
-                     a hand-typed literal that could drift from the \
+                     envelope from the sibling consumers routing through \
+                     the primitive, and fork the bail wording into a \
+                     hand-typed literal that could drift from the \
                      primitive one consumer at a time."
                 );
             }

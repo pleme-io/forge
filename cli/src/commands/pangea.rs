@@ -613,10 +613,7 @@ pub fn spec_gen(
     force: bool,
     dry_run: bool,
 ) -> Result<()> {
-    let provider_path = std::path::Path::new(provider_dir);
-    if !provider_path.exists() {
-        anyhow::bail!("Provider directory not found: {}", provider_dir);
-    }
+    let provider_path = crate::repo::require_existing_labeled(provider_dir, "Provider directory")?;
 
     let resources_dir = provider_path.join("lib/pangea/resources");
     let spec_dir = provider_path.join("spec/resources");

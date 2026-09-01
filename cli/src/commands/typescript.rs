@@ -3,7 +3,6 @@
 //! Replaces typescript-tool.nix::mkTypescriptRegenApp.
 
 use anyhow::{bail, Result};
-use std::path::Path;
 use std::process::Command;
 use tracing::info;
 
@@ -28,10 +27,7 @@ pub fn regenerate(projects: &[String]) -> Result<()> {
     let pleme_linker = get_tool_path("PLEME_LINKER_BIN", "pleme-linker");
 
     for project in projects {
-        let dir = Path::new(project);
-        if !dir.exists() {
-            bail!("Project directory not found: {}", project);
-        }
+        crate::repo::require_existing_labeled(project, "Project directory")?;
 
         info!("Regenerating lockfile for {}...", project);
 
