@@ -109,7 +109,7 @@ pub(crate) async fn run_health_check(
     )
     .await?;
 
-    let phase = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let phase = crate::repo::utf8_lossy_trim_owned(&output.stdout);
     if phase != "Running" {
         bail!(
             "Health check failed: pod status is '{}', expected 'Running' for {}",

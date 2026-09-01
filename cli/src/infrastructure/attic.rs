@@ -535,7 +535,7 @@ impl AtticClient {
             Err(AtticError::ClosurePushFailed {
                 cache: self.cache_name.clone(),
                 exit_code: output.status.code(),
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                stderr: crate::repo::utf8_lossy_trim_owned(&output.stderr),
             })
         }
     }

@@ -12687,7 +12687,7 @@ impl CapturedFailure {
     pub fn from_output(output: &std::process::Output) -> Self {
         Self {
             exit_code: output.status.code(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            stderr: crate::repo::utf8_lossy_trim_owned(&output.stderr),
         }
     }
 
@@ -13082,9 +13082,7 @@ where
     FOp: FnOnce(CapturedFailure) -> E,
 {
     match captured {
-        Ok(out) if out.status.success() => {
-            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-        }
+        Ok(out) if out.status.success() => Ok(crate::repo::utf8_lossy_trim_owned(&out.stdout)),
         Ok(out) => Err(on_op(CapturedFailure::from_output(&out))),
         Err(e) => Err(on_spawn(e)),
     }
@@ -13923,8 +13921,8 @@ impl CommandAttemptFailure {
                 operation: operation.into(),
                 attempt,
                 exit_code: out.status.code(),
-                stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-                stdout: String::from_utf8_lossy(&out.stdout).trim().to_string(),
+                stderr: crate::repo::utf8_lossy_trim_owned(&out.stderr),
+                stdout: crate::repo::utf8_lossy_trim_owned(&out.stdout),
             }),
             Err(spawn_err) => Err(Self {
                 operation: operation.into(),

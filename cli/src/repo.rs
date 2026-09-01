@@ -1897,6 +1897,96 @@ pub fn path_to_string_lossy(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// Project a captured process output byte slice
+/// ([`std::process::Output::stdout`] / [`std::process::Output::stderr`],
+/// or any owned `Vec<u8>` that traveled through the same OS pipe) into
+/// an owned [`String`] via the lossy UTF-8 repair every pre-lift
+/// consumer relied on, then trim the leading and trailing whitespace
+/// so the returned [`String`] carries only the operator-visible payload
+/// (a digest, a phase, an image tag, a `stderr` diagnostic).
+///
+/// # Duplication lift (the one-primitive-per-projection discipline)
+///
+/// The pre-lift shape recurred at eight sibling consumer sites across
+/// four files, each spelling the same three-step
+/// `String::from_utf8_lossy(&<bytes>).trim().to_string()` projection
+/// inline:
+///
+/// - Three command modules on the pod-status / registry-digest /
+///   deployed-image read path:
+///   `commands/product_release.rs:112` (phase from `kubectl get pods
+///   -o jsonpath={.items[0].status.phase}` fed into a `"Running"`
+///   equality gate that produces the deploy-health verdict),
+///   `commands/rust_service.rs:758` (digest from `crane digest ...`
+///   fed into a [`String::is_empty`] check + a `[..19]` prefix slice
+///   the operator sees in the "✅ Image verified" progress line),
+///   `commands/github_runner_ci.rs:767` (deployed image from `kubectl
+///   get sts -o jsonpath={image}` fed into a [`str::contains`]
+///   check against the expected git-sha).
+/// - One [`crate::infrastructure::attic::AtticClient`] error site
+///   (`infrastructure/attic.rs:538`, `stderr` field of the typed
+///   `AtticError::ClosurePushFailed` variant returned when the Attic
+///   `push` output has a non-success status).
+/// - Four [`crate::retry`] retry-boundary primitives:
+///   `retry.rs:12690` ([`crate::retry::CapturedFailure::from_output`]'s
+///   `stderr` field), `retry.rs:13086`
+///   ([`crate::retry::classify_capture_query_anyhow`]'s success-arm
+///   trimmed-stdout return), and `retry.rs:13926-13927`
+///   ([`crate::retry::CommandAttemptFailure::from_capture`]'s
+///   `stderr`+`stdout` fields for the op-failure variant).
+///
+/// Every one of those sites carried the same lossy-repair-plus-trim
+/// projection: `Vec<u8>` bytes captured from an OS pipe are not
+/// guaranteed UTF-8 (a spawned child's stdout can carry any byte
+/// sequence, and a tokio subprocess pipe hands the buffer back
+/// verbatim), so a non-lossy [`str::from_utf8`] projection would
+/// [`Result::Err`] on the first invalid byte and lose the diagnostic
+/// the operator needs to act. And every consumer wanted the trailing
+/// newline the child process almost always emits (`kubectl -o
+/// jsonpath` closes with `\n`, `crane digest` closes with `\n`,
+/// `stderr` diagnostics usually close with `\n`) stripped, so the
+/// downstream equality / substring / `[..19]` prefix slice sees only
+/// the payload bytes and not the trailing whitespace that would
+/// silently break a `==` comparison or shift the prefix slice off by
+/// one.
+///
+/// Fanned out across eight hand-typed spellings, the projection was
+/// invisible to the borrow-checker: a helpful "let's return
+/// [`std::borrow::Cow`]-shaped so an all-ASCII payload skips the
+/// allocation" cleanup at any one site would quietly fork one
+/// consumer at a time from its seven siblings. Lifting to a single
+/// primitive with one owner keeps the projection uniform and refuses
+/// drift by construction.
+///
+/// # Behavior
+///
+/// - **Invalid UTF-8** — replaced by [`U+FFFD REPLACEMENT CHARACTER`]
+///   via [`String::from_utf8_lossy`]. A non-UTF-8 byte in the child's
+///   captured output never fails the projection; the operator sees a
+///   diagnostic with `\u{FFFD}` markers rather than a swallowed error.
+/// - **Whitespace** — leading and trailing ASCII / Unicode whitespace
+///   (matching [`char::is_whitespace`], the same class
+///   [`str::trim`] recognizes) is removed. Internal whitespace is
+///   preserved so a multi-line `stderr` diagnostic survives
+///   line-for-line into the typed error record.
+/// - **Empty input** — returns [`String::new`]. The exact result every
+///   pre-lift `<x>.stdout.is_empty() → ""` short-circuit relied on.
+///
+/// # Peer
+///
+/// Sibling to [`path_to_string_lossy`] on the caller-owned-bytes
+/// projection surface: [`path_to_string_lossy`] is the [`Path`]-
+/// receiving peer that projects into an owned [`String`] via the
+/// same [`String::from_utf8_lossy`] repair (over the path's OS
+/// bytes); [`utf8_lossy_trim_owned`] is the byte-slice-receiving
+/// peer that projects into an owned trimmed [`String`] (over process
+/// output bytes). Together they discharge the `<owned-bytes> →
+/// <owned-string-shape>` primitive family the `crate::repo::*`
+/// surface owns.
+pub fn utf8_lossy_trim_owned(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).trim().to_string()
+}
+
 /// Run a command in a specific directory, restoring the original directory afterward
 ///
 /// # Arguments
@@ -5456,6 +5546,183 @@ mod tests {
                  lifted in this commit depend on the substitution \
                  being a no-op. Input: {input:?}"
             );
+        }
+    }
+
+    /// [`utf8_lossy_trim_owned`] projects a byte slice through
+    /// [`String::from_utf8_lossy`] + [`str::trim`] + [`ToString::to_string`]
+    /// byte-for-byte identically to the pre-lift inline spelling every
+    /// one of the eight consumer sites carried
+    /// (`String::from_utf8_lossy(&<bytes>).trim().to_string()`). Pins
+    /// the substitution to be a no-op across the four canonical
+    /// shapes the pre-lift sites exercised:
+    ///
+    /// - ASCII stdout with a trailing newline (`kubectl -o jsonpath`,
+    ///   `crane digest`) — the trim strips the newline, the payload
+    ///   passes through byte-identical.
+    /// - Empty stdout (`kubectl` returning no data) — projects to
+    ///   [`String::new`], the same value every pre-lift
+    ///   `<x>.is_empty()` short-circuit at
+    ///   `commands/rust_service.rs:759` relied on.
+    /// - Multi-line stderr with mixed leading and trailing whitespace
+    ///   (`docker push` diagnostic) — leading and trailing whitespace
+    ///   is stripped, internal newlines and spacing are preserved so
+    ///   the operator sees the full diagnostic line-for-line.
+    /// - A byte slice carrying invalid UTF-8 (a `0xFF` in the middle
+    ///   of a stdout buffer, structurally what a rogue subprocess can
+    ///   emit) — the invalid byte is replaced by `\u{FFFD}` via the
+    ///   [`String::from_utf8_lossy`] repair every pre-lift consumer
+    ///   relied on. A non-lossy [`str::from_utf8`] projection would
+    ///   have [`Result::Err`]-ed here and swallowed the surrounding
+    ///   diagnostic.
+    ///
+    /// A future refinement that tightened the primitive's projection
+    /// out from under any one of the eight consumer sites — a
+    /// [`std::borrow::Cow`]-returning variant, a
+    /// [`str::trim_ascii`] specialization, a
+    /// [`char::is_ascii_whitespace`] classifier — surfaces here as a
+    /// byte-mismatch against the pre-lift spelling on the shape the
+    /// refinement missed, before it reaches production.
+    #[test]
+    fn utf8_lossy_trim_owned_matches_pre_lift_spelling_byte_for_byte() {
+        let cases: &[(&str, &[u8], &str)] = &[
+            (
+                "ascii kubectl-jsonpath phase with trailing newline",
+                b"Running\n",
+                "Running",
+            ),
+            ("empty stdout", b"", ""),
+            (
+                "multi-line stderr with leading+trailing whitespace",
+                b"\n  push failed: unauthorized\n  retry the login\n\n",
+                "push failed: unauthorized\n  retry the login",
+            ),
+            (
+                "invalid utf-8 byte in stdout buffer",
+                b"sha256:abc\xffdef\n",
+                "sha256:abc\u{FFFD}def",
+            ),
+        ];
+        for (label, bytes, expected) in cases {
+            let via_primitive = utf8_lossy_trim_owned(bytes);
+            let via_pre_lift_spelling: String = String::from_utf8_lossy(bytes).trim().to_string();
+            assert_eq!(
+                via_primitive, via_pre_lift_spelling,
+                "utf8_lossy_trim_owned() must project byte-for-byte \
+                 equal to the pre-lift \
+                 `String::from_utf8_lossy(&<bytes>).trim().to_string()` \
+                 spelling — the eight lifted consumer sites depend on \
+                 the substitution being a no-op. Case: {label}"
+            );
+            assert_eq!(
+                via_primitive, *expected,
+                "utf8_lossy_trim_owned() must produce the expected \
+                 canonical payload on the four load-bearing shapes the \
+                 pre-lift sites exercise. Case: {label}"
+            );
+        }
+    }
+
+    /// Post-lift the eight consumer sites routing through
+    /// [`utf8_lossy_trim_owned`] must not silently re-inline the
+    /// primitive's shape at their call points — a re-inline reopens
+    /// the class this lift closed and forks one consumer at a time
+    /// from its seven siblings.
+    ///
+    /// This source-scan shield walks every hand-lifted consumer file
+    /// and refuses the exact
+    /// `String::from_utf8_lossy(&<bytes>).trim().to_string()`
+    /// three-step projection, keyed by the concrete `.stdout` or
+    /// `.stderr` receiver every consumer bound. The needles pair each
+    /// consumer with the specific identifier it carried pre-lift
+    /// (`output.stdout` at the three command sites and
+    /// `infrastructure/attic.rs`; `out.stderr` / `out.stdout` at the
+    /// three [`crate::retry`] sites; `output.stderr` at the
+    /// [`crate::retry::CapturedFailure::from_output`] site).
+    ///
+    /// Other spellings of the same projection survive by construction:
+    /// `String::from_utf8_lossy(&<x>).trim()` (no owned tail — returns
+    /// `&str` for a `format!` interpolation, e.g.
+    /// `commands/github_runner_ci.rs:838`) is a distinct
+    /// zero-alloc-borrow projection and is not routed through this
+    /// primitive; `String::from_utf8_lossy(&<x>).to_string()` (no
+    /// trim — the `commands/migrations.rs`, `commands/seed.rs`,
+    /// `services/migration_service.rs` sites) preserves trailing
+    /// whitespace intentionally and is a different projection. This
+    /// shield's needles pin the three-step
+    /// `.from_utf8_lossy(_).trim().to_string()` shape only.
+    ///
+    /// The primitive body in `repo.rs` legitimately spells the
+    /// three-step shape at its own body; this shield does NOT scan
+    /// `repo.rs`, mirroring the sibling shield discipline.
+    #[test]
+    fn utf8_lossy_trim_owned_consumers_do_not_reinline_the_primitive_shape() {
+        for (name, source, needles) in [
+            (
+                "commands/product_release.rs",
+                include_str!("commands/product_release.rs"),
+                &["String::from_utf8_lossy(&output.stdout).trim().to_string()"][..],
+            ),
+            (
+                "commands/rust_service.rs",
+                include_str!("commands/rust_service.rs"),
+                &["String::from_utf8_lossy(&output.stdout).trim().to_string()"][..],
+            ),
+            (
+                "commands/github_runner_ci.rs",
+                include_str!("commands/github_runner_ci.rs"),
+                &["String::from_utf8_lossy(&output.stdout).trim().to_string()"][..],
+            ),
+            (
+                "infrastructure/attic.rs",
+                include_str!("infrastructure/attic.rs"),
+                &["String::from_utf8_lossy(&output.stderr).trim().to_string()"][..],
+            ),
+            (
+                "retry.rs",
+                include_str!("retry.rs"),
+                &[
+                    "String::from_utf8_lossy(&output.stderr).trim().to_string()",
+                    "String::from_utf8_lossy(&out.stderr).trim().to_string()",
+                    "String::from_utf8_lossy(&out.stdout).trim().to_string()",
+                ][..],
+            ),
+        ] {
+            // Scan executable lines only — doc-comment (`///`) prose
+            // that legitimately spells the three-step shape in prior-
+            // commit historical narrative (`retry.rs`'s
+            // [`CapturedFailure`] doc block naming the pre-lift
+            // "verbatim two-line incantation", the
+            // [`classify_capture_query_anyhow`] doc's example code
+            // fence) is not executable and would spuriously trip the
+            // shield. Filtering by leading-`///` (after trimming
+            // ambient indentation) keeps the shield checking what it
+            // was written to check: the primitive body of every
+            // caller, not the prose above it.
+            for needle in needles {
+                for (line_no, line) in source.lines().enumerate() {
+                    if line.trim_start().starts_with("///") {
+                        continue;
+                    }
+                    assert!(
+                        !line.contains(needle),
+                        "{name}:{line_no} must NOT spell the inline \
+                         `{needle}` three-step projection — that \
+                         duplication was lifted onto \
+                         `crate::repo::utf8_lossy_trim_owned`. A re-\
+                         inline would silently diverge the Output-\
+                         bytes-to-trimmed-owned-String projection from \
+                         the eight sibling consumers routing through \
+                         the primitive, and re-fork the shape into \
+                         hand-typed literals that could drift from the \
+                         primitive one consumer at a time (a helpful \
+                         `Cow`-return / `trim_ascii` / \
+                         `is_ascii_whitespace` refinement at the \
+                         primitive would silently miss the re-inlined \
+                         site). Offending line: {line}"
+                    );
+                }
+            }
         }
     }
 }
