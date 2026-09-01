@@ -116,8 +116,7 @@ fn exec_psql(namespace: &str, pod: &str, db_name: &str, sql: &str) -> Result<Str
         .context("Failed to wait for psql")?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let (stdout, stderr) = crate::repo::utf8_lossy_streams(&output);
         anyhow::bail!("psql failed:\nstdout: {}\nstderr: {}", stdout, stderr);
     }
 

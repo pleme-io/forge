@@ -154,8 +154,7 @@ pub async fn execute(backend_dir: &Path, web_dir: &Path) -> Result<CodegenResult
         .with_context(|| format!("Failed to run graphql-codegen in {}", web_dir.display()))?;
 
     if !codegen_output.status.success() {
-        let stderr = String::from_utf8_lossy(&codegen_output.stderr);
-        let stdout = String::from_utf8_lossy(&codegen_output.stdout);
+        let (stdout, stderr) = crate::repo::utf8_lossy_streams(&codegen_output);
         anyhow::bail!("GraphQL codegen failed:\n{}\n{}", stderr, stdout);
     }
 
