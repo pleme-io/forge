@@ -5304,14 +5304,29 @@ mod tests {
         );
     }
 
-    /// Post-lift the eleven consumer sites lifted onto
+    /// Post-lift the fifteen consumer sites lifted onto
     /// [`path_to_string_lossy`] must not silently re-inline the
     /// primitive's shape at their call points — a re-inline reopens
     /// the class this lift closed. This source-scan shield walks
     /// every hand-lifted consumer file and refuses the exact
-    /// `<ident>.to_string_lossy().to_string()` composition each site
-    /// carried pre-lift, keyed by the concrete identifier every
+    /// `<ident>.to_string_lossy().to_string()` and
+    /// `<ident>.to_string_lossy().into_owned()` compositions each
+    /// site carried pre-lift, keyed by the concrete identifier every
     /// consumer bound.
+    ///
+    /// The two pre-lift spellings project identically through the
+    /// primitive's `.into_owned()` tail: on the
+    /// [`std::borrow::Cow::Borrowed`] (UTF-8) arm both allocate one
+    /// fresh [`String`] and are bytewise indistinguishable; on the
+    /// [`std::borrow::Cow::Owned`] (non-UTF-8) arm the primitive
+    /// unwraps the already-owned [`String`] in place while both
+    /// pre-lift spellings — the double-`.to_string()` variant and
+    /// the `.into_owned()` variant that already saved one alloc —
+    /// belong to the same "path-to-owned-string via lossy repair"
+    /// projection. Consolidating both into one primitive keeps the
+    /// projection uniform and refuses drift by construction, no
+    /// matter which of the two pre-lift spellings a future cleanup
+    /// tried to re-inline.
     ///
     /// The chained-receiver variants that survive by construction
     /// (`product_dir.join(&svc.path).to_string_lossy().to_string()`
@@ -5346,6 +5361,7 @@ mod tests {
                     "repo_root.to_string_lossy().to_string()",
                     "lib_path.to_string_lossy().to_string()",
                     "dst_chart.to_string_lossy().to_string()",
+                    "ci_values.to_string_lossy().into_owned()",
                 ][..],
             ),
             (
@@ -5366,6 +5382,21 @@ mod tests {
                 include_str!("commands/dashboards.rs"),
                 &["path.to_string_lossy().to_string()"][..],
             ),
+            (
+                "commands/migrations.rs",
+                include_str!("commands/migrations.rs"),
+                &["manifest_path.to_string_lossy().into_owned()"][..],
+            ),
+            (
+                "commands/federation_tests.rs",
+                include_str!("commands/federation_tests.rs"),
+                &["manifest_path.to_string_lossy().into_owned()"][..],
+            ),
+            (
+                "commands/e2e.rs",
+                include_str!("commands/e2e.rs"),
+                &["output_path.to_string_lossy().into_owned()"][..],
+            ),
         ] {
             for needle in needles {
                 assert!(
@@ -5374,12 +5405,57 @@ mod tests {
                      two-step projection — that duplication was \
                      lifted onto `crate::repo::path_to_string_lossy`. \
                      A re-inline would silently diverge the \
-                     path-to-owned-string projection from the eleven \
+                     path-to-owned-string projection from the fifteen \
                      sibling consumers routing through the primitive, \
-                     and re-open the double-alloc discipline on the \
-                     `Cow::Owned` (non-UTF-8) arm this lift discharged."
+                     and re-fork the two pre-lift spellings \
+                     (`.to_string()` and `.into_owned()`) into two \
+                     hand-typed shapes that could drift from each \
+                     other one consumer at a time."
                 );
             }
+        }
+    }
+
+    /// [`path_to_string_lossy`] projects a caller-owned [`Path`]
+    /// bytewise-equal to the pre-lift `.to_string_lossy().into_owned()`
+    /// spelling on a UTF-8 input path — the exact spelling the four
+    /// alternate-spelling consumers lifted in the current commit
+    /// (`commands/migrations.rs`, `commands/federation_tests.rs`,
+    /// `commands/e2e.rs`, `commands/helm.rs`'s `ci_values` site)
+    /// carried. Pins the substitution to be a no-op at those sites,
+    /// so a future refinement that tightened the primitive's
+    /// projection cannot silently diverge from the pre-lift shape
+    /// the four alternate-spelling consumers relied on.
+    ///
+    /// The peer test
+    /// [`path_to_string_lossy_returns_owned_string_byte_identical_on_utf8_hit`]
+    /// pins byte-identity against the input path literal; this test
+    /// pins byte-identity against the second pre-lift *spelling* of
+    /// the projection (`.into_owned()`), so a drift where the
+    /// primitive body's tail changed one of the two arms of
+    /// [`std::borrow::Cow::into_owned`] out from under the pre-lift
+    /// `.into_owned()` sites — a hypothetical tail like
+    /// `.to_string_lossy().to_string().trim().to_string()` — would
+    /// fail here even though it would still pass the ASCII-literal
+    /// pin.
+    #[test]
+    fn path_to_string_lossy_matches_pre_lift_into_owned_spelling_byte_for_byte() {
+        for input in [
+            "/tmp/forge/manifest.yaml",
+            "/nix/store/deadbeef-hash/output-symlink",
+            "./chart/ci/lint-values.yaml",
+        ] {
+            let path = std::path::Path::new(input);
+            let via_primitive = path_to_string_lossy(path);
+            let via_pre_lift_spelling: String = path.to_string_lossy().into_owned();
+            assert_eq!(
+                via_primitive, via_pre_lift_spelling,
+                "path_to_string_lossy() must project byte-for-byte \
+                 equal to the pre-lift `.to_string_lossy().into_owned()` \
+                 spelling — the four alternate-spelling consumer sites \
+                 lifted in this commit depend on the substitution \
+                 being a no-op. Input: {input:?}"
+            );
         }
     }
 }

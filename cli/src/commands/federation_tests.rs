@@ -313,7 +313,7 @@ pub async fn run_federation_tests(
     std::fs::write(&manifest_path, manifest)
         .context("Failed to write federation test job manifest")?;
 
-    let manifest_path_str: String = manifest_path.to_string_lossy().into_owned();
+    let manifest_path_str: String = crate::repo::path_to_string_lossy(&manifest_path);
     println!("   📝 Created job manifest: {}", manifest_path_str);
 
     // Apply the job
