@@ -217,9 +217,7 @@ pub fn render(
         ("composition", composition),
         ("functions", functions),
     ] {
-        if !Path::new(path).exists() {
-            bail!("crossplane render: {} file not found: {}", label, path);
-        }
+        crate::repo::require_existing_labeled(path, &format!("crossplane render: {} file", label))?;
     }
     if let Some(o) = observed {
         if !Path::new(o).exists() {
@@ -241,9 +239,10 @@ pub fn render(
 /// validate`) — the SDLC's schema-validation surface.
 pub fn validate(extensions: &str, resources: &str) -> Result<()> {
     for (label, path) in [("extensions", extensions), ("resources", resources)] {
-        if !Path::new(path).exists() {
-            bail!("crossplane validate: {} path not found: {}", label, path);
-        }
+        crate::repo::require_existing_labeled(
+            path,
+            &format!("crossplane validate: {} path", label),
+        )?;
     }
     crate::retry::run_bin_args_inherited_status_sync(
         &crossplane_bin(),

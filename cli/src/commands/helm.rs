@@ -813,10 +813,7 @@ fn helm_dependency_update(chart_dir: &str) -> Result<()> {
 /// Library charts (type: library) skip `helm template` since they are not
 /// directly installable.
 pub fn lint(chart_dir: &str) -> Result<()> {
-    let chart_path = Path::new(chart_dir);
-    if !chart_path.exists() {
-        bail!("Chart directory not found: {}", chart_dir);
-    }
+    let chart_path = crate::repo::require_existing_labeled(chart_dir, "Chart directory")?;
 
     info!("Linting chart: {}", chart_dir);
 
@@ -952,10 +949,7 @@ pub fn release_with_lib(
 
 /// Package a chart directory into a .tgz tarball.
 pub fn package(chart_dir: &str, output: &str, version: Option<&str>) -> Result<String> {
-    let chart_path = Path::new(chart_dir);
-    if !chart_path.exists() {
-        bail!("Chart directory not found: {}", chart_dir);
-    }
+    let chart_path = crate::repo::require_existing_labeled(chart_dir, "Chart directory")?;
 
     crate::repo::create_dir_all_sync(Path::new(output))?;
 
@@ -1277,10 +1271,7 @@ pub fn deploy(
     commit: bool,
     _watch: bool,
 ) -> Result<()> {
-    let k8s_path = Path::new(k8s_repo);
-    if !k8s_path.exists() {
-        bail!("K8s repo not found: {}", k8s_repo);
-    }
+    crate::repo::require_existing_labeled(k8s_repo, "K8s repo")?;
 
     // Find the HelmRelease file for this service
     // Convention: clusters/{cluster}/{category}/{service}/kustomization.yaml patches the HelmRelease
@@ -1378,10 +1369,7 @@ pub fn release(chart_dir: &str, registry: &str, version: Option<&str>) -> Result
 
 /// Render chart templates for debugging.
 pub fn template(chart_dir: &str, values: Option<&str>, set_values: &[String]) -> Result<()> {
-    let chart_path = Path::new(chart_dir);
-    if !chart_path.exists() {
-        bail!("Chart directory not found: {}", chart_dir);
-    }
+    crate::repo::require_existing_labeled(chart_dir, "Chart directory")?;
 
     // helm dependency update (bounded + retried)
     helm_dependency_update(chart_dir)?;
@@ -1444,10 +1432,7 @@ pub fn bump(
     level: &str,
     commit: bool,
 ) -> Result<(String, String)> {
-    let charts_path = Path::new(charts_dir);
-    if !charts_path.exists() {
-        bail!("Charts directory not found: {}", charts_dir);
-    }
+    let charts_path = crate::repo::require_existing_labeled(charts_dir, "Charts directory")?;
 
     let lib_chart_yaml = charts_path.join(lib_chart_name).join("Chart.yaml");
     if !lib_chart_yaml.exists() {
@@ -1828,10 +1813,7 @@ fn republish_enabled() -> bool {
 ///
 /// Returns chart names that have a Chart.yaml, excluding `exclude_name`.
 fn discover_charts(charts_dir: &str, exclude_name: &str) -> Result<Vec<String>> {
-    let dir = Path::new(charts_dir);
-    if !dir.exists() {
-        bail!("Charts directory not found: {}", charts_dir);
-    }
+    let dir = crate::repo::require_existing_labeled(charts_dir, "Charts directory")?;
 
     let mut charts: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(dir)?.filter_map(std::result::Result::ok) {
