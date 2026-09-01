@@ -199,9 +199,7 @@ pub async fn update_federation(
 
     // Write temporary supergraph config
     let config_path = PathBuf::from("supergraph-config.yaml");
-    tokio::fs::write(&config_path, &supergraph_config)
-        .await
-        .context("Failed to write supergraph config")?;
+    crate::repo::write_text_async(&config_path, &supergraph_config).await?;
 
     println!(
         "📋 Supergraph config generated with {} service(s)",
@@ -243,9 +241,7 @@ pub async fn update_federation(
 
     // Write composed supergraph schema
     let supergraph_path = PathBuf::from("supergraph.graphql");
-    tokio::fs::write(&supergraph_path, &output.stdout)
-        .await
-        .context("Failed to write supergraph schema")?;
+    crate::repo::write_text_async(&supergraph_path, &output.stdout).await?;
 
     println!("✅ {}", "Supergraph composed successfully".green());
     println!("   Schema: {}", supergraph_path.display());
@@ -441,9 +437,7 @@ pub async fn update_federation(
         // Join documents with YAML document separator
         let final_content = updated_documents.join("\n---\n");
 
-        tokio::fs::write(&router_deployment_path, final_content)
-            .await
-            .context("Failed to write updated hive-router deployment")?;
+        crate::repo::write_text_async(&router_deployment_path, final_content).await?;
 
         println!(
             "✅ Hive Router deployment updated with supergraph hash: {}",
