@@ -4536,6 +4536,22 @@ mod tests {
                 "commands/rust_service.rs",
                 include_str!("commands/rust_service.rs"),
             ),
+            // Three sibling stragglers from `commands/federation.rs`,
+            // lifted in a later pass onto the same
+            // `write_text_async(<path>, <content>)` body. The 866d9ed
+            // pass caught ten across seven consumers; these three
+            // completed the sweep at the supergraph-composition arm —
+            // one write of the temporary `supergraph-config.yaml` seed,
+            // one write of the composed `supergraph.graphql` output,
+            // one write of the mutated `hive-router` deployment
+            // manifest — each pre-lift spelled the same
+            // filename-literal `.context("Failed to write <literal>")`
+            // shape that dropped `path.display()` from the operator log
+            // and could drift from the actual `path` argument silently.
+            (
+                "commands/federation.rs",
+                include_str!("commands/federation.rs"),
+            ),
         ] {
             assert!(
                 !source.contains("Failed to write kustomization"),
@@ -4543,7 +4559,7 @@ mod tests {
                  `Failed to write kustomization.yaml` — that duplication \
                  was lifted onto `crate::repo::write_text_async`. A \
                  re-inline would silently diverge the write arm from the \
-                 ten sibling text-mode consumers routing through the \
+                 sibling text-mode consumers routing through the \
                  primitive.",
             );
             assert!(
@@ -4563,6 +4579,28 @@ mod tests {
                 "{name} must NOT spell the inline write-arm envelope \
                  `Failed to write updated manifest` — that duplication \
                  was lifted onto `crate::repo::write_text_async`.",
+            );
+            assert!(
+                !source.contains("Failed to write supergraph config"),
+                "{name} must NOT spell the inline write-arm envelope \
+                 `Failed to write supergraph config` — that duplication \
+                 was lifted onto `crate::repo::write_text_async` in a \
+                 follow-up sweep that closed three federation-arm \
+                 stragglers of the class 866d9ed opened.",
+            );
+            assert!(
+                !source.contains("Failed to write supergraph schema"),
+                "{name} must NOT spell the inline write-arm envelope \
+                 `Failed to write supergraph schema` — that duplication \
+                 was lifted onto `crate::repo::write_text_async` in the \
+                 same follow-up sweep.",
+            );
+            assert!(
+                !source.contains("Failed to write updated hive-router deployment"),
+                "{name} must NOT spell the inline write-arm envelope \
+                 `Failed to write updated hive-router deployment` — that \
+                 duplication was lifted onto `crate::repo::write_text_async` \
+                 in the same follow-up sweep.",
             );
         }
     }
