@@ -1398,8 +1398,8 @@ pub async fn execute_pre_deployment_tests(
                         let output = child.wait_with_output().await?;
                         Ok::<_, anyhow::Error>((
                             output.status.success(),
-                            String::from_utf8_lossy(&output.stdout).to_string()
-                                + &String::from_utf8_lossy(&output.stderr).to_string(),
+                            crate::repo::utf8_lossy_owned(&output.stdout)
+                                + &crate::repo::utf8_lossy_owned(&output.stderr),
                         ))
                     })
                     .await

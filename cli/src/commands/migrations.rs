@@ -675,7 +675,7 @@ spec:
                 .await
                 .ok();
             logs_tail = logs_output
-                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                .map(|o| crate::repo::utf8_lossy_owned(&o.stdout))
                 .filter(|s| !s.is_empty());
         }
 
@@ -790,7 +790,7 @@ pub async fn check_and_reset_shinka_migration(
 
     match check {
         Ok(output) if !output.stdout.is_empty() => {
-            let phase = String::from_utf8_lossy(&output.stdout).to_string();
+            let phase = crate::repo::utf8_lossy_owned(&output.stdout);
             let phase = phase.trim();
 
             if phase == "Failed" || phase == "CheckingHealth" {
@@ -849,7 +849,7 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
     )
     .await?;
 
-    let current_phase = String::from_utf8_lossy(&check.stdout).to_string();
+    let current_phase = crate::repo::utf8_lossy_owned(&check.stdout);
 
     if current_phase.is_empty() {
         bail!(
@@ -905,7 +905,7 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
     )
     .await?;
 
-    let jobs_str = String::from_utf8_lossy(&list_jobs.stdout).to_string();
+    let jobs_str = crate::repo::utf8_lossy_owned(&list_jobs.stdout);
     let jobs: Vec<&str> = jobs_str
         .split_whitespace()
         .filter(|j| j.contains("migration"))

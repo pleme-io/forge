@@ -121,7 +121,7 @@ fn exec_psql(namespace: &str, pod: &str, db_name: &str, sql: &str) -> Result<Str
         anyhow::bail!("psql failed:\nstdout: {}\nstderr: {}", stdout, stderr);
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(crate::repo::utf8_lossy_owned(&output.stdout))
 }
 
 /// Find the primary CNPG postgres pod.

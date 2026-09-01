@@ -1987,6 +1987,98 @@ pub fn utf8_lossy_trim_owned(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).trim().to_string()
 }
 
+/// Project a captured process output byte slice
+/// ([`std::process::Output::stdout`] / [`std::process::Output::stderr`],
+/// or any owned `Vec<u8>` that traveled through the same OS pipe) into
+/// an owned [`String`] via the lossy UTF-8 repair every pre-lift
+/// consumer relied on — WITHOUT trimming. Trailing whitespace (the
+/// child's closing `\n`, indent runs, blank continuation lines) is
+/// preserved verbatim so consumers whose downstream logic depends on
+/// the byte sequence surviving intact (a whitespace-split iteration,
+/// a substring-search over an `expected + "\n"` slice, a re-emitted
+/// diagnostic that must round-trip line-for-line, a `stdout+stderr`
+/// concatenation) see the same shape they would have seen from an
+/// inline `String::from_utf8_lossy(&<x>).to_string()`.
+///
+/// # Duplication lift (the one-primitive-per-projection discipline)
+///
+/// The pre-lift shape recurred at eight sibling consumer sites across
+/// four files, each spelling the same two-step
+/// `String::from_utf8_lossy(&<bytes>).to_string()` projection inline:
+///
+/// - Four sites on the Shinka / DatabaseMigration pod-status +
+///   job-listing polling paths in `commands/migrations.rs`
+///   (`:678` — pod-logs tail captured on failed-job cleanup and
+///   fed into the [`Option::filter`] of an
+///   [`Option::is_empty`] gate; `:793` — phase from `kubectl get
+///   shinkamigration -o jsonpath={.status.phase}` bound owned so
+///   a later `phase.trim()` re-borrow can equality-check against
+///   `"Failed"` / `"CheckingHealth"` without dropping the temporary;
+///   `:852` — `current_phase` from `kubectl get databasemigration`
+///   whose [`String::is_empty`] check gates a
+///   [`anyhow::bail`] on missing resources and a later
+///   `current_phase.trim()` re-borrow feeds the status log line;
+///   `:908` — whitespace-separated job names from `kubectl get jobs
+///   -o jsonpath={.items[*].metadata.name}` fed into a
+///   [`str::split_whitespace`] iteration bound to `Vec<&str>` — a
+///   pre-lift `.trim().to_string()` here would still work but the
+///   internal-whitespace preservation is load-bearing).
+/// - One site on the seed / psql `stdout` capture path
+///   (`commands/seed.rs:124` — the whole `stdout` buffer is returned
+///   to the caller as an owned [`String`] for downstream parsing
+///   that must not lose the psql output's trailing newline structure).
+/// - Two sibling sites on the integration-tests / cargo-test-suite
+///   output-concatenation path (`commands/integration_tests.rs:1401`
+///   + `:1402` — `stdout + &stderr` merged into a single owned
+///   [`String`] fed to [`parse_test_counts`], which counts newline-
+///   delimited PASS/FAIL lines from `cargo test`'s combined output).
+/// - One site on the migration-job log-fetch path
+///   (`services/migration_service.rs:337` — the whole `stdout` buffer
+///   from `kubectl logs job/<name>` returned to the caller as an
+///   owned [`String`] so the operator sees the migration-job log
+///   verbatim, blank lines and all).
+///
+/// # Why a separate primitive from `utf8_lossy_trim_owned`
+///
+/// The sibling [`utf8_lossy_trim_owned`] projects into an owned
+/// [`String`] and ALSO strips leading and trailing whitespace, which
+/// its consumers rely on for equality gates, substring searches, and
+/// prefix slices that would silently drift off-by-one on a stray
+/// closing `\n`. The eight consumers here have the opposite
+/// requirement: trailing whitespace is load-bearing (a psql `stdout`
+/// with its trailing blank line; a cargo-test output whose PASS/FAIL
+/// line count depends on the newline structure; a migration-job log
+/// whose blank continuation lines carry stack-frame context). A
+/// lift onto [`utf8_lossy_trim_owned`] would silently strip that
+/// tail at every one of the eight sites — a distinct projection
+/// masquerading as the same shape.
+///
+/// # Behavior
+///
+/// - **Invalid UTF-8** — replaced by [`U+FFFD REPLACEMENT CHARACTER`]
+///   via [`String::from_utf8_lossy`]. A non-UTF-8 byte in the child's
+///   captured output never fails the projection; the operator sees a
+///   diagnostic with `\u{FFFD}` markers rather than a swallowed error.
+/// - **Whitespace** — leading, trailing, and internal whitespace all
+///   preserved byte-for-byte. This is the load-bearing difference
+///   from [`utf8_lossy_trim_owned`].
+/// - **Empty input** — returns [`String::new`]. The exact result every
+///   pre-lift `<x>.stdout.is_empty()` short-circuit relied on.
+///
+/// # Peer
+///
+/// Sibling to [`utf8_lossy_trim_owned`] on the byte-slice-receiving
+/// surface, keyed by the tail projection: `_trim_owned` strips
+/// whitespace, `_owned` preserves it. Together they cover the two
+/// canonical `<captured-bytes> → <owned-String>` projections the
+/// `crate::repo::*` surface owns; a future third variant would name
+/// its tail explicitly (a `_borrow` variant returning `&str`, a
+/// `_stderr_trim` variant that also applies an ANSI-code stripper)
+/// rather than overload one primitive.
+pub fn utf8_lossy_owned(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).to_string()
+}
+
 /// Run a command in a specific directory, restoring the original directory afterward
 ///
 /// # Arguments
@@ -5720,6 +5812,196 @@ mod tests {
                          `is_ascii_whitespace` refinement at the \
                          primitive would silently miss the re-inlined \
                          site). Offending line: {line}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// [`utf8_lossy_owned`] projects a byte slice through
+    /// [`String::from_utf8_lossy`] + [`ToString::to_string`]
+    /// byte-for-byte identically to the pre-lift inline spelling every
+    /// one of the eight consumer sites carried
+    /// (`String::from_utf8_lossy(&<bytes>).to_string()`, WITHOUT the
+    /// `.trim()` step the sibling [`utf8_lossy_trim_owned`] applies).
+    /// Pins the substitution to be a no-op across the four canonical
+    /// shapes the pre-lift sites exercised — and pins the load-bearing
+    /// difference from the sibling by asserting the trailing whitespace
+    /// SURVIVES the projection:
+    ///
+    /// - psql `stdout` with trailing newline (`commands/seed.rs:124`,
+    ///   returned to the caller for downstream parsing that must see
+    ///   the closing `\n`).
+    /// - Multi-line `stderr` diagnostic (a migration-job log the
+    ///   operator reads verbatim — `services/migration_service.rs:337`
+    ///   — where blank continuation lines carry stack-frame context).
+    /// - Empty stdout (`kubectl` returning no data —
+    ///   `commands/migrations.rs:852`'s [`String::is_empty`] gate) —
+    ///   projects to [`String::new`], the value the pre-lift shape
+    ///   produced.
+    /// - A byte slice carrying invalid UTF-8 (structurally what a
+    ///   rogue subprocess can emit) — the invalid byte is replaced by
+    ///   `\u{FFFD}` via the same [`String::from_utf8_lossy`] repair
+    ///   the sibling primitive uses.
+    ///
+    /// The trailing-whitespace-survives assertion is the load-bearing
+    /// contract: a future "helpful" cleanup that routed
+    /// [`utf8_lossy_owned`] through [`utf8_lossy_trim_owned`] would
+    /// silently strip the closing `\n` at every one of the eight
+    /// consumer sites and surface here as an equality mismatch
+    /// against the pre-lift spelling.
+    #[test]
+    fn utf8_lossy_owned_matches_pre_lift_spelling_byte_for_byte() {
+        let cases: &[(&str, &[u8], &str)] = &[
+            (
+                "psql stdout with trailing newline (must survive)",
+                b"SELECT 1\n",
+                "SELECT 1\n",
+            ),
+            ("empty stdout", b"", ""),
+            (
+                "multi-line stderr diagnostic (internal + trailing \
+                 whitespace must survive)",
+                b"\n  migration failed: constraint violated\n  at row 42\n\n",
+                "\n  migration failed: constraint violated\n  at row 42\n\n",
+            ),
+            (
+                "invalid utf-8 byte in stdout buffer",
+                b"NOTICE: log line\xffwith byte\n",
+                "NOTICE: log line\u{FFFD}with byte\n",
+            ),
+        ];
+        for (label, bytes, expected) in cases {
+            let via_primitive = utf8_lossy_owned(bytes);
+            let via_pre_lift_spelling: String = String::from_utf8_lossy(bytes).to_string();
+            assert_eq!(
+                via_primitive, via_pre_lift_spelling,
+                "utf8_lossy_owned() must project byte-for-byte equal to \
+                 the pre-lift `String::from_utf8_lossy(&<bytes>).to_string()` \
+                 spelling — the eight lifted consumer sites depend on the \
+                 substitution being a no-op. Case: {label}"
+            );
+            assert_eq!(
+                via_primitive, *expected,
+                "utf8_lossy_owned() must produce the expected canonical \
+                 payload on the four load-bearing shapes the pre-lift \
+                 sites exercise. Case: {label}"
+            );
+        }
+    }
+
+    /// [`utf8_lossy_owned`] MUST NOT be lifted onto
+    /// [`utf8_lossy_trim_owned`] — the two are distinct projections
+    /// keyed by whether trailing whitespace is stripped or preserved,
+    /// and the eight consumers here rely on the trailing whitespace
+    /// SURVIVING. This body-slice source-scan pins the primitive to
+    /// its own two-step `.from_utf8_lossy(_).to_string()` composition
+    /// and refuses a "cleanup" that routed it through the trimming
+    /// sibling.
+    #[test]
+    fn utf8_lossy_owned_body_does_not_trim_the_payload() {
+        let with_trailing_newline = utf8_lossy_owned(b"payload\n");
+        assert_eq!(
+            with_trailing_newline, "payload\n",
+            "utf8_lossy_owned() must preserve trailing whitespace \
+             byte-for-byte — the load-bearing difference from the \
+             sibling `utf8_lossy_trim_owned`. A lift onto the \
+             trimming sibling would silently strip the closing `\\n` \
+             at every one of the eight consumer sites (psql stdout, \
+             cargo-test stdout+stderr concat, migration-job logs, \
+             kubectl pod-logs tail) whose downstream parsing depends \
+             on the newline structure."
+        );
+    }
+
+    /// Post-lift the eight consumer sites routing through
+    /// [`utf8_lossy_owned`] must not silently re-inline the primitive's
+    /// shape at their call points — a re-inline reopens the class this
+    /// lift closed and forks one consumer at a time from its seven
+    /// siblings.
+    ///
+    /// This source-scan shield walks every hand-lifted consumer file
+    /// and refuses the exact
+    /// `String::from_utf8_lossy(&<bytes>).to_string()`
+    /// two-step projection, keyed by the concrete `.stdout` or
+    /// `.stderr` receiver every consumer bound (`o.stdout` at the
+    /// [`Option::map`] closure in `commands/migrations.rs:678`,
+    /// `output.stdout` at the three other migration polling sites plus
+    /// `commands/seed.rs` and `services/migration_service.rs`,
+    /// `check.stdout` and `list_jobs.stdout` at the remaining migration
+    /// sites, and `output.stdout` + `output.stderr` at the
+    /// integration-tests concat site).
+    ///
+    /// Other spellings of the same-input, different-projection surface
+    /// survive by construction: the trimming sibling
+    /// `String::from_utf8_lossy(&<x>).trim().to_string()` is the
+    /// distinct load-bearing projection lifted onto
+    /// [`utf8_lossy_trim_owned`] and pinned by its own shield;
+    /// `String::from_utf8_lossy(&<x>).into_owned()` (`retry.rs`) uses
+    /// the one-alloc `Cow::into_owned` tail rather than the two-alloc
+    /// `.to_string()` tail — a different projection this shield leaves
+    /// untouched. `String::from_utf8_lossy(&<x>)` without either owned
+    /// tail (a borrowed `Cow<str>` fed directly to `format!()`) is a
+    /// distinct zero-alloc-borrow projection also untouched. This
+    /// shield's needles pin the two-step `.from_utf8_lossy(_).to_string()`
+    /// shape only.
+    ///
+    /// The primitive body in `repo.rs` legitimately spells the two-step
+    /// shape at its own body; this shield does NOT scan `repo.rs`,
+    /// mirroring the sibling shield discipline.
+    #[test]
+    fn utf8_lossy_owned_consumers_do_not_reinline_the_primitive_shape() {
+        for (name, source, needles) in [
+            (
+                "commands/migrations.rs",
+                include_str!("commands/migrations.rs"),
+                &[
+                    "String::from_utf8_lossy(&o.stdout).to_string()",
+                    "String::from_utf8_lossy(&output.stdout).to_string()",
+                    "String::from_utf8_lossy(&check.stdout).to_string()",
+                    "String::from_utf8_lossy(&list_jobs.stdout).to_string()",
+                ][..],
+            ),
+            (
+                "commands/seed.rs",
+                include_str!("commands/seed.rs"),
+                &["String::from_utf8_lossy(&output.stdout).to_string()"][..],
+            ),
+            (
+                "commands/integration_tests.rs",
+                include_str!("commands/integration_tests.rs"),
+                &[
+                    "String::from_utf8_lossy(&output.stdout).to_string()",
+                    "String::from_utf8_lossy(&output.stderr).to_string()",
+                ][..],
+            ),
+            (
+                "services/migration_service.rs",
+                include_str!("services/migration_service.rs"),
+                &["String::from_utf8_lossy(&output.stdout).to_string()"][..],
+            ),
+        ] {
+            for needle in needles {
+                for (line_no, line) in source.lines().enumerate() {
+                    if line.trim_start().starts_with("///") {
+                        continue;
+                    }
+                    assert!(
+                        !line.contains(needle),
+                        "{name}:{line_no} must NOT spell the inline \
+                         `{needle}` two-step projection — that \
+                         duplication was lifted onto \
+                         `crate::repo::utf8_lossy_owned`. A re-inline \
+                         would silently diverge the Output-bytes-to-\
+                         owned-String projection from the eight sibling \
+                         consumers routing through the primitive, and \
+                         re-fork the shape into hand-typed literals that \
+                         could drift from the primitive one consumer at \
+                         a time (a helpful `Cow`-return, an ANSI-strip \
+                         refinement, or a metrics-hook counting the \
+                         non-UTF-8 repair frequency at the primitive \
+                         would silently miss the re-inlined site). \
+                         Offending line: {line}"
                     );
                 }
             }

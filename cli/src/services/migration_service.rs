@@ -334,7 +334,7 @@ spec:
         )
         .await?;
 
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        Ok(crate::repo::utf8_lossy_owned(&output.stdout))
     }
 }
 
