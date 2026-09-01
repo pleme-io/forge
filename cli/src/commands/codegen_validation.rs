@@ -163,8 +163,7 @@ pub async fn validate_codegen_with_autocommit(
         .with_context(|| format!("Failed to run graphql-codegen in {}", web_dir.display()))?;
 
     if !codegen_output.status.success() {
-        let stderr = String::from_utf8_lossy(&codegen_output.stderr);
-        let stdout = String::from_utf8_lossy(&codegen_output.stdout);
+        let (stdout, stderr) = crate::repo::utf8_lossy_streams(&codegen_output);
 
         // Check for specific drift errors
         let error_msg = format!("{}\n{}", stderr, stdout);
@@ -361,8 +360,7 @@ async fn auto_commit_codegen_changes(web_dir: &Path) -> Result<bool> {
         .with_context(|| "Failed to commit codegen files")?;
 
     if !commit_output.status.success() {
-        let stderr = String::from_utf8_lossy(&commit_output.stderr);
-        let stdout = String::from_utf8_lossy(&commit_output.stdout);
+        let (stdout, stderr) = crate::repo::utf8_lossy_streams(&commit_output);
 
         // Check if it's just "nothing to commit" which is actually OK
         if stdout.contains("nothing to commit") || stderr.contains("nothing to commit") {

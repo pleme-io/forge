@@ -885,8 +885,7 @@ async fn run_integration_gate(config: &PreReleaseConfig) -> Result<bool> {
                 );
                 Ok(true)
             } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let stdout = String::from_utf8_lossy(&output.stdout);
+                let (stdout, stderr) = crate::repo::utf8_lossy_streams(&output);
                 println!(
                     "   {} Integration tests failed ({:.1}s)",
                     "❌".red(),
@@ -1072,8 +1071,7 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
                 );
                 Ok(true)
             } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let stdout = String::from_utf8_lossy(&output.stdout);
+                let (stdout, stderr) = crate::repo::utf8_lossy_streams(&output);
                 println!(
                     "   {} E2E tests failed ({:.1}s)",
                     "❌".red(),

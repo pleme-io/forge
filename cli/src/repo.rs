@@ -2079,6 +2079,94 @@ pub fn utf8_lossy_owned(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).to_string()
 }
 
+/// Project both captured streams of a [`std::process::Output`] through
+/// [`String::from_utf8_lossy`] in one call, returning
+/// `(stdout, stderr)` as a paired tuple of borrowed [`std::borrow::Cow`]
+/// values.
+///
+/// # Duplication lift (the paired-projection discipline)
+///
+/// The pre-lift shape recurred at ten sibling consumer sites across six
+/// files, each spelling the same two adjacent
+/// `String::from_utf8_lossy(&<x>.<stream>)` borrow projections inline
+/// against the SAME `Output` receiver — a failure-branch dump of both
+/// pipes for the operator's diagnostic:
+///
+/// - `commands/codegen.rs:157-158` (graphql-codegen failure — both
+///   streams piped into a single `anyhow::bail!` message).
+/// - `commands/codegen_validation.rs:166-167` (graphql-codegen drift
+///   detection — both streams concatenated for `drift_indicators`
+///   substring search) and `:364-365` ("nothing to commit" gate on
+///   `git commit` failure — both streams searched for the marker).
+/// - `commands/frontend_validation.rs:181-182` (TypeScript type-check
+///   failure — both streams counted for `error TS` occurrences),
+///   `:250-251` (ESLint failure — both streams concatenated for the
+///   summary), `:339-340` (biome-check failure — both streams merged
+///   for error/warning counting), `:391-392` (unit-test failure — both
+///   streams merged for the vitest parser).
+/// - `commands/prerelease.rs:888-889` (integration-tests failure —
+///   both streams walked for `FAILED`/`panicked` lines) and
+///   `:1075-1076` (e2e-tests failure — both streams re-printed to the
+///   operator).
+/// - `commands/seed.rs:119-120` (psql failure — both streams piped
+///   into a single `anyhow::bail!` message).
+///
+/// Every one of those sites bound BOTH streams (never only one) into
+/// borrowed [`std::borrow::Cow`] values from the same `Output`
+/// receiver, then read them for `.contains` / `.matches` / `.lines` /
+/// `format!` interpolation. Nine of the ten spellings bound `stderr`
+/// first and `stdout` second; one (`frontend_validation.rs:391-392`)
+/// bound `stdout` first. The paired projection was invisible to the
+/// borrow-checker: a helpful "let's also strip ANSI codes at the
+/// diagnostic dump" cleanup at any one site would quietly fork one
+/// consumer at a time from its nine siblings. Lifting to a single
+/// paired-return primitive with one owner keeps the two projections
+/// uniform against the same receiver and refuses drift by construction.
+///
+/// # Behavior
+///
+/// - Returns `(stdout, stderr)` — the natural [`std::process::Output`]
+///   field order. Callers destructure into whichever names they read
+///   (nine sites use `let (stdout, stderr) = ...`; the tenth used
+///   the same order pre-lift).
+/// - **Borrow shape** — the returned tuple carries two
+///   [`std::borrow::Cow`] values borrowed from the argument's stream
+///   buffers. Every consumer reads them via `.contains` / `.matches` /
+///   `.lines` / `format!` interpolation and never needs the owned tail
+///   the sibling [`utf8_lossy_owned`] applies — a `.to_string()` here
+///   would allocate at every failure branch and drop the borrow shape
+///   the pre-lift sites already relied on.
+/// - **Invalid UTF-8** — each stream's invalid bytes replaced by
+///   [`U+FFFD REPLACEMENT CHARACTER`] via the same
+///   [`String::from_utf8_lossy`] repair the sibling primitives use.
+///   A non-lossy [`str::from_utf8`] projection would fail on the first
+///   invalid byte and drop the diagnostic the operator needs.
+/// - **Whitespace** — leading, trailing, and internal whitespace all
+///   preserved byte-for-byte on each stream. The failure-branch
+///   consumers walk full lines (`\n`-delimited splits, `.lines()`
+///   iteration) and cannot afford a trim step that would silently
+///   glue the last line of one stream to the first of a `format!`
+///   concatenation.
+///
+/// # Peer
+///
+/// Sibling to [`utf8_lossy_owned`] and [`utf8_lossy_trim_owned`] on
+/// the `Output`-projection surface, keyed by the receiver shape and
+/// the tail: `_owned` / `_trim_owned` take a single `&[u8]` byte slice
+/// and return an owned [`String`] (with or without a trim tail); this
+/// primitive takes an `&Output` and returns a paired
+/// borrow-shape tuple covering BOTH streams in one call. Together
+/// they discharge the `<captured-process-output> → <lossy-UTF-8-repair>`
+/// primitive family the `crate::repo::*` surface owns.
+pub fn utf8_lossy_streams(
+    output: &std::process::Output,
+) -> (std::borrow::Cow<'_, str>, std::borrow::Cow<'_, str>) {
+    (
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    )
+}
+
 /// Run a command in a specific directory, restoring the original directory afterward
 ///
 /// # Arguments
@@ -6004,6 +6092,228 @@ mod tests {
                          Offending line: {line}"
                     );
                 }
+            }
+        }
+    }
+
+    /// [`utf8_lossy_streams`] projects both streams of an
+    /// [`std::process::Output`] through [`String::from_utf8_lossy`]
+    /// byte-for-byte identically to the pre-lift inline spelling every
+    /// one of the ten consumer sites carried
+    /// (`String::from_utf8_lossy(&<x>.stderr)` + adjacent
+    /// `String::from_utf8_lossy(&<x>.stdout)`). Pins the substitution
+    /// to be a no-op across the four canonical shapes the pre-lift
+    /// failure-branch dumps exercise:
+    ///
+    /// - Both streams non-empty ASCII with a trailing newline
+    ///   (typical `bun run test` / `graphql-codegen` failure) — each
+    ///   stream projects to the borrow-shape [`std::borrow::Cow`] the
+    ///   pre-lift sites bound.
+    /// - Empty stdout, populated stderr (typical `psql` failure —
+    ///   `commands/seed.rs`) — the stdout borrow is `""` and the
+    ///   diagnostic stderr survives byte-for-byte.
+    /// - Populated stdout, empty stderr (typical `tsc` type-check
+    ///   failure — `commands/frontend_validation.rs`) — the stderr
+    ///   borrow is `""` and the diagnostic stdout survives.
+    /// - A stream carrying invalid UTF-8 (a `0xFF` byte in captured
+    ///   output, structurally what a rogue subprocess can emit) — the
+    ///   invalid byte is replaced by `\u{FFFD}` via the same
+    ///   [`String::from_utf8_lossy`] repair the sibling primitives use.
+    #[test]
+    fn utf8_lossy_streams_matches_pre_lift_spelling_byte_for_byte() {
+        use std::os::unix::process::ExitStatusExt;
+        let cases: &[(&str, &[u8], &[u8])] = &[
+            (
+                "both streams populated ASCII with trailing newline",
+                b"codegen: 3 files written\n",
+                b"error: schema drift\n",
+            ),
+            (
+                "empty stdout, populated stderr (psql failure)",
+                b"",
+                b"ERROR: relation does not exist\n",
+            ),
+            (
+                "populated stdout, empty stderr (tsc failure)",
+                b"src/foo.ts(12,3): error TS2322\n",
+                b"",
+            ),
+            ("both streams empty", b"", b""),
+            (
+                "invalid utf-8 byte in stdout, ascii stderr",
+                b"junk\xffbyte in payload\n",
+                b"error diagnostic\n",
+            ),
+        ];
+        for (label, stdout_bytes, stderr_bytes) in cases {
+            let output = std::process::Output {
+                status: std::process::ExitStatus::from_raw(1 << 8),
+                stdout: stdout_bytes.to_vec(),
+                stderr: stderr_bytes.to_vec(),
+            };
+            let (stdout, stderr) = utf8_lossy_streams(&output);
+            let stdout_pre_lift = String::from_utf8_lossy(&output.stdout);
+            let stderr_pre_lift = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(
+                stdout, stdout_pre_lift,
+                "utf8_lossy_streams()'s stdout half must project \
+                 byte-for-byte equal to the pre-lift \
+                 `String::from_utf8_lossy(&<x>.stdout)` spelling — the \
+                 ten lifted consumer sites depend on the substitution \
+                 being a no-op. Case: {label}"
+            );
+            assert_eq!(
+                stderr, stderr_pre_lift,
+                "utf8_lossy_streams()'s stderr half must project \
+                 byte-for-byte equal to the pre-lift \
+                 `String::from_utf8_lossy(&<x>.stderr)` spelling — the \
+                 ten lifted consumer sites depend on the substitution \
+                 being a no-op. Case: {label}"
+            );
+        }
+    }
+
+    /// [`utf8_lossy_streams`] MUST return `(stdout, stderr)` — the
+    /// natural [`std::process::Output`] field order — and the two
+    /// projections MUST map to the corresponding stream, not the
+    /// opposite one. A stream-swap regression at the primitive would
+    /// silently misroute every one of the ten consumer sites' error
+    /// diagnostic (a `psql failed: stdout: <ERROR ...>` message with
+    /// stderr's payload in the stdout slot, a `format!("{}\n{}",
+    /// stderr, stdout)` concatenation with the two halves swapped).
+    /// This shape test pins the ordering contract with distinguishable
+    /// non-empty payloads on each stream.
+    #[test]
+    fn utf8_lossy_streams_returns_stdout_first_stderr_second() {
+        use std::os::unix::process::ExitStatusExt;
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: b"THIS-IS-STDOUT".to_vec(),
+            stderr: b"THIS-IS-STDERR".to_vec(),
+        };
+        let (stdout, stderr) = utf8_lossy_streams(&output);
+        assert_eq!(
+            stdout, "THIS-IS-STDOUT",
+            "utf8_lossy_streams() must return the stdout projection in \
+             the first tuple slot — the ten consumer sites destructure \
+             `let (stdout, stderr) = ...` and a stream-swap would \
+             silently misroute every failure-branch diagnostic."
+        );
+        assert_eq!(
+            stderr, "THIS-IS-STDERR",
+            "utf8_lossy_streams() must return the stderr projection in \
+             the second tuple slot — the ten consumer sites destructure \
+             `let (stdout, stderr) = ...` and a stream-swap would \
+             silently misroute every failure-branch diagnostic."
+        );
+    }
+
+    /// Post-lift the ten consumer sites routing through
+    /// [`utf8_lossy_streams`] must not silently re-inline the paired
+    /// projection at their call points — a re-inline reopens the
+    /// class this lift closed and forks one consumer at a time from
+    /// its nine siblings.
+    ///
+    /// This source-scan shield walks every hand-lifted consumer file
+    /// and refuses ADJACENT `String::from_utf8_lossy(&<X>.stderr)` +
+    /// `String::from_utf8_lossy(&<X>.stdout)` borrow projections on
+    /// the SAME receiver identifier (in either order). Only the
+    /// paired failure-branch spelling is pinned; single-stream borrow
+    /// projections (a `stderr`-only diagnostic on a spawn error that
+    /// never bound `stdout`, a `stdout`-only capture path that never
+    /// bound `stderr`) are a distinct projection not routed through
+    /// this primitive and survive by construction — the shield keys
+    /// on the same-receiver adjacency, not the projection shape
+    /// alone.
+    ///
+    /// The primitive body in `repo.rs` legitimately spells the two
+    /// borrow projections at its own body; this shield does NOT scan
+    /// `repo.rs`, mirroring the sibling shield discipline.
+    #[test]
+    fn utf8_lossy_streams_consumers_do_not_reinline_the_primitive_shape() {
+        fn extract_receiver<'a>(line: &'a str, stream: &str) -> Option<&'a str> {
+            let prefix = "String::from_utf8_lossy(&";
+            let suffix = if stream == "stderr" {
+                ".stderr)"
+            } else {
+                ".stdout)"
+            };
+            let start = line.find(prefix)? + prefix.len();
+            let rest = line.get(start..)?;
+            let end = rest.find(suffix)?;
+            let ident = &rest[..end];
+            // A receiver identifier is Rust-lexical only — no whitespace,
+            // no punctuation. This guards against a needle appearing in
+            // an unrelated context (a `format!` string, a comment).
+            if ident.is_empty()
+                || ident
+                    .chars()
+                    .any(|c| !(c.is_ascii_alphanumeric() || c == '_'))
+            {
+                return None;
+            }
+            Some(ident)
+        }
+        for (name, source) in [
+            ("commands/codegen.rs", include_str!("commands/codegen.rs")),
+            (
+                "commands/codegen_validation.rs",
+                include_str!("commands/codegen_validation.rs"),
+            ),
+            (
+                "commands/frontend_validation.rs",
+                include_str!("commands/frontend_validation.rs"),
+            ),
+            (
+                "commands/prerelease.rs",
+                include_str!("commands/prerelease.rs"),
+            ),
+            ("commands/seed.rs", include_str!("commands/seed.rs")),
+        ] {
+            let lines: Vec<&str> = source.lines().collect();
+            for i in 0..lines.len().saturating_sub(1) {
+                let a = lines[i];
+                let b = lines[i + 1];
+                let a_trim = a.trim_start();
+                let b_trim = b.trim_start();
+                if a_trim.starts_with("///")
+                    || a_trim.starts_with("//!")
+                    || a_trim.starts_with("//")
+                {
+                    continue;
+                }
+                if b_trim.starts_with("///")
+                    || b_trim.starts_with("//!")
+                    || b_trim.starts_with("//")
+                {
+                    continue;
+                }
+                let a_stderr = extract_receiver(a, "stderr");
+                let a_stdout = extract_receiver(a, "stdout");
+                let b_stderr = extract_receiver(b, "stderr");
+                let b_stdout = extract_receiver(b, "stdout");
+                let paired_same_receiver =
+                    (a_stderr.is_some() && b_stdout.is_some() && a_stderr == b_stdout)
+                        || (a_stdout.is_some() && b_stderr.is_some() && a_stdout == b_stderr);
+                assert!(
+                    !paired_same_receiver,
+                    "{name}:{}-{} must NOT spell adjacent \
+                     `String::from_utf8_lossy(&<X>.stderr)` + \
+                     `String::from_utf8_lossy(&<X>.stdout)` borrow \
+                     projections on the same `<X>` receiver — that \
+                     paired failure-branch duplication was lifted onto \
+                     `crate::repo::utf8_lossy_streams`. A re-inline \
+                     would silently diverge the Output-both-streams-to-\
+                     borrowed-Cow projection from the ten sibling \
+                     consumers routing through the primitive, and re-\
+                     fork the shape into hand-typed literals that could \
+                     drift one consumer at a time (a helpful ANSI-strip, \
+                     `Cow::into_owned`, or `.trim()` refinement at the \
+                     primitive would silently miss the re-inlined \
+                     site). Offending pair:\n  {a}\n  {b}",
+                    i + 1,
+                    i + 2,
+                );
             }
         }
     }
