@@ -11,6 +11,7 @@ use colored::Colorize;
 use tokio::process::Command;
 
 use crate::repo::get_tool_path;
+use crate::ui::print_success_banner;
 
 /// Resolve the `cargo` binary via the `CARGO` env override, falling
 /// back to PATH. Every `cargo` spawn in this module reads through this
@@ -335,9 +336,7 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
     println!();
 
     // Success summary
-    println!("{}", "━".repeat(80).bright_green());
-    println!("{}", "✅ REGENERATION COMPLETE".green().bold());
-    println!("{}", "━".repeat(80).bright_green());
+    print_success_banner(80, "✅ REGENERATION COMPLETE");
     println!();
     println!("Generated files:");
     println!("  • {}", cargo_lock.display());
@@ -404,9 +403,7 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
     println!();
 
     // Success summary
-    println!("{}", "━".repeat(80).bright_green());
-    println!("{}", "✅ UPDATE COMPLETE".green().bold());
-    println!("{}", "━".repeat(80).bright_green());
+    print_success_banner(80, "✅ UPDATE COMPLETE");
     println!();
     println!("Updated files:");
     println!("  • {}", workspace_root.join("Cargo.lock").display());

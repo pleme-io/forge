@@ -36,6 +36,7 @@ use crate::infrastructure::kubectl::kubectl_command_async;
 use crate::infrastructure::registry::{ArchImage, RegistryClient, RegistryCredentials};
 use crate::path_builder::PathBuilder;
 use crate::repo::get_tool_path;
+use crate::ui::print_success_banner;
 use anyhow::{anyhow, bail, Context, Result};
 use colored::Colorize;
 use std::env;
@@ -1659,12 +1660,7 @@ pub async fn orchestrate_release(
         }
     }
 
-    println!("{}", "━".repeat(80).bright_green());
-    println!(
-        "{}",
-        "✅ RELEASE COMPLETE - ALL SYSTEMS HEALTHY".green().bold()
-    );
-    println!("{}", "━".repeat(80).bright_green());
+    print_success_banner(80, "✅ RELEASE COMPLETE - ALL SYSTEMS HEALTHY");
 
     Ok(())
 }
@@ -1728,9 +1724,7 @@ pub async fn orchestrate_standalone_release(
     push_docker_images(&images, &registry, &tag_suffix).await?;
 
     println!();
-    println!("{}", "━".repeat(60).bright_green());
-    println!("{}", "✅ STANDALONE RELEASE COMPLETE".green().bold());
-    println!("{}", "━".repeat(60).bright_green());
+    print_success_banner(60, "✅ STANDALONE RELEASE COMPLETE");
     println!();
     println!("ℹ️  Image pushed to {}:{}", registry, tag_suffix);
     println!("ℹ️  GitOps reconciliation should pick up the new tag automatically.");
@@ -2702,9 +2696,7 @@ pub async fn release_rust_service(
     }
 
     println!();
-    println!("{}", "━".repeat(80).bright_green());
-    println!("{}", "✅ RELEASE COMPLETE".green().bold());
-    println!("{}", "━".repeat(80).bright_green());
+    print_success_banner(80, "✅ RELEASE COMPLETE");
 
     Ok(())
 }

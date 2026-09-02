@@ -14,6 +14,7 @@ use colored::Colorize;
 use tokio::process::Command;
 
 use crate::repo::get_tool_path;
+use crate::ui::print_success_banner;
 
 /// Resolve the `crate2nix` binary via the `CRATE2NIX` env override,
 /// falling back to `crate2nix` on PATH. Every `crate2nix` spawn in this
@@ -187,9 +188,7 @@ pub async fn web_regenerate(product: String, service: String, repo_root: String)
     println!();
 
     // Success summary
-    println!("{}", "━".repeat(80).bright_green());
-    println!("{}", "✅ REGENERATION COMPLETE".green().bold());
-    println!("{}", "━".repeat(80).bright_green());
+    print_success_banner(80, "✅ REGENERATION COMPLETE");
     println!();
     println!("Generated files:");
     println!("  • {}", service_dir.join("deps.nix").display());
@@ -280,9 +279,7 @@ pub async fn web_cargo_update(product: String, service: String, repo_root: Strin
     println!();
 
     // Success summary
-    println!("{}", "━".repeat(80).bright_green());
-    println!("{}", "✅ UPDATE COMPLETE".green().bold());
-    println!("{}", "━".repeat(80).bright_green());
+    print_success_banner(80, "✅ UPDATE COMPLETE");
     println!();
     println!("Updated files:");
     println!("  • {}", hanabi_dir.join("Cargo.lock").display());
