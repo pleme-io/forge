@@ -2332,6 +2332,93 @@ pub fn utf8_lossy_streams(
     )
 }
 
+/// Lossy-project both captured streams of a [`std::process::Output`]
+/// and return a single owned [`String`] carrying
+/// `<stderr>\n<stdout>` — the "combined diagnostic corpus" four
+/// failure-branch consumer sites build to grep-match error / warning
+/// tokens that a tool may route to either stream.
+///
+/// # Duplication lift (the stderr-first joined-corpus discipline)
+///
+/// Four sibling consumer sites past THEORY §VI.1's three-times-is-a-
+/// law threshold each spelled the same two-line stanza inline:
+///
+/// ```text
+/// let (stdout, stderr) = crate::repo::utf8_lossy_streams(&<output>);
+/// let <name> = format!("{}\n{}", stderr, stdout);
+/// ```
+///
+/// - `commands/codegen_validation.rs:166-169` (graphql-codegen drift
+///   detection — `let error_msg = format!(...)` searched with
+///   `.contains(indicator)` against a fixed drift-indicator list).
+/// - `commands/frontend_validation.rs:249-250` (ESLint failure — `let
+///   combined = format!(...)` walked with `.matches(" error").count()`
+///   / `.matches(" warning").count()` and re-iterated by `.lines()`
+///   for the summary).
+/// - `commands/frontend_validation.rs:337-338` (biome-check failure —
+///   `let combined = format!(...)` walked with `.matches("error")` /
+///   line-filter `.contains("✖")` for the error/warning counts).
+/// - `commands/frontend_validation.rs:388-389` (vitest unit-test run
+///   — `let combined = format!(...)` fed into `parse_test_count`
+///   and used for `.contains("FAIL")` / `.contains("No test files
+///   found")` classifiers).
+///
+/// Two related sites route the paired projection into a bail!
+/// message inline instead of naming the joined string
+/// (`commands/codegen.rs:157-158` and `commands/seed.rs:118-120`);
+/// they are OUT OF SCOPE of this primitive because the pre-lift
+/// stanza there fuses the projection and the bail wording into one
+/// call (`anyhow::bail!("...:\n{}\n{}", stderr, stdout)`) and lifting
+/// only the joined string half would leave a trailing bail! that
+/// carries the same operator wording split across two lines. The
+/// four in-scope sites all name the joined `String` locally and
+/// consume it via `.contains` / `.matches` / `.lines` / parser
+/// helpers, so a single-owner primitive at that boundary is the
+/// tightest fit.
+///
+/// # Behavior
+///
+/// - Returns `<stderr>\n<stdout>` — stderr FIRST, stdout SECOND.
+///   Operator-facing diagnostic tools (ESLint, TypeScript, biome,
+///   vitest, graphql-codegen) route human-readable error prose to
+///   stderr and machine-parseable summary counts to stdout; putting
+///   stderr first makes the first line of a truncated display carry
+///   the most actionable signal. The single-line-per-primitive body
+///   pins this order at ONE place; a future consumer that respells
+///   the same two-line stanza and typos the order (stdout first)
+///   would be caught by the sibling shield test rather than compiling
+///   into a wrong-looking diagnostic.
+/// - **Invalid UTF-8** — each stream's invalid bytes replaced by
+///   [`U+FFFD REPLACEMENT CHARACTER`] via the same
+///   [`String::from_utf8_lossy`] repair the sibling primitives use.
+/// - **Whitespace** — leading, trailing, and internal whitespace all
+///   preserved byte-for-byte on each stream; only the single
+///   `\n` separator between the two is added by construction. A
+///   `.trim()` here would silently glue the last line of stderr to
+///   the first of stdout for the `.lines()` iteration the four
+///   consumer sites drive.
+/// - **Allocation** — one owned [`String`] allocation (the [`format!`]
+///   output). The pre-lift stanza did two [`Cow`] projections plus
+///   one [`format!`] allocation for a total of one owned allocation;
+///   post-lift matches the pre-lift allocation shape.
+///
+/// # Peer
+///
+/// Sibling to [`utf8_lossy_streams`] on the `Output`-projection
+/// surface: where the pair-tuple primitive returns two borrowed
+/// [`Cow`] values for callers that need each stream independently,
+/// this primitive returns a single owned [`String`] for callers that
+/// need only the joined corpus. A consumer that needs BOTH the tuple
+/// AND the joined corpus (the `run_type_check` site in
+/// `commands/frontend_validation.rs:181-194`, which counts
+/// `error TS` on each stream independently before joining) keeps
+/// the tuple call and does not route through this primitive — the
+/// joined-only shape is the specific well this primitive fills.
+pub fn utf8_lossy_streams_joined(output: &std::process::Output) -> String {
+    let (stdout, stderr) = utf8_lossy_streams(output);
+    format!("{}\n{}", stderr, stdout)
+}
+
 /// Run a command in a specific directory, restoring the original directory afterward
 ///
 /// # Arguments
@@ -6855,6 +6942,227 @@ mod tests {
                      `Cow::into_owned`, or `.trim()` refinement at the \
                      primitive would silently miss the re-inlined \
                      site). Offending pair:\n  {a}\n  {b}",
+                    i + 1,
+                    i + 2,
+                );
+            }
+        }
+    }
+
+    /// [`utf8_lossy_streams_joined`] returns the joined
+    /// `<stderr>\n<stdout>` corpus byte-for-byte identically to the
+    /// pre-lift inline stanza every one of the four consumer sites
+    /// carried:
+    ///
+    /// ```text
+    /// let (stdout, stderr) = crate::repo::utf8_lossy_streams(&<output>);
+    /// let <name> = format!("{}\n{}", stderr, stdout);
+    /// ```
+    ///
+    /// Pins the substitution to be a no-op across the four canonical
+    /// shapes the pre-lift failure-branch dumps exercise:
+    ///
+    /// - Both streams non-empty ASCII with a trailing newline (typical
+    ///   `bun run test` / `graphql-codegen` failure) — the joined
+    ///   corpus is `<stderr-with-trailing-newline>\n<stdout-with-\
+    ///   trailing-newline>`, which the pre-lift `format!` produced
+    ///   verbatim.
+    /// - Empty stdout, populated stderr (typical `psql`-shaped failure)
+    ///   — the joined corpus is `<stderr>\n` (stdout's empty projection
+    ///   contributes nothing but the `\n` separator survives).
+    /// - Populated stdout, empty stderr (typical `tsc` type-check
+    ///   failure with all diagnostics on stdout) — the joined corpus
+    ///   is `\n<stdout>` (stderr's empty projection leaves the
+    ///   leading `\n` from the separator).
+    /// - A stream carrying invalid UTF-8 (a `0xFF` byte in captured
+    ///   output) — the invalid byte is replaced by `\u{FFFD}` via the
+    ///   same [`String::from_utf8_lossy`] repair the sibling primitives
+    ///   use.
+    #[test]
+    fn utf8_lossy_streams_joined_matches_pre_lift_spelling_byte_for_byte() {
+        use std::os::unix::process::ExitStatusExt;
+        let cases: &[(&str, &[u8], &[u8])] = &[
+            (
+                "both streams populated ASCII with trailing newline",
+                b"codegen: 3 files written\n",
+                b"error: schema drift\n",
+            ),
+            (
+                "empty stdout, populated stderr (psql failure)",
+                b"",
+                b"ERROR: relation does not exist\n",
+            ),
+            (
+                "populated stdout, empty stderr (tsc failure)",
+                b"src/foo.ts(12,3): error TS2322\n",
+                b"",
+            ),
+            ("both streams empty", b"", b""),
+            (
+                "invalid utf-8 byte in stdout, ascii stderr",
+                b"junk\xffbyte in payload\n",
+                b"error diagnostic\n",
+            ),
+            (
+                "invalid utf-8 byte in stderr, ascii stdout",
+                b"stdout summary\n",
+                b"error \xff diagnostic\n",
+            ),
+        ];
+        for (label, stdout_bytes, stderr_bytes) in cases {
+            let output = std::process::Output {
+                status: std::process::ExitStatus::from_raw(1 << 8),
+                stdout: stdout_bytes.to_vec(),
+                stderr: stderr_bytes.to_vec(),
+            };
+            let via_primitive = utf8_lossy_streams_joined(&output);
+            let stdout_pre_lift = String::from_utf8_lossy(&output.stdout);
+            let stderr_pre_lift = String::from_utf8_lossy(&output.stderr);
+            let via_pre_lift = format!("{}\n{}", stderr_pre_lift, stdout_pre_lift);
+            assert_eq!(
+                via_primitive, via_pre_lift,
+                "utf8_lossy_streams_joined() must return the joined \
+                 corpus byte-for-byte equal to the pre-lift \
+                 `format!(\"{{}}\\n{{}}\", stderr, stdout)` spelling — \
+                 the four lifted consumer sites depend on the \
+                 substitution being a no-op. Case: {label}"
+            );
+        }
+    }
+
+    /// [`utf8_lossy_streams_joined`] MUST place `stderr` FIRST and
+    /// `stdout` SECOND in the joined corpus — operator-facing
+    /// diagnostic tools (ESLint, TypeScript, biome, vitest,
+    /// graphql-codegen) route human-readable error prose to stderr
+    /// and machine-parseable summary counts to stdout; a stderr-\
+    /// second regression at the primitive would silently misroute
+    /// every one of the four consumer sites' `.contains(...)` /
+    /// `.matches(...)` / `.lines().take(N)` grep by putting the
+    /// summary-count noise ahead of the actionable error prose. This
+    /// shape test pins the ordering contract with distinguishable
+    /// non-empty payloads on each stream.
+    #[test]
+    fn utf8_lossy_streams_joined_places_stderr_first_stdout_second() {
+        use std::os::unix::process::ExitStatusExt;
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: b"THIS-IS-STDOUT".to_vec(),
+            stderr: b"THIS-IS-STDERR".to_vec(),
+        };
+        let joined = utf8_lossy_streams_joined(&output);
+        assert_eq!(
+            joined, "THIS-IS-STDERR\nTHIS-IS-STDOUT",
+            "utf8_lossy_streams_joined() must render \
+             `<stderr>\\n<stdout>` — the four consumer sites' \
+             `.contains(...)` / `.matches(...)` / `.lines().take(N)` \
+             grep against the joined corpus depends on the \
+             human-readable error prose (stderr) appearing FIRST so \
+             the first N lines of a truncated display carry the most \
+             actionable signal. A stream-swap regression would \
+             silently surface the summary-count noise (stdout) \
+             ahead of the error prose."
+        );
+    }
+
+    /// Post-lift the four consumer sites routing through
+    /// [`utf8_lossy_streams_joined`] must not silently re-inline the
+    /// two-line stanza at their call points — a re-inline reopens the
+    /// class this lift closed and forks one consumer at a time from
+    /// its three siblings.
+    ///
+    /// This source-scan shield walks every hand-lifted consumer file
+    /// and refuses the pre-lift ADJACENT two-line stanza
+    /// (`let (stdout, stderr) = crate::repo::utf8_lossy_streams(&<X>);`
+    /// followed by `let <name> = format!("{}\n{}", stderr, stdout);`)
+    /// on the same-receiver identifier. The primitive body in
+    /// `repo.rs` legitimately spells the two-line composition inside
+    /// its own body; this shield does NOT scan `repo.rs`, mirroring
+    /// the sibling [`utf8_lossy_streams`] shield discipline. Two
+    /// related sites (`commands/codegen.rs` and `commands/seed.rs`)
+    /// fuse the paired projection into an inline `anyhow::bail!`
+    /// message and are OUT OF SCOPE (see the primitive's docstring)
+    /// — they are also skipped by this shield.
+    ///
+    /// A consumer that needs BOTH the tuple AND the joined corpus
+    /// (the `run_type_check` site in
+    /// `commands/frontend_validation.rs`, which counts `error TS`
+    /// on each stream independently before joining) keeps the tuple
+    /// call spelled inline and does not match the two-line stanza
+    /// this shield refuses — the shield keys on the ADJACENT two
+    /// lines, not the tuple call in isolation.
+    #[test]
+    fn utf8_lossy_streams_joined_consumers_do_not_reinline_the_primitive_shape() {
+        fn extract_streams_receiver(line: &str) -> Option<&str> {
+            let prefix = "= crate::repo::utf8_lossy_streams(&";
+            let start = line.find(prefix)? + prefix.len();
+            let rest = line.get(start..)?;
+            let end = rest.find(')')?;
+            let ident = &rest[..end];
+            if ident.is_empty()
+                || ident
+                    .chars()
+                    .any(|c| !(c.is_ascii_alphanumeric() || c == '_'))
+            {
+                return None;
+            }
+            Some(ident)
+        }
+        fn line_binds_stderr_stdout_format(line: &str) -> bool {
+            // Matches `let <name> = format!("{}\n{}", stderr, stdout);`
+            // — the pre-lift stanza's second half. Note the exact
+            // `stderr, stdout` argument order the primitive enforces.
+            let trimmed = line.trim_start();
+            trimmed.starts_with("let ")
+                && trimmed.contains("= format!(\"{}\\n{}\", stderr, stdout)")
+        }
+        for (name, source) in [
+            (
+                "commands/codegen_validation.rs",
+                include_str!("commands/codegen_validation.rs"),
+            ),
+            (
+                "commands/frontend_validation.rs",
+                include_str!("commands/frontend_validation.rs"),
+            ),
+        ] {
+            let lines: Vec<&str> = source.lines().collect();
+            for i in 0..lines.len().saturating_sub(1) {
+                let a = lines[i];
+                let b = lines[i + 1];
+                let a_trim = a.trim_start();
+                let b_trim = b.trim_start();
+                if a_trim.starts_with("///")
+                    || a_trim.starts_with("//!")
+                    || a_trim.starts_with("//")
+                {
+                    continue;
+                }
+                if b_trim.starts_with("///")
+                    || b_trim.starts_with("//!")
+                    || b_trim.starts_with("//")
+                {
+                    continue;
+                }
+                let paired_stanza =
+                    extract_streams_receiver(a).is_some() && line_binds_stderr_stdout_format(b);
+                assert!(
+                    !paired_stanza,
+                    "{name}:{}-{} must NOT spell the pre-lift adjacent \
+                     `let (stdout, stderr) = crate::repo::\
+                     utf8_lossy_streams(&<X>);` + `let <name> = \
+                     format!(\"{{}}\\n{{}}\", stderr, stdout);` \
+                     two-line stanza — that stderr-first joined-corpus \
+                     duplication was lifted onto \
+                     `crate::repo::utf8_lossy_streams_joined`. A \
+                     re-inline would silently diverge the joined-corpus \
+                     shape from the four sibling consumers routing \
+                     through the primitive, and re-fork the shape into \
+                     hand-typed literals that could drift one consumer \
+                     at a time (a helpful ANSI-strip, a stderr-second \
+                     regression, or a metrics-hook counting the joined \
+                     corpus's post-repair length at the primitive would \
+                     silently miss the re-inlined site). Offending \
+                     pair:\n  {a}\n  {b}",
                     i + 1,
                     i + 2,
                 );

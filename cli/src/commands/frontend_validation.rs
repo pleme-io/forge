@@ -246,8 +246,7 @@ pub async fn run_lint_with_config(web_dir: &Path, linter: &str) -> Result<(bool,
         );
         Ok((true, Vec::new()))
     } else {
-        let (stdout, stderr) = crate::repo::utf8_lossy_streams(&output);
-        let combined = format!("{}\n{}", stderr, stdout);
+        let combined = crate::repo::utf8_lossy_streams_joined(&output);
 
         // ESLint outputs: "X error" or "X errors"
         let error_count = combined.matches(" error").count();
@@ -334,8 +333,7 @@ async fn run_biome_lint(web_dir: &Path) -> Result<(bool, Vec<String>)> {
         );
         Ok((true, Vec::new()))
     } else {
-        let (stdout, stderr) = crate::repo::utf8_lossy_streams(&check_output);
-        let combined = format!("{}\n{}", stderr, stdout);
+        let combined = crate::repo::utf8_lossy_streams_joined(&check_output);
 
         // Count errors and warnings from biome output
         let errors = combined.matches("error").count().max(
@@ -385,8 +383,7 @@ pub async fn run_unit_tests(web_dir: &Path) -> Result<(bool, Option<usize>, Vec<
     .await?;
 
     let duration = start.elapsed();
-    let (stdout, stderr) = crate::repo::utf8_lossy_streams(&output);
-    let combined = format!("{}\n{}", stderr, stdout);
+    let combined = crate::repo::utf8_lossy_streams_joined(&output);
 
     // Parse test count from vitest output
     let test_count = parse_test_count(&combined);
