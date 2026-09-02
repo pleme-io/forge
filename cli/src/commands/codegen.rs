@@ -69,17 +69,7 @@ pub struct CodegenResult {
 pub async fn execute(backend_dir: &Path, web_dir: &Path) -> Result<CodegenResult> {
     let start = Instant::now();
 
-    println!();
-    println!(
-        "{}",
-        "════════════════════════════════════════════════".bold()
-    );
-    println!("{}", "  Schema Export + Codegen".bold());
-    println!(
-        "{}",
-        "════════════════════════════════════════════════".bold()
-    );
-    println!();
+    crate::ui::print_section_header("Schema Export + Codegen");
     println!("Backend: {}", backend_dir.display());
     println!("Frontend: {}", web_dir.display());
     println!();

@@ -176,17 +176,7 @@ impl GateSummary {
     }
 
     pub fn print_summary(&self) {
-        println!();
-        println!(
-            "{}",
-            "════════════════════════════════════════════════".bold()
-        );
-        println!("{}", "  Gate Summary".bold());
-        println!(
-            "{}",
-            "════════════════════════════════════════════════".bold()
-        );
-        println!();
+        crate::ui::print_section_header("Gate Summary");
 
         if !self.passed.is_empty() {
             println!("{} Passed ({}):", "✅".green(), self.passed.len());
@@ -315,17 +305,7 @@ pub async fn execute(
         return Ok(());
     }
 
-    println!();
-    println!(
-        "{}",
-        "════════════════════════════════════════════════".bold()
-    );
-    println!("{}", "  Pre-Release Gates".bold());
-    println!(
-        "{}",
-        "════════════════════════════════════════════════".bold()
-    );
-    println!();
+    crate::ui::print_section_header("Pre-Release Gates");
     println!("Working directory: {}", config.working_dir.display());
     println!("Backend: {}", config.backend_dir.display());
     println!("Frontend: {}", config.web_dir.display());

@@ -406,17 +406,7 @@ pub async fn verify_smoke_queries(
 
 /// Run all post-deploy verification gates
 pub async fn verify_deployment(config: &PostDeployConfig) -> Result<PostDeployResult> {
-    println!();
-    println!(
-        "{}",
-        "════════════════════════════════════════════════".bold()
-    );
-    println!("{}", "  Post-Deploy Verification".bold());
-    println!(
-        "{}",
-        "════════════════════════════════════════════════".bold()
-    );
-    println!();
+    crate::ui::print_section_header("Post-Deploy Verification");
     println!("Environment: {}", config.environment);
     println!("Service: {}", config.service_name);
     println!("Health URL: {}", config.health_endpoint);
