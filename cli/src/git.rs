@@ -654,14 +654,14 @@ pub fn commit_and_push_in(
 /// Check if the git working tree is clean (no uncommitted changes).
 pub fn is_working_tree_clean() -> Result<bool> {
     let stdout = git_capture(&["status", "--porcelain"], None, "status")?;
-    let s = String::from_utf8_lossy(&stdout);
+    let s = crate::repo::utf8_lossy_borrow(&stdout);
     Ok(s.trim().is_empty())
 }
 
 /// Check if a git tag exists locally.
 pub fn tag_exists(tag: &str) -> Result<bool> {
     let stdout = git_capture(&["tag", "--list", tag], None, "tag --list")?;
-    let s = String::from_utf8_lossy(&stdout);
+    let s = crate::repo::utf8_lossy_borrow(&stdout);
     Ok(!s.trim().is_empty())
 }
 
@@ -689,7 +689,7 @@ pub fn tag_exists(tag: &str) -> Result<bool> {
 #[allow(dead_code)]
 pub fn tag_exists_in(tag: &str, workdir: Option<&Path>) -> Result<bool> {
     let stdout = git_capture(&["tag", "--list", tag], workdir, "tag --list")?;
-    let s = String::from_utf8_lossy(&stdout);
+    let s = crate::repo::utf8_lossy_borrow(&stdout);
     Ok(!s.trim().is_empty())
 }
 
@@ -853,7 +853,7 @@ pub fn released_semver_tags_typed(
 ) -> Result<std::collections::BTreeSet<crate::version::SemverTriple>> {
     let pattern = format!("{}*", prefix);
     let stdout = git_capture(&["tag", "--list", &pattern], workdir, "tag --list")?;
-    let listing = String::from_utf8_lossy(&stdout);
+    let listing = crate::repo::utf8_lossy_borrow(&stdout);
 
     // Collect into a `BTreeSet` rather than a `HashSet`: the derived
     // `Ord` on `SemverTriple` (semver-lex over field declaration
@@ -1992,7 +1992,7 @@ mod tests {
             .current_dir(&probe)
             .output()
             .expect("spawn git show");
-        let files = String::from_utf8_lossy(&files_out.stdout);
+        let files = crate::repo::utf8_lossy_borrow(&files_out.stdout);
         assert!(
             files.contains("kustomization.yaml"),
             "manifest must appear in HEAD commit, got: {files:?}"

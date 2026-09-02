@@ -469,7 +469,7 @@ pub async fn execute(
                 // and the algorithm prefix from `sha256:hex` → bare hex),
                 // silently breaking the downstream `docker tag` step for
                 // every real docker-load output.
-                let load_output = String::from_utf8_lossy(&load_result.stdout);
+                let load_output = crate::repo::utf8_lossy_borrow(&load_result.stdout);
                 let image_name = load_output
                     .lines()
                     .find_map(crate::oci_manifest::docker_load_image_reference)
@@ -548,7 +548,7 @@ pub async fn execute(
                         .output()
                         .await?;
 
-                    let ps_output = String::from_utf8_lossy(&ps_result.stdout);
+                    let ps_output = crate::repo::utf8_lossy_borrow(&ps_result.stdout);
                     if ps_output.contains("healthy") || ps_output.contains("Up") {
                         break;
                     }

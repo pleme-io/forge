@@ -6947,6 +6947,78 @@ mod tests {
                     "let stderr = String::from_utf8_lossy(&install.stderr);",
                 ][..],
             ),
+            (
+                "commands/federation.rs",
+                include_str!("commands/federation.rs"),
+                &["let stderr = String::from_utf8_lossy(&output.stderr);"][..],
+            ),
+            (
+                "commands/status.rs",
+                include_str!("commands/status.rs"),
+                &["let stderr = String::from_utf8_lossy(&output.stderr);"][..],
+            ),
+            (
+                "commands/dashboards.rs",
+                include_str!("commands/dashboards.rs"),
+                &["let stdout = String::from_utf8_lossy(&output.stdout);"][..],
+            ),
+            (
+                "commands/flux.rs",
+                include_str!("commands/flux.rs"),
+                &["let stdout = String::from_utf8_lossy(&output.stdout);"][..],
+            ),
+            (
+                "commands/github_runner_ci.rs",
+                include_str!("commands/github_runner_ci.rs"),
+                &[
+                    "let pod_json = String::from_utf8_lossy(&output.stdout);",
+                    "let logs = String::from_utf8_lossy(&log_output.stdout);",
+                ][..],
+            ),
+            (
+                "commands/comprehensive_release.rs",
+                include_str!("commands/comprehensive_release.rs"),
+                &[
+                    "let load_output = String::from_utf8_lossy(&load_result.stdout);",
+                    "let ps_output = String::from_utf8_lossy(&ps_result.stdout);",
+                ][..],
+            ),
+            (
+                "commands/codegen_validation.rs",
+                include_str!("commands/codegen_validation.rs"),
+                &["let schema = String::from_utf8_lossy(&schema_bytes);"][..],
+            ),
+            (
+                "flux_get.rs",
+                include_str!("flux_get.rs"),
+                &["let stdout = String::from_utf8_lossy(&output.stdout);"][..],
+            ),
+            (
+                "services/migration_service.rs",
+                include_str!("services/migration_service.rs"),
+                &[
+                    "let status = String::from_utf8_lossy(&output.stdout);",
+                    "let failed = String::from_utf8_lossy(&output.stdout);",
+                ][..],
+            ),
+            (
+                "git.rs",
+                include_str!("git.rs"),
+                &[
+                    "let s = String::from_utf8_lossy(&stdout);",
+                    "let listing = String::from_utf8_lossy(&stdout);",
+                    "let files = String::from_utf8_lossy(&files_out.stdout);",
+                ][..],
+            ),
+            (
+                "retry.rs",
+                include_str!("retry.rs"),
+                &[
+                    "let stderr = String::from_utf8_lossy(&output.stderr);",
+                    "let stdout = String::from_utf8_lossy(&out.stdout);",
+                    "let stderr = String::from_utf8_lossy(&out.stderr);",
+                ][..],
+            ),
         ] {
             for needle in needles {
                 for (line_no, line) in source.lines().enumerate() {

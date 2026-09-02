@@ -318,7 +318,7 @@ async fn fetch_deployment(namespace: &str, deployment_name: &str) -> Result<Depl
     let output = kubectl_get_object("deployment", deployment_name, namespace).await?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = crate::repo::utf8_lossy_borrow(&output.stderr);
         anyhow::bail!(
             "Failed to get deployment '{}' in namespace '{}': {}",
             deployment_name,

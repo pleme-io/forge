@@ -300,7 +300,7 @@ async fn list_kustomizations_all_namespaces_with_bin(
         },
     )?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = crate::repo::utf8_lossy_borrow(&output.stdout);
     Ok(parse_kustomization_rows(&stdout))
 }
 
@@ -514,7 +514,7 @@ async fn list_kustomizations_in_namespace_with_bin(
         },
     )?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = crate::repo::utf8_lossy_borrow(&output.stdout);
     Ok(parse_kustomization_rows_in_namespace(namespace, &stdout))
 }
 
@@ -613,7 +613,7 @@ async fn get_kustomization_scoped_with_bin(
         return Ok(None);
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = crate::repo::utf8_lossy_borrow(&output.stdout);
     Ok(parse_kustomization_row_no_header_scoped(namespace, &stdout))
 }
 
