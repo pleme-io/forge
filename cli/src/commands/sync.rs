@@ -300,16 +300,15 @@ pub async fn execute(working_dir: &Path, skip_entities: bool) -> Result<SyncResu
     // Step 2: SeaORM Entity Generation (if enabled)
     crate::ui::print_step_heading("Step 2: SeaORM Entity Generation");
     if skip_entities {
-        println!("   {} Skipped via --skip-entities", "○".yellow());
+        crate::ui::print_step_skip("Skipped via --skip-entities");
     } else {
         match generate_entities(&config).await {
             Ok(generated) => {
                 if generated {
                     println!("   {} Entities generated", "✓".green());
                 } else {
-                    println!(
-                        "   {} Skipped (DATABASE_URL not set or sea-orm-cli not found)",
-                        "○".yellow()
+                    crate::ui::print_step_skip(
+                        "Skipped (DATABASE_URL not set or sea-orm-cli not found)",
                     );
                 }
             }
@@ -407,7 +406,7 @@ pub async fn execute(working_dir: &Path, skip_entities: bool) -> Result<SyncResu
             }
         }
         Err(e) => {
-            println!("   {} ReBAC validation skipped: {}", "○".yellow(), e);
+            crate::ui::print_step_skip(&format!("ReBAC validation skipped: {}", e));
             true // Don't fail on validation errors
         }
     };

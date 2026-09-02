@@ -869,6 +869,73 @@ pub fn write_step_warn<W: std::io::Write>(w: &mut W, message: &str) -> std::io::
     writeln!(w, "   {} {}", "⚠️".yellow(), message)
 }
 
+/// Prints the single `   <○.yellow()> <message>` line 5 pre-lift
+/// consumer sites spelled inline as `println!("   {} <fmt>",
+/// "○".yellow(), <args>)`. Peer to [`print_step_pass`] (`✅.green()` /
+/// `\x1b[32m`), [`print_step_failure`] (`❌.red()` / `\x1b[31m`), and
+/// [`print_step_warn`] (`⚠️.yellow()` / `\x1b[33m` — same yellow shade,
+/// different glyph and semantic layer): a gate/step that was
+/// deliberately NOT executed under this run — skipped by a `--skip-*`
+/// flag, a missing prerequisite, an "example type, no entity required"
+/// classification — is neither a pass, a failure, nor a warning about
+/// something that DID execute; it is a distinct outcome kind, and the
+/// pre-lift call sites uniformly reached for the hollow-circle `○`
+/// glyph in yellow to name it.
+///
+/// # Distinct from [`print_step_warn`]
+///
+/// Both wear the `.yellow()` palette (same `\x1b[33m` ANSI sequence)
+/// under a shared three-space-indent body grammar, but they carry
+/// different glyphs (`○` vs `⚠️`) and different semantic layers: a
+/// step-warn narrates that something DID happen and the caller wants
+/// to draw attention to it (a retry attempt failing, a missing
+/// manifest the pipeline recovered from, a pre-cleanup surprise); a
+/// step-skip narrates that something DID NOT happen because the
+/// pipeline routed around it (`--skip-entities`, `DATABASE_URL not
+/// set`, `example type, no entity required`, `ReBAC validation
+/// skipped: {}`). A future palette adjustment (a shade shift on the
+/// skip glyph to `.dimmed()` to visually deprioritize skips relative
+/// to warns, a dedicated `\x1b[90m` gray palette for skips, a glyph
+/// swap under a CI-log-friendly grammar) hits ONE typed body rather
+/// than 5 sites.
+///
+/// # `.yellow()` on the glyph, plain on the message
+///
+/// Pre-lift every consumer spelled the coloring as `"○".yellow()` on
+/// the GLYPH alone, never on the composed line (`format!("   ○ {}",
+/// msg).yellow()`). The primitive preserves that split: the
+/// `\x1b[33m` yellow ANSI sequence wraps the glyph, the message
+/// reaches the writer uncolored, and the three-space indent is
+/// emitted OUTSIDE both spans — so a terminal without color renders
+/// `   ○ <msg>` legibly.
+///
+/// # Compounding
+///
+/// Pre-lift 5 sibling sites each restated the `println!("   {}
+/// <fmt>", "○".yellow(), <args>)` grammar verbatim, with the
+/// three-space indent, the `○` glyph, the `.yellow()` coloring on the
+/// glyph, and the plain-message tail all spelled inline. A future
+/// palette adjustment or an OTLP `step_skipped` observability event
+/// wired alongside the print had to hit 5 sites in lockstep or drift
+/// the visual grammar; post-lift it hits ONE typed body. Delegates
+/// to [`write_step_skip`] against [`std::io::stdout()`]; the writer
+/// split exists so the fail-before-pass test can pin the one-line
+/// body, the three-space indent, the `○` glyph, and the `\x1b[33m`
+/// yellow ANSI palette contract by inspecting emitted bytes.
+pub fn print_step_skip(message: &str) {
+    let _ = write_step_skip(&mut std::io::stdout().lock(), message);
+}
+
+/// Writer-taking sibling to [`print_step_skip`]. Emits the single
+/// `   <○.yellow()> <message>` line via [`writeln!`] against the
+/// supplied writer. [`print_step_skip`] is the stdout adapter; this
+/// variant exists so tests can pin the one-line body, the three-space
+/// indent, the `○` glyph, and the `\x1b[33m` yellow ANSI sequence
+/// around the glyph (never the message) without capturing stdout.
+pub fn write_step_skip<W: std::io::Write>(w: &mut W, message: &str) -> std::io::Result<()> {
+    writeln!(w, "   {} {}", "○".yellow(), message)
+}
+
 /// Prints the two-line `"=".repeat(<width>)` ASCII rule + trailing
 /// blank grammar 14 pre-lift consumer sites spelled inline as
 /// `println!("{}", "=".repeat(<50|60>)); println!();` across 5
@@ -2690,6 +2757,203 @@ mod tests {
                  `crate::ui::print_step_warn(\"<MSG>\")` — the \
                  primitive body every three-space-indented `⚠️.yellow()` \
                  in-body step-warn in the crate now delegates \
+                 through."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_step_skip`]. Pins
+    /// the one-line body every pre-lift consumer spelled verbatim
+    /// (`println!("   {} <fmt>", "○".yellow(), <args>)`): a
+    /// three-space indent, a `.yellow()`-colored `○` hollow-circle
+    /// glyph, a single space, then the plain (uncolored) message. A
+    /// silent contract drift a future rewrite might introduce —
+    /// dropping the three-space indent, promoting the whole line's
+    /// coloring (`format!("   ○ {}", msg).yellow()`) so the message
+    /// text paints yellow at every site, swapping `○` for `-` under a
+    /// CI-log-friendly grammar, dimming the palette to `\x1b[90m`
+    /// under a "skips are quieter than warns" cleanup, slipping a
+    /// trailing blank line into the primitive body — flips this
+    /// assertion rather than compiling and silently diverging the 5
+    /// consumer sites' visual grammar.
+    #[test]
+    fn write_step_skip_emits_exactly_one_skip_prefixed_indented_line() {
+        // Force ANSI emission and serialize against peer banner tests
+        // via [`AnsiOverrideForTest`]; its Drop restores colored's
+        // auto-detection on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`].
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_step_skip(&mut buf, "Skipped via --skip-entities")
+            .expect("write_step_skip against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_step_skip must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — the pre-lift stanza is one `println!`,
+        // not two, and carries no framing blank.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_step_skip must emit exactly one line — the \
+             pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The three-space indent reaches the rendered line before any
+        // ANSI escape.
+        assert!(
+            lines[0].starts_with("   "),
+            "line 0 must begin with a three-space indent — every \
+             pre-lift consumer spelled `\"   {{}} <fmt>\"` verbatim, \
+             so the indent must reach the writer OUTSIDE the coloring \
+             span; got {:?}",
+            lines[0]
+        );
+
+        // The `○` glyph reaches the rendered line — a fusion that
+        // swapped `○` for `-` under a "CI-log-friendly" cleanup or
+        // dropped the glyph altogether fails here.
+        assert!(
+            lines[0].contains('○'),
+            "line 0 must contain the `○` hollow-circle glyph — every \
+             pre-lift consumer spelled `\"○\".yellow()` on the marker; \
+             got {:?}",
+            lines[0]
+        );
+
+        // The message text reaches the rendered line verbatim.
+        assert!(
+            lines[0].contains("Skipped via --skip-entities"),
+            "line 0 must carry the message verbatim; got {:?}",
+            lines[0]
+        );
+
+        // The `yellow` ANSI sequence (`\x1b[33m`) reaches the rendered
+        // line; a fusion that dropped `.yellow()` (a "just print the
+        // string, it's shorter" cleanup) or dimmed the palette to
+        // `\x1b[90m` (a "skips are quieter than warns" cleanup) fails
+        // here.
+        assert!(
+            lines[0].contains("\x1b[33m"),
+            "line 0 must carry the `yellow` ANSI sequence (`\\x1b[33m`) \
+             — every pre-lift consumer spelled `.yellow()` (never \
+             `.dimmed()` or `.bright_yellow()`) on the glyph; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[93m"),
+            "line 0 must NOT carry the `bright_yellow` ANSI sequence \
+             (`\\x1b[93m`) — that palette belongs to milestone-level \
+             warnings, not this in-body skip primitive; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[90m"),
+            "line 0 must NOT carry the `bright_black` / dim ANSI \
+             sequence (`\\x1b[90m`) — every pre-lift consumer used \
+             plain `.yellow()`, and a promotion to dimmed would \
+             collapse the skip vs the sibling `\"○\".dimmed()` shade \
+             (`commands/rust_service.rs:1150` — a distinct \"inactive \
+             environment listing\" grammar this primitive does NOT \
+             enroll); got {:?}",
+            lines[0]
+        );
+
+        // The `.yellow()` coloring wraps the GLYPH alone, never the
+        // message text.
+        let glyph_pos = lines[0].find('○').expect("glyph must be present");
+        let reset_pos = lines[0]
+            .find("\x1b[0m")
+            .expect("reset must be present after the glyph");
+        let msg_pos = lines[0]
+            .find("Skipped via --skip-entities")
+            .expect("message must be present");
+        assert!(
+            glyph_pos < reset_pos && reset_pos < msg_pos,
+            "the `\\x1b[0m` reset must close the yellow span BEFORE the \
+             message begins — every pre-lift consumer spelled `.yellow()` \
+             on the `○` glyph alone, never on the message. Got \
+             positions glyph={glyph_pos}, reset={reset_pos}, msg={msg_pos} \
+             in line {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `println!` (not `print!`), so the newline is part of the
+        // contract.
+        assert!(
+            out.ends_with('\n'),
+            "write_step_skip must emit a trailing `\\n` (the \
+             pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto [`super::print_step_skip`]
+    /// no longer spell the `println!("   {} <fmt>", "○".yellow(),
+    /// <args>)` shape inline. Structural regression shield — without
+    /// it, a future refactor could silently re-inline the one-liner
+    /// and reopen the 5-site duplication class this lift closed.
+    /// Enforced at the module bodies before their `#[cfg(test)]`
+    /// regions so a test-support mention of the raw shape does not
+    /// defeat the shield.
+    ///
+    /// The exact-shape needle is `"○".yellow()` appearing anywhere in
+    /// the module body. `commands/rust_service.rs:1150` is a nearby
+    /// non-step-skip sibling site (`"○".dimmed()` — a
+    /// dimmed-inactive-environment listing under a distinct visual
+    /// grammar, NOT `.yellow()`); the pattern needle would not match
+    /// it in any case, and `rust_service.rs` is deliberately NOT
+    /// enrolled below because it carries no `"○".yellow()` stanza to
+    /// migrate.
+    #[test]
+    fn print_step_skip_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[
+            (
+                include_str!("commands/prerelease.rs"),
+                "commands/prerelease.rs",
+            ),
+            (
+                include_str!("commands/rebac_validation.rs"),
+                "commands/rebac_validation.rs",
+            ),
+            (include_str!("commands/sync.rs"), "commands/sync.rs"),
+        ];
+        // No known non-step-skip `"○".yellow()` sites: the one
+        // dimmed-`○` sibling in `commands/rust_service.rs:1150`
+        // spells `.dimmed()`, not `.yellow()`, so the needle does not
+        // match it and no allowlist is required.
+        const ALLOWLIST_SUBSTRINGS: &[&str] = &[];
+        for (source, module_path) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("\"○\".yellow()") {
+                    continue;
+                }
+                if ALLOWLIST_SUBSTRINGS.iter().any(|s| line.contains(s)) {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `\"○\".yellow()` step-skip marker — that shape \
+                     was lifted onto `crate::ui::print_step_skip`. \
+                     A re-inline would silently reopen the 5-site \
+                     duplication class this shield exists to close. \
+                     Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            assert!(
+                body.contains("crate::ui::print_step_skip("),
+                "{module_path} body must forward to \
+                 `crate::ui::print_step_skip(\"<MSG>\")` — the \
+                 primitive body every three-space-indented `○.yellow()` \
+                 in-body step-skip in the crate now delegates \
                  through."
             );
         }
