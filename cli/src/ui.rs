@@ -782,6 +782,93 @@ pub fn write_step_pass<W: std::io::Write>(w: &mut W, message: &str) -> std::io::
     writeln!(w, "   {} {}", "✅".green(), message)
 }
 
+/// Prints the one-line `"   {} <message>"` (three-space indent + yellow
+/// `⚠️` glyph + plain message) in-body step-warning grammar 5 pre-lift
+/// consumer sites spelled inline as `println!("   {} <fmt>",
+/// "⚠️".yellow(), <args>)` (or its multi-line spread across four to six
+/// source lines when the message carries a `format!`-computed argument
+/// list) across 5 command modules (`commands/{post_deploy_verification
+/// (×2), frontend_validation (×1), migration_validation (×1),
+/// prerelease (×1)}.rs`). Marks a non-fatal irregularity mid-body — a
+/// retry attempt about to fire, a missing optional artifact, a skipped
+/// pre-cleanup step — the exact-shape between-pass-and-failure sibling
+/// to [`print_step_pass`]'s `.green() ✅` in-body pass and
+/// [`print_step_failure`]'s `.red() ❌` in-body failure.
+///
+/// # Distinct from the other `ui::print_*` primitives
+///
+/// [`print_warning`] is a `bright_yellow().bold()` `⚠️ <msg>` line the
+/// milestone-level command-warning sigil, emitted at the top-level of
+/// the command (not indented inside a body) — the heavier palette
+/// (`bright_yellow` rather than plain `.yellow()` on the glyph,
+/// `.bold()` added, message-colored, no indent) marks it as a
+/// command-level warning louder than an in-body step. This primitive
+/// carries the LEANEST indented warning — a three-space indent, a
+/// `.yellow()`-colored `⚠️` glyph, and a plain (uncolored) message —
+/// every pre-lift consumer used inside a command's pipeline as an
+/// in-body step-warning marker one step below a milestone-level
+/// [`print_warning`], one shade calmer than [`print_step_failure`], and
+/// visually paired with [`print_step_pass`] under the same three-space
+/// body-indent grammar.
+///
+/// # `.yellow()` on the glyph, plain on the message
+///
+/// Pre-lift every consumer spelled the coloring as `"⚠️".yellow()` on
+/// the GLYPH alone, never on the composed line (`format!("   ⚠️ {}",
+/// msg).yellow()`). The primitive preserves that split: the `\x1b[33m`
+/// yellow ANSI sequence wraps the glyph, the message reaches the writer
+/// uncolored, and the three-space indent is emitted OUTSIDE both spans
+/// — so a terminal without color renders `   ⚠️ <msg>` legibly. A
+/// re-lift that hoisted the color onto the whole line would paint the
+/// message text yellow at every site, changing the visual grammar
+/// silently.
+///
+/// # stdout, not stderr
+///
+/// One nearby sibling — `commands/rust_service.rs:1884`'s "Skipping
+/// image verification (no registry credentials available)" — spells the
+/// same `"   {} <fmt>", "⚠️".yellow(), ...` visual grammar but routes
+/// through `eprintln!` (stderr), not `println!` (stdout). That stanza
+/// is deliberately NOT enrolled in this primitive: the stdout/stderr
+/// stream is an observable behavior contract (a downstream consumer
+/// piping stdout while leaving stderr on the terminal, a log-shipper
+/// tagging streams differently), and folding it into a stdout
+/// primitive would silently shift its output stream. A future
+/// [`eprint_step_warn`] peer can lift that stderr-routed sibling class
+/// once it grows past one site.
+///
+/// # Compounding
+///
+/// Pre-lift 5 sibling sites each restated the `println!("   {} <fmt>",
+/// "⚠️".yellow(), <args>)` grammar verbatim, with the three-space
+/// indent, the `⚠️` glyph, the `.yellow()` coloring on the glyph, and
+/// the plain-message tail all spelled inline. A future palette
+/// adjustment (a swap of `⚠️ ` for `!` under a CI-log-friendly grammar,
+/// a promotion of `.yellow()` to `.bright_yellow()` under a leaner
+/// step-vs-milestone distinction, an OTLP `step_warned` observability
+/// event wired alongside the print, a shift of the three-space indent
+/// to two- or four-space under a standardized body-indent) had to hit
+/// 5 sites in lockstep or drift the visual grammar; post-lift it hits
+/// ONE typed body. Delegates to [`write_step_warn`] against
+/// [`std::io::stdout()`]; the writer split exists so the
+/// fail-before-pass test can pin the one-line body, the three-space
+/// indent, the `⚠️ ` glyph, and the `\x1b[33m` yellow ANSI palette
+/// contract by inspecting emitted bytes rather than shelling out and
+/// grepping stdout.
+pub fn print_step_warn(message: &str) {
+    let _ = write_step_warn(&mut std::io::stdout().lock(), message);
+}
+
+/// Writer-taking sibling to [`print_step_warn`]. Emits the single
+/// `   <⚠️.yellow()> <message>` line via [`writeln!`] against the
+/// supplied writer. [`print_step_warn`] is the stdout adapter; this
+/// variant exists so tests can pin the one-line body, the three-space
+/// indent, the `⚠️ ` glyph, and the `\x1b[33m` yellow ANSI sequence
+/// around the glyph (never the message) without capturing stdout.
+pub fn write_step_warn<W: std::io::Write>(w: &mut W, message: &str) -> std::io::Result<()> {
+    writeln!(w, "   {} {}", "⚠️".yellow(), message)
+}
+
 /// Prints the two-line `"=".repeat(<width>)` ASCII rule + trailing
 /// blank grammar 14 pre-lift consumer sites spelled inline as
 /// `println!("{}", "=".repeat(<50|60>)); println!();` across 5
@@ -2384,6 +2471,225 @@ mod tests {
                  `crate::ui::print_step_pass(\"<MSG>\")` — the \
                  primitive body every three-space-indented `✅.green()` \
                  in-body step-pass in the crate now delegates \
+                 through."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_step_warn`]. Pins
+    /// the one-line body every pre-lift consumer spelled verbatim
+    /// (`println!("   {} <fmt>", "⚠️".yellow(), <args>)`): a three-space
+    /// indent, a `.yellow()`-colored `⚠️` glyph, a single space, then the
+    /// plain (uncolored) message. A silent contract drift a future
+    /// rewrite might introduce — dropping the three-space indent (a
+    /// "tighter body spacing" cleanup), promoting the whole line's
+    /// coloring (`format!("   ⚠️ {}", msg).yellow()`) so the message
+    /// text paints yellow at every site, swapping `⚠️ ` for `!` under a
+    /// CI-log-friendly grammar, promoting `.yellow()` to
+    /// `.bright_yellow()` (`\x1b[93m` — the milestone-level
+    /// [`super::print_warning`] palette), slipping a trailing blank
+    /// line into the primitive body — flips this assertion rather than
+    /// compiling and silently diverging the 5 consumer sites' visual
+    /// grammar.
+    #[test]
+    fn write_step_warn_emits_exactly_one_warn_prefixed_indented_line() {
+        // Force ANSI emission (colored auto-drops sequences on a
+        // non-tty stdout) and serialize against peer banner tests
+        // via [`AnsiOverrideForTest`]; its Drop restores colored's
+        // auto-detection on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`], closing the set-write-unset window
+        // without a manual [`colored::control::unset_override`] call
+        // that a future test author could omit.
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_step_warn(&mut buf, "Pre-cleanup warning: orphaned container")
+            .expect("write_step_warn against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_step_warn must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — the pre-lift stanza is one `println!`,
+        // not two, and carries no framing blank. A refactor that slips
+        // a leading or trailing blank into the primitive body fails
+        // here.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_step_warn must emit exactly one line — the \
+             pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The three-space indent reaches the rendered line before any
+        // ANSI escape — a fusion that hoisted the indent inside the
+        // coloring span (`"   ⚠️".yellow()`) or dropped it altogether
+        // (`println!("{} <msg>", "⚠️".yellow())`) fails here.
+        assert!(
+            lines[0].starts_with("   "),
+            "line 0 must begin with a three-space indent — every \
+             pre-lift consumer spelled `\"   {{}} <fmt>\"` verbatim, \
+             so the indent must reach the writer OUTSIDE the coloring \
+             span; got {:?}",
+            lines[0]
+        );
+
+        // The `⚠️ ` glyph reaches the rendered line — a fusion that
+        // swapped `⚠️ ` for `!` under a "CI-log-friendly" cleanup or
+        // dropped the glyph altogether fails here.
+        assert!(
+            lines[0].contains('⚠'),
+            "line 0 must contain the `⚠️` glyph — every pre-lift \
+             consumer spelled `\"⚠️\".yellow()` on the marker; got {:?}",
+            lines[0]
+        );
+
+        // The message text reaches the rendered line verbatim; a
+        // fusion that hoists the message off the parameter and pins
+        // it to a constant fails here.
+        assert!(
+            lines[0].contains("Pre-cleanup warning: orphaned container"),
+            "line 0 must carry the message verbatim; got {:?}",
+            lines[0]
+        );
+
+        // The `yellow` ANSI sequence (`\x1b[33m`) reaches the rendered
+        // line; a fusion that dropped `.yellow()` (a "just print the
+        // string, it's shorter" cleanup) or promoted the palette to
+        // `.bright_yellow()` (`\x1b[93m` — the [`super::print_warning`]
+        // milestone palette) fails here. A promotion collapses the
+        // visual distinction between step-warn and milestone
+        // grammars this primitive exists to preserve.
+        assert!(
+            lines[0].contains("\x1b[33m"),
+            "line 0 must carry the `yellow` ANSI sequence (`\\x1b[33m`) \
+             — every pre-lift consumer spelled `.yellow()` (never \
+             `.bright_yellow()` or `.yellow().bold()`) on the glyph; \
+             got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[93m"),
+            "line 0 must NOT carry the `bright_yellow` ANSI sequence \
+             (`\\x1b[93m`) — that palette belongs to the heavier \
+             milestone-level `print_warning`, not this in-body \
+             step-warn primitive; got {:?}",
+            lines[0]
+        );
+
+        // The `.yellow()` coloring wraps the GLYPH alone, never the
+        // message text — a fusion that hoisted the color onto the
+        // composed line (`format!("   ⚠️ {}", msg).yellow()`) would
+        // paint the message yellow at every site. Pin that the
+        // message text is NOT bracketed by a yellow-open + reset
+        // pair: the yellow span must close (`\x1b[0m`) BEFORE the
+        // space that precedes the message.
+        let warn_pos = lines[0].find('⚠').expect("glyph must be present");
+        let reset_pos = lines[0]
+            .find("\x1b[0m")
+            .expect("reset must be present after the glyph");
+        let msg_pos = lines[0]
+            .find("Pre-cleanup warning")
+            .expect("message must be present");
+        assert!(
+            warn_pos < reset_pos && reset_pos < msg_pos,
+            "the `\\x1b[0m` reset must close the yellow span BEFORE the \
+             message begins — every pre-lift consumer spelled `.yellow()` \
+             on the `⚠️` glyph alone, never on the message. Got \
+             positions warn={warn_pos}, reset={reset_pos}, msg={msg_pos} \
+             in line {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `println!` (not `print!`), so the newline is part of the
+        // contract. A fusion that swapped `writeln!` for `write!`
+        // fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_step_warn must emit a trailing `\\n` (the \
+             pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto [`super::print_step_warn`]
+    /// no longer spell the `println!("   {} <fmt>", "⚠️".yellow(),
+    /// <args>)` shape inline. Structural regression shield — without
+    /// it, a future refactor could silently re-inline the one-liner
+    /// (e.g. a "just call `println!` directly, it's shorter" cleanup)
+    /// and reopen the 5-site duplication class this lift closed.
+    /// Enforced at the module bodies before their `#[cfg(test)]`
+    /// regions so a test-support mention of the raw shape does not
+    /// defeat the shield.
+    ///
+    /// The exact-shape needle is `"⚠️".yellow()` appearing anywhere in
+    /// the module body, MINUS the one known non-step-warn site that
+    /// carries the same coloring under a different grammar: the
+    /// `rust_service.rs:1884` `eprintln!(...)` stderr-routed
+    /// missing-credentials warning (same visual grammar, different
+    /// output stream — see the `# stdout, not stderr` note on
+    /// [`super::print_step_warn`]). Survives untouched; the shield
+    /// allowlists it by an anchoring substring unique to that site.
+    #[test]
+    fn print_step_warn_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[
+            (
+                include_str!("commands/post_deploy_verification.rs"),
+                "commands/post_deploy_verification.rs",
+            ),
+            (
+                include_str!("commands/frontend_validation.rs"),
+                "commands/frontend_validation.rs",
+            ),
+            (
+                include_str!("commands/migration_validation.rs"),
+                "commands/migration_validation.rs",
+            ),
+            (
+                include_str!("commands/prerelease.rs"),
+                "commands/prerelease.rs",
+            ),
+        ];
+        // Non-step-warn sites that carry `"⚠️".yellow()` under a
+        // different grammar (a stderr-routed `eprintln!` sibling
+        // that shares the visual grammar but not the output stream).
+        // Each is anchored by a substring unique to that site so the
+        // shield allowlists it verbatim without needing a line-number
+        // pin. Empty for the enrolled `CALLERS` above — the stderr
+        // sibling lives in `commands/rust_service.rs`, which is NOT
+        // enrolled below precisely because its one `"⚠️".yellow()`
+        // occurrence is that allowlisted stderr stanza, not a
+        // lift-eligible stdout site.
+        const ALLOWLIST_SUBSTRINGS: &[&str] = &[];
+        for (source, module_path) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("\"⚠\u{fe0f}\".yellow()") {
+                    continue;
+                }
+                if ALLOWLIST_SUBSTRINGS.iter().any(|s| line.contains(s)) {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `\"⚠️\".yellow()` step-warn marker — that shape \
+                     was lifted onto `crate::ui::print_step_warn`. \
+                     A re-inline would silently reopen the 5-site \
+                     duplication class this shield exists to close. \
+                     Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            assert!(
+                body.contains("crate::ui::print_step_warn("),
+                "{module_path} body must forward to \
+                 `crate::ui::print_step_warn(\"<MSG>\")` — the \
+                 primitive body every three-space-indented `⚠️.yellow()` \
+                 in-body step-warn in the crate now delegates \
                  through."
             );
         }

@@ -394,11 +394,10 @@ pub async fn run_unit_tests(web_dir: &Path) -> Result<(bool, Option<usize>, Vec<
         let no_tests = combined.contains("No test files found") || test_count == Some(0);
 
         if no_tests {
-            println!(
-                "   {} No unit tests found ({:.1}s)",
-                "⚠️".yellow(),
+            crate::ui::print_step_warn(&format!(
+                "No unit tests found ({:.1}s)",
                 duration.as_secs_f64()
-            );
+            ));
             // Consider no tests as passing (not all projects have tests)
             Ok((true, Some(0), Vec::new()))
         } else if has_failures {

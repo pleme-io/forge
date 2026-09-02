@@ -1036,11 +1036,10 @@ pub async fn validate_migration_manifest(
     let manifest = if manifest_path.exists() {
         crate::repo::read_yaml_async::<MigrationManifest>(&manifest_path).await?
     } else {
-        println!(
-            "   {} No migration-manifest.yaml found at {}",
-            "⚠️".yellow(),
+        crate::ui::print_step_warn(&format!(
+            "No migration-manifest.yaml found at {}",
             manifest_path.display()
-        );
+        ));
         return Ok(ManifestValidationResult {
             assessed_count: 0,
             issues: vec![MigrationIssue::DataMigrationIncomplete {

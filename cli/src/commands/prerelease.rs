@@ -987,7 +987,7 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
 
     // Pre-cleanup: ensure no orphaned containers from previous runs
     if let Err(e) = e2e::cleanup_testcontainers() {
-        println!("   {} Pre-cleanup warning: {}", "⚠️".yellow(), e);
+        crate::ui::print_step_warn(&format!("Pre-cleanup warning: {}", e));
     }
 
     // Always force-rebuild E2E images to ensure tests run against the current code.
