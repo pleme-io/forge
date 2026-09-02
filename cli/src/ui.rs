@@ -193,6 +193,57 @@ pub fn styled_progress_bar(total: u64) -> ProgressBar {
     bar
 }
 
+/// Prints the three-line success banner every pre-lift consumer
+/// spelled inline as three sibling `println!` calls: a
+/// `bright_green`-tinted `"━"`-rule of `width` glyphs, the `message` in
+/// `green().bold()`, and a second identical rule. Marks a terminal-
+/// success milestone at 7 sibling call sites across
+/// `commands/{developer_tools, rust_service, web_service}.rs` — the
+/// pre-lift `println!("{}", "━".repeat(<width>).bright_green());
+/// println!("{}", <MSG>.green().bold()); println!("{}",
+/// "━".repeat(<width>).bright_green());` stanza — so a future palette
+/// shift (a swap of the rule character, a `bright_green`→dedicated
+/// success color, a hoist of the width onto a `MilestoneKind` closed
+/// enum) happens at ONE site rather than seven.
+///
+/// Delegates to [`write_success_banner`] against `std::io::stdout()`;
+/// the writer split exists so the fail-before-pass test can pin the
+/// three-line, message-order contract by inspecting emitted bytes
+/// rather than shelling out and grepping stdout.
+///
+/// # Compounding
+///
+/// The three consumer sites share a visual grammar the CLI operator
+/// has been trained to read (bar → highlighted headline → bar) — but
+/// each pre-lift restatement is a fresh chance for that grammar to
+/// drift: a swap of `.green()` for `.bright_green()` on the headline
+/// silently loses the visual contrast against the rule, a swap of the
+/// rule character in one site alone breaks operator scanning across
+/// commands. The primitive collapses seven contract restatements onto
+/// ONE typed function whose body a future palette swap has to hit
+/// exactly once.
+pub fn print_success_banner(width: usize, message: &str) {
+    let _ = write_success_banner(&mut std::io::stdout().lock(), width, message);
+}
+
+/// Writer-taking sibling to [`print_success_banner`]. Emits the three
+/// banner lines (`bright_green` rule, `green().bold()` message,
+/// `bright_green` rule) via [`writeln!`] against the supplied writer.
+/// [`print_success_banner`] is the stdout adapter; this variant exists
+/// so tests can pin the line count and message-order contract without
+/// capturing stdout.
+pub fn write_success_banner<W: std::io::Write>(
+    w: &mut W,
+    width: usize,
+    message: &str,
+) -> std::io::Result<()> {
+    let bar = "━".repeat(width);
+    writeln!(w, "{}", bar.as_str().bright_green())?;
+    writeln!(w, "{}", message.green().bold())?;
+    writeln!(w, "{}", bar.as_str().bright_green())?;
+    Ok(())
+}
+
 pub fn print_header(title: &str) {
     println!();
     println!(
@@ -331,6 +382,100 @@ mod tests {
              the requested `total` as its length, not a spinner-flavored bar"
         );
         bar.finish_and_clear();
+    }
+
+    /// Fail-before-pass envelope for [`super::write_success_banner`].
+    /// Pins the three-line body order every pre-lift consumer spelled
+    /// verbatim (`"━".repeat(width).bright_green()` rule,
+    /// `<MSG>.green().bold()` message, `"━".repeat(width).bright_green()`
+    /// rule). A silent contract drift a future rewrite might introduce —
+    /// dropping one bar to two `println!`s, swapping the message and a
+    /// bar, promoting the message color to `bright_green` and losing the
+    /// visual-contrast contract against the rule, hoisting the rule
+    /// character off `━` in one branch alone — flips this assertion
+    /// rather than compiling and silently diverging the seven consumer
+    /// sites' visual grammar.
+    #[test]
+    fn write_success_banner_emits_three_bar_message_bar_lines_in_order() {
+        // Force ANSI emission so the palette contract survives a test
+        // runner attached to a non-tty (colored auto-drops sequences).
+        colored::control::set_override(true);
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_success_banner(&mut buf, 80, "✅ REGENERATION COMPLETE")
+            .expect("write_success_banner against a Vec<u8> writer must succeed");
+
+        colored::control::unset_override();
+
+        let out = String::from_utf8(buf)
+            .expect("write_success_banner must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly three lines — the pre-lift stanza is three
+        // `println!`s, not two, and not four. A refactor that drops or
+        // adds a bar fails here.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            3,
+            "write_success_banner must emit exactly three lines \
+             (rule, message, rule) — the pre-lift stanza is three \
+             `println!`s; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The bar glyph appears in the outer two lines but never in
+        // the middle line; the message text appears in the middle line
+        // but never in the outer lines. A swap of the middle line and
+        // a bar (a fusion that reorders the `writeln!`s) fails here.
+        assert!(
+            lines[0].contains('━'),
+            "line 0 must be a `━` rule; got {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[2].contains('━'),
+            "line 2 must be a `━` rule; got {:?}",
+            lines[2]
+        );
+        assert!(
+            !lines[1].contains('━'),
+            "line 1 must NOT contain the rule glyph — it is the \
+             message line; got {:?}",
+            lines[1]
+        );
+        assert!(
+            lines[1].contains("REGENERATION COMPLETE"),
+            "line 1 must carry the message verbatim; got {:?}",
+            lines[1]
+        );
+
+        // The rule width reaches `String::repeat` unwrapped — a fusion
+        // that hoists the width off the parameter and pins it to a
+        // constant fails here.
+        let bar_glyph_count = lines[0].chars().filter(|c| *c == '━').count();
+        assert_eq!(
+            bar_glyph_count, 80,
+            "line 0 must contain exactly `width` (80) `━` glyphs; got {}",
+            bar_glyph_count
+        );
+
+        // The palette contract: the rule lines carry the
+        // `bright_green` ANSI sequence and the message line carries
+        // the `bold` sequence. A silent swap of `.bright_green()` for
+        // `.green()` on the rule loses the contrast against the
+        // message — pin the sequences here.
+        assert!(
+            lines[0].contains("\x1b[92m"),
+            "line 0 must carry the `bright_green` ANSI sequence \
+             (`\\x1b[92m`); got {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains("\x1b[1;32m") || lines[1].contains("\x1b[32;1m"),
+            "line 1 must carry the `green` + `bold` ANSI sequence; got {:?}",
+            lines[1]
+        );
     }
 
     #[test]
