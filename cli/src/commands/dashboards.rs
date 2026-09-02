@@ -384,7 +384,7 @@ fn run_jsonnet(config: &DashboardConfig) -> Result<HashMap<String, serde_json::V
         "jsonnet",
     )?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = crate::repo::utf8_lossy_borrow(&output.stdout);
     let dashboards: HashMap<String, serde_json::Value> = serde_json::from_str(&stdout)?;
 
     Ok(dashboards)

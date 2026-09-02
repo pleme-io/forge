@@ -225,7 +225,7 @@ pub async fn update_federation(
         .context("Failed to run rover-fhs")?;
 
     // Check stderr first - Rover may output errors even on status 0
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = crate::repo::utf8_lossy_borrow(&output.stderr);
     if !stderr.is_empty() {
         eprintln!("Rover stderr: {}", stderr);
     }

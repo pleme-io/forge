@@ -696,7 +696,7 @@ async fn get_pod_status_full(namespace: &str, deployment_name: &str) -> Result<P
     )
     .await?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = crate::repo::utf8_lossy_borrow(&output.stdout);
     let json: serde_json::Value =
         serde_json::from_str(&stdout).context("Failed to parse pod JSON")?;
 

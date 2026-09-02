@@ -246,7 +246,7 @@ pub async fn validate_schema_export(backend_dir: &Path) -> Result<bool> {
     };
 
     // Parse schema to count types
-    let schema = String::from_utf8_lossy(&schema_bytes);
+    let schema = crate::repo::utf8_lossy_borrow(&schema_bytes);
     let type_count = schema.matches("type ").count()
         + schema.matches("input ").count()
         + schema.matches("enum ").count();

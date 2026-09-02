@@ -576,7 +576,7 @@ pub async fn execute(
 
             match pod_status_result {
                 Ok(output) if output.status.success() => {
-                    let pod_json = String::from_utf8_lossy(&output.stdout);
+                    let pod_json = crate::repo::utf8_lossy_borrow(&output.stdout);
 
                     // Parse JSON to check pod states
                     if let Ok(pods_value) = serde_json::from_str::<serde_json::Value>(&pod_json) {
@@ -694,7 +694,8 @@ pub async fn execute(
 
                                     match log_result {
                                         Ok(log_output) if log_output.status.success() => {
-                                            let logs = String::from_utf8_lossy(&log_output.stdout);
+                                            let logs =
+                                                crate::repo::utf8_lossy_borrow(&log_output.stdout);
                                             println!("━━━ Logs from {} ━━━", pod_name);
                                             println!("{}", logs);
                                             println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");

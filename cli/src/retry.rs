@@ -13329,7 +13329,7 @@ pub fn classify_capture_anyhow(
 ) -> anyhow::Result<std::process::Output> {
     let output = classify_spawn_anyhow(captured, op)?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = crate::repo::utf8_lossy_borrow(&output.stderr);
         let detail = match output.status.code() {
             Some(code) => format!("exit {}", code),
             None => "killed by signal".to_string(),
@@ -14260,12 +14260,12 @@ where
 /// the migration.
 pub fn format_capture_streams(out: &std::process::Output, tool: &str) -> Vec<String> {
     let mut messages = Vec::new();
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = crate::repo::utf8_lossy_borrow(&out.stdout);
     let stdout_trimmed = stdout.trim();
     if !stdout_trimmed.is_empty() {
         messages.push(format!("{} stdout: {}", tool, stdout_trimmed));
     }
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stderr = crate::repo::utf8_lossy_borrow(&out.stderr);
     let stderr_trimmed = stderr.trim();
     if !stderr_trimmed.is_empty() {
         messages.push(format!("{} stderr: {}", tool, stderr_trimmed));

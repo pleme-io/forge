@@ -295,7 +295,7 @@ spec:
             )
             .await?;
 
-            let status = String::from_utf8_lossy(&output.stdout);
+            let status = crate::repo::utf8_lossy_borrow(&output.stdout);
 
             if status.trim() == "True" {
                 return Ok(());
@@ -316,7 +316,7 @@ spec:
             )
             .await?;
 
-            let failed = String::from_utf8_lossy(&output.stdout);
+            let failed = crate::repo::utf8_lossy_borrow(&output.stdout);
             if failed.trim() == "True" {
                 anyhow::bail!("Migration job failed");
             }
