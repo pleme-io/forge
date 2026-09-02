@@ -1897,6 +1897,93 @@ pub fn path_to_string_lossy(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// Project the file-name segment of a [`std::fs::DirEntry`] into an
+/// owned [`String`] via the lossy UTF-8 repair every pre-lift consumer
+/// relied on: a non-UTF-8 byte in the entry's file name is replaced by
+/// [`U+FFFD REPLACEMENT CHARACTER`], and the resulting string is
+/// returned owned so it outlives the [`std::ffi::OsString`]
+/// [`std::fs::DirEntry::file_name`] freshly allocates on each call.
+///
+/// # Duplication lift (the one-primitive-per-projection discipline)
+///
+/// The pre-lift shape recurred at five sibling consumer sites across
+/// four command modules on the directory-listing "read the entry's
+/// file name as an owned stringly key" surface:
+///
+/// - `commands/pangea.rs:633` (inside the `.filter(|e| { let name =
+///   e.file_name().to_string_lossy().to_string(); ... })` closure
+///   that gates provider-prefixed resource dirs — the `name` is fed
+///   into a `name.contains('_') && !name.starts_with('.')` predicate).
+/// - `commands/pangea.rs:650` (inside the `for entry in &resource_dirs`
+///   body that spells `let resource_name = entry.file_name()
+///   .to_string_lossy().to_string();` — `resource_name` is fed into a
+///   [`Path::join`] to build the per-resource `synthesis_spec.rb`
+///   path).
+/// - `commands/helm.rs:1823` (inside the `for entry in std::fs
+///   ::read_dir(dir)?.filter_map(...)` body that spells `let name =
+///   entry.file_name().to_string_lossy().to_string();` — `name` is
+///   fed into an `exclude_name` equality and an `info!("Skipping {}",
+///   name)` progress line).
+/// - `commands/migration_new.rs:44` (inside the `for entry in entries`
+///   body that spells `let filename = entry.file_name().to_string_lossy()
+///   .to_string();` — `filename` is fed into a `.starts_with(&date_prefix)
+///   && .ends_with(".rs")` predicate and a `.split('_')` sequence-number
+///   parse).
+/// - `commands/gem.rs:643` (inside the `.map(|e| e.file_name()
+///   .to_string_lossy().to_string())` on the sorted-by-mtime
+///   `.first()` — the returned [`String`] is the freshly-built gem
+///   file's basename the caller returns to its `.context(...)` /
+///   downstream `attic push <path>` argv slot).
+///
+/// Every one of those sites carried the same
+/// `<entry>.file_name().to_string_lossy().to_string()` triple-projection
+/// over a [`std::fs::DirEntry`] receiver: [`std::fs::DirEntry::file_name`]
+/// returns a fresh owned [`std::ffi::OsString`] (unlike
+/// [`Path::file_name`] which returns a borrowed `Option<&OsStr>`), then
+/// [`std::ffi::OsStr::to_string_lossy`] projects the OS bytes through
+/// [`String::from_utf8_lossy`] returning [`std::borrow::Cow<str>`],
+/// then [`ToString::to_string`] allocates a fresh owned [`String`] the
+/// caller can outlive the temporary [`std::ffi::OsString`] with.
+///
+/// Fanned out across five hand-typed spellings, the shape was invisible
+/// to the borrow-checker: a helpful "let's keep the [`std::ffi::OsString`]
+/// alive and hand back a `&str` slice" cleanup at any one site would
+/// quietly fork one consumer at a time from its four siblings. Lifting
+/// to a single primitive with one owner keeps the projection uniform
+/// and refuses drift by construction.
+///
+/// # The `.into_owned()` alternative to `.to_string()`
+///
+/// Like [`path_to_string_lossy`], the primitive body calls
+/// [`std::borrow::Cow::into_owned`] rather than the [`ToString::to_string`]
+/// tail every pre-lift site spelled. On the [`std::borrow::Cow::Borrowed`]
+/// arm (the file name is already valid UTF-8) both spellings allocate one
+/// fresh [`String`] and are bytewise indistinguishable. On the
+/// [`std::borrow::Cow::Owned`] arm (the file name carried non-UTF-8 bytes
+/// and [`std::ffi::OsStr::to_string_lossy`] synthesized a repair-string),
+/// `.into_owned()` unwraps the already-owned [`String`] in place while
+/// `.to_string()` allocates a second [`String`] and copies through it —
+/// a silent double-alloc the pre-lift shape carried at every site. On
+/// Linux CI the observable difference is nil (every filename is UTF-8),
+/// so this is not a behavioral change; it is a canonical shape the
+/// primitive owns once on behalf of every consumer.
+///
+/// # Peer
+///
+/// Sibling to [`file_name_str`] on the file-name-projection surface:
+/// [`file_name_str`] is the borrow-only, zero-alloc [`Path`] peer that
+/// projects a [`Path::file_name`] into a borrowed `&str` (with `""`
+/// on the miss arm); [`dir_entry_name_lossy`] is the owned, one-alloc
+/// [`std::fs::DirEntry`] peer that projects a
+/// [`std::fs::DirEntry::file_name`] into an owned [`String`] via
+/// lossy UTF-8 repair. The two primitives own the two ends of the
+/// "read the file name off a path-like receiver as a stringly key"
+/// primitive family — no consumer needs to hand-spell either
+/// projection.
+pub fn dir_entry_name_lossy(entry: &std::fs::DirEntry) -> String {
+    entry.file_name().to_string_lossy().into_owned()
+}
+
 /// Project a captured process output byte slice
 /// ([`std::process::Output::stdout`] / [`std::process::Output::stderr`],
 /// or any owned `Vec<u8>` that traveled through the same OS pipe) into
@@ -5561,6 +5648,131 @@ mod tests {
                      the primitive, and fork the miss-arm unit (`\"\"`) \
                      into a hand-typed literal that could drift from \
                      the primitive one consumer at a time."
+                );
+            }
+        }
+    }
+
+    /// [`dir_entry_name_lossy`] projects the file-name segment of a
+    /// [`std::fs::DirEntry`] into an owned [`String`] verbatim through
+    /// the lossy UTF-8 repair on the well-formed UTF-8 case — pins the
+    /// primitive to the byte-identical projection every one of the five
+    /// pre-lift consumer sites relied on. On a directory containing an
+    /// ASCII-named entry the returned [`String`] carries the entry's
+    /// file-name bytes byte-for-byte, so a downstream
+    /// [`str::starts_with`] / [`str::ends_with`] / [`str::contains`] /
+    /// [`Path::join`] receives the same bytes the pre-lift
+    /// `<entry>.file_name().to_string_lossy().to_string()` spelling
+    /// handed it.
+    #[test]
+    fn dir_entry_name_lossy_returns_file_name_byte_identical_on_utf8_hit() {
+        let tmp = tempfile::tempdir().expect("mk tempdir");
+        std::fs::write(tmp.path().join("m20260209_000001_seed.rs"), b"//! seed\n")
+            .expect("write seed file");
+        let entry = std::fs::read_dir(tmp.path())
+            .expect("read_dir tempdir")
+            .filter_map(std::result::Result::ok)
+            .next()
+            .expect("one entry in tempdir");
+        let projected = dir_entry_name_lossy(&entry);
+        assert_eq!(
+            projected, "m20260209_000001_seed.rs",
+            "dir_entry_name_lossy() must project the DirEntry's file-name \
+             segment byte-identical on the UTF-8 hit arm — the exact shape \
+             every pre-lift consumer relied on for its downstream \
+             `.starts_with(&date_prefix)` / `.ends_with(\".rs\")` / \
+             `.contains('_')` / `Path::join(&name)` / \
+             `info!(\"Skipping {{}}\", name)` predicate. Got: {projected:?}"
+        );
+    }
+
+    /// [`dir_entry_name_lossy`] uses [`std::borrow::Cow::into_owned`]
+    /// at its tail rather than the pre-lift `.to_string()` spelling —
+    /// see the primitive body's doc-comment for the one-alloc vs
+    /// two-alloc distinction on the [`std::borrow::Cow::Owned`] arm.
+    /// Mirrors [`path_to_string_lossy_body_ends_with_into_owned_not_to_string`]
+    /// on the [`std::fs::DirEntry`]-receiving sibling — a body-slice
+    /// source-scan shield keeps future drift on the tail (a helpful
+    /// "let's be consistent with `.to_string()` everywhere" cleanup
+    /// would silently reintroduce the double-alloc the primitive
+    /// discharges).
+    #[test]
+    fn dir_entry_name_lossy_body_ends_with_into_owned_not_to_string() {
+        let source = include_str!("repo.rs");
+        let signature = "pub fn dir_entry_name_lossy(entry: &std::fs::DirEntry) -> String {";
+        let start = source
+            .find(signature)
+            .expect("dir_entry_name_lossy signature must appear in repo.rs");
+        let body_slice = &source[start..start + 200];
+        assert!(
+            body_slice.contains(".into_owned()"),
+            "dir_entry_name_lossy body must end with `.into_owned()` \
+             to keep the one-alloc discipline on the \
+             `Cow::Owned` (non-UTF-8) arm — a drift to `.to_string()` \
+             reintroduces the silent double-alloc every pre-lift site \
+             carried and this primitive was lifted to discharge. \
+             Body slice: {body_slice}"
+        );
+        assert!(
+            !body_slice.contains(".to_string_lossy().to_string()"),
+            "dir_entry_name_lossy body must NOT respell the pre-lift \
+             `.to_string_lossy().to_string()` two-alloc shape at its \
+             own body — that is the exact shape the five consumer \
+             sites were lifted to escape. Body slice: {body_slice}"
+        );
+    }
+
+    /// Post-lift the five consumer sites lifted onto
+    /// [`dir_entry_name_lossy`] must not silently re-inline the
+    /// primitive's shape at their call points — a re-inline would
+    /// reopen the class this lift closed. This source-scan shield walks
+    /// every hand-lifted consumer file and refuses the raw
+    /// `<ident>.file_name().to_string_lossy().to_string()` composition
+    /// keyed by the concrete identifier every consumer bound (the two
+    /// `pangea.rs` closures bind `e` and `entry`, `helm.rs` binds
+    /// `entry`, `migration_new.rs` binds `entry`, `gem.rs`'s `.map(|e|
+    /// ...)` closure binds `e`).
+    ///
+    /// The `pangea.rs:640` `Some(r) => e.file_name().to_string_lossy() == r`
+    /// site is legitimately a different shape from the identifier-plus-
+    /// `.to_string()` form this lift consolidated: it compares the
+    /// [`std::borrow::Cow<str>`] directly against a `&String` without
+    /// allocating the owned tail, so it survives the identifier-keyed
+    /// needle below by construction (the `.to_string()` suffix is
+    /// absent from that expression).
+    ///
+    /// The primitive body in `repo.rs` legitimately spells the shape at
+    /// its own body (inside a doc-comment code block and inside the
+    /// primitive body itself); this shield does NOT scan `repo.rs` so
+    /// the sibling primitive survives it by construction, mirroring the
+    /// discipline every sibling shield test in this module already
+    /// carries.
+    #[test]
+    fn dir_entry_name_lossy_consumers_do_not_reinline_the_primitive_shape() {
+        for (name, source) in [
+            ("commands/pangea.rs", include_str!("commands/pangea.rs")),
+            ("commands/helm.rs", include_str!("commands/helm.rs")),
+            (
+                "commands/migration_new.rs",
+                include_str!("commands/migration_new.rs"),
+            ),
+            ("commands/gem.rs", include_str!("commands/gem.rs")),
+        ] {
+            for needle in [
+                "e.file_name().to_string_lossy().to_string()",
+                "entry.file_name().to_string_lossy().to_string()",
+            ] {
+                assert!(
+                    !source.contains(needle),
+                    "{name} must NOT spell the inline `{needle}` \
+                     triple-projection — that duplication was lifted \
+                     onto `crate::repo::dir_entry_name_lossy`. A re-inline \
+                     would silently diverge the DirEntry file-name read \
+                     from the five sibling stringly-key consumers routing \
+                     through the primitive, and re-fork the \
+                     `.to_string()` tail one consumer at a time from \
+                     the primitive's `.into_owned()` one-alloc \
+                     discipline."
                 );
             }
         }
