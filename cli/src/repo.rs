@@ -2419,6 +2419,82 @@ pub fn utf8_lossy_streams_joined(output: &std::process::Output) -> String {
     format!("{}\n{}", stderr, stdout)
 }
 
+/// Canonical wall-clock timestamp for machine-parseable emissions:
+/// RFC-3339, UTC, no per-caller precision choice.
+///
+/// Lifts the one-liner
+/// ```text
+/// chrono::Utc::now().to_rfc3339()
+/// ```
+/// (or its post-`use chrono::Utc;` spelling `Utc::now().to_rfc3339()`)
+/// that five sibling sites in forge carry verbatim:
+/// - `commands/rollback.rs::execute` — `now` for artifact-json tag swaps
+/// - `commands/dashboards.rs::generate_metadata` — `generated_at` on
+///   the dashboard-catalog JSON record
+/// - `commands/product_release.rs::write_artifact_tags` — `now` for
+///   per-service `{service}.artifact.json` timestamps
+/// - `commands/supergraph_verification.rs` — `composed_at` on the
+///   supergraph-composition manifest record
+/// - `observability.rs::EventMetadata::new` — `timestamp` on every
+///   [`crate::observability::ReleaseEvent`] envelope emitted to Vector
+///
+/// Five identically-shaped bodies past THEORY §VI.1's three-times-is-a-
+/// law threshold (PRIME DIRECTIVE: duplication budget is zero) consolidate
+/// onto this typed primitive. Load-bearing properties this primitive owns
+/// that the pre-lift one-liner dropped:
+///
+/// 1. **Time source pinned to UTC, not local.** A hypothetical future
+///    consumer respelling the pre-lift stanza as
+///    `chrono::Local::now().to_rfc3339()` (a single-token drift) would
+///    compile and emit a locale-relative timestamp that Vector, the
+///    artifact-catalog reader, and the dashboard-metadata consumer all
+///    silently mis-interpret as UTC — no runtime error, no lint, no
+///    grep pattern flags the drift. The primitive owns the time-source
+///    choice at ONE code line, closing that drift path by construction.
+/// 2. **Format pinned to RFC-3339.** Chrono exposes a `.to_string()` that
+///    renders the same underlying `DateTime<Utc>` in a slightly different
+///    grammar (`2026-09-02 15:30:00 UTC` — space separator, `UTC` suffix
+///    rather than `+00:00`), which downstream JSON consumers parsing per
+///    RFC-3339 refuse. The pre-lift sites all chose `.to_rfc3339()`
+///    deliberately; the primitive pins that choice.
+/// 3. **Fleet-wide grep-anchor for a future refinement.** A future
+///    decision to trim the sub-second precision (`.to_rfc3339_opts(
+///    SecondsFormat::Secs, true)` — the shape `commands/tool.rs:471`
+///    already carries for the ATTIC_TOKEN JWT `iat` claim), swap in a
+///    monotonic clock for test hermeticity (`#[cfg(test)]` injection
+///    of a fixed instant), or route through a telemetry sigil that
+///    stamps a build-time OTLP trace ID lands in ONE place, not five.
+///
+/// # Return value
+///
+/// A newly-allocated `String` per call — the pre-lift one-liner
+/// composed `chrono::Utc::now().to_rfc3339()` which returns
+/// `String` already, so the primitive body just forwards the same
+/// owned-String shape. Every consumer site both assigned to a
+/// `let now = ...;` local and consumed the value once (as a struct
+/// field, JSON literal, or in-loop borrow into `format!(...)`), so
+/// the owned-String surface is what every caller wants without a
+/// `.to_owned()` bridge.
+///
+/// # Non-goals
+///
+/// This primitive is deliberately NOT the home for:
+/// - `to_rfc3339_opts(SecondsFormat::<X>, use_z)` — the fixed-precision
+///   variant (`commands/tool.rs:471` for the JWT `iat` grammar, which
+///   the JWT spec rejects at sub-second precision) is a distinct shape
+///   with a distinct-typed caller. A `now_rfc3339_utc_secs()` sibling
+///   is the natural next lift when that shape crosses the three-is-a-
+///   law threshold; today it is one site.
+/// - Raw `DateTime<Utc>` construction — `commands/attestation.rs:1135`
+///   and `:1616` assign a `DateTime<Utc>` directly to a struct field
+///   (the serde envelope on the record type owns the render), so the
+///   `.to_rfc3339()` step never happens. The `.timestamp()` integer
+///   variant (`commands/migrations.rs:390`) is likewise a distinct
+///   projection.
+pub fn now_rfc3339_utc() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
 /// Run a command in a specific directory, restoring the original directory afterward
 ///
 /// # Arguments
@@ -7520,5 +7596,196 @@ mod tests {
              byte-for-byte — a `stderr` re-emitted verbatim relies \
              on the indent structure."
         );
+    }
+
+    /// [`now_rfc3339_utc`] must project the current wall-clock time via
+    /// the same `chrono::Utc::now().to_rfc3339()` grammar every one of
+    /// the five pre-lift consumer sites carried inline. Byte-for-byte
+    /// equivalence is not testable directly (two calls on either side
+    /// straddle a clock tick, so their sub-second precision drifts), so
+    /// this test pins the SHAPE that grammar produces: an RFC-3339
+    /// date-time with a `T` separator, a UTC offset suffix, and a
+    /// digit-run at least covering the `YYYY-MM-DDTHH:MM:SS` prefix.
+    /// A future primitive body that respells the projection as
+    /// `chrono::Local::now().to_rfc3339()` (a one-token drift that
+    /// still compiles and returns an RFC-3339 string, but with a
+    /// non-`+00:00` offset the downstream JSON consumers silently
+    /// mis-interpret as UTC) fails the offset-suffix assertion. A
+    /// respell to `.to_string()` (which renders `2026-09-02 15:30:00
+    /// UTC` — space separator, `UTC` suffix rather than `+00:00`)
+    /// fails the `T` separator assertion.
+    #[test]
+    fn now_rfc3339_utc_projects_the_pre_lift_utc_rfc3339_grammar() {
+        let stamp = now_rfc3339_utc();
+
+        // T-separator: `YYYY-MM-DDTHH:MM:SS...` — `chrono::to_string()`
+        // renders a space separator, `chrono::to_rfc3339()` renders `T`.
+        // Pin the RFC-3339 spelling here so a `.to_string()` respell
+        // fails loud.
+        assert!(
+            stamp.as_bytes().get(10) == Some(&b'T'),
+            "now_rfc3339_utc() must place `T` at byte index 10 (the \
+             `YYYY-MM-DD` / `HH:MM:SS...` separator RFC-3339 mandates) \
+             — a `chrono::to_string()` respell renders a space \
+             separator that downstream JSON consumers parsing per \
+             RFC-3339 refuse. Got: {stamp}"
+        );
+
+        // UTC offset suffix: `+00:00`. Chrono's `Utc::now().to_rfc3339()`
+        // renders the offset verbatim as `+00:00` (never `Z`), so a
+        // silent `chrono::Local::now()` respell — which emits the
+        // machine's local offset (`-04:00`, `+02:00`, ...) — fails this
+        // assertion, catching the drift at the primitive body.
+        assert!(
+            stamp.ends_with("+00:00"),
+            "now_rfc3339_utc() must end with the UTC offset suffix \
+             `+00:00` — a `chrono::Local::now()` respell emits the \
+             machine's local offset instead, silently mis-representing \
+             the timestamp to every downstream JSON consumer. Got: \
+             {stamp}"
+        );
+
+        // YYYY-MM-DDTHH:MM:SS prefix — 19 bytes, digits at fixed
+        // positions with `-` / `T` / `:` at the RFC-3339-mandated slots.
+        // A drifting body that returned `Utc::now().timestamp().
+        // to_string()` (an epoch-seconds integer) would fail this
+        // structural check even though the string LOOKS numeric.
+        assert!(
+            stamp.len() >= 25,
+            "now_rfc3339_utc() must return an RFC-3339 date-time at \
+             least `YYYY-MM-DDTHH:MM:SS+00:00` long (25 bytes). A \
+             respell to `.timestamp().to_string()` would return a \
+             bare epoch-seconds integer that fails this shape. Got: \
+             {stamp} (len={})",
+            stamp.len()
+        );
+        let prefix = &stamp[..19];
+        for (i, expected) in [(4, b'-'), (7, b'-'), (10, b'T'), (13, b':'), (16, b':')] {
+            assert_eq!(
+                prefix.as_bytes()[i],
+                expected,
+                "now_rfc3339_utc() must place `{}` at prefix byte {} \
+                 (RFC-3339 date-time layout). Got: {stamp}",
+                expected as char,
+                i
+            );
+        }
+    }
+
+    /// [`now_rfc3339_utc`] must project the SAME timestamp shape as the
+    /// pre-lift `chrono::Utc::now().to_rfc3339()` one-liner. Byte-for-
+    /// byte equality is unreachable across a clock tick, but a tight
+    /// wall-clock window between two back-to-back calls lets us pin
+    /// that the primitive's output PARSES back to the same
+    /// `DateTime<FixedOffset>` domain the pre-lift spelling did, and
+    /// resolves to a UTC offset (`+00:00`) — the strongest oracle
+    /// available without freezing the clock.
+    #[test]
+    fn now_rfc3339_utc_parses_back_to_the_pre_lift_utc_datetime_domain() {
+        let via_primitive = now_rfc3339_utc();
+        let via_pre_lift_spelling = chrono::Utc::now().to_rfc3339();
+
+        // Both project as parseable RFC-3339 date-times. If the
+        // primitive body drifted onto `.to_string()` (space separator,
+        // `UTC` suffix) or `.format(<other-strftime-spec>)`, chrono's
+        // own RFC-3339 parser refuses the output and this assertion
+        // fires.
+        let parsed_primitive = chrono::DateTime::parse_from_rfc3339(&via_primitive).expect(
+            "now_rfc3339_utc() must return a string chrono's own \
+                 RFC-3339 parser accepts — the same round-trip \
+                 discipline every pre-lift consumer's downstream JSON \
+                 consumer applies.",
+        );
+        let parsed_pre_lift = chrono::DateTime::parse_from_rfc3339(&via_pre_lift_spelling)
+            .expect("pre-lift `Utc::now().to_rfc3339()` must round-trip");
+
+        // Both parse to a `FixedOffset::east(0)` — the UTC zero-offset.
+        // A drifted primitive body that quietly returned
+        // `Local::now().to_rfc3339()` would parse successfully but
+        // land at the machine's local offset (`-04:00` on us-east,
+        // `+02:00` on eu-central, ...), catching the timezone drift
+        // that the SHAPE-only check above cannot see when the runner
+        // happens to be in a `+00:00` locale (a CI container with
+        // `TZ=UTC` set — where a `Local` and `Utc` respell would
+        // render identically). Compare offsets, not instants
+        // (the two calls straddle a clock tick).
+        assert_eq!(
+            parsed_primitive.offset(),
+            &chrono::FixedOffset::east_opt(0).unwrap(),
+            "now_rfc3339_utc() must resolve to UTC (`+00:00`) — a \
+             `chrono::Local::now()` respell drifts to the machine's \
+             local offset and silently mis-represents the timestamp. \
+             Got offset: {}",
+            parsed_primitive.offset()
+        );
+        assert_eq!(
+            parsed_pre_lift.offset(),
+            parsed_primitive.offset(),
+            "primitive and pre-lift spelling must agree on the UTC \
+             offset — a divergence here means the primitive body drifted \
+             from the pre-lift consumer contract."
+        );
+    }
+
+    /// Post-lift the five hand-lifted consumer files routing through
+    /// [`now_rfc3339_utc`] must not silently re-inline the pre-lift
+    /// `chrono::Utc::now().to_rfc3339()` (or its post-`use` shorthand
+    /// `Utc::now().to_rfc3339()`) one-liner. Every consumer that emits
+    /// a UTC RFC-3339 timestamp for a machine-parseable JSON record
+    /// (artifact tag record, dashboard metadata, supergraph composition
+    /// manifest, `ReleaseEvent` envelope) routes through this
+    /// primitive, so a re-inline is a lift-regression by construction.
+    ///
+    /// The shield walks each of the five lifted files and refuses
+    /// any occurrence of the pre-lift spellings — locking in the lift
+    /// with the same discipline the sibling `utf8_lossy_borrow` /
+    /// `utf8_lossy_streams_joined` shields enforce.
+    ///
+    /// The `observability.rs` file uses the post-`use chrono::Utc;`
+    /// spelling `Utc::now().to_rfc3339()` pre-lift, so the shield
+    /// probes for both spellings on every file.
+    ///
+    /// Files not in the fleet map are ALLOWED to spell either form —
+    /// a hypothetical future single-site consumer that needs a
+    /// non-`.to_rfc3339()` variant (a `.to_rfc3339_opts(SecondsFormat::
+    /// Secs, true)` for a JWT `iat` claim; `commands/tool.rs:471`
+    /// carries this shape today) chooses its own projection; the shield
+    /// governs only the five sibling call sites this lift closes.
+    #[test]
+    fn now_rfc3339_utc_consumers_do_not_reinline_the_primitive_shape() {
+        let fleet: &[&str] = &[
+            "src/commands/rollback.rs",
+            "src/commands/dashboards.rs",
+            "src/commands/product_release.rs",
+            "src/commands/supergraph_verification.rs",
+            "src/observability.rs",
+        ];
+        for path in fleet {
+            let content = std::fs::read_to_string(path).unwrap_or_else(|e| {
+                panic!(
+                    "shield must read `{path}` to walk it for re-inlines — \
+                     the five-file fleet map was frozen at the lift boundary. \
+                     Read error: {e}"
+                )
+            });
+            assert!(
+                !content.contains("chrono::Utc::now().to_rfc3339()"),
+                "shield refuses re-inline: `{path}` contains the \
+                 pre-lift `chrono::Utc::now().to_rfc3339()` one-liner \
+                 the lift replaced with a `crate::repo::now_rfc3339_utc()` \
+                 call. A silent re-inline would silently reopen the \
+                 timezone-drift path (a hand-swap to `Local::now()`) at \
+                 exactly this site — route the value through the \
+                 primitive instead."
+            );
+            assert!(
+                !content.contains("Utc::now().to_rfc3339()"),
+                "shield refuses re-inline: `{path}` contains the \
+                 post-`use` shorthand `Utc::now().to_rfc3339()` — the \
+                 pre-lift spelling `observability.rs` originally \
+                 carried. Same fix: route through \
+                 `crate::repo::now_rfc3339_utc()`."
+            );
+        }
     }
 }

@@ -207,7 +207,7 @@ async fn write_artifact_tags(
     git_sha: &str,
     attestation_info: Option<&crate::config::AttestationInfoRecord>,
 ) -> Result<()> {
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = crate::repo::now_rfc3339_utc();
     let mut modified_files = Vec::new();
 
     for svc in services {

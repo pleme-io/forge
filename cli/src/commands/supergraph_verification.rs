@@ -173,7 +173,7 @@ impl SupergraphMetadata {
 
         Ok(Self {
             supergraph_hash,
-            composed_at: chrono::Utc::now().to_rfc3339(),
+            composed_at: crate::repo::now_rfc3339_utc(),
             git_commit,
             triggering_service,
             services,

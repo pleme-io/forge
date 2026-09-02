@@ -286,7 +286,7 @@ pub async fn execute(
     // ─── Swap tags in artifact.json ────────────────────────────────────────
     println!("{}", "Swapping tags in artifact.json...".bold());
 
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = crate::repo::now_rfc3339_utc();
     let mut modified_files = Vec::new();
 
     for entry in &entries {

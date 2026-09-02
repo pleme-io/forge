@@ -21,7 +21,6 @@
 //! export PUSHGATEWAY_URL=http://pushgateway.monitoring.svc.cluster.local:9091
 //! ```
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
@@ -92,7 +91,7 @@ impl EventMetadata {
         namespace: impl Into<String>,
     ) -> Self {
         Self {
-            timestamp: Utc::now().to_rfc3339(),
+            timestamp: crate::repo::now_rfc3339_utc(),
             git_sha: git_sha.into(),
             product: product.into(),
             service: service.into(),
