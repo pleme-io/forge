@@ -1160,7 +1160,7 @@ fn mirror_one(
     }
 
     let tmp = tempfile::tempdir().context("mirror tempdir")?;
-    let tmps = tmp.path().to_string_lossy().to_string();
+    let tmps = crate::repo::path_to_string_lossy(tmp.path());
 
     // Pull from upstream — OCI repos take the chart name in the path, HTTP
     // repos take it via --repo.

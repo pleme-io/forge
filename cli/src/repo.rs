@@ -5871,18 +5871,26 @@ mod tests {
     /// The chained-receiver variants that survive by construction
     /// (`product_dir.join(&svc.path).to_string_lossy().to_string()`
     /// at `commands/product_release.rs:708` and
-    /// `commands/rollback.rs:238`, `tmp.path().to_string_lossy()
-    /// .to_string()` at `commands/helm.rs:1169`,
-    /// `entry.file_name().to_string_lossy().to_string()` at
-    /// `commands/helm.rs:1841`, `e.path().to_string_lossy()
-    /// .to_string()` at `commands/helm.rs:2930`) are legitimately
-    /// different in shape from the identifier-single form this lift
-    /// consolidated: the receiver is an inline expression whose
-    /// result type ([`std::ffi::OsString`], the returned
-    /// [`std::path::PathBuf`] of [`Path::join`], etc.) differs from
-    /// the caller-owned `PathBuf` / `&Path` binding the primitive
-    /// takes. Those sites are out-of-scope for this lift; the
-    /// identifier-keyed needles below leave them untouched.
+    /// `commands/rollback.rs:238`, `entry.file_name().to_string_lossy()
+    /// .to_string()` at `commands/helm.rs:1841`,
+    /// `e.path().to_string_lossy().to_string()` at
+    /// `commands/helm.rs:2930`) are legitimately different in shape
+    /// from the identifier-single form this lift consolidated: the
+    /// receiver is an inline expression whose result type
+    /// ([`std::ffi::OsString`], the returned [`std::path::PathBuf`] of
+    /// [`Path::join`], etc.) differs from the caller-owned `PathBuf`
+    /// / `&Path` binding the primitive takes. Those sites are
+    /// out-of-scope for this lift; the identifier-keyed needles below
+    /// leave them untouched.
+    ///
+    /// The one chained-receiver class explicitly closed by a
+    /// follow-up lift is the `<tempfile-binding>.path()
+    /// .to_string_lossy().to_string()` shape (seven sites across
+    /// `commands/image_release.rs` ×5, `commands/helm.rs` ×1,
+    /// `infrastructure/git.rs` ×1) — see the sibling
+    /// [`path_to_string_lossy_tempfile_receiver_consumers_do_not_reinline_the_primitive_shape`]
+    /// shield for the chained-receiver needles those consumers were
+    /// lifted to escape.
     #[test]
     fn path_to_string_lossy_consumers_do_not_reinline_the_primitive_shape() {
         for (name, source, needles) in [
@@ -5951,6 +5959,74 @@ mod tests {
                      (`.to_string()` and `.into_owned()`) into two \
                      hand-typed shapes that could drift from each \
                      other one consumer at a time."
+                );
+            }
+        }
+    }
+
+    /// Post-lift the seven `<tempfile-binding>.path()
+    /// .to_string_lossy().to_string()` chained-receiver consumer sites
+    /// lifted onto [`path_to_string_lossy`] — a class the earlier
+    /// identifier-keyed shield left open by construction because its
+    /// needle-keying skipped chained receivers — must not silently
+    /// re-inline the primitive's shape at their call points.
+    ///
+    /// The seven sites route through the primitive by handing it the
+    /// tempfile binding's [`Path`] reference directly (`tmp.path()`,
+    /// `dir.path()`) rather than binding an owned copy first. The
+    /// shielded shape is therefore keyed by the concrete tempfile
+    /// identifier every consumer bound: `tmp` at the five
+    /// `commands/image_release.rs` test sites and the one
+    /// `commands/helm.rs:1163` `helm pull -d` mirror-tempdir
+    /// production site, and `dir` at the one
+    /// `infrastructure/git.rs:675` `GitBinScope::set(&shim)` fixture
+    /// tempdir test site.
+    ///
+    /// The chained-receiver form is legitimately a different shape
+    /// from the identifier-single form the primary shield walks: the
+    /// receiver is an inline `<TempFile>::path()` / `<TempDir>::path()`
+    /// call whose `&Path` return is fed straight into the primitive
+    /// without an intermediate binding. A re-inline would silently
+    /// diverge the tempfile-path-to-owned-string projection from the
+    /// primary-shield consumers routing through the same primitive,
+    /// and re-fork the `.to_string()` tail one tempfile site at a
+    /// time from the primitive's `.into_owned()` one-alloc
+    /// discipline. Anchoring the needle to the `<ident>.path()` chain
+    /// (rather than either `.path()` alone or the trailing
+    /// `.to_string_lossy().to_string()` alone) keeps the shield from
+    /// matching legitimately different chained-receiver shapes that
+    /// use `.path()` on non-tempfile receivers (a
+    /// [`std::fs::DirEntry`], say) or the trailing two-step over a
+    /// receiver whose type is not `&Path`.
+    #[test]
+    fn path_to_string_lossy_tempfile_receiver_consumers_do_not_reinline_the_primitive_shape() {
+        for (name, source) in [
+            (
+                "commands/image_release.rs",
+                include_str!("commands/image_release.rs"),
+            ),
+            ("commands/helm.rs", include_str!("commands/helm.rs")),
+            (
+                "infrastructure/git.rs",
+                include_str!("infrastructure/git.rs"),
+            ),
+        ] {
+            for needle in [
+                "tmp.path().to_string_lossy().to_string()",
+                "dir.path().to_string_lossy().to_string()",
+            ] {
+                assert!(
+                    !source.contains(needle),
+                    "{name} must NOT spell the inline `{needle}` \
+                     chained-receiver two-step projection — that \
+                     duplication was lifted onto \
+                     `crate::repo::path_to_string_lossy(<tempfile>.path())`. \
+                     A re-inline reopens the class this follow-up lift \
+                     closed (the seven tempfile-receiver stragglers the \
+                     primary identifier-keyed shield left open by \
+                     construction) and re-forks the `.to_string()` tail \
+                     from the primitive's `.into_owned()` one-alloc \
+                     discipline."
                 );
             }
         }

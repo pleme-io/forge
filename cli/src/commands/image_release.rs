@@ -795,7 +795,7 @@ mod tests {
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), &gzipped).unwrap();
-        let path = tmp.path().to_string_lossy().to_string();
+        let path = crate::repo::path_to_string_lossy(tmp.path());
 
         // The gzip wrapper must be transparent: the manifest parses.
         let manifest =
@@ -941,7 +941,7 @@ mod tests {
         let mut payload = elf_header(EM_X86_64);
         payload.resize(4096 + 100, 0); // past MIN_BINARY_SIZE
         let tmp = build_fake_docker_archive(&payload);
-        let path = tmp.path().to_string_lossy().to_string();
+        let path = crate::repo::path_to_string_lossy(tmp.path());
         assert!(verify_binary_contents_arch(&path, "amd64").is_ok());
     }
 
@@ -950,7 +950,7 @@ mod tests {
         let mut payload = elf_header(EM_AARCH64);
         payload.resize(4096 + 100, 0);
         let tmp = build_fake_docker_archive(&payload);
-        let path = tmp.path().to_string_lossy().to_string();
+        let path = crate::repo::path_to_string_lossy(tmp.path());
         let err = verify_binary_contents_arch(&path, "amd64").unwrap_err();
         assert!(matches!(err, LoaderError::BinaryArchMismatch { .. }));
         assert!(err.to_string().contains("exec format error"));
@@ -963,7 +963,7 @@ mod tests {
         let mut payload = vec![0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0x00, 0x00, 0x01];
         payload.resize(4096 + 100, 0);
         let tmp = build_fake_docker_archive(&payload);
-        let path = tmp.path().to_string_lossy().to_string();
+        let path = crate::repo::path_to_string_lossy(tmp.path());
         let err = verify_binary_contents_arch(&path, "amd64").unwrap_err();
         assert!(matches!(err, LoaderError::NotAnElf { .. }));
     }
@@ -974,7 +974,7 @@ mod tests {
         // (this check targets compiled binaries, not every tiny file).
         let payload = vec![0xcf, 0xfa, 0xed, 0xfe, 0, 0, 0, 0];
         let tmp = build_fake_docker_archive(&payload);
-        let path = tmp.path().to_string_lossy().to_string();
+        let path = crate::repo::path_to_string_lossy(tmp.path());
         assert!(verify_binary_contents_arch(&path, "amd64").is_ok());
     }
 }
