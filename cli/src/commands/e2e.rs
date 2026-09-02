@@ -700,7 +700,7 @@ pub fn cleanup_testcontainers() -> Result<()> {
         .output()
         .context("Failed to list testcontainers")?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = crate::repo::utf8_lossy_borrow(&output.stdout);
     let container_ids: Vec<&str> = stdout.trim().lines().filter(|l| !l.is_empty()).collect();
 
     let tc_count = container_ids.len();
@@ -720,7 +720,7 @@ pub fn cleanup_testcontainers() -> Result<()> {
         .output()
         .context("Failed to list Ryuk containers")?;
 
-    let ryuk_stdout = String::from_utf8_lossy(&ryuk_output.stdout);
+    let ryuk_stdout = crate::repo::utf8_lossy_borrow(&ryuk_output.stdout);
     let ryuk_ids: Vec<&str> = ryuk_stdout
         .trim()
         .lines()
@@ -1041,7 +1041,7 @@ fn print_image_info() -> Result<()> {
         .output()
         .context("Failed to list Docker images")?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = crate::repo::utf8_lossy_borrow(&output.stdout);
     for line in stdout.lines() {
         if line.contains("backend") || line.contains("web") {
             println!("{}", line);

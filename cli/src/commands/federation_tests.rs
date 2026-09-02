@@ -381,14 +381,14 @@ pub async fn run_federation_tests(
 
             match log_output {
                 Ok(output) if output.status.success() => {
-                    let logs = String::from_utf8_lossy(&output.stdout);
+                    let logs = crate::repo::utf8_lossy_borrow(&output.stdout);
                     println!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                     println!("{}", logs);
                     println!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                     println!();
                 }
                 Ok(output) => {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let stderr = crate::repo::utf8_lossy_borrow(&output.stderr);
                     eprintln!("   ⚠️  Could not fetch logs: {}", stderr);
                 }
                 Err(e) => {
@@ -405,7 +405,7 @@ pub async fn run_federation_tests(
 
             if let Ok(output) = status_output {
                 if output.status.success() {
-                    let status = String::from_utf8_lossy(&output.stdout);
+                    let status = crate::repo::utf8_lossy_borrow(&output.stdout);
                     // Extract just the status section
                     if let Some(status_section) = status.split("status:").nth(1) {
                         println!("{}", "Job Status:".bold());
@@ -726,7 +726,7 @@ async fn wait_for_job_completion(
         )
         .await?;
 
-        let status = String::from_utf8_lossy(&output.stdout);
+        let status = crate::repo::utf8_lossy_borrow(&output.stdout);
 
         // Check if job is complete or failed
         if status.contains("True") {
@@ -754,7 +754,7 @@ async fn check_job_success(job_name: &str, namespace: &str) -> Result<bool> {
     )
     .await?;
 
-    let succeeded = String::from_utf8_lossy(&output.stdout);
+    let succeeded = crate::repo::utf8_lossy_borrow(&output.stdout);
     Ok(succeeded.trim() == "1")
 }
 

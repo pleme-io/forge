@@ -2166,6 +2166,84 @@ pub fn utf8_lossy_owned(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).to_string()
 }
 
+/// Project a captured byte stream through [`String::from_utf8_lossy`],
+/// returning a borrowed [`std::borrow::Cow`] without materializing an
+/// owned [`String`] on the fully-valid-UTF-8 path.
+///
+/// # Duplication lift (the single-stream borrow-projection discipline)
+///
+/// The `let <name> = String::from_utf8_lossy(&<X>.<stream>);` bare
+/// borrow-projection recurred inline at forty-plus sibling consumer
+/// sites across the `commands/*.rs` surface, each spelling the identical
+/// one-line projection: a captured [`std::process::Output`] stream (or a
+/// hand-rolled `Vec<u8>` capture in an equivalent shape) bound as a
+/// borrowed [`std::borrow::Cow<str>`] and immediately consumed by a
+/// single downstream call (a [`str::contains`] gate, a
+/// [`str::lines`] walk, a `format!` interpolation, a bail! message).
+/// Each pre-lift site read the raw [`String::from_utf8_lossy`] name;
+/// none read the family label. Post-lift the primitive stands as the
+/// fourth sibling of the `crate::repo::utf8_lossy_*` surface, and
+/// consumer sites route through the single named entry point that
+/// pins the family membership.
+///
+/// # Why a separate primitive from `utf8_lossy_owned` and `utf8_lossy_streams`
+///
+/// The sibling [`utf8_lossy_owned`] materializes an owned [`String`]
+/// via a two-alloc `.to_string()` tail — its consumers need the owned
+/// buffer to outlive the source bytes (a return value, a struct field,
+/// a downstream parser that binds the result across scopes). This
+/// primitive's consumers do the opposite: they bind the projection into
+/// a local `let` and consume it in the same block, so an owned tail
+/// would allocate at every site without benefit. The sibling
+/// [`utf8_lossy_streams`] projects BOTH streams from a single
+/// [`std::process::Output`] receiver as a paired `(Cow, Cow)` tuple;
+/// its shield refuses adjacent same-receiver borrow-projection pairs
+/// to keep the "diagnostic dump both streams" surface uniform, but
+/// deliberately leaves single-stream borrows (a `stderr`-only bail
+/// arm, a `stdout`-only capture path) untouched — that is the class
+/// this primitive owns.
+///
+/// # Behavior
+///
+/// - **Zero-alloc on valid UTF-8** — returns [`std::borrow::Cow::Borrowed`]
+///   pointing directly into `bytes`. The lifetime elision binds the
+///   returned [`std::borrow::Cow`]'s borrow to the input slice, so the
+///   caller's `let` binding keeps the source alive across use.
+/// - **Invalid UTF-8** — invalid byte sequences replaced by
+///   [`U+FFFD REPLACEMENT CHARACTER`] via the same
+///   [`String::from_utf8_lossy`] repair the sibling primitives use;
+///   returns [`std::borrow::Cow::Owned`] carrying the repaired string.
+///   A non-lossy [`str::from_utf8`] projection would fail on the first
+///   invalid byte and drop the diagnostic the operator needs.
+/// - **Whitespace** — leading, trailing, and internal whitespace all
+///   preserved byte-for-byte. Consumers that need trimming spell
+///   `utf8_lossy_borrow(&<x>.stream).trim()` explicitly at the call
+///   site — the primitive does not silently apply a trim the operator
+///   did not ask for.
+/// - **Empty input** — returns [`std::borrow::Cow::Borrowed`] of the
+///   empty string. The exact shape every `<x>.<stream>.is_empty()`
+///   short-circuit relied on.
+///
+/// # Peer
+///
+/// Sibling to [`utf8_lossy_owned`], [`utf8_lossy_trim_owned`], and
+/// [`utf8_lossy_streams`] on the byte-projection surface, keyed by
+/// the shape of the return value and the receiver:
+///
+/// | Primitive               | Receiver                      | Return                                | Tail             |
+/// |-------------------------|-------------------------------|---------------------------------------|------------------|
+/// | `utf8_lossy_borrow`     | `&[u8]`                       | [`std::borrow::Cow<'_, str>`]         | none             |
+/// | `utf8_lossy_owned`      | `&[u8]`                       | [`String`]                            | `.to_string()`   |
+/// | `utf8_lossy_trim_owned` | `&[u8]`                       | [`String`]                            | `.trim()` + `.to_string()` |
+/// | `utf8_lossy_streams`    | `&`[`std::process::Output`]   | `(`[`Cow<'_, str>`][`std::borrow::Cow`]`, Cow<'_, str>)` | none (paired) |
+///
+/// Together the four discharge the
+/// `<captured-bytes> → <lossy-UTF-8-repair>` family the
+/// `crate::repo::*` surface owns.
+pub fn utf8_lossy_borrow(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+    String::from_utf8_lossy(bytes)
+}
+
 /// Project both captured streams of a [`std::process::Output`] through
 /// [`String::from_utf8_lossy`] in one call, returning
 /// `(stdout, stderr)` as a paired tuple of borrowed [`std::borrow::Cow`]
@@ -6662,5 +6740,271 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// [`utf8_lossy_borrow`] projects a byte slice through
+    /// [`String::from_utf8_lossy`] byte-for-byte identically to the
+    /// pre-lift inline spelling every one of the forty-plus consumer
+    /// sites carried (`let <name> = String::from_utf8_lossy(&<X>.stream);`).
+    /// Pins the substitution to be a no-op across the four canonical
+    /// shapes the pre-lift borrow-projections exercise:
+    ///
+    /// - Empty input — projects to the empty [`std::borrow::Cow::Borrowed`]
+    ///   `""` the `<x>.stream.is_empty()` short-circuits relied on.
+    /// - Valid ASCII with a trailing newline (typical `kubectl` /
+    ///   `helm` / `cargo` stdout capture) — projects to a
+    ///   [`std::borrow::Cow::Borrowed`] pointing at the source bytes
+    ///   without allocating.
+    /// - Valid multi-byte UTF-8 (a subprocess emitting `→` /
+    ///   `✅` in a diagnostic) — projects to a [`std::borrow::Cow::Borrowed`]
+    ///   containing the same code points.
+    /// - Invalid UTF-8 (a rogue `0xFF` byte in captured output) — projects
+    ///   to a [`std::borrow::Cow::Owned`] with the invalid byte replaced
+    ///   by `\u{FFFD}` via the same [`String::from_utf8_lossy`] repair
+    ///   the sibling primitives use.
+    #[test]
+    fn utf8_lossy_borrow_matches_pre_lift_spelling_byte_for_byte() {
+        let cases: &[(&str, &[u8])] = &[
+            ("empty input", b""),
+            (
+                "ascii with trailing newline (kubectl stdout)",
+                b"pod-abc123   Running   0   3m\n",
+            ),
+            (
+                "multi-byte utf-8 (diagnostic with unicode arrows)",
+                "→ 3 files updated ✅\n".as_bytes(),
+            ),
+            (
+                "invalid utf-8 byte in payload (rogue subprocess)",
+                b"partial\xff\xfeoutput\n",
+            ),
+        ];
+        for (label, bytes) in cases {
+            let via_primitive = utf8_lossy_borrow(bytes);
+            let via_pre_lift_spelling = String::from_utf8_lossy(bytes);
+            assert_eq!(
+                via_primitive, via_pre_lift_spelling,
+                "utf8_lossy_borrow() must project byte-for-byte \
+                 identically to the pre-lift inline \
+                 `String::from_utf8_lossy(&<bytes>)` spelling — the \
+                 shape every one of the forty-plus consumer sites \
+                 across `commands/*.rs` carried. Case `{label}` \
+                 diverged: primitive={via_primitive:?}, \
+                 pre-lift={via_pre_lift_spelling:?}"
+            );
+        }
+    }
+
+    /// [`utf8_lossy_borrow`] must NOT allocate on the fully-valid-UTF-8
+    /// path — the whole point of the borrow-shape return is that a
+    /// caller who binds `let s = utf8_lossy_borrow(&<x>.stream)` and
+    /// consumes `s` via a [`str::contains`] / [`str::lines`] /
+    /// `format!` interpolation pays zero allocations, whereas the
+    /// sibling [`utf8_lossy_owned`] always materializes an owned
+    /// [`String`]. A future primitive body that silently applied a
+    /// `.to_string()` tail (a "convenient" refactor onto the owned
+    /// sibling) would silently reintroduce a per-site allocation at
+    /// every one of the forty-plus consumer sites. This shield pins
+    /// the borrow discipline at the primitive's own body by asserting
+    /// the returned [`std::borrow::Cow`] discriminant is `Borrowed`
+    /// on the valid-UTF-8 branch and `Owned` on the invalid-UTF-8
+    /// branch — the exact discriminant behavior [`String::from_utf8_lossy`]
+    /// itself specifies.
+    #[test]
+    fn utf8_lossy_borrow_returns_borrowed_on_valid_utf8_owned_on_invalid() {
+        let valid = utf8_lossy_borrow(b"pod-abc123   Running   0   3m\n");
+        assert!(
+            matches!(valid, std::borrow::Cow::Borrowed(_)),
+            "utf8_lossy_borrow() must return `Cow::Borrowed` on \
+             fully-valid UTF-8 input — the zero-allocation guarantee \
+             that separates this primitive from the sibling \
+             `utf8_lossy_owned`. A `.to_string()` tail at the primitive \
+             body would silently reintroduce a per-site allocation at \
+             every consumer routing through it."
+        );
+        let empty = utf8_lossy_borrow(b"");
+        assert!(
+            matches!(empty, std::borrow::Cow::Borrowed(_)),
+            "utf8_lossy_borrow() must return `Cow::Borrowed` on empty \
+             input — the exact shape every `<x>.stream.is_empty()` \
+             short-circuit relied on."
+        );
+        let invalid = utf8_lossy_borrow(b"partial\xffoutput");
+        assert!(
+            matches!(invalid, std::borrow::Cow::Owned(_)),
+            "utf8_lossy_borrow() must return `Cow::Owned` when the \
+             input carries invalid UTF-8 — the repair path where \
+             `\\u{{FFFD}}` replacements are stamped into a fresh \
+             buffer. A pre-lift consumer that bound the projection \
+             into a `let` and expected `.contains(\"\\u{{FFFD}}\")` \
+             to succeed relies on this branch."
+        );
+    }
+
+    /// Post-lift the nine hand-lifted consumer files routing through
+    /// [`utf8_lossy_borrow`] must not silently re-inline the
+    /// bare-borrow projection at their call points — a re-inline
+    /// reopens the class this lift closed and forks one consumer at a
+    /// time from its siblings.
+    ///
+    /// This source-scan shield walks each lifted file and refuses the
+    /// specific pre-lift needles: any `String::from_utf8_lossy(&<X>.stream)`
+    /// borrow projection where the following character is neither
+    /// `.` (a further method call — a distinct projection like
+    /// `.trim().to_string()` [→ `utf8_lossy_trim_owned`] or
+    /// `.to_string()` [→ `utf8_lossy_owned`] or `.into_owned()`) nor
+    /// a closing token of a paired dump (which [`utf8_lossy_streams`]
+    /// owns). The shield keys on the exact needle each file's lifted
+    /// site carried pre-lift; other spellings survive by construction.
+    ///
+    /// The primitive body in `repo.rs` legitimately spells the shape
+    /// at its own body; this shield does NOT scan `repo.rs`, mirroring
+    /// the sibling shield discipline.
+    #[test]
+    fn utf8_lossy_borrow_consumers_do_not_reinline_the_primitive_shape() {
+        for (name, source, needles) in [
+            (
+                "commands/prerelease.rs",
+                include_str!("commands/prerelease.rs"),
+                &[
+                    "let stderr = String::from_utf8_lossy(&output.stderr);",
+                    "let stderr = String::from_utf8_lossy(&fix_output.stderr);",
+                    "let stdout = String::from_utf8_lossy(&check_output.stdout);",
+                    "let stdout = String::from_utf8_lossy(&output.stdout);",
+                ][..],
+            ),
+            (
+                "commands/federation_tests.rs",
+                include_str!("commands/federation_tests.rs"),
+                &[
+                    "let logs = String::from_utf8_lossy(&output.stdout);",
+                    "let stderr = String::from_utf8_lossy(&output.stderr);",
+                    "let status = String::from_utf8_lossy(&output.stdout);",
+                    "let succeeded = String::from_utf8_lossy(&output.stdout);",
+                ][..],
+            ),
+            (
+                "commands/migrations.rs",
+                include_str!("commands/migrations.rs"),
+                &[
+                    "let names = String::from_utf8_lossy(&output.stdout);",
+                    "let stderr = String::from_utf8_lossy(&patch_result.stderr);",
+                    "let output = String::from_utf8_lossy(&cleanup_pods.stdout);",
+                    "let stderr = String::from_utf8_lossy(&o.stderr);",
+                ][..],
+            ),
+            (
+                "commands/nix_builder.rs",
+                include_str!("commands/nix_builder.rs"),
+                &[
+                    "let output = String::from_utf8_lossy(&nix_build.stdout);",
+                    "let stderr = String::from_utf8_lossy(&nc_check.stderr);",
+                    "let ip = String::from_utf8_lossy(&dig_output.stdout);",
+                ][..],
+            ),
+            (
+                "commands/e2e.rs",
+                include_str!("commands/e2e.rs"),
+                &[
+                    "let stdout = String::from_utf8_lossy(&output.stdout);",
+                    "let ryuk_stdout = String::from_utf8_lossy(&ryuk_output.stdout);",
+                ][..],
+            ),
+            (
+                "commands/supergraph_verification.rs",
+                include_str!("commands/supergraph_verification.rs"),
+                &[
+                    "let version = String::from_utf8_lossy(&output.stdout);",
+                    "let health_response = String::from_utf8_lossy(&output.stdout);",
+                    "let actual_hash = String::from_utf8_lossy(&output.stdout);",
+                ][..],
+            ),
+            (
+                "commands/codegen_validation.rs",
+                include_str!("commands/codegen_validation.rs"),
+                &[
+                    "let stderr = String::from_utf8_lossy(&install_output.stderr);",
+                    "let stderr = String::from_utf8_lossy(&status_output.stderr);",
+                    "let changes = String::from_utf8_lossy(&status_output.stdout);",
+                    "let stderr = String::from_utf8_lossy(&add_output.stderr);",
+                ][..],
+            ),
+            (
+                "commands/rust_service.rs",
+                include_str!("commands/rust_service.rs"),
+                &[
+                    "let config = String::from_utf8_lossy(&output.stdout);",
+                    "let stderr = String::from_utf8_lossy(&output.stderr);",
+                    "let phase = String::from_utf8_lossy(&status_output.stdout);",
+                    "let image = String::from_utf8_lossy(&image_output.stdout);",
+                ][..],
+            ),
+            (
+                "commands/frontend_validation.rs",
+                include_str!("commands/frontend_validation.rs"),
+                &[
+                    "let stderr = String::from_utf8_lossy(&fix_output.stderr);",
+                    "let stderr = String::from_utf8_lossy(&install.stderr);",
+                ][..],
+            ),
+        ] {
+            for needle in needles {
+                for (line_no, line) in source.lines().enumerate() {
+                    if line.trim_start().starts_with("///")
+                        || line.trim_start().starts_with("//!")
+                        || line.trim_start().starts_with("//")
+                    {
+                        continue;
+                    }
+                    assert!(
+                        !line.contains(needle),
+                        "{name}:{} must NOT spell the inline \
+                         `{needle}` bare-borrow projection — that \
+                         duplication was lifted onto \
+                         `crate::repo::utf8_lossy_borrow`. A re-inline \
+                         would silently diverge the captured-bytes-to-\
+                         borrowed-Cow projection from its siblings \
+                         routing through the primitive, and re-fork the \
+                         shape into hand-typed literals that could drift \
+                         one consumer at a time (a helpful ANSI-strip, \
+                         `.trim()`, or metrics-hook counting the \
+                         non-UTF-8 repair frequency at the primitive \
+                         would silently miss the re-inlined site). \
+                         Offending line: {line}",
+                        line_no + 1,
+                    );
+                }
+            }
+        }
+    }
+
+    /// [`utf8_lossy_borrow`] does NOT trim its payload — leading and
+    /// trailing whitespace survives byte-for-byte because consumers
+    /// that need trimming spell `.trim()` explicitly at the call site,
+    /// and consumers that DON'T trim (a `stdout` walked line-by-line,
+    /// a `stderr` re-emitted to the operator verbatim) rely on the
+    /// preserved bytes. A future primitive body that silently applied
+    /// a `.trim()` tail would silently drift the projection from the
+    /// callers who never asked for it — the same discipline
+    /// [`utf8_lossy_owned`]'s own shield enforces against the sibling
+    /// [`utf8_lossy_trim_owned`].
+    #[test]
+    fn utf8_lossy_borrow_body_does_not_trim_the_payload() {
+        let with_trailing_newline = utf8_lossy_borrow(b"payload\n");
+        assert_eq!(
+            with_trailing_newline, "payload\n",
+            "utf8_lossy_borrow() must preserve trailing whitespace \
+             byte-for-byte — trimming is a distinct projection at the \
+             sibling `utf8_lossy_trim_owned`, and a silent trim tail \
+             here would drop the newline forty-plus consumers walk \
+             lines against."
+        );
+        let with_leading_whitespace = utf8_lossy_borrow(b"  indent\n");
+        assert_eq!(
+            with_leading_whitespace, "  indent\n",
+            "utf8_lossy_borrow() must preserve leading whitespace \
+             byte-for-byte — a `stderr` re-emitted verbatim relies \
+             on the indent structure."
+        );
     }
 }

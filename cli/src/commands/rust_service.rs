@@ -284,7 +284,7 @@ fn check_cross_compilation_available() -> bool {
         .args(&["show-config"])
         .output()
     {
-        let config = String::from_utf8_lossy(&output.stdout);
+        let config = crate::repo::utf8_lossy_borrow(&output.stdout);
         if config.contains("aarch64-linux") {
             return true;
         }
@@ -742,7 +742,7 @@ async fn verify_image_in_registry(registry: &str, full_tag_suffix: &str) -> Resu
         .context("Failed to run doca inspect")?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = crate::repo::utf8_lossy_borrow(&output.stderr);
         bail!(
             "❌ Image not found in registry: {}\n   \
              This could mean:\n   \
@@ -2072,8 +2072,8 @@ async fn print_deployment_report(
 
     if let (Ok(status_output), Ok(image_output)) = (&pod_status, &current_image) {
         if status_output.status.success() && image_output.status.success() {
-            let phase = String::from_utf8_lossy(&status_output.stdout);
-            let image = String::from_utf8_lossy(&image_output.stdout);
+            let phase = crate::repo::utf8_lossy_borrow(&status_output.stdout);
+            let image = crate::repo::utf8_lossy_borrow(&image_output.stdout);
 
             println!("  {} Service Pod Rollout", "⏳".yellow());
             println!("    • Current pod status: {}", phase);

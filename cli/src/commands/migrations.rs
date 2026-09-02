@@ -297,7 +297,7 @@ async fn get_kustomize_resource_name(
     )
     .await?;
 
-    let names = String::from_utf8_lossy(&output.stdout);
+    let names = crate::repo::utf8_lossy_borrow(&output.stdout);
     let names: Vec<&str> = names.split_whitespace().collect();
 
     // Find the name that matches our service-suffix pattern
@@ -879,7 +879,7 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
     .await?;
 
     if !patch_result.status.success() {
-        let stderr = String::from_utf8_lossy(&patch_result.stderr);
+        let stderr = crate::repo::utf8_lossy_borrow(&patch_result.stderr);
         bail!("Failed to reset DatabaseMigration: {}", stderr);
     }
 
@@ -946,7 +946,7 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
         )
         .await?;
 
-        let output = String::from_utf8_lossy(&cleanup_pods.stdout);
+        let output = crate::repo::utf8_lossy_borrow(&cleanup_pods.stdout);
         if output.contains("deleted") {
             println!("   ✅ Deleted orphaned pods");
         } else {
@@ -1314,7 +1314,7 @@ async fn set_expected_tag_annotation(migration_name: &str, namespace: &str, expe
             println!("   ✅ Expected-tag annotation set");
         }
         Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
+            let stderr = crate::repo::utf8_lossy_borrow(&o.stderr);
             println!(
                 "   ⚠️  Failed to set expected-tag annotation (non-fatal): {}",
                 stderr.trim()
