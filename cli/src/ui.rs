@@ -244,6 +244,105 @@ pub fn write_success_banner<W: std::io::Write>(
     Ok(())
 }
 
+/// Rule-character glyph every pre-lift release-milestone site fed to
+/// [`String::repeat`] verbatim. Pinned as one named constant so a
+/// future swap of the release-milestone grammar's rule character (a
+/// promotion to `━` to unify with [`write_success_banner`]'s heavy
+/// rule, a demotion to `-` for a leaner readout) happens at ONE typed
+/// boundary rather than three literal-argument sites.
+const RELEASE_STAGE_BANNER_RULE_CHAR: &str = "=";
+
+/// Rule width every pre-lift release-milestone site spelled inline as
+/// the literal `60`. Same one-boundary pinning as
+/// [`RELEASE_STAGE_BANNER_RULE_CHAR`]; the width is distinct from the
+/// per-caller `width` parameter [`write_success_banner`] carries
+/// because the release-milestone grammar is a fixed-shape terminal
+/// banner (not a variable-width headline) — every consumer chose 60,
+/// so 60 lives in the primitive rather than repeating at every call
+/// site.
+const RELEASE_STAGE_BANNER_WIDTH: usize = 60;
+
+/// Prints the three-line release-milestone banner every pre-lift
+/// consumer spelled inline as a `"=".repeat(60).bright_green()` rule,
+/// a composite headline of the form `<STAGE> COMPLETE` in `green.bold`,
+/// then `<product>` in `cyan.bold`, then `(<suffix>)` in `dimmed`, and
+/// a second identical rule. Marks a terminal-milestone in the product
+/// release pipeline at 3 sibling call sites across
+/// `commands/{rollback, product_release (×2)}.rs` — the pre-lift
+/// `println!("{}", "=".repeat(60).bright_green()); println!("{} {} {}",
+/// "<STAGE> COMPLETE".green().bold(), product.cyan().bold(),
+/// format!("(<...>)", ...).dimmed()); println!("{}",
+/// "=".repeat(60).bright_green());` stanza — so a future palette shift
+/// against rule-char, headline color, or parenthesization happens at
+/// ONE site rather than three.
+///
+/// Delegates to [`write_release_stage_banner`] against
+/// `std::io::stdout()`; the writer split exists so the fail-before-pass
+/// test can pin the three-line, palette, and headline-composition
+/// contract by inspecting emitted bytes rather than shelling out and
+/// grepping stdout.
+///
+/// # Distinct from [`print_success_banner`]
+///
+/// [`print_success_banner`] carries a `━`-rule + single-message
+/// headline grammar the 7 pre-lift consumer sites in
+/// `commands/{developer_tools, rust_service, web_service}.rs` used to
+/// mark a single-command terminal-success milestone. This primitive
+/// carries a **distinct** `=`-rule + composite `<STAGE> + <product> +
+/// (<suffix>)` headline grammar the 3 pre-lift consumer sites in
+/// `commands/{rollback, product_release}.rs` used to mark a
+/// product-release-lifecycle milestone — a shape where the stage name
+/// varies (ROLLBACK / BUILD / RELEASE) and the product name and a
+/// stage-specific suffix (target env, git sha, or both) are
+/// visually separated by color. The two primitives coexist rather
+/// than one subsuming the other because the visual grammars an
+/// operator has been trained to read differ — a single-command
+/// success is a `━` bar, a product-release milestone is an `=` bar.
+///
+/// # Compounding
+///
+/// Pre-lift each of the 3 consumer sites restated the entire
+/// three-line stanza — a swap of the rule character in one site
+/// alone (an `=` demoted to `-` in `rollback.rs` while
+/// `product_release.rs` stayed on `=`) silently splits the
+/// release-lifecycle visual grammar, a `.green().bold()` promoted
+/// to `.bright_green().bold()` on the stage headline loses the
+/// contrast against the rule, a `.dimmed()` dropped from the
+/// suffix promotes non-load-bearing metadata onto operator eye
+/// alongside the stage name. Post-lift the primitive collapses
+/// all three restatements onto ONE typed function; a future
+/// palette adjustment hits one body, not three.
+pub fn print_release_stage_banner(stage: &str, product: &str, suffix: &str) {
+    let _ = write_release_stage_banner(&mut std::io::stdout().lock(), stage, product, suffix);
+}
+
+/// Writer-taking sibling to [`print_release_stage_banner`]. Emits the
+/// three release-milestone banner lines (`bright_green` `=` rule,
+/// `<stage>.green().bold() + <product>.cyan().bold() +
+/// format!("({})", <suffix>).dimmed()` headline, `bright_green` `=`
+/// rule) via [`writeln!`] against the supplied writer.
+/// [`print_release_stage_banner`] is the stdout adapter; this variant
+/// exists so tests can pin the line count, palette, and
+/// headline-composition contract without capturing stdout.
+pub fn write_release_stage_banner<W: std::io::Write>(
+    w: &mut W,
+    stage: &str,
+    product: &str,
+    suffix: &str,
+) -> std::io::Result<()> {
+    let bar = RELEASE_STAGE_BANNER_RULE_CHAR.repeat(RELEASE_STAGE_BANNER_WIDTH);
+    writeln!(w, "{}", bar.as_str().bright_green())?;
+    writeln!(
+        w,
+        "{} {} {}",
+        stage.green().bold(),
+        product.cyan().bold(),
+        format!("({})", suffix).dimmed()
+    )?;
+    writeln!(w, "{}", bar.as_str().bright_green())?;
+    Ok(())
+}
+
 pub fn print_header(title: &str) {
     println!();
     println!(
@@ -474,6 +573,135 @@ mod tests {
         assert!(
             lines[1].contains("\x1b[1;32m") || lines[1].contains("\x1b[32;1m"),
             "line 1 must carry the `green` + `bold` ANSI sequence; got {:?}",
+            lines[1]
+        );
+    }
+
+    /// Fail-before-pass envelope for [`super::write_release_stage_banner`].
+    /// Pins the three-line body order every pre-lift consumer spelled
+    /// verbatim (`"=".repeat(60).bright_green()` rule,
+    /// `<STAGE>.green().bold() + <product>.cyan().bold() +
+    /// format!("({})", <suffix>).dimmed()` composite headline,
+    /// `"=".repeat(60).bright_green()` rule). A silent contract drift
+    /// a future rewrite might introduce — dropping one bar to two
+    /// `writeln!`s, swapping the message and a bar, promoting the
+    /// stage color to `bright_green` and losing the visual-contrast
+    /// contract against the rule, hoisting the rule character off `=`
+    /// in one branch alone, dropping the parentheses around the
+    /// suffix, dropping `.dimmed()` from the suffix so it competes
+    /// with the stage for operator eye — flips this assertion rather
+    /// than compiling and silently diverging the three consumer
+    /// sites' visual grammar.
+    #[test]
+    fn write_release_stage_banner_emits_three_bar_headline_bar_lines_in_order() {
+        // Force ANSI emission so the palette contract survives a test
+        // runner attached to a non-tty (colored auto-drops sequences).
+        colored::control::set_override(true);
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_release_stage_banner(&mut buf, "RELEASE COMPLETE", "kenshi", "prod, abc123")
+            .expect("write_release_stage_banner against a Vec<u8> writer must succeed");
+
+        colored::control::unset_override();
+
+        let out = String::from_utf8(buf).expect(
+            "write_release_stage_banner must emit valid UTF-8 (the pre-lift println!s did)",
+        );
+
+        // Exactly three lines — the pre-lift stanza is three
+        // `println!`s, not two, and not four. A refactor that drops
+        // or adds a bar fails here.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            3,
+            "write_release_stage_banner must emit exactly three lines \
+             (rule, headline, rule) — the pre-lift stanza is three \
+             `println!`s; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The `=` rule glyph appears in the outer two lines but never
+        // in the middle line; every headline component appears in the
+        // middle line but never in the outer lines. A swap of the
+        // middle line and a bar (a fusion that reorders the
+        // `writeln!`s) fails here.
+        assert!(
+            lines[0].contains('='),
+            "line 0 must be an `=` rule; got {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[2].contains('='),
+            "line 2 must be an `=` rule; got {:?}",
+            lines[2]
+        );
+        assert!(
+            !lines[1].contains('='),
+            "line 1 must NOT contain the rule glyph — it is the \
+             composite headline line; got {:?}",
+            lines[1]
+        );
+        assert!(
+            lines[1].contains("RELEASE COMPLETE"),
+            "line 1 must carry the stage headline verbatim; got {:?}",
+            lines[1]
+        );
+        assert!(
+            lines[1].contains("kenshi"),
+            "line 1 must carry the product name verbatim; got {:?}",
+            lines[1]
+        );
+        assert!(
+            lines[1].contains("(prod, abc123)"),
+            "line 1 must wrap the suffix in parentheses — the pre-lift \
+             stanza wrapped it via `format!(\"({{}})\", <suffix>)`, so \
+             a fusion that drops the parenthesization fails here; got {:?}",
+            lines[1]
+        );
+
+        // The rule width is pinned inside the primitive at 60 (every
+        // pre-lift consumer spelled `.repeat(60)` verbatim). A fusion
+        // that hoists the width off the constant fails here.
+        let rule_glyph_count = lines[0].chars().filter(|c| *c == '=').count();
+        assert_eq!(
+            rule_glyph_count, 60,
+            "line 0 must contain exactly `RELEASE_STAGE_BANNER_WIDTH` \
+             (60) `=` glyphs; got {}",
+            rule_glyph_count
+        );
+
+        // The palette contract: the rule lines carry the `bright_green`
+        // ANSI sequence; the stage carries `green` + `bold`; the
+        // product carries `cyan` + `bold`; the parenthesized suffix
+        // carries the `dimmed` (`\x1b[2m`) sequence. A silent swap of
+        // any of these loses the visual grammar's meaning — the stage
+        // and the product would no longer be visually separable, the
+        // suffix would promote off the dimmed track onto operator eye
+        // alongside the stage. Pin every sequence here.
+        assert!(
+            lines[0].contains("\x1b[92m"),
+            "line 0 must carry the `bright_green` ANSI sequence \
+             (`\\x1b[92m`); got {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains("\x1b[1;32m") || lines[1].contains("\x1b[32;1m"),
+            "line 1 stage must carry the `green` + `bold` ANSI sequence; \
+             got {:?}",
+            lines[1]
+        );
+        assert!(
+            lines[1].contains("\x1b[1;36m") || lines[1].contains("\x1b[36;1m"),
+            "line 1 product must carry the `cyan` + `bold` ANSI sequence; \
+             got {:?}",
+            lines[1]
+        );
+        assert!(
+            lines[1].contains("\x1b[2m"),
+            "line 1 suffix must carry the `dimmed` ANSI sequence \
+             (`\\x1b[2m`); got {:?}",
             lines[1]
         );
     }

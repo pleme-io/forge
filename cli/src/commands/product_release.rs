@@ -644,14 +644,11 @@ pub async fn product_release(
         );
         println!();
 
-        println!("{}", "=".repeat(60).bright_green());
-        println!(
-            "{} {} {}",
-            "BUILD COMPLETE".green().bold(),
-            product.cyan().bold(),
-            format!("(sha: {})", git_sha).dimmed()
+        crate::ui::print_release_stage_banner(
+            "BUILD COMPLETE",
+            &product,
+            &format!("sha: {}", git_sha),
         );
-        println!("{}", "=".repeat(60).bright_green());
 
         return Ok(());
     }
@@ -806,14 +803,11 @@ pub async fn product_release(
     }
 
     // ─── Done ───────────────────────────────────────────────────────────────
-    println!("{}", "=".repeat(60).bright_green());
-    println!(
-        "{} {} {}",
-        "RELEASE COMPLETE".green().bold(),
-        product.cyan().bold(),
-        format!("({}, {})", target_env, git_sha).dimmed()
+    crate::ui::print_release_stage_banner(
+        "RELEASE COMPLETE",
+        &product,
+        &format!("{}, {}", target_env, git_sha),
     );
-    println!("{}", "=".repeat(60).bright_green());
 
     Ok(())
 }
