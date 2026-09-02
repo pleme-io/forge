@@ -162,7 +162,7 @@ pub async fn verify_health_endpoint(
                 let latency_ms = start.elapsed().as_millis() as u64;
 
                 if response.status().is_success() {
-                    println!("   {} Health check passed ({}ms)", "✅".green(), latency_ms);
+                    crate::ui::print_step_pass(&format!("Health check passed ({}ms)", latency_ms));
                     return Ok((true, Some(latency_ms)));
                 } else {
                     let status = response.status();
@@ -240,7 +240,10 @@ pub async fn verify_graphql_endpoint(
                 match response.json::<serde_json::Value>().await {
                     Ok(json) => {
                         if json.get("data").is_some() {
-                            println!("   {} GraphQL responding ({}ms)", "✅".green(), latency_ms);
+                            crate::ui::print_step_pass(&format!(
+                                "GraphQL responding ({}ms)",
+                                latency_ms
+                            ));
                             return Ok((true, Some(latency_ms)));
                         } else if let Some(errors) = json.get("errors") {
                             crate::ui::print_step_failure(&format!(
@@ -342,7 +345,10 @@ pub async fn verify_smoke_queries(
                             .is_some();
 
                         if has_field {
-                            println!("   {} {}: OK ({}ms)", "✅".green(), smoke.name, latency_ms);
+                            crate::ui::print_step_pass(&format!(
+                                "{}: OK ({}ms)",
+                                smoke.name, latency_ms
+                            ));
                             results.push(SmokeQueryResult {
                                 name: smoke.name.clone(),
                                 passed: true,

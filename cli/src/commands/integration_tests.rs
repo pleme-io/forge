@@ -1451,13 +1451,12 @@ pub async fn execute_pre_deployment_tests(
                 .as_ref()
                 .map(|c| format!(" [{} passed]", c.passed))
                 .unwrap_or_default();
-            println!(
-                "   {} {} - {:.2}s{}",
-                "✅".green(),
+            crate::ui::print_step_pass(&format!(
+                "{} - {:.2}s{}",
                 suite.name,
                 result.duration.as_secs_f64(),
                 test_info.bright_white()
-            );
+            ));
         } else {
             let test_info = result
                 .test_counts

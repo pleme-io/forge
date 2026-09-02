@@ -200,12 +200,11 @@ pub async fn export_schema_only(backend_dir: &Path, output_path: &Path) -> Resul
         .await
         .with_context(|| format!("Failed to write schema to {}", output_path.display()))?;
 
-    println!(
-        "   {} Schema exported to {} ({} bytes)",
-        "✅".green(),
+    crate::ui::print_step_pass(&format!(
+        "Schema exported to {} ({} bytes)",
         output_path.display(),
         schema_size
-    );
+    ));
 
     Ok(schema_size)
 }

@@ -171,11 +171,10 @@ pub async fn run_type_check(web_dir: &Path) -> Result<(bool, Vec<String>)> {
     let duration = start.elapsed();
 
     if output.status.success() {
-        println!(
-            "   {} Type check passed ({:.1}s)",
-            "✅".green(),
+        crate::ui::print_step_pass(&format!(
+            "Type check passed ({:.1}s)",
             duration.as_secs_f64()
-        );
+        ));
         Ok((true, Vec::new()))
     } else {
         let (stdout, stderr) = crate::repo::utf8_lossy_streams(&output);
@@ -237,12 +236,11 @@ pub async fn run_lint_with_config(web_dir: &Path, linter: &str) -> Result<(bool,
     let duration = start.elapsed();
 
     if output.status.success() {
-        println!(
-            "   {} {} passed ({:.1}s)",
-            "✅".green(),
+        crate::ui::print_step_pass(&format!(
+            "{} passed ({:.1}s)",
             linter_name,
             duration.as_secs_f64()
-        );
+        ));
         Ok((true, Vec::new()))
     } else {
         let combined = crate::repo::utf8_lossy_streams_joined(&output);
@@ -323,11 +321,10 @@ async fn run_biome_lint(web_dir: &Path) -> Result<(bool, Vec<String>)> {
     let duration = start.elapsed();
 
     if check_output.status.success() {
-        println!(
-            "   {} Biome lint applied and verified ({:.1}s)",
-            "✅".green(),
+        crate::ui::print_step_pass(&format!(
+            "Biome lint applied and verified ({:.1}s)",
             duration.as_secs_f64()
-        );
+        ));
         Ok((true, Vec::new()))
     } else {
         let combined = crate::repo::utf8_lossy_streams_joined(&check_output);
@@ -385,12 +382,11 @@ pub async fn run_unit_tests(web_dir: &Path) -> Result<(bool, Option<usize>, Vec<
     let test_count = parse_test_count(&combined);
 
     if output.status.success() {
-        println!(
-            "   {} Unit tests passed ({} tests, {:.1}s)",
-            "✅".green(),
+        crate::ui::print_step_pass(&format!(
+            "Unit tests passed ({} tests, {:.1}s)",
             test_count.unwrap_or(0),
             duration.as_secs_f64()
-        );
+        ));
         Ok((true, test_count, Vec::new()))
     } else {
         // Check if tests actually failed or if there are no tests

@@ -648,6 +648,87 @@ pub fn write_step_failure<W: std::io::Write>(w: &mut W, message: &str) -> std::i
     writeln!(w, "   {} {}", "❌".red(), message)
 }
 
+/// Prints the one-line `"   {} <message>"` (three-space indent + green
+/// `✅` glyph + plain message) in-body step-pass grammar 28 pre-lift
+/// consumer sites spelled inline as `println!("   {} <fmt>",
+/// "✅".green(), <args>)` (or its multi-line spread across five to
+/// seven source lines when the message carries a `format!`-computed
+/// argument list) across 10 command modules (`commands/{prerelease
+/// (×6), migration_new (×4), frontend_validation (×4), migration_validation
+/// (×3), post_deploy_verification (×3), codegen_validation (×3), rust_service
+/// (×2), codegen (×1), integration_tests (×1), migrations (×1)}.rs`).
+/// Marks the successful completion of an in-body step, gate, sub-check,
+/// or per-item probe within a command's readout ("All migrations valid",
+/// "Type check passed (3.4s)", "Health check passed (12ms)", "Schema
+/// exported to <path> (<n> bytes)", "Tests passed (<n> tests, <s>s)",
+/// "Migrations completed for <env>", …) — the exact-shape success
+/// counterpart to [`print_step_failure`]'s `   ❌.red() <msg>` in-body
+/// step-failure marker.
+///
+/// # Distinct from the other `ui::print_*` primitives
+///
+/// [`print_step_success`] carries a different visual grammar entirely:
+/// the `✅ ` glyph reaches the writer WITHOUT a three-space indent and
+/// with the MESSAGE painted `.green()` (not the glyph). That primitive
+/// lifts a distinct 9-site sibling class of milestone-closing "phase
+/// complete" markers ("Schema extraction complete", "Supergraph
+/// composed successfully", "Cargo.nix updated!", …), one step above the
+/// in-body sub-check grammar this primitive carries. [`print_success`]
+/// is a `bright_green().bold()` `✅ <msg>` milestone-level command
+/// success sigil the `e2e.rs` runner uses. [`print_success_banner`] is
+/// a three-line `━`-rule + `green().bold()` message + `━`-rule
+/// terminal-completion banner. This primitive carries the LEANEST
+/// indented pass — a three-space indent, a `.green()`-colored `✅`
+/// glyph, and a plain (uncolored) message — every pre-lift consumer
+/// used inside a command's pipeline as an in-body step-pass marker
+/// exactly one indent depth below the milestone-level
+/// [`print_step_success`].
+///
+/// # `.green()` on the glyph, plain on the message
+///
+/// Pre-lift every consumer spelled the coloring as `"✅".green()` on the
+/// GLYPH alone, never on the composed line (`format!("   ✅ {}",
+/// msg).green()`). The primitive preserves that split: the `\x1b[32m`
+/// green ANSI sequence wraps the glyph, the message reaches the writer
+/// uncolored, and the three-space indent is emitted OUTSIDE both spans
+/// — so a terminal without color renders `   ✅ <msg>` legibly. A
+/// re-lift that hoisted the color onto the whole line would paint the
+/// message text green at every site (colliding with sibling sites that
+/// already color a sub-field of the message via `.cyan()` /
+/// `.bright_white()`), changing the visual grammar silently.
+///
+/// # Compounding
+///
+/// Pre-lift 28 sibling sites each restated the `println!("   {}
+/// <fmt>", "✅".green(), <args>)` grammar verbatim, with the
+/// three-space indent, the `✅` glyph, the `.green()` coloring on the
+/// glyph, and the plain-message tail all spelled inline. A future
+/// palette adjustment (a swap of `✅ ` for `✓ ` under a CI-log-friendly
+/// grammar, a promotion of `.green()` to `.bright_green()` under a
+/// leaner step-vs-milestone distinction, an OTLP `step_passed`
+/// observability event wired alongside the print, a shift of the
+/// three-space indent to two- or four-space under a standardized
+/// body-indent) had to hit 28 sites in lockstep or drift the visual
+/// grammar; post-lift it hits ONE typed body. Delegates to
+/// [`write_step_pass`] against [`std::io::stdout()`]; the writer split
+/// exists so the fail-before-pass test can pin the one-line body, the
+/// three-space indent, the `✅ ` glyph, and the `\x1b[32m` green ANSI
+/// palette contract by inspecting emitted bytes rather than shelling
+/// out and grepping stdout.
+pub fn print_step_pass(message: &str) {
+    let _ = write_step_pass(&mut std::io::stdout().lock(), message);
+}
+
+/// Writer-taking sibling to [`print_step_pass`]. Emits the single
+/// `   <✅.green()> <message>` line via [`writeln!`] against the
+/// supplied writer. [`print_step_pass`] is the stdout adapter; this
+/// variant exists so tests can pin the one-line body, the three-space
+/// indent, the `✅ ` glyph, and the `\x1b[32m` green ANSI sequence
+/// around the glyph (never the message) without capturing stdout.
+pub fn write_step_pass<W: std::io::Write>(w: &mut W, message: &str) -> std::io::Result<()> {
+    writeln!(w, "   {} {}", "✅".green(), message)
+}
+
 /// Prints the two-line `"=".repeat(<width>)` ASCII rule + trailing
 /// blank grammar 14 pre-lift consumer sites spelled inline as
 /// `println!("{}", "=".repeat(<50|60>)); println!();` across 5
@@ -1839,6 +1920,252 @@ mod tests {
                  `crate::ui::print_step_failure(\"<MSG>\")` — the \
                  primitive body every three-space-indented `❌.red()` \
                  in-body step-failure in the crate now delegates \
+                 through."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_step_pass`]. Pins
+    /// the one-line body every pre-lift consumer spelled verbatim
+    /// (`println!("   {} <fmt>", "✅".green(), <args>)`): a three-space
+    /// indent, a `.green()`-colored `✅` glyph, a single space, then the
+    /// plain (uncolored) message. A silent contract drift a future
+    /// rewrite might introduce — dropping the three-space indent (a
+    /// "tighter body spacing" cleanup), promoting the whole line's
+    /// coloring (`format!("   ✅ {}", msg).green()`) so the message text
+    /// paints green at every site (colliding with sibling sites that
+    /// color a sub-field of the message via `.cyan()` /
+    /// `.bright_white()`), swapping `✅ ` for `✓ ` under a
+    /// CI-log-friendly grammar, promoting `.green()` to `.bright_green()`
+    /// (`\x1b[92m` — the milestone-level [`super::print_success`]
+    /// palette), slipping a trailing blank line into the primitive
+    /// body — flips this assertion rather than compiling and silently
+    /// diverging the 28 consumer sites' visual grammar.
+    #[test]
+    fn write_step_pass_emits_exactly_one_check_prefixed_indented_line() {
+        // Force ANSI emission (colored auto-drops sequences on a
+        // non-tty stdout) and serialize against peer banner tests
+        // via [`AnsiOverrideForTest`]; its Drop restores colored's
+        // auto-detection on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`], closing the set-write-unset window
+        // without a manual [`colored::control::unset_override`] call
+        // that a future test author could omit.
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_step_pass(&mut buf, "Health check passed (12ms)")
+            .expect("write_step_pass against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_step_pass must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — the pre-lift stanza is one `println!`,
+        // not two, and carries no framing blank. A refactor that slips
+        // a leading or trailing blank into the primitive body fails
+        // here.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_step_pass must emit exactly one line — the \
+             pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The three-space indent reaches the rendered line before any
+        // ANSI escape — a fusion that hoisted the indent inside the
+        // coloring span (`"   ✅".green()`) or dropped it altogether
+        // (`println!("{} <msg>", "✅".green())`) fails here.
+        assert!(
+            lines[0].starts_with("   "),
+            "line 0 must begin with a three-space indent — every \
+             pre-lift consumer spelled `\"   {{}} <fmt>\"` verbatim, \
+             so the indent must reach the writer OUTSIDE the coloring \
+             span; got {:?}",
+            lines[0]
+        );
+
+        // The `✅ ` glyph reaches the rendered line — a fusion that
+        // swapped `✅ ` for `✓ ` under a "CI-log-friendly" cleanup or
+        // dropped the glyph altogether fails here.
+        assert!(
+            lines[0].contains('✅'),
+            "line 0 must contain the `✅` glyph — every pre-lift \
+             consumer spelled `\"✅\".green()` on the marker; got {:?}",
+            lines[0]
+        );
+
+        // The message text reaches the rendered line verbatim; a
+        // fusion that hoists the message off the parameter and pins
+        // it to a constant fails here.
+        assert!(
+            lines[0].contains("Health check passed (12ms)"),
+            "line 0 must carry the message verbatim; got {:?}",
+            lines[0]
+        );
+
+        // The `green` ANSI sequence (`\x1b[32m`) reaches the rendered
+        // line; a fusion that dropped `.green()` (a "just print the
+        // string, it's shorter" cleanup) or promoted the palette to
+        // `.bright_green()` (`\x1b[92m` — the [`super::print_success`]
+        // milestone palette) fails here. A promotion collapses the
+        // visual distinction between step-pass and milestone
+        // grammars this primitive exists to preserve.
+        assert!(
+            lines[0].contains("\x1b[32m"),
+            "line 0 must carry the `green` ANSI sequence (`\\x1b[32m`) \
+             — every pre-lift consumer spelled `.green()` (never \
+             `.bright_green()` or `.green().bold()`) on the glyph; \
+             got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[92m"),
+            "line 0 must NOT carry the `bright_green` ANSI sequence \
+             (`\\x1b[92m`) — that palette belongs to the heavier \
+             milestone-level `print_success`, not this in-body \
+             step-pass primitive; got {:?}",
+            lines[0]
+        );
+
+        // The `.green()` coloring wraps the GLYPH alone, never the
+        // message text — a fusion that hoisted the color onto the
+        // composed line (`format!("   ✅ {}", msg).green()`) would
+        // paint the message green at every site (colliding with
+        // sibling sites that already color a sub-field of the message
+        // via `.cyan()` / `.bright_white()`). Pin that the message
+        // text is NOT bracketed by a green-open + reset pair: the
+        // green span must close (`\x1b[0m`) BEFORE the space that
+        // precedes the message.
+        let check_pos = lines[0].find('✅').expect("glyph must be present");
+        let reset_pos = lines[0]
+            .find("\x1b[0m")
+            .expect("reset must be present after the glyph");
+        let msg_pos = lines[0]
+            .find("Health check passed")
+            .expect("message must be present");
+        assert!(
+            check_pos < reset_pos && reset_pos < msg_pos,
+            "the `\\x1b[0m` reset must close the green span BEFORE the \
+             message begins — every pre-lift consumer spelled \
+             `.green()` on the `✅` glyph alone, never on the message. \
+             Got positions check={check_pos}, reset={reset_pos}, \
+             msg={msg_pos} in line {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `println!` (not `print!`), so the newline is part of the
+        // contract. A fusion that swapped `writeln!` for `write!`
+        // fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_step_pass must emit a trailing `\\n` (the \
+             pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto [`super::print_step_pass`]
+    /// no longer spell the `println!("   {} <fmt>", "✅".green(),
+    /// <args>)` shape inline. Structural regression shield — without
+    /// it, a future refactor could silently re-inline the one-liner
+    /// (e.g. a "just call `println!` directly, it's shorter" cleanup)
+    /// and reopen the 28-site duplication class this lift closed.
+    /// Enforced at the module bodies before their `#[cfg(test)]`
+    /// regions so a test-support mention of the raw shape does not
+    /// defeat the shield.
+    ///
+    /// The exact-shape needle is `"✅".green()` appearing anywhere in
+    /// the module body, MINUS one known non-step-pass site that
+    /// carries the same coloring under a different grammar: the
+    /// `prerelease.rs:182` `println!("{} Passed ({}):", "✅".green(),
+    /// self.passed.len())` gate-summary label header (no three-space
+    /// indent, plural item count in parens, colon suffix — a
+    /// section-opening banner for a batch of passed gates, distinct
+    /// from an in-body per-step pass). Survives untouched; the shield
+    /// allowlists it by an anchoring substring unique to that site.
+    /// `release_service.rs`'s `info!("{} {} completed in {:.1}s",
+    /// "✅".green(), ...)` tracing-logger call is routed through
+    /// `tracing::info!`, not `println!` — logger frontend, not
+    /// terminal UI — and is not enrolled in the caller set below.
+    #[test]
+    fn print_step_pass_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[
+            (
+                include_str!("commands/migration_validation.rs"),
+                "commands/migration_validation.rs",
+            ),
+            (
+                include_str!("commands/migration_new.rs"),
+                "commands/migration_new.rs",
+            ),
+            (
+                include_str!("commands/codegen_validation.rs"),
+                "commands/codegen_validation.rs",
+            ),
+            (include_str!("commands/codegen.rs"), "commands/codegen.rs"),
+            (
+                include_str!("commands/post_deploy_verification.rs"),
+                "commands/post_deploy_verification.rs",
+            ),
+            (
+                include_str!("commands/prerelease.rs"),
+                "commands/prerelease.rs",
+            ),
+            (
+                include_str!("commands/frontend_validation.rs"),
+                "commands/frontend_validation.rs",
+            ),
+            (
+                include_str!("commands/integration_tests.rs"),
+                "commands/integration_tests.rs",
+            ),
+            (
+                include_str!("commands/rust_service.rs"),
+                "commands/rust_service.rs",
+            ),
+            (
+                include_str!("commands/migrations.rs"),
+                "commands/migrations.rs",
+            ),
+        ];
+        // Non-step-pass sites that carry `"✅".green()` under a
+        // different grammar (a gate-summary label header). Each is
+        // anchored by a substring unique to that site so the shield
+        // allowlists it verbatim without needing a line-number pin.
+        const ALLOWLIST_SUBSTRINGS: &[&str] = &[
+            // prerelease.rs:182 — gate-summary label header, no three-
+            // space indent, plural item count in parens.
+            "\"{} Passed ({}):\"",
+        ];
+        for (source, module_path) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("\"✅\".green()") {
+                    continue;
+                }
+                if ALLOWLIST_SUBSTRINGS.iter().any(|s| line.contains(s)) {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `\"✅\".green()` step-pass marker — that shape \
+                     was lifted onto `crate::ui::print_step_pass`. \
+                     A re-inline would silently reopen the 28-site \
+                     duplication class this shield exists to close. \
+                     Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            assert!(
+                body.contains("crate::ui::print_step_pass("),
+                "{module_path} body must forward to \
+                 `crate::ui::print_step_pass(\"<MSG>\")` — the \
+                 primitive body every three-space-indented `✅.green()` \
+                 in-body step-pass in the crate now delegates \
                  through."
             );
         }
