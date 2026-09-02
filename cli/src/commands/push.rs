@@ -1,6 +1,5 @@
 use anyhow::{anyhow, Context, Result};
 use colored::Colorize;
-use indicatif::{ProgressBar, ProgressStyle};
 use std::process::Stdio;
 use tokio::process::Command;
 use tracing::info;
@@ -8,6 +7,7 @@ use tracing::info;
 use crate::infrastructure::registry::{split_composed_registry_base, RegistryRef};
 use crate::repo::get_tool_path;
 use crate::retry::{retry_command_logged, RetryPolicy};
+use crate::ui::styled_progress_bar;
 
 /// Get git SHA for tagging - Single source of truth
 ///
@@ -303,13 +303,7 @@ pub async fn execute(
     info!("   Retries: {} attempts per tag", retries);
     println!();
 
-    let pb = ProgressBar::new(tags.len() as u64);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}")
-            .unwrap()
-            .progress_chars("#>-"),
-    );
+    let pb = styled_progress_bar(tags.len() as u64);
 
     // Push all tags
     for tag in &tags {

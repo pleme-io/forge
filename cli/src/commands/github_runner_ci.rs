@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
-use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Duration;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
@@ -10,7 +9,7 @@ use crate::git;
 use crate::infrastructure::kubectl::kubectl_command_async;
 use crate::repo::get_tool_path;
 use crate::retry::{debug_log_capture_streams, retry_command_logged, RetryPolicy};
-use crate::ui::{styled_spinner, SpinnerStyle};
+use crate::ui::{styled_progress_bar, styled_spinner, SpinnerStyle};
 
 /// The typed exponential-backoff policy for the StatefulSet rollout-watch
 /// pod-status-poll cadence in [`execute`]'s `--watch` branch — `initial_backoff`
@@ -438,13 +437,7 @@ pub async fn execute(
 
         info!("📤 Pushing to GHCR with doca...");
 
-        let pb = ProgressBar::new(2);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}")
-                .unwrap()
-                .progress_chars("#>-"),
-        );
+        let pb = styled_progress_bar(2);
 
         // Push latest tag
         pb.set_message(format!("Pushing {}:latest", registry));

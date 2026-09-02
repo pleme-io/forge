@@ -9,12 +9,12 @@
 
 use anyhow::{Context, Result};
 use colored::Colorize;
-use indicatif::{ProgressBar, ProgressStyle};
 use tracing::info;
 
 use super::push::{discover_ghcr_token, generate_auto_tags, push_with_retry};
 use crate::nix::build_docker_image_from_dir;
 use crate::repo::{find_repo_root, get_tool_path, in_directory, verify_directory};
+use crate::ui::styled_progress_bar;
 
 // ============================================================================
 // Tool sigils
@@ -157,17 +157,6 @@ fn print_header(title: &str) {
     println!();
 }
 
-fn create_progress_bar(total: u64) -> ProgressBar {
-    let pb = ProgressBar::new(total);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}")
-            .expect("Invalid progress bar template")
-            .progress_chars("#>-"),
-    );
-    pb
-}
-
 // ============================================================================
 // Public API
 // ============================================================================
@@ -231,7 +220,7 @@ pub async fn push_single(
     info!("Tags: {}", tags.join(", "));
     println!();
 
-    let pb = create_progress_bar(tags.len() as u64);
+    let pb = styled_progress_bar(tags.len() as u64);
     for tag in &tags {
         pb.set_message(format!("Pushing {}:{}", registry, tag));
         push_with_retry(&image_path, &registry, tag, &ghcr_token, retries).await?;
@@ -419,7 +408,7 @@ async fn push_all_sequential(
     );
     println!();
 
-    let pb = create_progress_bar(PANGEA_COMPONENTS.len() as u64);
+    let pb = styled_progress_bar(PANGEA_COMPONENTS.len() as u64);
     let mut results = Vec::new();
 
     for component in PANGEA_COMPONENTS {
