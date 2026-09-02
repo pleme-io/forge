@@ -167,13 +167,12 @@ pub async fn verify_health_endpoint(
                 } else {
                     let status = response.status();
                     if attempt < retries {
-                        println!(
-                            "   {} Attempt {}/{}: Status {} (retrying...)",
-                            "⚠️".yellow(),
+                        crate::ui::print_step_warn(&format!(
+                            "Attempt {}/{}: Status {} (retrying...)",
                             attempt + 1,
                             retries + 1,
                             status
-                        );
+                        ));
                         tokio::time::sleep(health_endpoint_retry_delay(attempt)).await;
                     } else {
                         crate::ui::print_step_failure(&format!(
@@ -186,13 +185,12 @@ pub async fn verify_health_endpoint(
             }
             Err(e) => {
                 if attempt < retries {
-                    println!(
-                        "   {} Attempt {}/{}: {} (retrying...)",
-                        "⚠️".yellow(),
+                    crate::ui::print_step_warn(&format!(
+                        "Attempt {}/{}: {} (retrying...)",
                         attempt + 1,
                         retries + 1,
                         e
-                    );
+                    ));
                     tokio::time::sleep(health_endpoint_retry_delay(attempt)).await;
                 } else {
                     crate::ui::print_step_failure(&format!("Health check failed: {}", e));
