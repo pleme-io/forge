@@ -84,7 +84,7 @@ pub async fn extract_schema(_service: String, deploy_config: &DeployConfig) -> R
     match result {
         Some(extraction_result) => {
             println!();
-            println!("✅ {}", "Schema extraction complete".green());
+            crate::ui::print_step_success("Schema extraction complete");
             println!("   Path: {}", extraction_result.schema_path.display());
             println!("   Size: {} bytes", extraction_result.schema_size);
             println!("   Types: {}", extraction_result.type_count);
@@ -157,7 +157,7 @@ pub async fn update_federation(
         bail!("Pre-composition validation failed. Cannot proceed with composition.");
     }
 
-    println!("✅ {}", "Pre-composition validation passed".green());
+    crate::ui::print_step_success("Pre-composition validation passed");
     println!();
 
     // Generate supergraph config YAML from subgraph schemas
@@ -243,7 +243,7 @@ pub async fn update_federation(
     let supergraph_path = PathBuf::from("supergraph.graphql");
     crate::repo::write_text_async(&supergraph_path, &output.stdout).await?;
 
-    println!("✅ {}", "Supergraph composed successfully".green());
+    crate::ui::print_step_success("Supergraph composed successfully");
     println!("   Schema: {}", supergraph_path.display());
     println!();
 
@@ -267,7 +267,7 @@ pub async fn update_federation(
         bail!("Post-composition validation failed. Supergraph may be invalid.");
     }
 
-    println!("✅ {}", "Post-composition validation passed".green());
+    crate::ui::print_step_success("Post-composition validation passed");
     println!(
         "   Supergraph size: {} KB",
         post_check.supergraph_size / 1024
@@ -528,7 +528,7 @@ pub async fn update_federation(
             .await
             .context("Git push failed for supergraph changes")?;
 
-        println!("✅ {}", "Supergraph changes pushed to git".green());
+        crate::ui::print_step_success("Supergraph changes pushed to git");
     } else {
         // CRITICAL: If there are no changes, the supergraph is already up to date
         // This is only OK if we're re-running the same deployment
@@ -540,7 +540,7 @@ pub async fn update_federation(
 
     crate::commands::flux::reconcile(namespace.clone()).await?;
 
-    println!("✅ {}", "Hive Router update triggered via GitOps".green());
+    crate::ui::print_step_success("Hive Router update triggered via GitOps");
     println!(
         "ℹ️  Flux will handle deployment - use 'kubectl get pods -n {}' to monitor",
         namespace

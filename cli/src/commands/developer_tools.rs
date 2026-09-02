@@ -218,7 +218,7 @@ pub async fn rust_update_cargo_nix(service: String) -> Result<()> {
     crate::nix::run_nix_wrapped_crate2nix(&nix_bin(), &[]).await?;
 
     println!();
-    println!("✅ {}", "Cargo.nix updated!".green());
+    crate::ui::print_step_success("Cargo.nix updated!");
     println!("   Commit both Cargo.lock and Cargo.nix changes");
 
     Ok(())
