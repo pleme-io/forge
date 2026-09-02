@@ -1,9 +1,9 @@
 use anyhow::Result;
 use colored::Colorize;
-use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
 use tracing::{info, warn};
 
+use crate::ui::{styled_spinner, SpinnerStyle};
 use crate::{cloudflare, commands, config::DeployConfig, flux_reconcile, git};
 
 pub async fn execute(
@@ -121,14 +121,7 @@ pub async fn execute(
     // Commit and push
     info!("📤 Committing to Git...");
 
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(
-        ProgressStyle::default_spinner()
-            .template("{spinner:.green} {msg}")
-            .unwrap(),
-    );
-    pb.set_message("Pushing to main...");
-    pb.enable_steady_tick(std::time::Duration::from_millis(100));
+    let pb = styled_spinner(SpinnerStyle::Green, "Pushing to main...");
 
     git::commit_and_push(kustomization_path, &old_tag, &tag)?;
 

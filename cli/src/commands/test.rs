@@ -15,13 +15,13 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
-use indicatif::{ProgressBar, ProgressStyle};
 use serde::Deserialize;
 use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::info;
 
 use crate::retry::RetryPolicy;
+use crate::ui::{styled_spinner, SpinnerStyle};
 
 /// The typed exponential-backoff policy for [`run_test_suite`]'s
 /// between-retry sleeps — `initial_backoff` 2s × `factor` 2 capped at
@@ -464,14 +464,10 @@ async fn run_test_suite(
             );
         }
 
-        let spinner = ProgressBar::new_spinner();
-        spinner.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.cyan} {msg}")
-                .unwrap(),
+        let spinner = styled_spinner(
+            SpinnerStyle::Cyan,
+            format!("Running {} tests...", suite_name),
         );
-        spinner.set_message(format!("Running {} tests...", suite_name));
-        spinner.enable_steady_tick(Duration::from_millis(100));
 
         let result = timeout(test_timeout, async {
             let output = Command::new(crate::repo::get_tool_path("SH_BIN", "sh"))

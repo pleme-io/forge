@@ -1,6 +1,5 @@
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
-use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -14,6 +13,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::infrastructure::kubectl::kubectl_capture_anyhow;
 use crate::retry::RetryPolicy;
+use crate::ui::{styled_spinner, SpinnerStyle};
 
 /// The typed exponential-backoff policy for [`execute_suite`]'s
 /// between-retry sleeps — `initial_backoff` 5s × `factor` 2 capped at
@@ -809,14 +809,7 @@ async fn execute_suite(
         let start = std::time::Instant::now();
 
         // Create progress spinner
-        let pb = ProgressBar::new_spinner();
-        pb.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.cyan} {msg}")
-                .unwrap(),
-        );
-        pb.set_message(format!("Running {}", suite.name));
-        pb.enable_steady_tick(Duration::from_millis(100));
+        let pb = styled_spinner(SpinnerStyle::Cyan, format!("Running {}", suite.name));
 
         // Build command
         let suite_working_dir = working_dir.join(&suite.working_dir);
@@ -1372,17 +1365,13 @@ pub async fn execute_pre_deployment_tests(
             let cmd = parts[0];
             let args = &parts[1..];
 
-            let spinner = ProgressBar::new_spinner();
-            spinner.set_style(
-                ProgressStyle::default_spinner()
-                    .template("{spinner:.yellow} {msg}")
-                    .unwrap(),
+            let spinner = styled_spinner(
+                SpinnerStyle::Yellow,
+                format!(
+                    "Running {} (attempt {}/{})",
+                    suite.name, attempts, max_attempts
+                ),
             );
-            spinner.set_message(format!(
-                "Running {} (attempt {}/{})",
-                suite.name, attempts, max_attempts
-            ));
-            spinner.enable_steady_tick(Duration::from_millis(100));
 
             // Run the test command
             let child = Command::new(cmd)

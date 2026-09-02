@@ -10,6 +10,7 @@ use crate::git;
 use crate::infrastructure::kubectl::kubectl_command_async;
 use crate::repo::get_tool_path;
 use crate::retry::{debug_log_capture_streams, retry_command_logged, RetryPolicy};
+use crate::ui::{styled_spinner, SpinnerStyle};
 
 /// The typed exponential-backoff policy for the StatefulSet rollout-watch
 /// pod-status-poll cadence in [`execute`]'s `--watch` branch — `initial_backoff`
@@ -334,14 +335,7 @@ pub async fn execute(
         info!("   Architecture: x86_64-linux");
         println!();
 
-        let spinner = ProgressBar::new_spinner();
-        spinner.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.green} {msg}")
-                .unwrap(),
-        );
-        spinner.set_message("Building with Nix...");
-        spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+        let spinner = styled_spinner(SpinnerStyle::Green, "Building with Nix...");
 
         // Route the status-only `nix build` spawn through the canonical
         // `crate::retry::run_inherited_status` primitive so the pre-lift
@@ -508,14 +502,7 @@ pub async fn execute(
     // Commit and push
     info!("📤 Committing to Git...");
 
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(
-        ProgressStyle::default_spinner()
-            .template("{spinner:.green} {msg}")
-            .unwrap(),
-    );
-    pb.set_message("Pushing to main...");
-    pb.enable_steady_tick(std::time::Duration::from_millis(100));
+    let pb = styled_spinner(SpinnerStyle::Green, "Pushing to main...");
 
     git::commit_and_push(&manifest_path, &old_tag, &git_sha)?;
 

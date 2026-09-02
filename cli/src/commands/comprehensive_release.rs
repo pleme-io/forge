@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
-use indicatif::{ProgressBar, ProgressStyle};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
 use crate::repo::get_tool_path;
 use crate::retry::RetryPolicy;
+use crate::ui::{styled_spinner, SpinnerStyle};
 use crate::{commands, git};
 
 /// The typed exponential-backoff policy for the docker-compose services-
@@ -307,14 +307,7 @@ pub async fn execute(
         info!("🧪 Running unit tests...");
         println!();
 
-        let spinner = ProgressBar::new_spinner();
-        spinner.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.green} {msg}")
-                .unwrap(),
-        );
-        spinner.set_message("Running cargo test --lib --bins...");
-        spinner.enable_steady_tick(Duration::from_millis(100));
+        let spinner = styled_spinner(SpinnerStyle::Green, "Running cargo test --lib --bins...");
 
         // Resolve the `cargo` binary path via the `cargo_bin()` sigil,
         // which routes through `CARGO` (falling back to `cargo` on
