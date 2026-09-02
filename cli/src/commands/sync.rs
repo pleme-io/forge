@@ -119,17 +119,7 @@ pub struct DriftCheckResult {
 pub async fn execute_schema_only(working_dir: &Path) -> Result<()> {
     let config = SyncConfig::from_working_dir(working_dir);
 
-    println!();
-    println!(
-        "{}",
-        "════════════════════════════════════════════════".bold()
-    );
-    println!("{}", "  Schema Export".bold());
-    println!(
-        "{}",
-        "════════════════════════════════════════════════".bold()
-    );
-    println!();
+    crate::ui::print_section_header("Schema Export");
 
     codegen::export_schema_only(&config.backend_dir, &config.schema_file).await?;
 
@@ -148,17 +138,7 @@ pub async fn execute_schema_only(working_dir: &Path) -> Result<()> {
 pub async fn execute_drift_check(working_dir: &Path) -> Result<DriftCheckResult> {
     let config = SyncConfig::from_working_dir(working_dir);
 
-    println!();
-    println!(
-        "{}",
-        "════════════════════════════════════════════════".bold()
-    );
-    println!("{}", "  Drift Check (CI Mode)".bold());
-    println!(
-        "{}",
-        "════════════════════════════════════════════════".bold()
-    );
-    println!();
+    crate::ui::print_section_header("Drift Check (CI Mode)");
 
     // Calculate current schema hash
     let old_schema_hash = if config.schema_file.exists() {
@@ -299,17 +279,7 @@ pub async fn execute(working_dir: &Path, skip_entities: bool) -> Result<SyncResu
     let config = SyncConfig::from_working_dir(working_dir);
     let mut errors = Vec::new();
 
-    println!();
-    println!(
-        "{}",
-        "════════════════════════════════════════════════".bold()
-    );
-    println!("{}", "  One-Command Sync Pipeline".bold());
-    println!(
-        "{}",
-        "════════════════════════════════════════════════".bold()
-    );
-    println!();
+    crate::ui::print_section_header("One-Command Sync Pipeline");
 
     // Verify we're in the right place
     if !config.working_dir.join("flake.nix").exists()

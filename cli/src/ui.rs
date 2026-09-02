@@ -343,6 +343,102 @@ pub fn write_release_stage_banner<W: std::io::Write>(
     Ok(())
 }
 
+/// Rule glyph every pre-lift section-header site fed to the literal
+/// `"════════════════════════════════════════════════"`. Pinned as
+/// one named constant so a future swap of the section-header rule
+/// character (a promotion to `━` to unify with
+/// [`write_success_banner`], a demotion to `-` for a leaner readout)
+/// happens at ONE typed boundary rather than 16 literal-argument
+/// sites (two rules per stanza across 8 consumer sites).
+const SECTION_HEADER_RULE: &str = "════════════════════════════════════════════════";
+
+/// Two-space indent every pre-lift section-header site prepended to
+/// the title via the literal `"  <TITLE>".bold()`. Pinned as one
+/// named constant so a future swap of the indent width (a tab, four
+/// spaces, no indent under a leaner section grammar) happens at ONE
+/// typed boundary rather than eight literal-argument sites.
+const SECTION_HEADER_TITLE_INDENT: &str = "  ";
+
+/// Prints the seven-line section-header banner every pre-lift consumer
+/// spelled inline as a blank line, a
+/// `"════════════════════════════════════════════════".bold()` rule,
+/// a `"  <TITLE>".bold()` indented title, a second identical rule,
+/// and a trailing blank line. Marks the opening of a section in a
+/// pipeline run at 8 sibling call sites across
+/// `commands/{codegen, post_deploy_verification, prerelease (×2),
+/// rebac_validation, sync (×3)}.rs` — the pre-lift 7-line stanza —
+/// so a future palette shift against rule-char, rule-width, indent
+/// glyph, or title emphasis happens at ONE site rather than eight.
+///
+/// Delegates to [`write_section_header`] against
+/// `std::io::stdout()`; the writer split exists so the
+/// fail-before-pass test can pin the five-line body, palette, and
+/// title-indent contract by inspecting emitted bytes rather than
+/// shelling out and grepping stdout.
+///
+/// # Distinct from [`print_header`], [`print_success_banner`], and [`print_release_stage_banner`]
+///
+/// [`print_header`] carries a `╔═…═╗` boxed grammar in `bright_blue`
+/// used for top-level command titles.
+///
+/// [`print_success_banner`] carries a `━`-rule + single-message
+/// terminal-success grammar in `bright_green` used to mark the end
+/// of a build-tools regeneration.
+///
+/// [`print_release_stage_banner`] carries a `=`-rule + composite
+/// `<STAGE> + <product> + (<suffix>)` headline grammar used to mark
+/// a product-release-lifecycle milestone.
+///
+/// This primitive carries a **distinct** `═`-rule + bold-title
+/// grammar used to mark the OPENING of a section within a pipeline
+/// (e.g. `Schema Export + Codegen`, `Gate Summary`, `ReBAC
+/// Validation`). The four primitives coexist rather than one
+/// subsuming the other because the visual grammars an operator has
+/// been trained to read differ — a top-level command title is a
+/// boxed blue banner, a section opening within a pipeline is a
+/// double-rule bold title, a terminal success is a heavy-rule green
+/// banner, a release-lifecycle milestone is an equals-rule composite
+/// headline.
+///
+/// # Compounding
+///
+/// Pre-lift each of the 8 consumer sites restated the entire
+/// seven-line stanza (two `println!` blanks framing a rule +
+/// `"  <TITLE>".bold()` + rule triple). A swap of the rule character
+/// in one site alone (an `═` demoted to `-` in `sync.rs` while
+/// `prerelease.rs` stayed on `═`) silently splits the section-opening
+/// visual grammar across the pipeline. A `.bold()` dropped from the
+/// title on one site alone loses the emphasis against the rule and
+/// promotes body text over the section boundary. A width drift
+/// between `.repeat(48)` and `.repeat(60)` in one site alone lines
+/// two adjacent sections against visibly different rules. Post-lift
+/// the primitive collapses all eight restatements onto ONE typed
+/// function; a future palette adjustment hits one body, not eight.
+pub fn print_section_header(title: &str) {
+    println!();
+    let _ = write_section_header(&mut std::io::stdout().lock(), title);
+    println!();
+}
+
+/// Writer-taking sibling to [`print_section_header`]. Emits the
+/// three section-header body lines (`bold` `═` rule,
+/// `SECTION_HEADER_TITLE_INDENT + <title>` in `bold`, `bold` `═`
+/// rule) via [`writeln!`] against the supplied writer.
+/// [`print_section_header`] is the stdout adapter (and adds the
+/// framing blank lines the pre-lift stanza carried); this variant
+/// exists so tests can pin the body line count, palette, and
+/// title-indent contract without capturing stdout.
+pub fn write_section_header<W: std::io::Write>(w: &mut W, title: &str) -> std::io::Result<()> {
+    writeln!(w, "{}", SECTION_HEADER_RULE.bold())?;
+    writeln!(
+        w,
+        "{}",
+        format!("{}{}", SECTION_HEADER_TITLE_INDENT, title).bold()
+    )?;
+    writeln!(w, "{}", SECTION_HEADER_RULE.bold())?;
+    Ok(())
+}
+
 pub fn print_header(title: &str) {
     println!();
     println!(
@@ -376,7 +472,19 @@ pub fn print_warning(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::{styled_spinner, SpinnerStyle, SPINNER_TICK};
+    use std::sync::Mutex;
     use std::time::Duration;
+
+    /// Serializes the three banner tests that flip `colored`'s global
+    /// override to force ANSI emission against a `Vec<u8>` writer. The
+    /// override is process-global; without a shared guard, cargo's
+    /// default parallel test runner can schedule one test's
+    /// [`colored::control::unset_override`] between another's
+    /// `set_override(true)` and its `writeln!`, leaving the writer's
+    /// bytes stripped of the very ANSI sequences those tests then
+    /// assert against. Every banner test that touches the override
+    /// acquires this mutex for the entire set-write-unset window.
+    static ANSI_OVERRIDE_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn spinner_style_template_pins_the_three_pre_lift_color_variants() {
@@ -498,6 +606,12 @@ mod tests {
     fn write_success_banner_emits_three_bar_message_bar_lines_in_order() {
         // Force ANSI emission so the palette contract survives a test
         // runner attached to a non-tty (colored auto-drops sequences).
+        // Hold the shared [`ANSI_OVERRIDE_LOCK`] across the whole
+        // set-write-unset window so a peer banner test's `unset` can
+        // never strand this writer between colored's on/off flip.
+        let _override_guard = ANSI_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         colored::control::set_override(true);
 
         let mut buf: Vec<u8> = Vec::new();
@@ -596,6 +710,12 @@ mod tests {
     fn write_release_stage_banner_emits_three_bar_headline_bar_lines_in_order() {
         // Force ANSI emission so the palette contract survives a test
         // runner attached to a non-tty (colored auto-drops sequences).
+        // Hold the shared [`ANSI_OVERRIDE_LOCK`] across the whole
+        // set-write-unset window so a peer banner test's `unset` can
+        // never strand this writer between colored's on/off flip.
+        let _override_guard = ANSI_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         colored::control::set_override(true);
 
         let mut buf: Vec<u8> = Vec::new();
@@ -704,6 +824,126 @@ mod tests {
              (`\\x1b[2m`); got {:?}",
             lines[1]
         );
+    }
+
+    /// Fail-before-pass envelope for [`super::write_section_header`].
+    /// Pins the three-line body order every pre-lift consumer spelled
+    /// verbatim (`"═".repeat(48).bold()` rule via the literal
+    /// `"════════════════════════════════════════════════"`,
+    /// `"  <title>".bold()` indented title, `"═".repeat(48).bold()`
+    /// rule). A silent contract drift a future rewrite might
+    /// introduce — dropping one bar to two `writeln!`s, swapping the
+    /// title and a bar, hoisting the rule character off `═` in one
+    /// branch alone, dropping `.bold()` from the title so it loses
+    /// emphasis against the rule, dropping the two-space indent so
+    /// the title crashes against the first column — flips this
+    /// assertion rather than compiling and silently diverging the
+    /// eight consumer sites' visual grammar.
+    #[test]
+    fn write_section_header_emits_three_bar_title_bar_lines_in_order() {
+        // Force ANSI emission so the palette contract survives a test
+        // runner attached to a non-tty (colored auto-drops sequences).
+        // Hold the shared [`ANSI_OVERRIDE_LOCK`] across the whole
+        // set-write-unset window so a peer banner test's `unset` can
+        // never strand this writer between colored's on/off flip.
+        let _override_guard = ANSI_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        colored::control::set_override(true);
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_section_header(&mut buf, "Schema Export + Codegen")
+            .expect("write_section_header against a Vec<u8> writer must succeed");
+
+        colored::control::unset_override();
+
+        let out = String::from_utf8(buf)
+            .expect("write_section_header must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly three body lines — the pre-lift stanza's rule +
+        // title + rule triple is three `println!`s, not two, and not
+        // four. A refactor that drops or adds a bar fails here. The
+        // framing blank lines the pre-lift stanza carried live on
+        // `print_section_header`, not on the writer sibling.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            3,
+            "write_section_header must emit exactly three body lines \
+             (rule, title, rule) — the pre-lift stanza's rule+title+rule \
+             triple is three `println!`s; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The `═` rule glyph appears in the outer two lines but never
+        // in the middle line; the title text appears in the middle
+        // line but never in the outer lines. A swap of the middle
+        // line and a bar (a fusion that reorders the `writeln!`s)
+        // fails here.
+        assert!(
+            lines[0].contains('═'),
+            "line 0 must be an `═` rule; got {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[2].contains('═'),
+            "line 2 must be an `═` rule; got {:?}",
+            lines[2]
+        );
+        assert!(
+            !lines[1].contains('═'),
+            "line 1 must NOT contain the rule glyph — it is the \
+             indented title line; got {:?}",
+            lines[1]
+        );
+        assert!(
+            lines[1].contains("Schema Export + Codegen"),
+            "line 1 must carry the title verbatim; got {:?}",
+            lines[1]
+        );
+
+        // The two-space indent every pre-lift consumer prepended to
+        // the title via the literal `"  <TITLE>"` must reach the
+        // rendered line intact. A fusion that hoists the indent off
+        // the constant and drops it fails here — every consumer's
+        // pre-lift stanza carried the two-space visual gutter between
+        // the rule's left edge and the first title glyph.
+        assert!(
+            lines[1].contains("  Schema Export + Codegen"),
+            "line 1 must carry the two-space title indent verbatim — \
+             the pre-lift stanza spelled `\"  <TITLE>\".bold()`; got {:?}",
+            lines[1]
+        );
+
+        // The rule width every pre-lift consumer spelled inline is
+        // 48 characters (the literal
+        // `"════════════════════════════════════════════════"`). A
+        // fusion that hoists the rule off the constant and lands on
+        // a different width lines two adjacent section headers
+        // against visibly different rules — pin the count here.
+        let rule_glyph_count = lines[0].chars().filter(|c| *c == '═').count();
+        assert_eq!(
+            rule_glyph_count, 48,
+            "line 0 must contain exactly `SECTION_HEADER_RULE`.len() (48) \
+             `═` glyphs; got {}",
+            rule_glyph_count
+        );
+
+        // The palette contract: every one of the three lines carries
+        // the `bold` ANSI sequence. A silent drop of `.bold()` on
+        // any line loses the section-boundary emphasis against the
+        // surrounding body text — pin the sequence here.
+        for (i, line) in lines.iter().enumerate() {
+            assert!(
+                line.contains("\x1b[1m"),
+                "line {} must carry the `bold` ANSI sequence \
+                 (`\\x1b[1m`) — the pre-lift stanza spelled `.bold()` \
+                 on each of the three lines; got {:?}",
+                i,
+                line
+            );
+        }
     }
 
     #[test]

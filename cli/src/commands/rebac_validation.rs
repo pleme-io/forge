@@ -117,17 +117,7 @@ pub async fn execute_with_options(
     let mut result = RebacValidationResult::default();
 
     if !quiet {
-        println!();
-        println!(
-            "{}",
-            "════════════════════════════════════════════════".bold()
-        );
-        println!("{}", "  ReBAC Validation".bold());
-        println!(
-            "{}",
-            "════════════════════════════════════════════════".bold()
-        );
-        println!();
+        crate::ui::print_section_header("ReBAC Validation");
     }
 
     // Check 1: Verify ReBAC documentation exists
