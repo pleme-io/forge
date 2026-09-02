@@ -313,11 +313,10 @@ async fn check_object_type_mapping(
             mapped += 1;
         } else if example_types.contains(object_type) {
             if !config.quiet {
-                println!(
-                    "   {} {} (example type, no entity required)",
-                    "○".yellow(),
+                crate::ui::print_step_skip(&format!(
+                    "{} (example type, no entity required)",
                     object_type
-                );
+                ));
             }
         } else {
             log_warning(

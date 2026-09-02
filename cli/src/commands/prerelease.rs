@@ -189,7 +189,7 @@ impl GateSummary {
             println!();
             println!("{} Skipped ({}):", "⏭️".yellow(), self.skipped.len());
             for gate in &self.skipped {
-                println!("   {} {}", "○".yellow(), gate);
+                crate::ui::print_step_skip(gate);
             }
         }
 
