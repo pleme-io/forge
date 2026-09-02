@@ -122,6 +122,77 @@ pub fn styled_spinner(style: SpinnerStyle, message: impl Into<Cow<'static, str>>
     bar
 }
 
+/// Template every pre-lift determinate `ProgressBar::new(<total>)` site
+/// spelled inline verbatim. Pinned as one named constant so a future
+/// visual adjustment (a wider `{bar:40}` track, a different color pair,
+/// a `{eta}` slot) happens at ONE typed boundary rather than four
+/// literal-argument sites.
+const PROGRESS_BAR_TEMPLATE: &str = "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}";
+
+/// Fill / edge / empty glyph triple every pre-lift determinate site fed
+/// to [`ProgressStyle::progress_chars`] verbatim. Same one-boundary
+/// pinning as [`PROGRESS_BAR_TEMPLATE`].
+const PROGRESS_BAR_CHARS: &str = "#>-";
+
+/// Build a determinate [`ProgressBar`] with `total` steps, pre-loaded
+/// with the canonical
+/// `{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}` template
+/// and `"#>-"` progress-char triple every pre-lift consumer spelled
+/// inline. Sibling to [`styled_spinner`] — the spinner-flavored bar
+/// with no length — pinning the length-carrying flavor at the same
+/// `crate::ui` typed boundary.
+///
+/// # Compounding
+///
+/// Pre-lift 4 sibling sites across `commands/{pangea, bootstrap, push,
+/// github_runner_ci}.rs` each spelled the same 3-step block (two of
+/// them wrapped in a file-local `fn create_progress_bar(total: u64) ->
+/// ProgressBar` helper that this primitive supersedes):
+///
+/// ```text
+/// let <name> = ProgressBar::new(<total>);
+/// <name>.set_style(
+///     ProgressStyle::default_bar()
+///         .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}")
+///         .unwrap()                          // push.rs, github_runner_ci.rs
+///         .progress_chars("#>-"),
+/// );
+/// ```
+///
+/// or
+///
+/// ```text
+///         .expect("Invalid progress bar template")   // pangea.rs, bootstrap.rs
+/// ```
+///
+/// Post-lift each collapses to:
+///
+/// ```text
+/// let <name> = ui::styled_progress_bar(<total>);
+/// ```
+///
+/// The template shape, the color pair, the progress-char triple, and
+/// the `.expect` label on a static template (which the 2 raw
+/// `.unwrap()` sites also inherit) all canonicalize at ONE typed
+/// boundary. A future adjustment (a `{eta}` slot, a widened `{bar:60}`
+/// track, a different color pair) happens in one place, not four.
+///
+/// The primitive does NOT set a message — each pre-lift consumer sets
+/// a per-iteration message via `pb.set_message(format!(...))` inside
+/// its own loop body, and the finish message via
+/// `pb.finish_with_message(...)`. Both of those bindings remain at the
+/// call site.
+pub fn styled_progress_bar(total: u64) -> ProgressBar {
+    let bar = ProgressBar::new(total);
+    bar.set_style(
+        ProgressStyle::default_bar()
+            .template(PROGRESS_BAR_TEMPLATE)
+            .expect("PROGRESS_BAR_TEMPLATE is a well-formed indicatif template")
+            .progress_chars(PROGRESS_BAR_CHARS),
+    );
+    bar
+}
+
 pub fn print_header(title: &str) {
     println!();
     println!(
@@ -211,6 +282,54 @@ mod tests {
         let suite = "webhook";
         let owned: String = format!("Running {}", suite);
         let bar = styled_spinner(SpinnerStyle::Cyan, owned);
+        bar.finish_and_clear();
+    }
+
+    #[test]
+    fn progress_bar_template_pins_the_pre_lift_template_string_verbatim() {
+        // Fail-before-pass envelope for the determinate-bar template.
+        // Pre-lift 4 sibling sites (`commands/{pangea, bootstrap, push,
+        // github_runner_ci}.rs`) each spelled this exact template
+        // literal inline. If the constant ever silently drifts (an
+        // extra space, `.cyan/blue` → `.blue/cyan`, a `{eta}` slot
+        // slipped in), the four determinate-bar visual contracts drift
+        // together, so pin the string here.
+        assert_eq!(
+            super::PROGRESS_BAR_TEMPLATE,
+            "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}"
+        );
+    }
+
+    #[test]
+    fn progress_bar_chars_pins_the_pre_lift_fill_edge_empty_triple_verbatim() {
+        // Same fail-before-pass envelope for the `progress_chars` triple.
+        // Every pre-lift site spelled `.progress_chars("#>-")` verbatim;
+        // a silent rewrite to `"=>-"`, `"##-"`, or `"#-"` would compile
+        // and render four progress bars that visually diverge from what
+        // every consumer originally set — so pin the triple here.
+        assert_eq!(super::PROGRESS_BAR_CHARS, "#>-");
+    }
+
+    #[test]
+    fn styled_progress_bar_returns_a_determinate_bar_with_the_requested_length() {
+        // Fail-before-pass envelope for the flavor-and-length contract:
+        // a determinate bar returns `Some(<total>)` from `.length()`,
+        // in contrast to `styled_spinner`'s spinner-flavored bar which
+        // returns `None`. Pre-lift each of the 4 consumer sites
+        // constructed via `ProgressBar::new(<total>)`, never
+        // `new_spinner()`; a fusion that accidentally routed to
+        // `new_spinner()` would render an animated glyph with no
+        // fraction and no `{pos}/{len}` slot, silently degrading every
+        // pre-lift consumer's push-progress readout. The specific
+        // length round-trip also nails that `total` reaches
+        // `ProgressBar::new` unwrapped.
+        let bar = super::styled_progress_bar(7);
+        assert_eq!(
+            bar.length(),
+            Some(7),
+            "styled_progress_bar must return a determinate bar carrying \
+             the requested `total` as its length, not a spinner-flavored bar"
+        );
         bar.finish_and_clear();
     }
 
