@@ -183,12 +183,11 @@ pub async fn run_type_check(web_dir: &Path) -> Result<(bool, Vec<String>)> {
         // Count errors
         let error_count = stdout.matches("error TS").count() + stderr.matches("error TS").count();
 
-        println!(
-            "   {} Type check failed ({} errors, {:.1}s)",
-            "❌".red(),
+        crate::ui::print_step_failure(&format!(
+            "Type check failed ({} errors, {:.1}s)",
             error_count,
             duration.as_secs_f64()
-        );
+        ));
 
         // Collect error lines for summary details
         let combined = format!("{}\n{}", stderr, stdout);
@@ -252,14 +251,13 @@ pub async fn run_lint_with_config(web_dir: &Path, linter: &str) -> Result<(bool,
         let error_count = combined.matches(" error").count();
         let warning_count = combined.matches(" warning").count();
 
-        println!(
-            "   {} {} failed ({} errors, {} warnings, {:.1}s)",
-            "❌".red(),
+        crate::ui::print_step_failure(&format!(
+            "{} failed ({} errors, {} warnings, {:.1}s)",
             linter_name,
             error_count,
             warning_count,
             duration.as_secs_f64()
-        );
+        ));
 
         // Collect error/warning lines for summary details
         let mut details = Vec::new();
@@ -297,11 +295,10 @@ async fn run_biome_lint(web_dir: &Path) -> Result<(bool, Vec<String>)> {
         let stderr = crate::repo::utf8_lossy_borrow(&fix_output.stderr);
         // Check if it's a real error or just unfixable issues
         if stderr.contains("Could not resolve") || stderr.contains("ENOENT") {
-            println!(
-                "   {} Biome auto-fix failed - biome may not be installed ({:.1}s)",
-                "❌".red(),
+            crate::ui::print_step_failure(&format!(
+                "Biome auto-fix failed - biome may not be installed ({:.1}s)",
                 start.elapsed().as_secs_f64()
-            );
+            ));
             for line in stderr.lines().take(5) {
                 println!("   {}", line);
             }
@@ -347,13 +344,12 @@ async fn run_biome_lint(web_dir: &Path) -> Result<(bool, Vec<String>)> {
             .filter(|l| l.contains("warning") || l.contains("⚠"))
             .count();
 
-        println!(
-            "   {} Biome check failed ({} errors, {} warnings, {:.1}s)",
-            "❌".red(),
+        crate::ui::print_step_failure(&format!(
+            "Biome check failed ({} errors, {} warnings, {:.1}s)",
             errors,
             warnings,
             duration.as_secs_f64()
-        );
+        ));
 
         // Collect error lines for summary details
         let mut details = Vec::new();
@@ -410,11 +406,10 @@ pub async fn run_unit_tests(web_dir: &Path) -> Result<(bool, Option<usize>, Vec<
             // Consider no tests as passing (not all projects have tests)
             Ok((true, Some(0), Vec::new()))
         } else if has_failures {
-            println!(
-                "   {} Unit tests failed ({:.1}s)",
-                "❌".red(),
+            crate::ui::print_step_failure(&format!(
+                "Unit tests failed ({:.1}s)",
                 duration.as_secs_f64()
-            );
+            ));
 
             // Collect failure lines for summary details
             let mut details = Vec::new();
@@ -429,11 +424,10 @@ pub async fn run_unit_tests(web_dir: &Path) -> Result<(bool, Option<usize>, Vec<
             Ok((false, test_count, details))
         } else {
             // Unknown error
-            println!(
-                "   {} Test execution failed ({:.1}s)",
-                "❌".red(),
+            crate::ui::print_step_failure(&format!(
+                "Test execution failed ({:.1}s)",
                 duration.as_secs_f64()
-            );
+            ));
             let details: Vec<String> = combined.lines().take(10).map(|l| l.to_string()).collect();
             println!("   {}", details.join("\n   "));
             Ok((false, test_count, details))

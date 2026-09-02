@@ -237,7 +237,7 @@ pub async fn validate_schema_export(backend_dir: &Path) -> Result<bool> {
     let schema_bytes = match crate::graphql_schema::extract_graphql_schema(backend_dir).await {
         Ok(bytes) => bytes,
         Err(err) => {
-            println!("   {} Schema export failed", "❌".red());
+            crate::ui::print_step_failure("Schema export failed");
             println!("   {}", err);
             return Ok(false);
         }

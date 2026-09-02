@@ -578,7 +578,7 @@ pub async fn validate_migrations_with_config(
     if all_issues.is_empty() {
         println!("   {} All migrations valid", "✅".green());
     } else {
-        println!("   {} Found {} issues", "❌".red(), all_issues.len());
+        crate::ui::print_step_failure(&format!("Found {} issues", all_issues.len()));
         for issue in &all_issues {
             println!("\n   {}", issue.format());
         }
@@ -945,7 +945,7 @@ pub async fn validate_seaorm_migrations(
     if all_issues.is_empty() {
         println!("   {} All SeaORM migrations safe", "✅".green());
     } else {
-        println!("   {} Found {} safety issues", "❌".red(), all_issues.len());
+        crate::ui::print_step_failure(&format!("Found {} safety issues", all_issues.len()));
         for issue in &all_issues {
             println!("\n   {}", issue.format());
         }
@@ -1215,7 +1215,7 @@ pub async fn validate_migration_manifest(
             assessed_count
         );
     } else {
-        println!("   {} Found {} manifest issues", "❌".red(), issues.len());
+        crate::ui::print_step_failure(&format!("Found {} manifest issues", issues.len()));
         for issue in &issues {
             println!("\n   {}", issue.format());
         }

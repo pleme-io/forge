@@ -393,7 +393,7 @@ pub async fn execute(
                 }
             }
             Err(e) => {
-                println!("   {} Integration tests error: {}", "❌".red(), e);
+                crate::ui::print_step_failure(&format!("Integration tests error: {}", e));
                 summary.failed.push("G13: Integration tests".to_string());
             }
         }
@@ -426,7 +426,7 @@ pub async fn execute(
                 }
             }
             Err(e) => {
-                println!("   {} E2E tests error: {}", "❌".red(), e);
+                crate::ui::print_step_failure(&format!("E2E tests error: {}", e));
                 summary.failed.push("G14: E2E tests".to_string());
             }
         }
@@ -832,7 +832,7 @@ async fn run_integration_gate(config: &PreReleaseConfig) -> Result<bool> {
 
     // Ensure Docker is running (auto-start on macOS)
     if let Err(e) = e2e::ensure_docker_running() {
-        println!("   {} Docker not available: {}", "❌".red(), e);
+        crate::ui::print_step_failure(&format!("Docker not available: {}", e));
         return Ok(false);
     }
 
@@ -866,11 +866,10 @@ async fn run_integration_gate(config: &PreReleaseConfig) -> Result<bool> {
                 Ok(true)
             } else {
                 let (stdout, stderr) = crate::repo::utf8_lossy_streams(&output);
-                println!(
-                    "   {} Integration tests failed ({:.1}s)",
-                    "❌".red(),
+                crate::ui::print_step_failure(&format!(
+                    "Integration tests failed ({:.1}s)",
                     duration.as_secs_f64()
-                );
+                ));
                 for line in stderr.lines().chain(stdout.lines()).take(15) {
                     if line.contains("FAILED") || line.contains("panicked") {
                         println!("   {}", line.red());
@@ -880,15 +879,14 @@ async fn run_integration_gate(config: &PreReleaseConfig) -> Result<bool> {
             }
         }
         Ok(Err(e)) => {
-            println!("   {} Failed to run integration tests: {}", "❌".red(), e);
+            crate::ui::print_step_failure(&format!("Failed to run integration tests: {}", e));
             Ok(false)
         }
         Err(_) => {
-            println!(
-                "   {} Integration tests timed out after {}s",
-                "❌".red(),
+            crate::ui::print_step_failure(&format!(
+                "Integration tests timed out after {}s",
                 timeout_secs
-            );
+            ));
             Ok(false)
         }
     }
@@ -987,7 +985,7 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
 
     // Ensure Docker is running (may already be started by G13)
     if let Err(e) = e2e::ensure_docker_running() {
-        println!("   {} Docker not available: {}", "❌".red(), e);
+        crate::ui::print_step_failure(&format!("Docker not available: {}", e));
         return Ok(false);
     }
 
@@ -1002,7 +1000,7 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
     // Always force-rebuild E2E images to ensure tests run against the current code.
     // Without force=true, stale images from a previous build would be reused.
     if let Err(e) = e2e::prepare_e2e_images(repo_root.clone(), false, false, true) {
-        println!("   {} Failed to prepare E2E images: {}", "❌".red(), e);
+        crate::ui::print_step_failure(&format!("Failed to prepare E2E images: {}", e));
         return Ok(false);
     }
 
@@ -1052,11 +1050,10 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
                 Ok(true)
             } else {
                 let (stdout, stderr) = crate::repo::utf8_lossy_streams(&output);
-                println!(
-                    "   {} E2E tests failed ({:.1}s)",
-                    "❌".red(),
+                crate::ui::print_step_failure(&format!(
+                    "E2E tests failed ({:.1}s)",
                     duration.as_secs_f64()
-                );
+                ));
 
                 // Show all test output for debugging
                 println!();
@@ -1093,7 +1090,7 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
             let _ = e2e::cleanup_testcontainers();
             let _ = e2e::cleanup_e2e_images();
 
-            println!("   {} Failed to run E2E tests: {}", "❌".red(), e);
+            crate::ui::print_step_failure(&format!("Failed to run E2E tests: {}", e));
             print_e2e_diagnostics(&config.backend_dir);
             Ok(false)
         }
@@ -1102,12 +1099,11 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
             let _ = e2e::cleanup_testcontainers();
             let _ = e2e::cleanup_e2e_images();
 
-            println!(
-                "   {} E2E tests timed out after {}s ({:.1}s elapsed)",
-                "❌".red(),
+            crate::ui::print_step_failure(&format!(
+                "E2E tests timed out after {}s ({:.1}s elapsed)",
                 timeout_secs,
                 duration.as_secs_f64()
-            );
+            ));
             println!();
             println!("   The test process was killed after the timeout.");
             println!("   This usually means containers failed to start or a test is hanging.");
@@ -1172,11 +1168,10 @@ async fn run_cargo_check(backend_dir: &Path) -> Result<bool> {
         Ok(true)
     } else {
         let stderr = crate::repo::utf8_lossy_borrow(&output.stderr);
-        println!(
-            "   {} Compilation check failed ({:.1}s)",
-            "❌".red(),
+        crate::ui::print_step_failure(&format!(
+            "Compilation check failed ({:.1}s)",
             duration.as_secs_f64()
-        );
+        ));
         // Show first few errors
         for line in stderr.lines().take(10) {
             if line.contains("error") {
@@ -1215,12 +1210,11 @@ async fn run_cargo_clippy(backend_dir: &Path) -> Result<bool> {
         let stderr = crate::repo::utf8_lossy_borrow(&output.stderr);
         let warning_count = stderr.matches("warning:").count();
 
-        println!(
-            "   {} Clippy failed ({} warnings, {:.1}s)",
-            "❌".red(),
+        crate::ui::print_step_failure(&format!(
+            "Clippy failed ({} warnings, {:.1}s)",
             warning_count,
             duration.as_secs_f64()
-        );
+        ));
         // Show first few warnings
         for line in stderr.lines().take(10) {
             if line.contains("warning:") || line.contains("error:") {
@@ -1247,11 +1241,10 @@ async fn run_cargo_fmt_check(backend_dir: &Path) -> Result<bool> {
 
     if !fix_output.status.success() {
         let stderr = crate::repo::utf8_lossy_borrow(&fix_output.stderr);
-        println!(
-            "   {} cargo fmt failed ({:.1}s)",
-            "❌".red(),
+        crate::ui::print_step_failure(&format!(
+            "cargo fmt failed ({:.1}s)",
             start.elapsed().as_secs_f64()
-        );
+        ));
         for line in stderr.lines().take(5) {
             println!("   {}", line);
         }
@@ -1283,12 +1276,11 @@ async fn run_cargo_fmt_check(backend_dir: &Path) -> Result<bool> {
             .filter(|l| l.starts_with("Diff in"))
             .collect();
 
-        println!(
-            "   {} Code formatting check failed after auto-fix ({} files, {:.1}s)",
-            "❌".red(),
+        crate::ui::print_step_failure(&format!(
+            "Code formatting check failed after auto-fix ({} files, {:.1}s)",
             unformatted_files.len(),
             duration.as_secs_f64()
-        );
+        ));
         for file in unformatted_files.iter().take(5) {
             println!("   {}", file);
         }
@@ -1333,11 +1325,7 @@ async fn run_cargo_test(backend_dir: &Path) -> Result<bool> {
         Ok(true)
     } else {
         let stderr = crate::repo::utf8_lossy_borrow(&output.stderr);
-        println!(
-            "   {} Tests failed ({:.1}s)",
-            "❌".red(),
-            duration.as_secs_f64()
-        );
+        crate::ui::print_step_failure(&format!("Tests failed ({:.1}s)", duration.as_secs_f64()));
         println!();
         // Show full stdout (cargo test writes results there)
         if !stdout.trim().is_empty() {
