@@ -1820,7 +1820,7 @@ fn discover_charts(charts_dir: &str, exclude_name: &str) -> Result<Vec<String>> 
         if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
             continue;
         }
-        let name = entry.file_name().to_string_lossy().to_string();
+        let name = crate::repo::dir_entry_name_lossy(&entry);
         if name == exclude_name || !entry.path().join("Chart.yaml").exists() {
             continue;
         }

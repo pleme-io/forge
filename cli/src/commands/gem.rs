@@ -640,7 +640,7 @@ fn find_gem_file(dir: &Path, prefix: &str) -> Result<String> {
 
     entries
         .first()
-        .map(|e| e.file_name().to_string_lossy().to_string())
+        .map(crate::repo::dir_entry_name_lossy)
         .context(format!(
             "No .gem file found for {} in {}",
             prefix,

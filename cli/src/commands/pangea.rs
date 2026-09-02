@@ -630,7 +630,7 @@ pub fn spec_gen(
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
         .filter(|e| {
-            let name = e.file_name().to_string_lossy().to_string();
+            let name = crate::repo::dir_entry_name_lossy(e);
             // Match provider-prefixed directories (aws_*, akeyless_*, etc.)
             name.contains('_') && !name.starts_with('.')
         })
@@ -647,7 +647,7 @@ pub fn spec_gen(
     let mut skipped = 0;
 
     for entry in &resource_dirs {
-        let resource_name = entry.file_name().to_string_lossy().to_string();
+        let resource_name = crate::repo::dir_entry_name_lossy(entry);
         let spec_path = spec_dir.join(&resource_name).join("synthesis_spec.rb");
 
         // Skip if spec exists and not forcing

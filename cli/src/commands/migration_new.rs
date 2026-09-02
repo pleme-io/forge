@@ -41,7 +41,7 @@ pub async fn execute(
 
     for entry in entries {
         let entry = entry?;
-        let filename = entry.file_name().to_string_lossy().to_string();
+        let filename = crate::repo::dir_entry_name_lossy(&entry);
         if filename.starts_with(&date_prefix) && filename.ends_with(".rs") {
             // Extract sequence: m20260209_000001_name.rs → 000001
             let parts: Vec<&str> = filename.split('_').collect();
