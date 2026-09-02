@@ -163,10 +163,8 @@ pub async fn validate_codegen_with_autocommit(
         .with_context(|| format!("Failed to run graphql-codegen in {}", web_dir.display()))?;
 
     if !codegen_output.status.success() {
-        let (stdout, stderr) = crate::repo::utf8_lossy_streams(&codegen_output);
-
         // Check for specific drift errors
-        let error_msg = format!("{}\n{}", stderr, stdout);
+        let error_msg = crate::repo::utf8_lossy_streams_joined(&codegen_output);
 
         // Look for schema drift indicators
         let drift_indicators = [
