@@ -193,7 +193,7 @@ pub async fn execute_drift_check(working_dir: &Path) -> Result<DriftCheckResult>
     let schema_drift = !old_schema_hash.is_empty() && old_schema_hash != new_schema_hash;
 
     if schema_drift {
-        println!("   {} Schema drift detected!", "❌".red());
+        crate::ui::print_step_failure("Schema drift detected!");
         println!("   Run 'nix run .#codegen' to sync schema");
         return Ok(DriftCheckResult {
             schema_drift: true,
@@ -249,7 +249,7 @@ pub async fn execute_drift_check(working_dir: &Path) -> Result<DriftCheckResult>
     let codegen_drift = !old_codegen_hash.is_empty() && old_codegen_hash != new_codegen_hash;
 
     if codegen_drift {
-        println!("   {} Codegen drift detected!", "❌".red());
+        crate::ui::print_step_failure("Codegen drift detected!");
         println!("   Generated types are out of sync with schema");
         println!("   Run 'nix run .#codegen' to regenerate");
         return Ok(DriftCheckResult {

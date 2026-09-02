@@ -176,7 +176,10 @@ pub async fn verify_health_endpoint(
                         );
                         tokio::time::sleep(health_endpoint_retry_delay(attempt)).await;
                     } else {
-                        println!("   {} Health check failed: Status {}", "❌".red(), status);
+                        crate::ui::print_step_failure(&format!(
+                            "Health check failed: Status {}",
+                            status
+                        ));
                         return Ok((false, Some(latency_ms)));
                     }
                 }
@@ -192,7 +195,7 @@ pub async fn verify_health_endpoint(
                     );
                     tokio::time::sleep(health_endpoint_retry_delay(attempt)).await;
                 } else {
-                    println!("   {} Health check failed: {}", "❌".red(), e);
+                    crate::ui::print_step_failure(&format!("Health check failed: {}", e));
                     return Ok((false, None));
                 }
             }
@@ -240,26 +243,31 @@ pub async fn verify_graphql_endpoint(
                             println!("   {} GraphQL responding ({}ms)", "✅".green(), latency_ms);
                             return Ok((true, Some(latency_ms)));
                         } else if let Some(errors) = json.get("errors") {
-                            println!("   {} GraphQL returned errors: {}", "❌".red(), errors);
+                            crate::ui::print_step_failure(&format!(
+                                "GraphQL returned errors: {}",
+                                errors
+                            ));
                             return Ok((false, Some(latency_ms)));
                         }
                     }
                     Err(e) => {
-                        println!("   {} Failed to parse GraphQL response: {}", "❌".red(), e);
+                        crate::ui::print_step_failure(&format!(
+                            "Failed to parse GraphQL response: {}",
+                            e
+                        ));
                         return Ok((false, Some(latency_ms)));
                     }
                 }
             } else {
-                println!(
-                    "   {} GraphQL check failed: Status {}",
-                    "❌".red(),
+                crate::ui::print_step_failure(&format!(
+                    "GraphQL check failed: Status {}",
                     response.status()
-                );
+                ));
                 return Ok((false, Some(latency_ms)));
             }
         }
         Err(e) => {
-            println!("   {} GraphQL check failed: {}", "❌".red(), e);
+            crate::ui::print_step_failure(&format!("GraphQL check failed: {}", e));
             return Ok((false, None));
         }
     }
@@ -312,13 +320,10 @@ pub async fn verify_smoke_queries(
 
                 if !response.status().is_success() {
                     let status = response.status();
-                    println!(
-                        "   {} {}: HTTP {} ({}ms)",
-                        "❌".red(),
-                        smoke.name,
-                        status,
-                        latency_ms
-                    );
+                    crate::ui::print_step_failure(&format!(
+                        "{}: HTTP {} ({}ms)",
+                        smoke.name, status, latency_ms
+                    ));
                     results.push(SmokeQueryResult {
                         name: smoke.name.clone(),
                         passed: false,
@@ -354,13 +359,10 @@ pub async fn verify_smoke_queries(
                                     smoke.expect_field
                                 )
                             };
-                            println!(
-                                "   {} {}: {} ({}ms)",
-                                "❌".red(),
-                                smoke.name,
-                                error_msg,
-                                latency_ms
-                            );
+                            crate::ui::print_step_failure(&format!(
+                                "{}: {} ({}ms)",
+                                smoke.name, error_msg, latency_ms
+                            ));
                             results.push(SmokeQueryResult {
                                 name: smoke.name.clone(),
                                 passed: false,
@@ -371,13 +373,10 @@ pub async fn verify_smoke_queries(
                         }
                     }
                     Err(e) => {
-                        println!(
-                            "   {} {}: Failed to parse response: {} ({}ms)",
-                            "❌".red(),
-                            smoke.name,
-                            e,
-                            latency_ms
-                        );
+                        crate::ui::print_step_failure(&format!(
+                            "{}: Failed to parse response: {} ({}ms)",
+                            smoke.name, e, latency_ms
+                        ));
                         results.push(SmokeQueryResult {
                             name: smoke.name.clone(),
                             passed: false,
@@ -389,7 +388,7 @@ pub async fn verify_smoke_queries(
                 }
             }
             Err(e) => {
-                println!("   {} {}: {}", "❌".red(), smoke.name, e);
+                crate::ui::print_step_failure(&format!("{}: {}", smoke.name, e));
                 results.push(SmokeQueryResult {
                     name: smoke.name.clone(),
                     passed: false,

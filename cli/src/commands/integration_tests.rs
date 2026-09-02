@@ -1464,13 +1464,12 @@ pub async fn execute_pre_deployment_tests(
                 .as_ref()
                 .map(|c| format!(" [{} passed, {} failed]", c.passed, c.failed))
                 .unwrap_or_default();
-            println!(
-                "   {} {} - {:.2}s{}",
-                "❌".red(),
+            crate::ui::print_step_failure(&format!(
+                "{} - {:.2}s{}",
                 suite.name,
                 result.duration.as_secs_f64(),
                 test_info.bright_white()
-            );
+            ));
             // Print output for failed tests
             if !result.output.is_empty() {
                 println!("   {}", "─".repeat(60).dimmed());
