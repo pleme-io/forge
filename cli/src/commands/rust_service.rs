@@ -308,8 +308,7 @@ pub async fn build_rust_service(
         service.cyan(),
         "with crate2nix (per-crate caching enabled)".dimmed()
     );
-    println!("{}", "=".repeat(50));
-    println!();
+    crate::ui::print_ascii_title_underline(50);
 
     // Pre-flight checks
     println!("🔍 {}", "Pre-flight checks...".bold());
@@ -876,8 +875,7 @@ pub async fn push_rust_service_with_tag(
         service.cyan(),
         "images to registries".dimmed()
     );
-    println!("{}", "=".repeat(50));
-    println!();
+    crate::ui::print_ascii_title_underline(50);
     println!("Registry: {}", registry);
     println!("Tag suffix: {}", tag_suffix);
     println!();
@@ -1137,8 +1135,7 @@ pub async fn orchestrate_release(
         )
         .dimmed()
     );
-    println!("{}", "=".repeat(60));
-    println!();
+    crate::ui::print_ascii_title_underline(60);
 
     // Show active vs available environments (skip for push-only)
     if !push_only {
@@ -1694,8 +1691,7 @@ pub async fn orchestrate_standalone_release(
         "Standalone Release".bold(),
         "(no deploy.yaml — push only)".dimmed()
     );
-    println!("{}", "=".repeat(60));
-    println!();
+    crate::ui::print_ascii_title_underline(60);
 
     if image_path.is_none() && image_path_arm64.is_none() {
         bail!("Standalone release requires --image-path and/or --image-path-arm64");
@@ -1877,8 +1873,7 @@ pub async fn deploy_rust_service_with_tag(
         service.cyan(),
         "to Kubernetes".dimmed()
     );
-    println!("{}", "=".repeat(50));
-    println!();
+    crate::ui::print_ascii_title_underline(50);
     println!("Namespace: {}", namespace);
     println!("Image: {}", image_tag);
     println!("Manifest: {}", manifest);
@@ -2322,8 +2317,7 @@ pub async fn release_rust_service(
         "Service Release Workflow".bold(),
         "(crate2nix)".dimmed()
     );
-    println!("{}", "=".repeat(50));
-    println!();
+    crate::ui::print_ascii_title_underline(50);
 
     // Load deployment configuration first (hierarchical: global → product → service)
     let deploy_config = DeployConfig::load_for_service(&service)?;

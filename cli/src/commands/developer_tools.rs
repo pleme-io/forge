@@ -232,8 +232,7 @@ pub async fn rust_service_help(service: String) -> Result<()> {
         service.cyan().bold(),
         "Service (crate2nix)".dimmed()
     );
-    println!("{}", "=".repeat(50));
-    println!();
+    crate::ui::print_ascii_title_underline(50);
     crate::ui::print_step_heading("🏗️  Architecture:");
     println!("  • Per-crate derivation caching via crate2nix");
     println!("  • Each dependency (tokio, axum, sqlx, etc.) cached separately in Attic");
@@ -275,8 +274,7 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
         "Cargo.lock and Cargo.nix".cyan(),
         format!("for {} workspace", service).dimmed()
     );
-    println!("{}", "=".repeat(50));
-    println!();
+    crate::ui::print_ascii_title_underline(50);
 
     // Get workspace root from environment (set by setup_service_directory)
     let service_path = service_path_from_env()?;
@@ -361,8 +359,7 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
         "and regenerating Cargo.nix".cyan(),
         format!("for {} workspace", service).dimmed()
     );
-    println!("{}", "=".repeat(50));
-    println!();
+    crate::ui::print_ascii_title_underline(50);
 
     // Get workspace root from environment (set by setup_service_directory)
     let service_path = service_path_from_env()?;
@@ -440,8 +437,7 @@ pub async fn rust_dev(
         "Local Development".bold(),
         "(powered by forge)".dimmed()
     );
-    println!("{}", "=".repeat(50));
-    println!();
+    crate::ui::print_ascii_title_underline(50);
 
     // Get paths from environment
     let service_path = service_path_from_env()?;

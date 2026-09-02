@@ -569,6 +569,68 @@ pub fn write_step_success<W: std::io::Write>(w: &mut W, message: &str) -> std::i
     writeln!(w, "✅ {}", message.green())
 }
 
+/// Prints the two-line `"=".repeat(<width>)` ASCII rule + trailing
+/// blank grammar 14 pre-lift consumer sites spelled inline as
+/// `println!("{}", "=".repeat(<50|60>)); println!();` across 5
+/// command modules (`commands/{rust_service (×6), developer_tools
+/// (×4), web_service (×2), rollback (×1), product_release (×1)}.rs`).
+/// Emitted directly beneath a multi-part styled command-intro title
+/// (the caller's `println!("🔄 {} {} {}", ...)` /
+/// `println!("🚀 {} {} {}", ...)` line), the rule underlines that
+/// title and the blank line separates the intro banner from the body
+/// that follows.
+///
+/// # Distinct from the other `ui::print_*` primitives
+///
+/// [`print_header`] is a `╔═╗` boxed top-level command title in
+/// `bright_blue` — heavy Unicode box-drawing, a self-contained
+/// framed title, no preceding caller `println!`. [`print_section_header`]
+/// is a `═`-rule + bold-title + `═`-rule triple around a section
+/// opening WITHIN a pipeline — heavy Unicode rule, palette-carrying,
+/// title-CONTAINED. This primitive carries the LEANEST intro
+/// separator — a single-byte `=` ASCII rule + a blank line, no color,
+/// no title inside — every pre-lift consumer emitted it as an
+/// UNDERLINE for a multi-part styled title the caller had just
+/// printed on the preceding line, closing the command-intro banner
+/// and opening the body.
+///
+/// # Compounding
+///
+/// Pre-lift 14 sibling sites each restated the two-line
+/// `println!("{}", "=".repeat(<width>)); println!();` grammar
+/// verbatim, with the rule character (`=`), the rule mechanism
+/// (`"=".repeat(...)`), and the trailing framing blank
+/// (`println!()`) all spelled inline. A future palette adjustment
+/// (a swap of `=` for `─` or `━` under a leaner-vs-heavier rule
+/// distinction, a promotion to a colored bar under a themed
+/// palette, dropping the trailing blank in favor of tighter body
+/// spacing, standardizing the two pre-lift widths (50 and 60) onto
+/// a single canonical intro-banner width) had to hit 14 sites in
+/// lockstep or drift the visual grammar; post-lift it hits ONE
+/// typed body. Delegates to [`write_ascii_title_underline`] against
+/// [`std::io::stdout()`]; the writer split exists so the
+/// fail-before-pass test can pin the exact rule byte-count, the
+/// trailing blank line, and the absence of coloring by inspecting
+/// emitted bytes rather than shelling out and grepping stdout.
+pub fn print_ascii_title_underline(width: usize) {
+    let _ = write_ascii_title_underline(&mut std::io::stdout().lock(), width);
+}
+
+/// Writer-taking sibling to [`print_ascii_title_underline`]. Emits
+/// the two-line body (`"=".repeat(width)` ASCII rule then a blank
+/// line) via [`writeln!`] against the supplied writer.
+/// [`print_ascii_title_underline`] is the stdout adapter; this
+/// variant exists so tests can pin the rule byte-count, the trailing
+/// blank, and the plain (uncolored) ASCII palette without capturing
+/// stdout.
+pub fn write_ascii_title_underline<W: std::io::Write>(
+    w: &mut W,
+    width: usize,
+) -> std::io::Result<()> {
+    writeln!(w, "{}", "=".repeat(width))?;
+    writeln!(w)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{styled_spinner, SpinnerStyle, SPINNER_TICK};
@@ -1395,6 +1457,143 @@ mod tests {
                  `crate::ui::print_step_success(\"<MSG>\")` — the \
                  primitive body every one-line `✅ ` + green() \
                  step-completion in the crate now delegates through."
+            );
+        }
+    }
+
+    /// Pins the exact bytes [`super::write_ascii_title_underline`]
+    /// emits — a `"=".repeat(width)` rule line, then a blank line —
+    /// the shape the 14 pre-lift consumer sites carried across five
+    /// command modules. Fails BEFORE the lift so the sibling class
+    /// closure is verifiable; guards against future palette drift
+    /// (rule character, trailing blank, coloring).
+    #[test]
+    fn write_ascii_title_underline_emits_rule_line_then_blank_line() {
+        // No `colored::control::set_override` shim needed — every
+        // pre-lift stanza spelled the rule as a plain `"=".repeat(...)`
+        // WITHOUT chaining a `.color()` / `.bold()` styling. Emit against
+        // a `Vec<u8>` writer and assert on bytes verbatim.
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_ascii_title_underline(&mut buf, 50)
+            .expect("write_ascii_title_underline against a Vec<u8> writer must succeed");
+        let out = String::from_utf8(buf).expect(
+            "write_ascii_title_underline must emit valid UTF-8 (the pre-lift println!s did)",
+        );
+
+        // Exactly two lines — the pre-lift stanza was two `println!`
+        // calls (the rule + one framing blank). A refactor that drops
+        // the trailing blank (a "tighter body spacing" cleanup) or
+        // that promotes it to two blanks fails here.
+        let lines: Vec<&str> = out.split_inclusive('\n').collect();
+        assert_eq!(
+            lines.len(),
+            2,
+            "write_ascii_title_underline must emit exactly two lines — \
+             the pre-lift stanza carried the `=`-rule followed by ONE \
+             framing blank via a second `println!()`; got {}:\n{:?}",
+            lines.len(),
+            out
+        );
+
+        // Line 0 is the `=`-rule of exactly `width` `=` bytes plus a
+        // trailing `\n`. A refactor that swaps `=` for `-` or `─` (a
+        // heavier / lighter rule promotion) fails the byte-content
+        // check; one that drifts the width fails the length check.
+        assert_eq!(
+            lines[0], "==================================================\n",
+            "line 0 must be exactly `50` `=` bytes + `\\n` — every \
+             pre-lift consumer spelled the rule as a plain \
+             `\"=\".repeat(width)` ASCII bar with no chained styling \
+             and no width drift; got {:?}",
+            lines[0]
+        );
+
+        // Line 1 is the trailing blank — exactly `\n`. A refactor
+        // that promotes it to a blank-with-content (e.g. spaces) or
+        // drops it entirely fails here.
+        assert_eq!(
+            lines[1], "\n",
+            "line 1 must be exactly `\\n` — the pre-lift trailing \
+             `println!()` emits an empty line, and any content there \
+             (a stray space, a promoted styled rule) is a visual \
+             regression; got {:?}",
+            lines[1]
+        );
+
+        // No ANSI coloring anywhere — every pre-lift consumer emitted
+        // the rule as plain ASCII. A refactor that promotes the rule
+        // to `.dimmed()` / `.bright_blue()` (borrowing the palette
+        // from `print_section_header`'s bold-`═`-rule triple) fails
+        // here.
+        assert!(
+            !out.contains('\x1b'),
+            "write_ascii_title_underline must emit no ANSI escape \
+             sequences — every pre-lift consumer spelled a plain \
+             `\"=\".repeat(width)` ASCII bar with no chained \
+             `.color()` / `.bold()`; got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_ascii_title_underline`] no longer spell the
+    /// `println!("{}", "=".repeat(<width>));` shape inline. Structural
+    /// regression shield — without it, a future refactor could
+    /// silently re-inline the two-liner (e.g. a "just call `println!`
+    /// directly, it's shorter" cleanup) and reopen the 14-site
+    /// duplication class this lift closed. Enforced at the module
+    /// bodies before their `#[cfg(test)]` regions so a test-support
+    /// mention of the raw shape does not defeat the shield. The
+    /// exact-shape needle `println!("{}", "=".repeat(` uniquely
+    /// identifies the pre-lift restatement — the `═`-heavy-rule
+    /// consumers of `print_section_header` use a Unicode
+    /// `SECTION_HEADER_RULE` constant (`═` bytes, never
+    /// `"=".repeat(...)`), and the `=`-rule sites in
+    /// `print_release_stage_banner` live inside `ui.rs` (outside
+    /// this shield's `commands/*.rs` scope).
+    #[test]
+    fn print_ascii_title_underline_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[
+            (
+                include_str!("commands/rust_service.rs"),
+                "commands/rust_service.rs",
+            ),
+            (
+                include_str!("commands/developer_tools.rs"),
+                "commands/developer_tools.rs",
+            ),
+            (
+                include_str!("commands/web_service.rs"),
+                "commands/web_service.rs",
+            ),
+            (include_str!("commands/rollback.rs"), "commands/rollback.rs"),
+            (
+                include_str!("commands/product_release.rs"),
+                "commands/product_release.rs",
+            ),
+        ];
+        for (source, module_path) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                assert!(
+                    !line.contains("println!(\"{}\", \"=\".repeat("),
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `println!(\"{{}}\", \"=\".repeat(<width>));` \
+                     ASCII title-underline rule — that two-liner was \
+                     lifted onto `crate::ui::print_ascii_title_underline`. \
+                     A re-inline would silently reopen the 14-site \
+                     duplication class this shield exists to close. \
+                     Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            assert!(
+                body.contains("crate::ui::print_ascii_title_underline("),
+                "{module_path} body must forward to \
+                 `crate::ui::print_ascii_title_underline(<width>)` — \
+                 the primitive body every two-line `=`-rule + blank \
+                 command-intro underline in the crate now delegates \
+                 through."
             );
         }
     }

@@ -113,8 +113,7 @@ pub async fn web_regenerate(product: String, service: String, repo_root: String)
         format!("{}-{}", product, service).cyan(),
         "dependencies".dimmed()
     );
-    println!("{}", "=".repeat(50));
-    println!();
+    crate::ui::print_ascii_title_underline(50);
 
     let repo_root_path = Path::new(&repo_root);
     let service_dir = repo_root_path
@@ -227,8 +226,7 @@ pub async fn web_cargo_update(product: String, service: String, repo_root: Strin
         "(shared BFF)".cyan(),
         format!("for {}-{}", product, service).dimmed()
     );
-    println!("{}", "=".repeat(50));
-    println!();
+    crate::ui::print_ascii_title_underline(50);
 
     let repo_root_path = Path::new(&repo_root);
     let hanabi_dir = repo_root_path.join("pkgs").join("platform").join("hanabi");
