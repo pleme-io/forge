@@ -634,10 +634,11 @@ pub fn write_ascii_title_underline<W: std::io::Write>(
 #[cfg(test)]
 mod tests {
     use super::{styled_spinner, SpinnerStyle, SPINNER_TICK};
+    use colored::Colorize;
     use std::sync::Mutex;
     use std::time::Duration;
 
-    /// Serializes the three banner tests that flip `colored`'s global
+    /// Serializes the banner tests that flip `colored`'s global
     /// override to force ANSI emission against a `Vec<u8>` writer. The
     /// override is process-global; without a shared guard, cargo's
     /// default parallel test runner can schedule one test's
@@ -645,8 +646,95 @@ mod tests {
     /// `set_override(true)` and its `writeln!`, leaving the writer's
     /// bytes stripped of the very ANSI sequences those tests then
     /// assert against. Every banner test that touches the override
-    /// acquires this mutex for the entire set-write-unset window.
+    /// acquires this mutex for the entire set-write-unset window via
+    /// the [`AnsiOverrideForTest`] guard.
     static ANSI_OVERRIDE_LOCK: Mutex<()> = Mutex::new(());
+
+    /// RAII guard that closes the acquire-lock + set-override +
+    /// matched-unset-override + poisoned-mutex-recovery stanza which
+    /// the five pre-lift banner tests each carried verbatim.
+    ///
+    /// The pre-lift tests were:
+    /// [`write_success_banner_emits_three_bar_message_bar_lines_in_order`],
+    /// [`write_release_stage_banner_emits_three_bar_headline_bar_lines_in_order`],
+    /// [`write_section_header_emits_three_bar_title_bar_lines_in_order`],
+    /// [`write_step_heading_emits_exactly_one_bold_title_line`], and
+    /// [`write_step_success_emits_exactly_one_check_prefixed_green_line`].
+    ///
+    /// Each pre-lift test opened with an acquire prologue at the test
+    /// top — `let _override_guard = ANSI_OVERRIDE_LOCK.lock()`
+    /// followed by `.unwrap_or_else(|poisoned| poisoned.into_inner())`
+    /// followed by `colored::control::set_override(true)` — and its
+    /// matched [`colored::control::unset_override`] call about 8
+    /// lines later, paired but visually separated by the writer call
+    /// and its [`expect`] between them.
+    ///
+    /// # Compounding
+    ///
+    /// Pre-lift the acquire + set + matched-unset had to appear in
+    /// lockstep in every banner test — a future test author could
+    /// (and, given how visually separated the pair sat in each test
+    /// body, would eventually) omit the trailing
+    /// [`colored::control::unset_override`], stranding subsequent
+    /// tests with the global override still forced on and silently
+    /// coloring their output against contracts that pinned the
+    /// absence of coloring (e.g.
+    /// [`write_ascii_title_underline_emits_rule_line_then_blank_line`]
+    /// asserts NO ANSI escapes present). Similarly, a poisoned mutex
+    /// recovered by one test author (via
+    /// `unwrap_or_else(|poisoned| poisoned.into_inner())`) and
+    /// forgotten by another meant a panic during one test's
+    /// set-write-unset window would poison the mutex and hang every
+    /// subsequent banner test on `.lock().unwrap()`. Post-lift the
+    /// acquire + set + poisoned-recover + Drop-unset dance lives in
+    /// ONE typed body; the pairing is a Rust invariant (Drop cannot
+    /// be forgotten), the poisoned-mutex recovery is the guard's
+    /// unconditional policy, and a new banner test picks up all
+    /// three properties by naming the type. The `_lock` field is
+    /// held for the guard's lifetime — dropping the guard drops the
+    /// [`MutexGuard`] AFTER the [`unset_override`] call in [`Drop`],
+    /// so the lock protects the entire set-write-unset window
+    /// (colored on → writer runs → colored off) even under a
+    /// re-entrant acquire from another test.
+    struct AnsiOverrideForTest {
+        /// The acquired [`ANSI_OVERRIDE_LOCK`] guard. `_`-prefixed
+        /// because it exists only for its RAII lifetime — the mutex
+        /// releases when [`AnsiOverrideForTest::drop`] returns, which
+        /// happens AFTER the `unset_override` call.
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl AnsiOverrideForTest {
+        /// Acquire the shared [`ANSI_OVERRIDE_LOCK`] with a
+        /// poisoned-mutex recovery (a prior test's panic during its
+        /// set-write-unset window taints the mutex but leaves the
+        /// override state deterministic — the guard's own [`Drop`]
+        /// will `unset_override` on scope exit, so recovering the
+        /// inner `()` and continuing is the correct policy) and force
+        /// [`colored`]'s global override on so the writer under test
+        /// emits ANSI sequences to a `Vec<u8>` buffer instead of
+        /// having them stripped by [`colored`]'s auto-detection when
+        /// the test binary's stdout is not a TTY.
+        fn acquire() -> Self {
+            let lock = ANSI_OVERRIDE_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            colored::control::set_override(true);
+            Self { _lock: lock }
+        }
+    }
+
+    impl Drop for AnsiOverrideForTest {
+        /// Restore [`colored`]'s auto-detection by clearing the
+        /// override. Runs BEFORE the wrapped [`MutexGuard`] releases,
+        /// so the lock still protects the unset call — a peer test
+        /// waiting on [`ANSI_OVERRIDE_LOCK`] cannot see the
+        /// override-still-forced-on window between the writer
+        /// finishing and the unset firing.
+        fn drop(&mut self) {
+            colored::control::unset_override();
+        }
+    }
 
     #[test]
     fn spinner_style_template_pins_the_three_pre_lift_color_variants() {
@@ -766,21 +854,18 @@ mod tests {
     /// sites' visual grammar.
     #[test]
     fn write_success_banner_emits_three_bar_message_bar_lines_in_order() {
-        // Force ANSI emission so the palette contract survives a test
-        // runner attached to a non-tty (colored auto-drops sequences).
-        // Hold the shared [`ANSI_OVERRIDE_LOCK`] across the whole
-        // set-write-unset window so a peer banner test's `unset` can
-        // never strand this writer between colored's on/off flip.
-        let _override_guard = ANSI_OVERRIDE_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        colored::control::set_override(true);
+        // Force ANSI emission (colored auto-drops sequences on a
+        // non-tty stdout) and serialize against peer banner tests
+        // via [`AnsiOverrideForTest`]; its Drop restores colored's
+        // auto-detection on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`], closing the set-write-unset window
+        // without a manual [`colored::control::unset_override`] call
+        // that a future test author could omit.
+        let _override_guard = AnsiOverrideForTest::acquire();
 
         let mut buf: Vec<u8> = Vec::new();
         super::write_success_banner(&mut buf, 80, "✅ REGENERATION COMPLETE")
             .expect("write_success_banner against a Vec<u8> writer must succeed");
-
-        colored::control::unset_override();
 
         let out = String::from_utf8(buf)
             .expect("write_success_banner must emit valid UTF-8 (the pre-lift println!s did)");
@@ -870,21 +955,18 @@ mod tests {
     /// sites' visual grammar.
     #[test]
     fn write_release_stage_banner_emits_three_bar_headline_bar_lines_in_order() {
-        // Force ANSI emission so the palette contract survives a test
-        // runner attached to a non-tty (colored auto-drops sequences).
-        // Hold the shared [`ANSI_OVERRIDE_LOCK`] across the whole
-        // set-write-unset window so a peer banner test's `unset` can
-        // never strand this writer between colored's on/off flip.
-        let _override_guard = ANSI_OVERRIDE_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        colored::control::set_override(true);
+        // Force ANSI emission (colored auto-drops sequences on a
+        // non-tty stdout) and serialize against peer banner tests
+        // via [`AnsiOverrideForTest`]; its Drop restores colored's
+        // auto-detection on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`], closing the set-write-unset window
+        // without a manual [`colored::control::unset_override`] call
+        // that a future test author could omit.
+        let _override_guard = AnsiOverrideForTest::acquire();
 
         let mut buf: Vec<u8> = Vec::new();
         super::write_release_stage_banner(&mut buf, "RELEASE COMPLETE", "kenshi", "prod, abc123")
             .expect("write_release_stage_banner against a Vec<u8> writer must succeed");
-
-        colored::control::unset_override();
 
         let out = String::from_utf8(buf).expect(
             "write_release_stage_banner must emit valid UTF-8 (the pre-lift println!s did)",
@@ -1003,21 +1085,18 @@ mod tests {
     /// eight consumer sites' visual grammar.
     #[test]
     fn write_section_header_emits_three_bar_title_bar_lines_in_order() {
-        // Force ANSI emission so the palette contract survives a test
-        // runner attached to a non-tty (colored auto-drops sequences).
-        // Hold the shared [`ANSI_OVERRIDE_LOCK`] across the whole
-        // set-write-unset window so a peer banner test's `unset` can
-        // never strand this writer between colored's on/off flip.
-        let _override_guard = ANSI_OVERRIDE_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        colored::control::set_override(true);
+        // Force ANSI emission (colored auto-drops sequences on a
+        // non-tty stdout) and serialize against peer banner tests
+        // via [`AnsiOverrideForTest`]; its Drop restores colored's
+        // auto-detection on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`], closing the set-write-unset window
+        // without a manual [`colored::control::unset_override`] call
+        // that a future test author could omit.
+        let _override_guard = AnsiOverrideForTest::acquire();
 
         let mut buf: Vec<u8> = Vec::new();
         super::write_section_header(&mut buf, "Schema Export + Codegen")
             .expect("write_section_header against a Vec<u8> writer must succeed");
-
-        colored::control::unset_override();
 
         let out = String::from_utf8(buf)
             .expect("write_section_header must emit valid UTF-8 (the pre-lift println!s did)");
@@ -1139,21 +1218,18 @@ mod tests {
     /// grammar.
     #[test]
     fn write_step_heading_emits_exactly_one_bold_title_line() {
-        // Force ANSI emission so the palette contract survives a test
-        // runner attached to a non-tty (colored auto-drops sequences).
-        // Hold the shared [`ANSI_OVERRIDE_LOCK`] across the whole
-        // set-write-unset window so a peer banner test's `unset` can
-        // never strand this writer between colored's on/off flip.
-        let _override_guard = ANSI_OVERRIDE_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        colored::control::set_override(true);
+        // Force ANSI emission (colored auto-drops sequences on a
+        // non-tty stdout) and serialize against peer banner tests
+        // via [`AnsiOverrideForTest`]; its Drop restores colored's
+        // auto-detection on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`], closing the set-write-unset window
+        // without a manual [`colored::control::unset_override`] call
+        // that a future test author could omit.
+        let _override_guard = AnsiOverrideForTest::acquire();
 
         let mut buf: Vec<u8> = Vec::new();
         super::write_step_heading(&mut buf, "G1: cargo check")
             .expect("write_step_heading against a Vec<u8> writer must succeed");
-
-        colored::control::unset_override();
 
         let out = String::from_utf8(buf)
             .expect("write_step_heading must emit valid UTF-8 (the pre-lift println!s did)");
@@ -1300,21 +1376,18 @@ mod tests {
     /// 9 consumer sites' visual grammar.
     #[test]
     fn write_step_success_emits_exactly_one_check_prefixed_green_line() {
-        // Force ANSI emission so the palette contract survives a test
-        // runner attached to a non-tty (colored auto-drops sequences).
-        // Hold the shared [`ANSI_OVERRIDE_LOCK`] across the whole
-        // set-write-unset window so a peer banner test's `unset` can
-        // never strand this writer between colored's on/off flip.
-        let _override_guard = ANSI_OVERRIDE_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        colored::control::set_override(true);
+        // Force ANSI emission (colored auto-drops sequences on a
+        // non-tty stdout) and serialize against peer banner tests
+        // via [`AnsiOverrideForTest`]; its Drop restores colored's
+        // auto-detection on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`], closing the set-write-unset window
+        // without a manual [`colored::control::unset_override`] call
+        // that a future test author could omit.
+        let _override_guard = AnsiOverrideForTest::acquire();
 
         let mut buf: Vec<u8> = Vec::new();
         super::write_step_success(&mut buf, "Schema extraction complete")
             .expect("write_step_success against a Vec<u8> writer must succeed");
-
-        colored::control::unset_override();
 
         let out = String::from_utf8(buf)
             .expect("write_step_success must emit valid UTF-8 (the pre-lift println!s did)");
@@ -1596,5 +1669,157 @@ mod tests {
                  through."
             );
         }
+    }
+
+    /// Fail-before-pass envelope for [`AnsiOverrideForTest`]. Pins
+    /// the two properties every pre-lift banner test carried
+    /// implicitly and would silently regress a future omission of:
+    /// (1) [`AnsiOverrideForTest::acquire`] forces [`colored`]'s
+    /// global override ON so a subsequent `.green()` render reaches
+    /// the buffer as the `\x1b[32m` ANSI sequence rather than being
+    /// stripped by [`colored`]'s non-tty auto-detection, and (2)
+    /// dropping the guard both releases the shared
+    /// [`ANSI_OVERRIDE_LOCK`] and restores [`colored`]'s
+    /// auto-detection — verified by re-acquiring the guard from the
+    /// same test body (the second `.lock()` would deadlock if Drop
+    /// hadn't released the mutex, and the second render reaches the
+    /// buffer with the override still forcing colored on).
+    #[test]
+    fn ansi_override_for_test_forces_colored_on_and_releases_lock_on_drop() {
+        // Scope 1 — acquire, render inside the guard's lifetime.
+        let first_render = {
+            let _guard = AnsiOverrideForTest::acquire();
+            format!("{}", "x".green())
+        }; // guard drops here — Drop runs unset_override, then MutexGuard releases.
+
+        assert!(
+            first_render.contains("\x1b[32m"),
+            "AnsiOverrideForTest::acquire() must force colored ON \
+             while alive — a `.green()` render inside the guard's \
+             lifetime must reach the buffer as `\\x1b[32m` (the \
+             pre-lift stanza's `colored::control::set_override(true)` \
+             call carried this contract; the guard's `acquire()` \
+             carries it now); got {:?}",
+            first_render
+        );
+
+        // Scope 2 — the second acquire must not deadlock (Drop
+        // released the MutexGuard) AND must re-force colored ON
+        // (Drop's `unset_override` was cleared by the second
+        // `set_override(true)` inside `acquire()`).
+        let _second = AnsiOverrideForTest::acquire();
+        let second_render = format!("{}", "y".green());
+        assert!(
+            second_render.contains("\x1b[32m"),
+            "AnsiOverrideForTest::acquire() must be re-acquirable \
+             after a prior guard drops — the first guard's Drop must \
+             release the MutexGuard (else this call deadlocks) AND \
+             the second acquire must re-force colored ON so a fresh \
+             `.green()` render reaches the buffer as `\\x1b[32m`; \
+             got {:?}",
+            second_render
+        );
+    }
+
+    /// Structural regression shield — the 5 pre-lift banner tests
+    /// (`write_success_banner_...`, `write_release_stage_banner_...`,
+    /// `write_section_header_...`, `write_step_heading_...`,
+    /// `write_step_success_...`) each spelled the raw
+    /// `let _override_guard = ANSI_OVERRIDE_LOCK.lock()
+    /// .unwrap_or_else(|poisoned| poisoned.into_inner());
+    /// colored::control::set_override(true);` acquire stanza and its
+    /// matched trailing `colored::control::unset_override();` about
+    /// 8 lines later. Post-lift both live only inside
+    /// [`AnsiOverrideForTest`]'s [`AnsiOverrideForTest::acquire`]
+    /// body and its [`Drop`] impl — one occurrence each in the
+    /// executable source of `ui.rs`. A future re-inline (e.g. a
+    /// "just call `set_override` directly, it's shorter" cleanup)
+    /// would push the count above one for either side; this shield
+    /// flips before compiling and prevents the 5-site duplication
+    /// class this lift closed from reopening. The needle uses the
+    /// exact 8-space test-body indent (`"        "`) so the guard's
+    /// own 12-space-indented invocations (`AnsiOverrideForTest::
+    /// acquire`'s body and the `Drop` impl) do NOT match.
+    #[test]
+    fn ansi_override_test_helpers_live_only_inside_the_guard_type() {
+        const SRC: &str = include_str!("ui.rs");
+        // Line-anchored needles — `\n<8 spaces>...<;>\n` matches a
+        // full source line whose ONLY indent is 8 spaces (the
+        // pre-lift test-body indent). Self-references in this
+        // shield's own error messages sit under a 13-space indent +
+        // backtick, so `\n<8 spaces>` never lines them up.
+        let set_test_body_hits = SRC
+            .matches(concat!(
+                "\n        colored::control::set_override",
+                "(true);\n"
+            ))
+            .count();
+        assert_eq!(
+            set_test_body_hits, 0,
+            "ui.rs must NOT spell an 8-space-indented \
+             set_override(true) as a full line — every pre-lift \
+             banner test was migrated onto AnsiOverrideForTest::\
+             acquire() which owns the sole (12-space-indented) call. \
+             A re-inline reopens the 5-site duplication class. \
+             Found {set_test_body_hits} test-body hits."
+        );
+        let unset_test_body_hits = SRC
+            .matches(concat!(
+                "\n        colored::control::unset_override",
+                "();\n"
+            ))
+            .count();
+        assert_eq!(
+            unset_test_body_hits, 0,
+            "ui.rs must NOT spell an 8-space-indented \
+             unset_override() as a full line — every pre-lift \
+             banner test was migrated onto AnsiOverrideForTest \
+             whose Drop owns the sole (12-space-indented) call. \
+             A re-inline reopens the 5-site duplication class. \
+             Found {unset_test_body_hits} test-body hits."
+        );
+        let lock_test_body_hits = SRC
+            .matches("\n        let _override_guard = ANSI_OVERRIDE_LOCK\n")
+            .count();
+        assert_eq!(
+            lock_test_body_hits, 0,
+            "ui.rs must NOT spell the pre-lift 8-space-indented \
+             ANSI_OVERRIDE_LOCK acquire prologue as a full line — \
+             every pre-lift banner test was migrated onto \
+             AnsiOverrideForTest::acquire() which owns the sole \
+             lock acquisition. A re-inline reopens the 5-site \
+             duplication class. Found {lock_test_body_hits} hits."
+        );
+        // The guard-owned invocations DO reach the source once
+        // each — a rename of the guard type that misses the type
+        // definition (leaving the tests referring to a non-existent
+        // AnsiOverrideForTest::acquire) fails at compile time; this
+        // shield pins the reverse (the guard's own set/unset call
+        // sites are unique). 12-space needle matches only within
+        // acquire's fn body / Drop's fn body.
+        let acquire_body_hits = SRC
+            .matches(concat!(
+                "\n            colored::control::set_override",
+                "(true);\n"
+            ))
+            .count();
+        assert_eq!(
+            acquire_body_hits, 1,
+            "ui.rs must spell a 12-space-indented set_override(true) \
+             call exactly ONCE — inside AnsiOverrideForTest::acquire. \
+             Found {acquire_body_hits} guard-body hits."
+        );
+        let drop_body_hits = SRC
+            .matches(concat!(
+                "\n            colored::control::unset_override",
+                "();\n"
+            ))
+            .count();
+        assert_eq!(
+            drop_body_hits, 1,
+            "ui.rs must spell a 12-space-indented unset_override() \
+             call exactly ONCE — inside AnsiOverrideForTest's Drop. \
+             Found {drop_body_hits} guard-body hits."
+        );
     }
 }
