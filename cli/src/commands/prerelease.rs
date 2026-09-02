@@ -328,8 +328,7 @@ pub async fn execute(
     // Phase 0a: Fast gates (parallel)
     // Backend, Migration, and Frontend gates run concurrently
     // ========================================
-    println!("{}", "Phase 0a: Fast Gates (parallel)".bold().underline());
-    println!();
+    crate::ui::print_phase_heading("Phase 0a: Fast Gates (parallel)");
 
     let (backend_results, migration_results, frontend_results) = tokio::join!(
         run_backend_gates(&config),
@@ -381,8 +380,7 @@ pub async fn execute(
             .push(format!("G13: Integration tests ({})", reason));
     } else {
         println!();
-        println!("{}", "Phase 0b: Integration Tests (G13)".bold().underline());
-        println!();
+        crate::ui::print_phase_heading("Phase 0b: Integration Tests (G13)");
 
         match run_integration_gate(&config).await {
             Ok(passed) => {
@@ -414,8 +412,7 @@ pub async fn execute(
         summary.skipped.push(format!("G14: E2E tests ({})", reason));
     } else {
         println!();
-        println!("{}", "Phase 0c: E2E Tests (G14)".bold().underline());
-        println!();
+        crate::ui::print_phase_heading("Phase 0c: E2E Tests (G14)");
 
         match run_e2e_gate(&config).await {
             Ok(passed) => {
@@ -472,8 +469,7 @@ async fn run_backend_gates(config: &PreReleaseConfig) -> Result<GateSummary> {
         return Ok(summary);
     }
 
-    println!("{}", "Backend Gates".bold().underline());
-    println!();
+    crate::ui::print_phase_heading("Backend Gates");
 
     // G1: cargo check
     if !config.gates.backend.cargo_check {
@@ -556,8 +552,7 @@ async fn run_migration_gates(config: &PreReleaseConfig) -> Result<GateSummary> {
         return Ok(summary);
     }
 
-    println!("{}", "Migration Gates".bold().underline());
-    println!();
+    crate::ui::print_phase_heading("Migration Gates");
 
     // Use the configured migration gate settings for SQLx migrations (legacy)
     let migration_result = migration_validation::validate_migrations_with_config(
@@ -714,8 +709,7 @@ async fn run_frontend_gates(config: &PreReleaseConfig) -> Result<GateSummary> {
         return Ok(summary);
     }
 
-    println!("{}", "Frontend Gates".bold().underline());
-    println!();
+    crate::ui::print_phase_heading("Frontend Gates");
 
     // G9: Codegen drift detection
     if !config.gates.frontend.codegen_drift {

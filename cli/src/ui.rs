@@ -514,6 +514,59 @@ pub fn write_step_heading<W: std::io::Write>(w: &mut W, title: &str) -> std::io:
     writeln!(w, "{}", title.bold())
 }
 
+/// Prints the two-line bold-underlined phase-heading grammar 6 pre-lift
+/// consumer sites spelled inline as `println!("{}", "<TITLE>".bold().underline());`
+/// immediately followed by `println!();` across `commands/prerelease.rs`
+/// (Phase 0a / 0b / 0c openings + `Backend Gates` / `Migration Gates` /
+/// `Frontend Gates` sub-phase openings). Marks the start of a top-level
+/// phase or sub-phase of the prerelease pipeline whose scope brackets
+/// several downstream [`print_step_heading`] step markers.
+///
+/// # Distinct from the other `ui::print_*` primitives
+///
+/// [`print_step_heading`] is the LEANEST opening — a single `.bold()`
+/// line, no underline, no framing blank — the in-body step marker one
+/// scope below a phase. This primitive carries the phase-level opening:
+/// `.bold()` PLUS `.underline()` for the extra emphasis a phase deserves
+/// over a step, PLUS a trailing framing blank the pre-lift stanza spelled
+/// as a second `println!();`. [`print_section_header`] is a `═`-rule +
+/// bold-title triple around a section opening in a non-prerelease
+/// pipeline; the phase-heading grammar is prerelease's leaner, rule-less
+/// peer. [`print_header`] is the `╔═╗` boxed top-level command title one
+/// scope above a phase.
+///
+/// # Compounding
+///
+/// Pre-lift 6 sibling sites each restated the
+/// `println!("{}", "<TITLE>".bold().underline()); println!();` two-line
+/// grammar verbatim. A future palette adjustment (a swap of `.underline()`
+/// for a `═`-rule under the heavier section-header grammar, a promotion
+/// of the trailing framing blank to two blanks under a more spacious
+/// phase-body, an OTLP `phase_start` observability event, a `[Pn/N]`
+/// phase-numbering prefix, a swap of `.bold().underline()` for
+/// `.bright_cyan().bold()` under a themed phase palette) had to hit 6
+/// sites in lockstep or drift the visual grammar; post-lift it hits ONE
+/// typed body. Delegates to [`write_phase_heading`] against
+/// [`std::io::stdout()`]; the writer split exists so the fail-before-pass
+/// test can pin the two-line body, the `\x1b[1m` bold and `\x1b[4m`
+/// underline ANSI sequences, and the trailing framing blank by
+/// inspecting emitted bytes rather than shelling out and grepping stdout.
+pub fn print_phase_heading(title: &str) {
+    let _ = write_phase_heading(&mut std::io::stdout().lock(), title);
+}
+
+/// Writer-taking sibling to [`print_phase_heading`]. Emits the two-line
+/// body — the `<title>.bold().underline()` heading then a framing blank
+/// — via [`writeln!`] against the supplied writer.
+/// [`print_phase_heading`] is the stdout adapter; this variant exists so
+/// tests can pin the two-line body, the `\x1b[1m` bold + `\x1b[4m`
+/// underline ANSI sequences, and the trailing blank without capturing
+/// stdout.
+pub fn write_phase_heading<W: std::io::Write>(w: &mut W, title: &str) -> std::io::Result<()> {
+    writeln!(w, "{}", title.bold().underline())?;
+    writeln!(w)
+}
+
 /// Prints the one-line `✅ <message>.green()` in-body step-completion
 /// grammar 9 pre-lift consumer sites spelled inline as
 /// `println!("✅ {}", "<MSG>".green());` across 4 command modules
@@ -1518,6 +1571,171 @@ mod tests {
                  `crate::ui::print_step_heading(\"<TITLE>\")` — the \
                  primitive body every one-line bold step-heading in the \
                  crate now delegates through."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_phase_heading`]. Pins
+    /// the exact two-line body every pre-lift consumer spelled verbatim
+    /// (`println!("{}", "<TITLE>".bold().underline()); println!();`).
+    /// A silent contract drift a future rewrite might introduce —
+    /// dropping `.underline()` so the phase heading collapses onto the
+    /// leaner [`super::print_step_heading`] grammar and loses its
+    /// phase-vs-step scope distinction, dropping `.bold()`, promoting the
+    /// title to a color that competes with the surrounding body text,
+    /// dropping the trailing framing blank (a "tighter body spacing"
+    /// cleanup) so downstream step headings crowd the phase title,
+    /// promoting the blank to two blanks under a more spacious body,
+    /// swapping `writeln!` for `write!` (losing the trailing `\n`) —
+    /// flips this assertion rather than compiling and silently diverging
+    /// the 6 consumer sites' visual grammar.
+    #[test]
+    fn write_phase_heading_emits_bold_underlined_title_then_blank_line() {
+        // Force ANSI emission (colored auto-drops sequences on a
+        // non-tty stdout) and serialize against peer banner tests
+        // via [`AnsiOverrideForTest`]; its Drop restores colored's
+        // auto-detection on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`], closing the set-write-unset window
+        // without a manual [`colored::control::unset_override`] call
+        // that a future test author could omit.
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_phase_heading(&mut buf, "Phase 0a: Fast Gates (parallel)")
+            .expect("write_phase_heading against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_phase_heading must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly two lines — the pre-lift stanza was two `println!`
+        // calls (the bold+underline title + one framing blank). A
+        // refactor that drops the trailing blank (a "tighter body
+        // spacing" cleanup) or promotes it to two blanks fails here.
+        let lines: Vec<&str> = out.split_inclusive('\n').collect();
+        assert_eq!(
+            lines.len(),
+            2,
+            "write_phase_heading must emit exactly two lines — the \
+             pre-lift stanza carried the bold+underlined title followed \
+             by ONE framing blank via a second `println!()`; got {}:\n{:?}",
+            lines.len(),
+            out
+        );
+
+        // The title text reaches line 0 verbatim; a fusion that hoists
+        // the title off the parameter and pins it to a constant fails
+        // here.
+        assert!(
+            lines[0].contains("Phase 0a: Fast Gates (parallel)"),
+            "line 0 must carry the title verbatim; got {:?}",
+            lines[0]
+        );
+
+        // The `bold` SGR parameter (`1`) and `underline` SGR parameter
+        // (`4`) both reach line 0 — every pre-lift consumer chained
+        // `.bold().underline()`, and `colored` folds the pair into a
+        // single compound `\x1b[1;4m` SGR sequence (the two-parameter
+        // form of the CSI-`m` set-graphics-rendition escape). Assert
+        // for either the compound form or the split forms so a future
+        // colored release that changes the fold order (`\x1b[4;1m`) or
+        // splits the pair into two `\x1b[1m`/`\x1b[4m` sequences still
+        // passes — the contract is BOTH SGR parameters reach the wire,
+        // not which byte-encoding colored picks.
+        //
+        // A fusion that drops `.bold()` (a "just underline it, that's
+        // enough emphasis" cleanup) fails the bold check; one that
+        // drops `.underline()` (collapsing the phase grammar onto the
+        // leaner step-scope [`super::print_step_heading`]) fails the
+        // underline check.
+        let carries_bold = lines[0].contains("\x1b[1m")
+            || lines[0].contains("\x1b[1;4m")
+            || lines[0].contains("\x1b[4;1m");
+        assert!(
+            carries_bold,
+            "line 0 must carry the `bold` SGR parameter (`1`) — every \
+             pre-lift consumer chained `.bold().underline()` on the \
+             title, and dropping `.bold()` erases the phase-heading \
+             emphasis; got {:?}",
+            lines[0]
+        );
+        let carries_underline = lines[0].contains("\x1b[4m")
+            || lines[0].contains("\x1b[1;4m")
+            || lines[0].contains("\x1b[4;1m");
+        assert!(
+            carries_underline,
+            "line 0 must carry the `underline` SGR parameter (`4`) — \
+             every pre-lift consumer chained `.underline()` alongside \
+             `.bold()`, and dropping `.underline()` collapses the \
+             phase grammar onto the leaner step-scope \
+             `print_step_heading` and erases the visual distinction \
+             between a phase opening and a step opening; got {:?}",
+            lines[0]
+        );
+
+        // Line 1 is the trailing framing blank — exactly `\n`. A
+        // refactor that promotes it to a blank-with-content (a stray
+        // space) or drops it entirely fails here.
+        assert_eq!(
+            lines[1], "\n",
+            "line 1 must be exactly `\\n` — every pre-lift trailing \
+             `println!()` emits an empty line, and any content there \
+             (a stray space, a promoted styled rule) is a visual \
+             regression; got {:?}",
+            lines[1]
+        );
+
+        // The trailing `\n` on the whole output reaches the writer —
+        // pre-lift stanza used two `println!` calls (not `print!`), so
+        // both newlines are part of the contract. A fusion that
+        // swapped either `writeln!` for `write!` fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_phase_heading must end with `\\n` — both pre-lift \
+             `println!`s emit trailing newlines; got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto [`super::print_phase_heading`]
+    /// no longer spell the `println!("{}", "<TITLE>".bold().underline());`
+    /// shape inline. Structural regression shield — without it, a future
+    /// refactor could silently re-inline the two-liner (e.g. a "just
+    /// call `println!` directly, it's shorter" cleanup) and reopen the
+    /// 6-site duplication class this lift closed. Enforced at the
+    /// module body before its `#[cfg(test)]` region so a test-support
+    /// mention of the raw shape does not defeat the shield. The
+    /// exact-shape needle `.bold().underline())` uniquely identifies the
+    /// pre-lift restatement — no other in-repo `println!` chains
+    /// `.bold().underline()` on its argument (the peer bold-only step
+    /// heading uses `.bold()` alone, the section header uses a `═`-rule
+    /// wrapper, the box header uses `.bright_blue()`), so this needle
+    /// is unique to the pre-lift phase-heading stanza.
+    #[test]
+    fn print_phase_heading_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[(
+            include_str!("commands/prerelease.rs"),
+            "commands/prerelease.rs",
+        )];
+        for (source, module_path) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                assert!(
+                    !line.contains(".bold().underline())"),
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `println!(\"{{}}\", \"<TITLE>\".bold().underline());` \
+                     phase-heading stanza — that two-liner was lifted \
+                     onto `crate::ui::print_phase_heading`. A re-inline \
+                     would silently reopen the 6-site duplication class \
+                     this shield exists to close. Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            assert!(
+                body.contains("crate::ui::print_phase_heading("),
+                "{module_path} body must forward to \
+                 `crate::ui::print_phase_heading(\"<TITLE>\")` — the \
+                 primitive body every two-line bold+underlined phase \
+                 heading in the crate now delegates through."
             );
         }
     }
