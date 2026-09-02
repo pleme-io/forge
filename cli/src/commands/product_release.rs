@@ -705,7 +705,7 @@ pub async fn product_release(
 
             let product_dir =
                 crate::config::resolve_product_dir(std::path::Path::new(&repo_root), &product);
-            let service_dir = product_dir.join(&svc.path).to_string_lossy().to_string();
+            let service_dir = crate::repo::path_to_string_lossy(&product_dir.join(&svc.path));
 
             // Always call orchestrate-release directly (not via nix run) to avoid
             // re-evaluating the nix derivation which would rebuild the docker image.

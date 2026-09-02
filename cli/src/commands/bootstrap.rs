@@ -576,7 +576,7 @@ pub async fn release(
         println!();
         println!("{}", "Step 3/3: Committing and pushing changes...".bold());
 
-        let git = GitClient::in_dir(repo_root.to_string_lossy().to_string());
+        let git = GitClient::in_dir(crate::repo::path_to_string_lossy(&repo_root));
         let commit_message = format!(
             "release(bootstrap): {} {} [{}]",
             product, environment, tag_suffix

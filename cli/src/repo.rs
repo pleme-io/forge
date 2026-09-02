@@ -6110,6 +6110,126 @@ mod tests {
         }
     }
 
+    /// Post-lift the eleven chained-receiver
+    /// `<pathbuf-expr>.to_string_lossy().to_string()` consumer sites
+    /// across ten files (nine `commands/*.rs` + one
+    /// `infrastructure/git.rs` test helper + one `nix_hooks.rs`
+    /// production site) lifted onto [`path_to_string_lossy`] — a
+    /// class the two earlier shields
+    /// ([`path_to_string_lossy_consumers_do_not_reinline_the_primitive_shape`]
+    /// keyed by identifiers, and
+    /// [`path_to_string_lossy_tempfile_receiver_consumers_do_not_reinline_the_primitive_shape`]
+    /// keyed by `<tempfile>.path()` chained receivers) left open by
+    /// construction because their needle-keying skipped the
+    /// non-tempfile chained-receiver shape — must not silently
+    /// re-inline the primitive's shape at their call points.
+    ///
+    /// The eleven sites route through the primitive by handing it a
+    /// reference to whatever `PathBuf`-shaped expression the pre-lift
+    /// callsite chained `.to_string_lossy().to_string()` onto: a
+    /// [`PathBuf::join`] product (`product_release.rs`,
+    /// `rollback.rs`), an already-bound `PathBuf` local (`e2e.rs`'s
+    /// `root`, `sync.rs`'s `path`, `tool.rs`'s `dest`, `infra.rs`'s
+    /// `compose_file`, `bootstrap.rs`'s `repo_root`, `nix_hooks.rs`'s
+    /// `hook_path`), a fallible [`Result<PathBuf>`] projection unwrapped
+    /// inline (`e2e.rs`'s `crate::repo::current_dir()?`), a
+    /// [`Cow<Path>`] from a `tar::Entry::path()` (`image_release.rs`),
+    /// a [`std::fs::DirEntry::path`] inside a `.map(|e| ...)` closure
+    /// (`helm.rs`'s `find_latest_tgz`), or a `&Path` parameter fed
+    /// directly (`infrastructure/git.rs`'s
+    /// `git_client_in_dir_path_git` test helper). Anchoring each
+    /// needle to the concrete pre-lift *expression* (the identifier
+    /// or method chain that immediately preceded
+    /// `.to_string_lossy().to_string()`) keeps the shield from
+    /// matching legitimately different chained-receiver shapes the
+    /// primitive owns elsewhere in the crate.
+    #[test]
+    fn path_to_string_lossy_pathbuf_chained_receiver_consumers_do_not_reinline_the_primitive_shape()
+    {
+        for (name, source, needles) in [
+            (
+                "commands/product_release.rs",
+                include_str!("commands/product_release.rs"),
+                &["product_dir.join(&svc.path).to_string_lossy().to_string()"][..],
+            ),
+            (
+                "commands/rollback.rs",
+                include_str!("commands/rollback.rs"),
+                &["product_dir.join(&entry.path).to_string_lossy().to_string()"][..],
+            ),
+            (
+                "commands/e2e.rs",
+                include_str!("commands/e2e.rs"),
+                &[
+                    "root.to_string_lossy().to_string()",
+                    "crate::repo::current_dir()?.to_string_lossy().to_string()",
+                ][..],
+            ),
+            (
+                "commands/sync.rs",
+                include_str!("commands/sync.rs"),
+                &["path.to_string_lossy().to_string()"][..],
+            ),
+            (
+                "commands/image_release.rs",
+                include_str!("commands/image_release.rs"),
+                &[
+                    "Ok(p) => p.to_string_lossy().to_string()",
+                    ".map(|p| p.to_string_lossy().to_string())",
+                    "entry.path()?.to_string_lossy().to_string()",
+                ][..],
+            ),
+            (
+                "commands/tool.rs",
+                include_str!("commands/tool.rs"),
+                &["dest.to_string_lossy().to_string()"][..],
+            ),
+            (
+                "commands/helm.rs",
+                include_str!("commands/helm.rs"),
+                &[".map(|e| e.path().to_string_lossy().to_string())"][..],
+            ),
+            (
+                "commands/infra.rs",
+                include_str!("commands/infra.rs"),
+                &["compose_file.to_string_lossy().to_string()"][..],
+            ),
+            (
+                "commands/bootstrap.rs",
+                include_str!("commands/bootstrap.rs"),
+                &["repo_root.to_string_lossy().to_string()"][..],
+            ),
+            (
+                "infrastructure/git.rs",
+                include_str!("infrastructure/git.rs"),
+                &["dir.to_string_lossy().to_string()"][..],
+            ),
+            (
+                "nix_hooks.rs",
+                include_str!("nix_hooks.rs"),
+                &["hook_path.to_string_lossy().to_string()"][..],
+            ),
+        ] {
+            for needle in needles {
+                assert!(
+                    !source.contains(needle),
+                    "{name} must NOT spell the inline `{needle}` \
+                     chained-receiver two-step projection — that \
+                     duplication was lifted onto \
+                     `crate::repo::path_to_string_lossy(&<expr>)`. \
+                     A re-inline reopens the class this follow-up \
+                     lift closed (the eleven \
+                     `PathBuf`-shaped chained-receiver stragglers the \
+                     identifier-keyed and tempfile-`.path()`-keyed \
+                     shields left open by construction) and re-forks \
+                     the `.to_string()` tail one site at a time from \
+                     the primitive's `.into_owned()` one-alloc \
+                     discipline."
+                );
+            }
+        }
+    }
+
     /// [`path_to_string_lossy`] projects a caller-owned [`Path`]
     /// bytewise-equal to the pre-lift `.to_string_lossy().into_owned()`
     /// spelling on a UTF-8 input path — the exact spelling the four

@@ -627,7 +627,7 @@ async fn calculate_directory_hash(dir: &Path) -> Result<String> {
                     if name.ends_with(".ts") || name.ends_with(".tsx") {
                         let content = std::fs::read(&path)?;
                         let hash = format!("{:x}", md5::compute(&content));
-                        file_hashes.insert(path.to_string_lossy().to_string(), hash);
+                        file_hashes.insert(crate::repo::path_to_string_lossy(&path), hash);
                     }
                 }
             }
