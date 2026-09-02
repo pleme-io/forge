@@ -289,7 +289,7 @@ fn validate_schema_content(
     _config: &ServiceFederationConfig,
     _service_name: &str,
 ) -> Result<ValidationResult> {
-    let schema_text = String::from_utf8_lossy(schema_bytes);
+    let schema_text = crate::repo::utf8_lossy_borrow(schema_bytes);
 
     // Count GraphQL type definitions
     let mut type_names = Vec::new();

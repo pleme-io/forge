@@ -219,7 +219,7 @@ pub fn calculate_hash(content: &[u8]) -> String {
 
 /// Count number of GraphQL type definitions in schema
 fn count_graphql_types(content: &[u8]) -> usize {
-    let text = String::from_utf8_lossy(content);
+    let text = crate::repo::utf8_lossy_borrow(content);
     text.lines()
         .filter(|line| {
             line.trim_start().starts_with("type ")

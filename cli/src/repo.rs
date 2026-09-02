@@ -6917,6 +6917,7 @@ mod tests {
                     "let version = String::from_utf8_lossy(&output.stdout);",
                     "let health_response = String::from_utf8_lossy(&output.stdout);",
                     "let actual_hash = String::from_utf8_lossy(&output.stdout);",
+                    "let text = String::from_utf8_lossy(content);",
                 ][..],
             ),
             (
@@ -6987,6 +6988,19 @@ mod tests {
                 "commands/codegen_validation.rs",
                 include_str!("commands/codegen_validation.rs"),
                 &["let schema = String::from_utf8_lossy(&schema_bytes);"][..],
+            ),
+            (
+                "commands/helm.rs",
+                include_str!("commands/helm.rs"),
+                &[
+                    "let stderr = String::from_utf8_lossy(stderr);",
+                    "let stdout = String::from_utf8_lossy(stdout);",
+                ][..],
+            ),
+            (
+                "commands/schema_validation.rs",
+                include_str!("commands/schema_validation.rs"),
+                &["let schema_text = String::from_utf8_lossy(schema_bytes);"][..],
             ),
             (
                 "flux_get.rs",
