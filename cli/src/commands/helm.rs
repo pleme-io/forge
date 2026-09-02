@@ -221,8 +221,8 @@ fn print_captured_output(stdout: &[u8], stderr: &[u8]) {
 /// reader back into tens of thousands of interleaved CI log lines to find
 /// the one relevant to that chart.
 fn last_reason_line(stdout: &[u8], stderr: &[u8]) -> String {
-    let stderr = String::from_utf8_lossy(stderr);
-    let stdout = String::from_utf8_lossy(stdout);
+    let stderr = crate::repo::utf8_lossy_borrow(stderr);
+    let stdout = crate::repo::utf8_lossy_borrow(stdout);
     stderr
         .lines()
         .rev()
