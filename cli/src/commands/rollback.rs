@@ -123,8 +123,7 @@ pub async fn execute(
         product.cyan().bold(),
         format!("(env: {})", target_env).dimmed()
     );
-    println!("{}", "=".repeat(60));
-    println!();
+    crate::ui::print_ascii_title_underline(60);
     crate::ui::print_step_heading("Rollback Plan:");
 
     for entry in &entries {

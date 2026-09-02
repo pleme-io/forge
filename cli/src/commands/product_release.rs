@@ -355,8 +355,7 @@ pub async fn product_release(
         product.cyan().bold(),
         format!("(env: {}, sha: {})", target_env, git_sha).dimmed()
     );
-    println!("{}", "=".repeat(60));
-    println!();
+    crate::ui::print_ascii_title_underline(60);
 
     // Show release plan
     crate::ui::print_step_heading("Release Plan:");
