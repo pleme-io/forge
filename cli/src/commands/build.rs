@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
-use indicatif::{ProgressBar, ProgressStyle};
 use tokio::process::Command;
 use tracing::{info, warn};
 
 use crate::repo::get_tool_path;
+use crate::ui::{styled_spinner, SpinnerStyle};
 
 pub async fn execute(
     flake_attr: String,
@@ -152,14 +152,7 @@ pub async fn execute(
     }
     println!();
 
-    let spinner = ProgressBar::new_spinner();
-    spinner.set_style(
-        ProgressStyle::default_spinner()
-            .template("{spinner:.green} {msg}")
-            .unwrap(),
-    );
-    spinner.set_message("Building with Nix...");
-    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+    let spinner = styled_spinner(SpinnerStyle::Green, "Building with Nix...");
 
     // Use relative .# to avoid git+file:// protocol issues
     let flake_ref = format!(".#{}", flake_attr);
