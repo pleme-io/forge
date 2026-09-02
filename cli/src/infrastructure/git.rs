@@ -672,7 +672,7 @@ mod tests {
         // A tempdir working directory keeps the shim spawn hermetic —
         // no ambient .git ancestor can confuse the fixture.
         let dir = tempfile::tempdir().expect("tempdir");
-        let workdir = dir.path().to_string_lossy().to_string();
+        let workdir = crate::repo::path_to_string_lossy(dir.path());
         // Default GitClient (no `with_git_bin` override) — the
         // production shape. Every method reads `GIT_BIN` at spawn.
         let client = GitClient::in_dir(&workdir);
