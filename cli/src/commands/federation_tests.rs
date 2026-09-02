@@ -408,7 +408,7 @@ pub async fn run_federation_tests(
                     let status = crate::repo::utf8_lossy_borrow(&output.stdout);
                     // Extract just the status section
                     if let Some(status_section) = status.split("status:").nth(1) {
-                        println!("{}", "Job Status:".bold());
+                        crate::ui::print_step_heading("Job Status:");
                         println!(
                             "{}",
                             status_section

@@ -359,7 +359,7 @@ pub async fn product_release(
     println!();
 
     // Show release plan
-    println!("{}", "Release Plan:".bold());
+    crate::ui::print_step_heading("Release Plan:");
     println!(
         "   Services: {}",
         product_config
@@ -381,7 +381,7 @@ pub async fn product_release(
     let effective_skip_gates = skip_gates || !is_staging;
 
     if !effective_skip_gates && product_config.prerelease {
-        println!("{}", "Phase 0: Pre-release gates".bold());
+        crate::ui::print_step_heading("Phase 0: Pre-release gates");
         let product_dir =
             crate::config::resolve_product_dir(std::path::Path::new(&repo_root), &product);
         let product_dir_str = crate::repo::path_to_string_lossy(&product_dir);
@@ -411,7 +411,7 @@ pub async fn product_release(
     // Images are built during Phase 0 (E2E gates always force-rebuild).
     // Phase 1 reuses those prebuilt images when available, avoiding redundant Nix builds.
     // Falls back to Nix build when prerelease was skipped (--skip-gates).
-    println!("{}", "Phase 1: Push artifacts".bold());
+    crate::ui::print_step_heading("Phase 1: Push artifacts");
 
     // Standalone detection: if deploy.yaml is at repo root and names this product,
     // nix apps use `release:{service}` (no product prefix).
@@ -496,7 +496,7 @@ pub async fn product_release(
     // Requires the "attestation" feature (tameshi crate).
     #[cfg(feature = "attestation")]
     let attestation_info: Option<crate::config::AttestationInfoRecord> = {
-        println!("{}", "Phase 1.5: Compute attestation".bold());
+        crate::ui::print_step_heading("Phase 1.5: Compute attestation");
 
         let repo_path = std::path::Path::new(&repo_root);
         let source_att = attestation::compute_source_attestation(repo_path, &git_sha)
@@ -622,7 +622,7 @@ pub async fn product_release(
         println!();
 
         // Jump straight to Phase 3: persist artifact tags
-        println!("{}", "Phase 3: Persist artifact tags".bold());
+        crate::ui::print_step_heading("Phase 3: Persist artifact tags");
         write_artifact_tags(
             &product,
             &product_config.services,
@@ -653,7 +653,7 @@ pub async fn product_release(
         return Ok(());
     }
 
-    println!("{}", "Phase 2: Deploy services".bold());
+    crate::ui::print_step_heading("Phase 2: Deploy services");
 
     // Load environments from the first service's deploy.yaml
     // (all services share the same environment topology)
@@ -749,7 +749,7 @@ pub async fn product_release(
     println!();
 
     // ─── Phase 3: Write artifact tags ───────────────────────────────────────
-    println!("{}", "Phase 3: Persist artifact tags".bold());
+    crate::ui::print_step_heading("Phase 3: Persist artifact tags");
     let att_record = attestation_info.as_ref().cloned();
     write_artifact_tags(
         &product,
@@ -763,7 +763,7 @@ pub async fn product_release(
 
     // ─── Phase 4: Dashboard sync ────────────────────────────────────────────
     if !skip_dashboards && product_config.dashboards {
-        println!("{}", "Phase 4: Dashboard sync".bold());
+        crate::ui::print_step_heading("Phase 4: Dashboard sync");
         let product_dir =
             crate::config::resolve_product_dir(std::path::Path::new(&repo_root), &product);
         let product_dir_str = crate::repo::path_to_string_lossy(&product_dir);
@@ -776,7 +776,7 @@ pub async fn product_release(
 
     // ─── Phase 5: Post-deploy verification ──────────────────────────────────
     if target_env == "staging" && product_config.post_deploy {
-        println!("{}", "Phase 5: Post-deploy verification".bold());
+        crate::ui::print_step_heading("Phase 5: Post-deploy verification");
         // Allow failure (best-effort verification)
         match run_forge_subcommand(&[
             "post-deploy-verify",

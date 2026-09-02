@@ -146,7 +146,7 @@ pub async fn verify_health_endpoint(
     timeout: Duration,
     retries: u32,
 ) -> Result<(bool, Option<u64>)> {
-    println!("{}", "G12: Health endpoint check".bold());
+    crate::ui::print_step_heading("G12: Health endpoint check");
 
     let client = Client::builder()
         .timeout(timeout)
@@ -207,7 +207,7 @@ pub async fn verify_graphql_endpoint(
     graphql_url: &str,
     timeout: Duration,
 ) -> Result<(bool, Option<u64>)> {
-    println!("{}", "G13: GraphQL introspection check".bold());
+    crate::ui::print_step_heading("G13: GraphQL introspection check");
 
     let client = Client::builder()
         .timeout(timeout)
@@ -282,7 +282,7 @@ pub async fn verify_smoke_queries(
     queries: &[SmokeQuery],
     timeout: Duration,
 ) -> Result<(bool, Vec<SmokeQueryResult>)> {
-    println!("{}", "G15: Smoke query validation".bold());
+    crate::ui::print_step_heading("G15: Smoke query validation");
 
     let client = Client::builder()
         .timeout(timeout)

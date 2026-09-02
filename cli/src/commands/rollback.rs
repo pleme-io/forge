@@ -77,7 +77,7 @@ pub async fn execute(
     }
 
     // ─── Verify rollback images exist in registry ─────────────────────────
-    println!("{}", "Verifying rollback images in registry...".bold());
+    crate::ui::print_step_heading("Verifying rollback images in registry...");
 
     for entry in &entries {
         let org = extract_organization(&entry.registry_url)
@@ -125,7 +125,7 @@ pub async fn execute(
     );
     println!("{}", "=".repeat(60));
     println!();
-    println!("{}", "Rollback Plan:".bold());
+    crate::ui::print_step_heading("Rollback Plan:");
 
     for entry in &entries {
         println!(
@@ -227,7 +227,7 @@ pub async fn execute(
     }
 
     // ─── Deploy previous tags ───────────────────────────────────────────────
-    println!("{}", "Deploying previous tags...".bold());
+    crate::ui::print_step_heading("Deploying previous tags...");
 
     for env_name in &environments {
         println!("   {} {}", ">>".dimmed(), env_name.cyan().bold());
@@ -284,7 +284,7 @@ pub async fn execute(
     println!();
 
     // ─── Swap tags in artifact.json ────────────────────────────────────────
-    println!("{}", "Swapping tags in artifact.json...".bold());
+    crate::ui::print_step_heading("Swapping tags in artifact.json...");
 
     let now = crate::repo::now_rfc3339_utc();
     let mut modified_files = Vec::new();

@@ -162,7 +162,7 @@ impl FrontendValidationResult {
 /// Executes `bun run type-check` or `tsc --noEmit` to verify type safety.
 /// Returns (passed, detail_lines).
 pub async fn run_type_check(web_dir: &Path) -> Result<(bool, Vec<String>)> {
-    println!("{}", "Running TypeScript type check...".bold());
+    crate::ui::print_step_heading("Running TypeScript type check...");
     let start = Instant::now();
 
     // Try bun run type-check first (defined in package.json)
@@ -372,7 +372,7 @@ async fn run_biome_lint(web_dir: &Path) -> Result<(bool, Vec<String>)> {
 ///
 /// Executes `bun run test` (vitest) to verify unit test coverage.
 pub async fn run_unit_tests(web_dir: &Path) -> Result<(bool, Option<usize>, Vec<String>)> {
-    println!("{}", "Running unit tests...".bold());
+    crate::ui::print_step_heading("Running unit tests...");
     let start = Instant::now();
 
     let output = bun_output_at(
@@ -487,7 +487,7 @@ pub async fn validate_frontend_with_config(
     let mut test_count = None;
 
     // Ensure dependencies are installed
-    println!("{}", "Ensuring dependencies are installed...".bold());
+    crate::ui::print_step_heading("Ensuring dependencies are installed...");
     let install = bun_output_at(
         &["install", "--frozen-lockfile"],
         web_dir,

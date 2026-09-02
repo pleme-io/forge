@@ -62,7 +62,7 @@ pub async fn execute(
     let migration_file = format!("{}.rs", migration_name);
     let migration_path = migrations_dir.join(&migration_file);
 
-    println!("{}", "Creating migration scaffold...".bold());
+    crate::ui::print_step_heading("Creating migration scaffold...");
     println!();
 
     // Write the schema migration file
@@ -130,7 +130,7 @@ pub async fn execute(
 
     // Print instructions for lib.rs registration
     println!();
-    println!("{}", "Add to services/rust/migration/src/lib.rs:".bold());
+    crate::ui::print_step_heading("Add to services/rust/migration/src/lib.rs:");
     println!();
     println!("   // Module declaration:");
     println!("   mod {};", migration_name);
