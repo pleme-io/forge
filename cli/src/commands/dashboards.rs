@@ -339,7 +339,7 @@ fn generate_metadata(entities: &[ObservedEntity], output_path: &Path) -> Result<
     }
 
     let metadata = serde_json::json!({
-        "generated_at": chrono::Utc::now().to_rfc3339(),
+        "generated_at": crate::repo::now_rfc3339_utc(),
         "version": "1.0.0",
         "entities": entities,
         "dashboard_config": {
