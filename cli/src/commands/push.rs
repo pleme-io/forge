@@ -303,18 +303,7 @@ pub async fn execute(
     info!("   Retries: {} attempts per tag", retries);
     println!();
 
-    let pb = styled_progress_bar(tags.len() as u64);
-
-    // Push all tags
-    for tag in &tags {
-        pb.set_message(format!("Pushing {}:{}", registry, tag));
-
-        push_with_retry(&image_path, &registry, tag, &ghcr_token, retries).await?;
-
-        pb.inc(1);
-    }
-
-    pb.finish_with_message("Push complete");
+    push_tags_with_progress(&image_path, &registry, &tags, &ghcr_token, retries).await?;
 
     println!();
     println!("{}", "✅ Images pushed successfully!".bright_green().bold());
@@ -631,4 +620,125 @@ pub async fn push_with_retry(
     .await;
 
     result.map(|_| ()).map_err(|e| anyhow::anyhow!("{}", e))
+}
+
+/// Push every tag of an image to a registry, streaming per-tag progress
+/// on a determinate [`styled_progress_bar`].
+///
+/// Three sibling call sites — `commands/push.rs::execute`,
+/// `commands/pangea.rs::push_single`, `commands/bootstrap.rs::push_image`
+/// — carried this loop-shape verbatim: build the bar, `set_message` a
+/// per-tag `"Pushing {registry}:{tag}"` label, invoke
+/// [`push_with_retry`], increment the bar, then close with a
+/// `"Push complete"` `finish_with_message`. Three identically-shaped
+/// bodies past THEORY §VI.1's three-is-a-law threshold — the visual
+/// contract for the tag-push loop (label spelling, completion phrasing,
+/// bar-increment vs. failure interleave) now attaches to a type at ONE
+/// code line. A future consumer that pushes a `&[String]` of tags to a
+/// registry through [`push_with_retry`] imports this primitive rather
+/// than re-copying the four-line block; a change to the per-tag label
+/// or the completion message touches one line, not three.
+///
+/// Sibling to [`crate::ui::styled_progress_bar`] (the determinate-bar
+/// primitive itself, lifted at 859c009) — this fuses the bar with the
+/// per-tag body it wraps every real consumer of the bar drove verbatim.
+pub async fn push_tags_with_progress(
+    image_path: &str,
+    registry: &str,
+    tags: &[String],
+    ghcr_token: &str,
+    retries: u32,
+) -> Result<()> {
+    let pb = styled_progress_bar(tags.len() as u64);
+    for tag in tags {
+        pb.set_message(format!("Pushing {}:{}", registry, tag));
+        push_with_retry(image_path, registry, tag, ghcr_token, retries).await?;
+        pb.inc(1);
+    }
+    pb.finish_with_message("Push complete");
+    Ok(())
+}
+
+#[cfg(test)]
+mod push_tags_with_progress_tests {
+    use super::push_tags_with_progress;
+
+    /// `push_tags_with_progress` on an empty tag slice returns `Ok(())`
+    /// without spawning `doca` — the loop body is skipped, so the
+    /// primitive's structural invariants (bar construction, completion
+    /// message dispatch) are exercised in isolation from the network-
+    /// spawning inner body. Fail-before-pass semantics: if the
+    /// primitive returns `Err(_)` on an empty slice (e.g. a future edit
+    /// pushes a `assert!(!tags.is_empty())` inside the body), this test
+    /// catches the regression before any consumer wire.
+    #[tokio::test]
+    async fn empty_tags_returns_ok_without_spawning() {
+        let out = push_tags_with_progress("nowhere", "example.invalid/img", &[], "token", 0).await;
+        assert!(
+            out.is_ok(),
+            "push_tags_with_progress must return Ok(()) on an empty \
+             tag slice (loop body skipped, no `doca` spawn) — got {out:?}"
+        );
+    }
+
+    /// Regression shield: each of the three pre-lift sibling call sites
+    /// (`commands/{push,pangea,bootstrap}.rs`) must route the tag-push
+    /// loop through `push_tags_with_progress` rather than re-inline the
+    /// four-line `styled_progress_bar + for tag + set_message +
+    /// push_with_retry + inc + finish_with_message` block. The check is
+    /// structural (substring on the source text via `include_str!`,
+    /// bounded to each consumer fn via
+    /// [`crate::test_support::fn_body_slice_between_markers`] so the
+    /// primitive-definition body and unrelated fn bodies do not mask a
+    /// regression) — a future regression that re-fuses one of the
+    /// inline bodies fails here, not silently in production where a
+    /// drift on the per-tag label spelling or the completion message
+    /// would leak through at one site while the other two stayed on
+    /// the primitive.
+    #[test]
+    fn every_pre_lift_sibling_call_site_routes_through_push_tags_with_progress() {
+        for (module_path, source, open_marker, end_marker) in [
+            (
+                "commands/push.rs",
+                include_str!("push.rs"),
+                "pub async fn execute(",
+                "\n#[cfg(test)]",
+            ),
+            (
+                "commands/pangea.rs",
+                include_str!("pangea.rs"),
+                "pub async fn push_single(",
+                "\npub async fn push_all(",
+            ),
+            (
+                "commands/bootstrap.rs",
+                include_str!("bootstrap.rs"),
+                "pub async fn push_single(",
+                "\npub async fn push_all(",
+            ),
+        ] {
+            let fn_body = crate::test_support::fn_body_slice_between_markers(
+                source,
+                module_path,
+                open_marker,
+                end_marker,
+            );
+            assert!(
+                fn_body.contains("push_tags_with_progress(&image_path,"),
+                "{module_path}::{open_marker} must delegate its tag-push \
+                 loop to `push_tags_with_progress(&image_path, &registry, \
+                 &tags, &ghcr_token, retries)` — the call string was \
+                 not found in the fn body."
+            );
+            assert!(
+                !fn_body.contains("pb.set_message(format!(\"Pushing "),
+                "{module_path}::{open_marker} must NOT re-inline the \
+                 pre-lift `pb.set_message(format!(\"Pushing …\", …))` \
+                 tag-push loop body — route through \
+                 `push_tags_with_progress(...)` so the visual contract \
+                 lives at ONE code line. Found the pre-lift inline body \
+                 in the fn."
+            );
+        }
+    }
 }

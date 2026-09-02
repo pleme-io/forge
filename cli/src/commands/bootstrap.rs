@@ -36,7 +36,9 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 use tracing::info;
 
-use super::push::{discover_ghcr_token, generate_auto_tags, push_with_retry};
+use super::push::{
+    discover_ghcr_token, generate_auto_tags, push_tags_with_progress, push_with_retry,
+};
 use crate::infrastructure::git::GitClient;
 use crate::nix::build_docker_image_from_dir;
 use crate::repo::{find_repo_root, get_tool_path, in_directory, verify_directory};
@@ -294,13 +296,7 @@ pub async fn push_single(
     info!("🏷️  Tags: {}", tags.join(", "));
     println!();
 
-    let pb = styled_progress_bar(tags.len() as u64);
-    for tag in &tags {
-        pb.set_message(format!("Pushing {}:{}", registry, tag));
-        push_with_retry(&image_path, &registry, tag, &ghcr_token, retries).await?;
-        pb.inc(1);
-    }
-    pb.finish_with_message("Push complete");
+    push_tags_with_progress(&image_path, &registry, &tags, &ghcr_token, retries).await?;
 
     // Success message
     println!();
