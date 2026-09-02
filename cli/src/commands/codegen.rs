@@ -75,7 +75,7 @@ pub async fn execute(backend_dir: &Path, web_dir: &Path) -> Result<CodegenResult
     println!();
 
     // Step 1: Export schema from backend
-    println!("{}", "Step 1: Exporting GraphQL schema...".bold());
+    crate::ui::print_step_heading("Step 1: Exporting GraphQL schema...");
     let schema_start = Instant::now();
 
     // Route through the canonical `extract_graphql_schema` primitive —
@@ -107,7 +107,7 @@ pub async fn execute(backend_dir: &Path, web_dir: &Path) -> Result<CodegenResult
     println!();
 
     // Step 3: Install dependencies
-    println!("{}", "Step 2: Installing dependencies...".bold());
+    crate::ui::print_step_heading("Step 2: Installing dependencies...");
     let install_start = Instant::now();
 
     let bun = bun_bin();
@@ -132,7 +132,7 @@ pub async fn execute(backend_dir: &Path, web_dir: &Path) -> Result<CodegenResult
     println!();
 
     // Step 4: Run codegen
-    println!("{}", "Step 3: Running GraphQL codegen...".bold());
+    crate::ui::print_step_heading("Step 3: Running GraphQL codegen...");
     let codegen_start = Instant::now();
 
     let codegen_output = Command::new(&bun)
@@ -187,7 +187,7 @@ pub async fn execute(backend_dir: &Path, web_dir: &Path) -> Result<CodegenResult
 
 /// Export schema only (without running codegen)
 pub async fn export_schema_only(backend_dir: &Path, output_path: &Path) -> Result<usize> {
-    println!("{}", "Exporting GraphQL schema...".bold());
+    crate::ui::print_step_heading("Exporting GraphQL schema...");
 
     // One-oracle read-through: same typed primitive `execute` above uses,
     // so a future refinement of the extract-schema invocation shape

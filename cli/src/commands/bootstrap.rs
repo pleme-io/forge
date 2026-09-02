@@ -511,7 +511,7 @@ pub async fn release(
 
     // Step 2: Update kustomization.yaml
     println!();
-    println!("{}", "Step 2/3: Updating Kubernetes manifests...".bold());
+    crate::ui::print_step_heading("Step 2/3: Updating Kubernetes manifests...");
 
     let repo_root = find_repo_root()?;
     let kustomization_path = repo_root
@@ -574,7 +574,7 @@ pub async fn release(
         );
     } else {
         println!();
-        println!("{}", "Step 3/3: Committing and pushing changes...".bold());
+        crate::ui::print_step_heading("Step 3/3: Committing and pushing changes...");
 
         let git = GitClient::in_dir(crate::repo::path_to_string_lossy(&repo_root));
         let commit_message = format!(

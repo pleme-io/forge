@@ -93,7 +93,7 @@ pub async fn validate_codegen_with_autocommit(
     web_dir: &Path,
     auto_commit: bool,
 ) -> Result<CodegenValidationResult> {
-    println!("{}", "Validating GraphQL codegen...".bold());
+    crate::ui::print_step_heading("Validating GraphQL codegen...");
 
     // Step 1: Export schema from backend
     println!("   Exporting schema from backend...");
@@ -226,7 +226,7 @@ pub async fn validate_codegen_with_autocommit(
 ///
 /// Useful for checking if the backend schema can be exported without errors.
 pub async fn validate_schema_export(backend_dir: &Path) -> Result<bool> {
-    println!("{}", "Validating schema export...".bold());
+    crate::ui::print_step_heading("Validating schema export...");
 
     // One-oracle read-through of the canonical `extract_graphql_schema`
     // primitive (THEORY §V.1, §VI.1). The typed

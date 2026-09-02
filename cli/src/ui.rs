@@ -469,6 +469,51 @@ pub fn print_warning(message: &str) {
     println!("{}", format!("⚠️  {}", message).bright_yellow());
 }
 
+/// Prints the one-line bold step-heading grammar 44 pre-lift consumer sites
+/// spelled inline as `println!("{}", "<TITLE>".bold());` across 12 command
+/// modules (`commands/{developer_tools, codegen, product_release, bootstrap,
+/// federation_tests, sync, migration_new, rollback, prerelease,
+/// frontend_validation, codegen_validation, post_deploy_verification}.rs`).
+/// Marks the start of a step, gate, phase, or list within a command's
+/// in-body readout ("G1: cargo check", "Step 2: SeaORM Entity Generation",
+/// "Phase 1: Push artifacts", "Rollback Plan:", "🏗️  Architecture:", …).
+///
+/// # Distinct from the other `ui::print_*` primitives
+///
+/// [`print_header`] is a `╔═╗` boxed top-level command title in
+/// `bright_blue`. [`print_section_header`] is a `═`-rule + bold-title
+/// triple around a section OPENING within a pipeline.
+/// [`print_success_banner`] and [`print_release_stage_banner`] are `━` /
+/// `=` rule + colored-message COMPLETION banners. This primitive carries
+/// the LEANEST opening — a single bold label, no rule, no color, no
+/// framing blank — every pre-lift consumer used inside a command as an
+/// in-body milestone marker one step below a full section boundary.
+///
+/// # Compounding
+///
+/// Pre-lift 44 sibling sites each restated the `println!("{}", "<TITLE>".bold())`
+/// grammar verbatim. A future palette adjustment (a green checkmark
+/// prefix, a `[Gn/N]` step-numbering scheme, an OTLP `step_start`
+/// observability event, a swap of `.bold()` for `.underline()` under
+/// a leaner grammar) had to hit 44 sites in lockstep or drift the visual
+/// grammar; post-lift it hits ONE typed body. Delegates to
+/// [`write_step_heading`] against `std::io::stdout()`; the writer split
+/// exists so the fail-before-pass test can pin the single-line body and
+/// palette contract by inspecting emitted bytes rather than shelling out
+/// and grepping stdout.
+pub fn print_step_heading(title: &str) {
+    let _ = write_step_heading(&mut std::io::stdout().lock(), title);
+}
+
+/// Writer-taking sibling to [`print_step_heading`]. Emits the single
+/// `<title>.bold()` line via [`writeln!`] against the supplied writer.
+/// [`print_step_heading`] is the stdout adapter; this variant exists so
+/// tests can pin the one-line body and `\x1b[1m` bold sequence without
+/// capturing stdout.
+pub fn write_step_heading<W: std::io::Write>(w: &mut W, title: &str) -> std::io::Result<()> {
+    writeln!(w, "{}", title.bold())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{styled_spinner, SpinnerStyle, SPINNER_TICK};
@@ -963,5 +1008,164 @@ mod tests {
              not a determinate progress bar"
         );
         bar.finish_and_clear();
+    }
+
+    /// Fail-before-pass envelope for [`super::write_step_heading`]. Pins
+    /// the exact single-line body every pre-lift consumer spelled
+    /// verbatim (`<title>.bold()` via `println!("{}", "<TITLE>".bold())`).
+    /// A silent contract drift a future rewrite might introduce —
+    /// dropping `.bold()` so the label loses emphasis, promoting the
+    /// title to a color that competes with the surrounding body text,
+    /// adding a framing blank the pre-lift stanza never carried,
+    /// dropping the trailing `\n` — flips this assertion rather than
+    /// compiling and silently diverging the 44 consumer sites' visual
+    /// grammar.
+    #[test]
+    fn write_step_heading_emits_exactly_one_bold_title_line() {
+        // Force ANSI emission so the palette contract survives a test
+        // runner attached to a non-tty (colored auto-drops sequences).
+        // Hold the shared [`ANSI_OVERRIDE_LOCK`] across the whole
+        // set-write-unset window so a peer banner test's `unset` can
+        // never strand this writer between colored's on/off flip.
+        let _override_guard = ANSI_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        colored::control::set_override(true);
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_step_heading(&mut buf, "G1: cargo check")
+            .expect("write_step_heading against a Vec<u8> writer must succeed");
+
+        colored::control::unset_override();
+
+        let out = String::from_utf8(buf)
+            .expect("write_step_heading must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — the pre-lift stanza is one `println!`,
+        // not two, and carries no framing blank. A refactor that
+        // slips a leading or trailing blank into the primitive body
+        // fails here.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_step_heading must emit exactly one line — the \
+             pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The title text reaches the rendered line verbatim; a fusion
+        // that hoists the title off the parameter and pins it to a
+        // constant fails here.
+        assert!(
+            lines[0].contains("G1: cargo check"),
+            "line 0 must carry the title verbatim; got {:?}",
+            lines[0]
+        );
+
+        // The `bold` ANSI sequence reaches the rendered line; a fusion
+        // that drops `.bold()` (a "just print the string, it's
+        // shorter" cleanup) fails here.
+        assert!(
+            lines[0].contains("\x1b[1m"),
+            "line 0 must carry the `bold` ANSI sequence (`\\x1b[1m`) \
+             — every pre-lift consumer spelled `.bold()` on the \
+             title; got {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `println!` (not `print!`), so the newline is part of the
+        // contract. A fusion that swapped `writeln!` for `write!`
+        // fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_step_heading must emit a trailing `\\n` (the \
+             pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto [`super::print_step_heading`]
+    /// no longer spell the `println!("{}", "<TITLE>".bold());` shape
+    /// inline. Structural regression shield — without it, a future
+    /// refactor could silently re-inline the one-liner (e.g. a "just
+    /// call `println!` directly, it's shorter" cleanup) and reopen the
+    /// 44-site duplication class this lift closed. Enforced at the
+    /// module bodies before their `#[cfg(test)]` regions so a
+    /// test-support mention of the raw shape does not defeat the
+    /// shield. The exact-shape needle `println!("{}", "` co-occurring
+    /// with `".bold());` on the SAME line uniquely identifies the
+    /// pre-lift restatement — other bold-carrying `println!`s in
+    /// these files (composite `format!` args, non-literal-arg shapes)
+    /// stay unshielded because they are morally-adjacent shapes with
+    /// their own lift targets, not this one.
+    #[test]
+    fn print_step_heading_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[
+            (
+                include_str!("commands/developer_tools.rs"),
+                "commands/developer_tools.rs",
+            ),
+            (include_str!("commands/codegen.rs"), "commands/codegen.rs"),
+            (
+                include_str!("commands/product_release.rs"),
+                "commands/product_release.rs",
+            ),
+            (
+                include_str!("commands/bootstrap.rs"),
+                "commands/bootstrap.rs",
+            ),
+            (
+                include_str!("commands/federation_tests.rs"),
+                "commands/federation_tests.rs",
+            ),
+            (include_str!("commands/sync.rs"), "commands/sync.rs"),
+            (
+                include_str!("commands/migration_new.rs"),
+                "commands/migration_new.rs",
+            ),
+            (include_str!("commands/rollback.rs"), "commands/rollback.rs"),
+            (
+                include_str!("commands/prerelease.rs"),
+                "commands/prerelease.rs",
+            ),
+            (
+                include_str!("commands/frontend_validation.rs"),
+                "commands/frontend_validation.rs",
+            ),
+            (
+                include_str!("commands/codegen_validation.rs"),
+                "commands/codegen_validation.rs",
+            ),
+            (
+                include_str!("commands/post_deploy_verification.rs"),
+                "commands/post_deploy_verification.rs",
+            ),
+        ];
+        for (source, module_path) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                assert!(
+                    !(line.contains("println!(\"{}\", \"") && line.contains("\".bold());")),
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `println!(\"{{}}\", \"<TITLE>\".bold());` step-heading \
+                     stanza — that one-liner was lifted onto \
+                     `crate::ui::print_step_heading`. A re-inline would \
+                     silently reopen the 44-site duplication class this \
+                     shield exists to close. Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            assert!(
+                body.contains("crate::ui::print_step_heading("),
+                "{module_path} body must forward to \
+                 `crate::ui::print_step_heading(\"<TITLE>\")` — the \
+                 primitive body every one-line bold step-heading in the \
+                 crate now delegates through."
+            );
+        }
     }
 }

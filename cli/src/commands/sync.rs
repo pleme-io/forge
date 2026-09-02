@@ -292,13 +292,13 @@ pub async fn execute(working_dir: &Path, skip_entities: bool) -> Result<SyncResu
     }
 
     // Step 1: Check migrations
-    println!("{}", "Step 1: Check pending migrations".bold());
+    crate::ui::print_step_heading("Step 1: Check pending migrations");
     let migration_count = count_migrations(&config.migrations_dir).await;
     println!("   Found {} migration files", migration_count);
     println!();
 
     // Step 2: SeaORM Entity Generation (if enabled)
-    println!("{}", "Step 2: SeaORM Entity Generation".bold());
+    crate::ui::print_step_heading("Step 2: SeaORM Entity Generation");
     if skip_entities {
         println!("   {} Skipped via --skip-entities", "○".yellow());
     } else {
@@ -341,7 +341,7 @@ pub async fn execute(working_dir: &Path, skip_entities: bool) -> Result<SyncResu
     println!();
 
     // Step 4: Verify generated files
-    println!("{}", "Step 4: Verify Generated Files".bold());
+    crate::ui::print_step_heading("Step 4: Verify Generated Files");
 
     // Check schema
     if config.schema_file.exists() {
@@ -390,7 +390,7 @@ pub async fn execute(working_dir: &Path, skip_entities: bool) -> Result<SyncResu
     println!();
 
     // Step 5: ReBAC validation
-    println!("{}", "Step 5: ReBAC Validation".bold());
+    crate::ui::print_step_heading("Step 5: ReBAC Validation");
     let rebac_valid = match super::rebac_validation::execute(working_dir, true).await {
         Ok(result) => {
             if result.all_passed() {
