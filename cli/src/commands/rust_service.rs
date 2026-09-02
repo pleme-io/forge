@@ -1961,7 +1961,7 @@ pub async fn deploy_rust_service_with_tag(
             .context("Failed to push manifest")?;
     }
 
-    println!("✅ {}", "Manifest updated and pushed".green());
+    crate::ui::print_step_success("Manifest updated and pushed");
 
     if watch {
         println!();

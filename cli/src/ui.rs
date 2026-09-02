@@ -514,6 +514,61 @@ pub fn write_step_heading<W: std::io::Write>(w: &mut W, title: &str) -> std::io:
     writeln!(w, "{}", title.bold())
 }
 
+/// Prints the one-line `✅ <message>.green()` in-body step-completion
+/// grammar 9 pre-lift consumer sites spelled inline as
+/// `println!("✅ {}", "<MSG>".green());` across 4 command modules
+/// (`commands/{federation (×6), rust_service (×1), schema_validation
+/// (×1), developer_tools (×1)}.rs`). Marks the successful completion
+/// of an in-body step, gate, or phase within a command's readout
+/// ("Schema extraction complete", "Pre-composition validation passed",
+/// "Supergraph composed successfully", "Manifest updated and pushed",
+/// "Cargo.nix updated!", …) — the natural closing counterpart to
+/// [`print_step_heading`]'s opening step marker.
+///
+/// # Distinct from the other `ui::print_*` primitives
+///
+/// [`print_success`] is a `bright_green().bold()` `✅ <msg>` line the
+/// `e2e.rs` runner uses as its milestone-level success sigil — the
+/// heavier palette (`bright_green` rather than `green`, `.bold()`
+/// added) marks it as a suite / phase / all-tests-complete milestone
+/// visually louder than an in-body step. [`print_success_banner`] is
+/// a three-line `━`-rule + `green().bold()` message + `━`-rule
+/// terminal-completion banner. This primitive carries the LEANEST
+/// closing — a single `✅ ` prefix + `green()` message, no bold, no
+/// rule, no framing blank — every pre-lift consumer used inside a
+/// command's pipeline as an in-body step-completion marker one step
+/// below a milestone-level `print_success` call and two steps below a
+/// terminal `print_success_banner`.
+///
+/// # Compounding
+///
+/// Pre-lift 9 sibling sites each restated the `println!("✅ {}",
+/// "<MSG>".green())` grammar verbatim. A future palette adjustment (a
+/// swap of `✅ ` for `✓ ` glyph, a promotion of `.green()` to
+/// `.bright_green()` or `.green().bold()` under a leaner step-vs-
+/// milestone distinction, an OTLP `step_complete` observability event
+/// wired alongside the print, a swap of the leading emoji for a bare
+/// checkmark under a CI-log-friendly palette) had to hit 9 sites in
+/// lockstep or drift the visual grammar; post-lift it hits ONE typed
+/// body. Delegates to [`write_step_success`] against
+/// [`std::io::stdout()`]; the writer split exists so the
+/// fail-before-pass test can pin the single-line body, the leading
+/// `✅ ` prefix, and the `\x1b[32m` green palette contract by
+/// inspecting emitted bytes rather than shelling out and grepping
+/// stdout.
+pub fn print_step_success(message: &str) {
+    let _ = write_step_success(&mut std::io::stdout().lock(), message);
+}
+
+/// Writer-taking sibling to [`print_step_success`]. Emits the single
+/// `✅ <message>.green()` line via [`writeln!`] against the supplied
+/// writer. [`print_step_success`] is the stdout adapter; this variant
+/// exists so tests can pin the one-line body, the `✅ ` prefix, and
+/// the `\x1b[32m` green ANSI sequence without capturing stdout.
+pub fn write_step_success<W: std::io::Write>(w: &mut W, message: &str) -> std::io::Result<()> {
+    writeln!(w, "✅ {}", message.green())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{styled_spinner, SpinnerStyle, SPINNER_TICK};
@@ -1165,6 +1220,181 @@ mod tests {
                  `crate::ui::print_step_heading(\"<TITLE>\")` — the \
                  primitive body every one-line bold step-heading in the \
                  crate now delegates through."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_step_success`]. Pins
+    /// the exact single-line body every pre-lift consumer spelled
+    /// verbatim (`println!("✅ {}", "<MSG>".green())`). A silent
+    /// contract drift a future rewrite might introduce — dropping the
+    /// `✅ ` prefix so operators lose the visual anchor for a completed
+    /// step, promoting the message color to `bright_green` or adding
+    /// `.bold()` (which would collapse the visual distinction against
+    /// the milestone-level [`super::print_success`]), adding a framing
+    /// blank the pre-lift stanza never carried, hoisting the primitive
+    /// off `println!` onto `print!` (losing the trailing `\n`) — flips
+    /// this assertion rather than compiling and silently diverging the
+    /// 9 consumer sites' visual grammar.
+    #[test]
+    fn write_step_success_emits_exactly_one_check_prefixed_green_line() {
+        // Force ANSI emission so the palette contract survives a test
+        // runner attached to a non-tty (colored auto-drops sequences).
+        // Hold the shared [`ANSI_OVERRIDE_LOCK`] across the whole
+        // set-write-unset window so a peer banner test's `unset` can
+        // never strand this writer between colored's on/off flip.
+        let _override_guard = ANSI_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        colored::control::set_override(true);
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_step_success(&mut buf, "Schema extraction complete")
+            .expect("write_step_success against a Vec<u8> writer must succeed");
+
+        colored::control::unset_override();
+
+        let out = String::from_utf8(buf)
+            .expect("write_step_success must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — the pre-lift stanza is one `println!`,
+        // not two, and carries no framing blank. A refactor that slips
+        // a leading or trailing blank into the primitive body fails
+        // here.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_step_success must emit exactly one line — the \
+             pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The leading `✅ ` prefix reaches the rendered line before any
+        // ANSI escape — a fusion that hoisted the checkmark inside the
+        // colored span (`"✅ <msg>".green()`) or dropped it altogether
+        // (`println!("{}", msg.green())`) fails here.
+        assert!(
+            lines[0].starts_with("✅ "),
+            "line 0 must begin with the literal `✅ ` prefix — every \
+             pre-lift consumer spelled it OUTSIDE the coloring span; \
+             got {:?}",
+            lines[0]
+        );
+
+        // The message text reaches the rendered line verbatim; a
+        // fusion that hoists the message off the parameter and pins
+        // it to a constant fails here.
+        assert!(
+            lines[0].contains("Schema extraction complete"),
+            "line 0 must carry the message verbatim; got {:?}",
+            lines[0]
+        );
+
+        // The `green` ANSI sequence (`\x1b[32m`) reaches the rendered
+        // line; a fusion that dropped `.green()` (a "just print the
+        // string, it's shorter" cleanup) or promoted the palette to
+        // `.bright_green()` (`\x1b[92m` — the [`super::print_success`]
+        // milestone palette) fails here. A promotion collapses the
+        // visual distinction between step-completion and milestone
+        // grammars this primitive exists to preserve.
+        assert!(
+            lines[0].contains("\x1b[32m"),
+            "line 0 must carry the `green` ANSI sequence (`\\x1b[32m`) \
+             — every pre-lift consumer spelled `.green()` (never \
+             `.bright_green()` or `.green().bold()`) on the message; \
+             got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[92m"),
+            "line 0 must NOT carry the `bright_green` ANSI sequence \
+             (`\\x1b[92m`) — that palette belongs to the heavier \
+             milestone-level `print_success`, not this in-body \
+             step-completion primitive; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !(lines[0].contains("\x1b[1;32m") || lines[0].contains("\x1b[32;1m")),
+            "line 0 must NOT carry the `green` + `bold` compound ANSI \
+             sequence — every pre-lift consumer spelled plain \
+             `.green()` on the message, and `.green().bold()` belongs \
+             to the two straggler milestone sites (`rust_service.rs` \
+             lines 700 and 1975) deliberately excluded from this \
+             lift's sibling class; got {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `println!` (not `print!`), so the newline is part of the
+        // contract. A fusion that swapped `writeln!` for `write!`
+        // fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_step_success must emit a trailing `\\n` (the \
+             pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto [`super::print_step_success`]
+    /// no longer spell the `println!("✅ {}", "<MSG>".green());` shape
+    /// inline. Structural regression shield — without it, a future
+    /// refactor could silently re-inline the one-liner (e.g. a "just
+    /// call `println!` directly, it's shorter" cleanup) and reopen the
+    /// 9-site duplication class this lift closed. Enforced at the
+    /// module bodies before their `#[cfg(test)]` regions so a
+    /// test-support mention of the raw shape does not defeat the
+    /// shield. The exact-shape needle `println!("✅ {}", "` co-occurring
+    /// with `".green());` on the SAME line uniquely identifies the
+    /// pre-lift restatement — the two straggler `.green().bold()` sites
+    /// (`rust_service.rs` lines 700 and 1975) carry a heavier
+    /// milestone-level grammar deliberately excluded from this lift's
+    /// sibling class, and their `".green().bold());` suffix does not
+    /// match this shield's `".green());" needle, so they survive
+    /// untouched.
+    #[test]
+    fn print_step_success_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[
+            (
+                include_str!("commands/federation.rs"),
+                "commands/federation.rs",
+            ),
+            (
+                include_str!("commands/rust_service.rs"),
+                "commands/rust_service.rs",
+            ),
+            (
+                include_str!("commands/schema_validation.rs"),
+                "commands/schema_validation.rs",
+            ),
+            (
+                include_str!("commands/developer_tools.rs"),
+                "commands/developer_tools.rs",
+            ),
+        ];
+        for (source, module_path) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                assert!(
+                    !(line.contains("println!(\"✅ {}\", \"") && line.contains("\".green());")),
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `println!(\"✅ {{}}\", \"<MSG>\".green());` \
+                     step-completion stanza — that one-liner was lifted \
+                     onto `crate::ui::print_step_success`. A re-inline \
+                     would silently reopen the 9-site duplication class \
+                     this shield exists to close. Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            assert!(
+                body.contains("crate::ui::print_step_success("),
+                "{module_path} body must forward to \
+                 `crate::ui::print_step_success(\"<MSG>\")` — the \
+                 primitive body every one-line `✅ ` + green() \
+                 step-completion in the crate now delegates through."
             );
         }
     }

@@ -240,7 +240,7 @@ pub async fn extract_and_validate_schema(
         );
     }
 
-    println!("✅ {}", "Schema extraction and validation complete".green());
+    crate::ui::print_step_success("Schema extraction and validation complete");
 
     Ok(Some(SchemaExtractionResult {
         schema_path,
