@@ -1398,10 +1398,7 @@ pub async fn orchestrate_release(
             .await
             {
                 if was_reset {
-                    println!(
-                        "   {} Shinka migration reset, will retry with new image",
-                        "✅".green()
-                    );
+                    crate::ui::print_step_pass("Shinka migration reset, will retry with new image");
                 }
             }
 
@@ -1414,11 +1411,7 @@ pub async fn orchestrate_release(
                 &deploy_config,
             )
             .await?;
-            println!(
-                "   {} Migrations completed for {}",
-                "✅".green(),
-                env.cyan()
-            );
+            crate::ui::print_step_pass(&format!("Migrations completed for {}", env.cyan()));
         }
     }
     println!();

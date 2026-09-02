@@ -211,7 +211,7 @@ pub async fn validate_codegen_with_autocommit(
         false
     };
 
-    println!("   {} No schema drift detected", "✅".green());
+    crate::ui::print_step_pass("No schema drift detected");
 
     Ok(CodegenValidationResult {
         is_valid: true,
@@ -249,12 +249,11 @@ pub async fn validate_schema_export(backend_dir: &Path) -> Result<bool> {
         + schema.matches("input ").count()
         + schema.matches("enum ").count();
 
-    println!(
-        "   {} Schema export succeeded ({} bytes, ~{} types)",
-        "✅".green(),
+    crate::ui::print_step_pass(&format!(
+        "Schema export succeeded ({} bytes, ~{} types)",
         schema_bytes.len(),
         type_count
-    );
+    ));
 
     Ok(true)
 }
@@ -392,11 +391,7 @@ async fn auto_commit_codegen_changes(web_dir: &Path) -> Result<bool> {
         .await
         .unwrap_or_else(|_| "unknown".to_string());
 
-    println!(
-        "   {} Auto-committed codegen changes ({})",
-        "✅".green(),
-        commit_hash
-    );
+    crate::ui::print_step_pass(&format!("Auto-committed codegen changes ({})", commit_hash));
 
     Ok(true)
 }

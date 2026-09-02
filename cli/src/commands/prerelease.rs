@@ -858,11 +858,10 @@ async fn run_integration_gate(config: &PreReleaseConfig) -> Result<bool> {
     match output {
         Ok(Ok(output)) => {
             if output.status.success() {
-                println!(
-                    "   {} Integration tests passed ({:.1}s)",
-                    "✅".green(),
+                crate::ui::print_step_pass(&format!(
+                    "Integration tests passed ({:.1}s)",
                     duration.as_secs_f64()
-                );
+                ));
                 Ok(true)
             } else {
                 let (stdout, stderr) = crate::repo::utf8_lossy_streams(&output);
@@ -1042,11 +1041,10 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
             let _ = e2e::cleanup_e2e_images();
 
             if output.status.success() {
-                println!(
-                    "   {} E2E tests passed ({:.1}s)",
-                    "✅".green(),
+                crate::ui::print_step_pass(&format!(
+                    "E2E tests passed ({:.1}s)",
                     duration.as_secs_f64()
-                );
+                ));
                 Ok(true)
             } else {
                 let (stdout, stderr) = crate::repo::utf8_lossy_streams(&output);
@@ -1160,11 +1158,10 @@ async fn run_cargo_check(backend_dir: &Path) -> Result<bool> {
     let duration = start.elapsed();
 
     if output.status.success() {
-        println!(
-            "   {} Compilation check passed ({:.1}s)",
-            "✅".green(),
+        crate::ui::print_step_pass(&format!(
+            "Compilation check passed ({:.1}s)",
             duration.as_secs_f64()
-        );
+        ));
         Ok(true)
     } else {
         let stderr = crate::repo::utf8_lossy_borrow(&output.stderr);
@@ -1200,11 +1197,10 @@ async fn run_cargo_clippy(backend_dir: &Path) -> Result<bool> {
     let duration = start.elapsed();
 
     if output.status.success() {
-        println!(
-            "   {} Clippy passed (0 warnings, {:.1}s)",
-            "✅".green(),
+        crate::ui::print_step_pass(&format!(
+            "Clippy passed (0 warnings, {:.1}s)",
             duration.as_secs_f64()
-        );
+        ));
         Ok(true)
     } else {
         let stderr = crate::repo::utf8_lossy_borrow(&output.stderr);
@@ -1262,11 +1258,10 @@ async fn run_cargo_fmt_check(backend_dir: &Path) -> Result<bool> {
     let duration = start.elapsed();
 
     if check_output.status.success() {
-        println!(
-            "   {} Code formatting applied and verified ({:.1}s)",
-            "✅".green(),
+        crate::ui::print_step_pass(&format!(
+            "Code formatting applied and verified ({:.1}s)",
             duration.as_secs_f64()
-        );
+        ));
         Ok(true)
     } else {
         // This shouldn't happen after auto-fix, but handle it
@@ -1316,12 +1311,11 @@ async fn run_cargo_test(backend_dir: &Path) -> Result<bool> {
         });
 
     if output.status.success() {
-        println!(
-            "   {} Tests passed ({} tests, {:.1}s)",
-            "✅".green(),
+        crate::ui::print_step_pass(&format!(
+            "Tests passed ({} tests, {:.1}s)",
             test_count.unwrap_or(0),
             duration.as_secs_f64()
-        );
+        ));
         Ok(true)
     } else {
         let stderr = crate::repo::utf8_lossy_borrow(&output.stderr);

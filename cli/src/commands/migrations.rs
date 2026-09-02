@@ -1130,11 +1130,10 @@ pub async fn wait_for_shinka_migration(
         match phase {
             "Ready" if tag_matches => {
                 let duration = start.elapsed().as_secs_f64();
-                println!(
-                    "   {} Shinka migration ready (took {:.1}s)",
-                    "✅".green(),
+                crate::ui::print_step_pass(&format!(
+                    "Shinka migration ready (took {:.1}s)",
                     duration,
-                );
+                ));
 
                 // Print final migrator results summary
                 if let Some(ref results) = status.status.migrator_results {

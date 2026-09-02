@@ -68,7 +68,7 @@ pub async fn execute(
     // Write the schema migration file
     let scaffold = generate_migration_scaffold(&migration_name);
     crate::repo::write_text_sync(&migration_path, &scaffold)?;
-    println!("   {} Created {}", "✅".green(), migration_path.display());
+    crate::ui::print_step_pass(&format!("Created {}", migration_path.display()));
 
     // If --with-data, also create companion data migration
     let data_migration_name = if with_data {
@@ -79,7 +79,7 @@ pub async fn execute(
 
         let data_scaffold = generate_data_migration_scaffold(&data_name);
         crate::repo::write_text_sync(&data_path, &data_scaffold)?;
-        println!("   {} Created {}", "✅".green(), data_path.display());
+        crate::ui::print_step_pass(&format!("Created {}", data_path.display()));
 
         Some(data_name)
     } else {
@@ -110,7 +110,7 @@ pub async fn execute(
 
         std::fs::write(&manifest_path, &content)
             .with_context(|| format!("Failed to update {}", manifest_path.display()))?;
-        println!("   {} Updated {}", "✅".green(), manifest_path.display());
+        crate::ui::print_step_pass(&format!("Updated {}", manifest_path.display()));
     } else {
         // Create new manifest
         let mut content = String::from(
@@ -125,7 +125,7 @@ pub async fn execute(
         }
         std::fs::write(&manifest_path, &content)
             .with_context(|| format!("Failed to create {}", manifest_path.display()))?;
-        println!("   {} Created {}", "✅".green(), manifest_path.display());
+        crate::ui::print_step_pass(&format!("Created {}", manifest_path.display()));
     }
 
     // Print instructions for lib.rs registration
