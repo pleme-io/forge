@@ -239,13 +239,13 @@ pub async fn release(
         if src.exists() {
             std::fs::copy(&src, &dest)
                 .with_context(|| format!("Failed to copy binary for {}", target))?;
-            artifacts.push(dest.to_string_lossy().to_string());
+            artifacts.push(crate::repo::path_to_string_lossy(&dest));
             info!("  Collected: {}", binary_name);
         } else {
             // Some builds produce the binary directly at the store path
             std::fs::copy(&store_path, &dest)
                 .with_context(|| format!("Failed to copy artifact for {}", target))?;
-            artifacts.push(dest.to_string_lossy().to_string());
+            artifacts.push(crate::repo::path_to_string_lossy(&dest));
             info!("  Collected: {}", binary_name);
         }
     }

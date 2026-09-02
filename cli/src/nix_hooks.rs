@@ -207,7 +207,7 @@ impl NixHooks {
         let hook_path = package_path.join("bin").join("attic-push-hook");
 
         if hook_path.exists() {
-            Some(hook_path.to_string_lossy().to_string())
+            Some(crate::repo::path_to_string_lossy(&hook_path))
         } else {
             warn!(
                 "⚠️  attic-push-hook binary not found at expected path: {:?}",

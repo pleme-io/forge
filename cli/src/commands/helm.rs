@@ -2909,7 +2909,7 @@ fn find_latest_tgz(dir: &str, prefix: &str) -> Result<String> {
 
     entries
         .first()
-        .map(|e| e.path().to_string_lossy().to_string())
+        .map(|e| crate::repo::path_to_string_lossy(&e.path()))
         .context(format!("No .tgz found for {} in {}", prefix, dir))
 }
 

@@ -235,7 +235,7 @@ pub async fn execute(
         for (i, entry) in entries.iter().enumerate() {
             let product_dir =
                 crate::config::resolve_product_dir(std::path::Path::new(&repo_root), &product);
-            let service_dir = product_dir.join(&entry.path).to_string_lossy().to_string();
+            let service_dir = crate::repo::path_to_string_lossy(&product_dir.join(&entry.path));
 
             run_forge_subcommand(&[
                 "orchestrate-release",

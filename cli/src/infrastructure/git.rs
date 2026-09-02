@@ -395,7 +395,7 @@ mod tests {
     /// of what env var is set — which is the exact same PATH-lookup
     /// shape they had pre-migration.
     fn git_client_in_dir_path_git(dir: &std::path::Path) -> GitClient {
-        GitClient::in_dir(dir.to_string_lossy().to_string()).with_git_bin("git")
+        GitClient::in_dir(crate::repo::path_to_string_lossy(dir)).with_git_bin("git")
     }
 
     /// On a freshly-seeded repo with no `git add` since the last

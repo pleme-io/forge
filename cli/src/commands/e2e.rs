@@ -820,11 +820,13 @@ fn resolve_repo_root(repo_root: Option<String>) -> Result<String> {
     // decode) collapses to `None` and this site falls back to the
     // current working directory rather than surfacing an error.
     if let Some(root) = crate::git::try_repo_root_via_rev_parse() {
-        return Ok(root.to_string_lossy().to_string());
+        return Ok(crate::repo::path_to_string_lossy(&root));
     }
 
     // Fall back to current directory
-    Ok(crate::repo::current_dir()?.to_string_lossy().to_string())
+    Ok(crate::repo::path_to_string_lossy(
+        &crate::repo::current_dir()?,
+    ))
 }
 
 /// Verify Docker daemon is running

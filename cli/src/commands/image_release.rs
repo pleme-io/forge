@@ -588,7 +588,7 @@ fn verify_binary_contents_arch(image_path: &str, expected_arch: &str) -> Result<
         for entry in entries.flatten() {
             let mut entry = entry;
             let path_in_outer = match entry.path() {
-                Ok(p) => p.to_string_lossy().to_string(),
+                Ok(p) => crate::repo::path_to_string_lossy(&p),
                 Err(_) => continue,
             };
             if path_in_outer != *layer_name {
@@ -618,7 +618,7 @@ fn verify_binary_contents_arch(image_path: &str, expected_arch: &str) -> Result<
                 }
                 let entry_path = layer_entry
                     .path()
-                    .map(|p| p.to_string_lossy().to_string())
+                    .map(|p| crate::repo::path_to_string_lossy(&p))
                     .unwrap_or_default();
                 let mut head = [0u8; 20];
                 let n = layer_entry.read(&mut head).unwrap_or(0);
@@ -664,7 +664,7 @@ fn read_docker_archive_manifest(image_path: &str) -> Result<DockerArchiveManifes
         .with_context(|| format!("Failed to open image tarball {}", image_path))?;
     for entry in archive.entries()?.flatten() {
         let mut entry = entry;
-        let path = entry.path()?.to_string_lossy().to_string();
+        let path = crate::repo::path_to_string_lossy(&entry.path()?);
         if path == "manifest.json" {
             let mut contents = String::new();
             entry.read_to_string(&mut contents)?;

@@ -44,7 +44,7 @@ pub fn up(working_dir: &str, services: &[String]) -> Result<()> {
     let mut args = vec![
         "compose".to_string(),
         "-f".to_string(),
-        compose_file.to_string_lossy().to_string(),
+        crate::repo::path_to_string_lossy(&compose_file),
         "up".to_string(),
         "-d".to_string(),
     ];
