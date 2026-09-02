@@ -376,14 +376,7 @@ pub async fn execute(
 
     // ─── Done ───────────────────────────────────────────────────────────────
     println!();
-    println!("{}", "=".repeat(60).bright_green());
-    println!(
-        "{} {} {}",
-        "ROLLBACK COMPLETE".green().bold(),
-        product.cyan().bold(),
-        format!("({})", target_env).dimmed()
-    );
-    println!("{}", "=".repeat(60).bright_green());
+    crate::ui::print_release_stage_banner("ROLLBACK COMPLETE", &product, target_env);
 
     Ok(())
 }
