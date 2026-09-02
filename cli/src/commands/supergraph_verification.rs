@@ -241,7 +241,7 @@ async fn get_rover_version() -> Result<String> {
     let rover = rover_fhs_bin();
     let output = Command::new(&rover).arg("--version").output().await?;
 
-    let version = String::from_utf8_lossy(&output.stdout);
+    let version = crate::repo::utf8_lossy_borrow(&output.stdout);
     Ok(version.trim().to_string())
 }
 
@@ -304,7 +304,7 @@ pub async fn verify_router_schema(
 
     // Parse health response to extract schema hash
     // This is a placeholder - we'll need to modify hive-router config to include this
-    let health_response = String::from_utf8_lossy(&output.stdout);
+    let health_response = crate::repo::utf8_lossy_borrow(&output.stdout);
     let actual_hash = extract_schema_hash(&health_response);
 
     let success = actual_hash.as_ref() == Some(&expected_hash.to_string());
@@ -379,7 +379,7 @@ pub async fn verify_configmap_hash(
         return Ok(false);
     }
 
-    let actual_hash = String::from_utf8_lossy(&output.stdout);
+    let actual_hash = crate::repo::utf8_lossy_borrow(&output.stdout);
     Ok(actual_hash.trim() == expected_hash)
 }
 

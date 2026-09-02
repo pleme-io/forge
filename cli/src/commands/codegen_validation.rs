@@ -144,7 +144,7 @@ pub async fn validate_codegen_with_autocommit(
         .with_context(|| format!("Failed to run bun install in {}", web_dir.display()))?;
 
     if !install_output.status.success() {
-        let stderr = String::from_utf8_lossy(&install_output.stderr);
+        let stderr = crate::repo::utf8_lossy_borrow(&install_output.stderr);
         return Ok(CodegenValidationResult {
             is_valid: false,
             schema_exported: true,
@@ -313,11 +313,11 @@ async fn auto_commit_codegen_changes(web_dir: &Path) -> Result<bool> {
         .with_context(|| "Failed to check git status for codegen files")?;
 
     if !status_output.status.success() {
-        let stderr = String::from_utf8_lossy(&status_output.stderr);
+        let stderr = crate::repo::utf8_lossy_borrow(&status_output.stderr);
         bail!("Failed to check git status for codegen files:\n{}", stderr);
     }
 
-    let changes = String::from_utf8_lossy(&status_output.stdout);
+    let changes = crate::repo::utf8_lossy_borrow(&status_output.stdout);
     if changes.trim().is_empty() {
         println!("   {} No codegen changes to commit", "✓".green());
         return Ok(false);
@@ -338,7 +338,7 @@ async fn auto_commit_codegen_changes(web_dir: &Path) -> Result<bool> {
         .with_context(|| "Failed to stage codegen files")?;
 
     if !add_output.status.success() {
-        let stderr = String::from_utf8_lossy(&add_output.stderr);
+        let stderr = crate::repo::utf8_lossy_borrow(&add_output.stderr);
         bail!(
             "FATAL: Failed to stage codegen files for commit:\n{}\n\n\
              This is a critical error - the release cannot proceed without \

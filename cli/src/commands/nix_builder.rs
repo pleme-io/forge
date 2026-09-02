@@ -134,7 +134,7 @@ pub async fn test(hostname: String, port: u16, ssh_key: String, package: String)
         .env("NIX_SSHOPTS", format!("-p {}", port));
     let nix_build = crate::retry::run_capture_anyhow_sync(nix_cmd, "nix cross-build")?;
 
-    let output = String::from_utf8_lossy(&nix_build.stdout);
+    let output = crate::repo::utf8_lossy_borrow(&nix_build.stdout);
     info!("✅ Remote build successful!");
     info!("Build output: {}", output.trim());
 
@@ -166,7 +166,7 @@ async fn verify_k8s_service(service: &str, namespace: &str, port: u16) -> Result
         .context("Failed to execute netcat check")?;
 
     if !nc_check.status.success() {
-        let stderr = String::from_utf8_lossy(&nc_check.stderr);
+        let stderr = crate::repo::utf8_lossy_borrow(&nc_check.stderr);
         anyhow::bail!("Service not accessible: {}. Stderr: {}", service, stderr);
     }
 
@@ -189,7 +189,7 @@ async fn verify_external(hostname: &str, port: u16) -> Result<()> {
         warn!("DNS resolution failed or returned no results");
         warn!("Make sure to run ./bin/darwin-rebuild to update DNS");
     } else {
-        let ip = String::from_utf8_lossy(&dig_output.stdout);
+        let ip = crate::repo::utf8_lossy_borrow(&dig_output.stdout);
         info!("✅ DNS resolved to: {}", ip.trim());
     }
 
@@ -201,7 +201,7 @@ async fn verify_external(hostname: &str, port: u16) -> Result<()> {
         .context("Failed to execute netcat check")?;
 
     if !nc_check.status.success() {
-        let stderr = String::from_utf8_lossy(&nc_check.stderr);
+        let stderr = crate::repo::utf8_lossy_borrow(&nc_check.stderr);
         anyhow::bail!(
             "Cannot connect to {}:{}. Stderr: {}",
             hostname,

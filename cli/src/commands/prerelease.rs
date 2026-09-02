@@ -1191,7 +1191,7 @@ async fn run_cargo_check(backend_dir: &Path) -> Result<bool> {
         );
         Ok(true)
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = crate::repo::utf8_lossy_borrow(&output.stderr);
         println!(
             "   {} Compilation check failed ({:.1}s)",
             "❌".red(),
@@ -1232,7 +1232,7 @@ async fn run_cargo_clippy(backend_dir: &Path) -> Result<bool> {
         );
         Ok(true)
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = crate::repo::utf8_lossy_borrow(&output.stderr);
         let warning_count = stderr.matches("warning:").count();
 
         println!(
@@ -1266,7 +1266,7 @@ async fn run_cargo_fmt_check(backend_dir: &Path) -> Result<bool> {
         .with_context(|| "Failed to run cargo fmt")?;
 
     if !fix_output.status.success() {
-        let stderr = String::from_utf8_lossy(&fix_output.stderr);
+        let stderr = crate::repo::utf8_lossy_borrow(&fix_output.stderr);
         println!(
             "   {} cargo fmt failed ({:.1}s)",
             "❌".red(),
@@ -1297,7 +1297,7 @@ async fn run_cargo_fmt_check(backend_dir: &Path) -> Result<bool> {
         Ok(true)
     } else {
         // This shouldn't happen after auto-fix, but handle it
-        let stdout = String::from_utf8_lossy(&check_output.stdout);
+        let stdout = crate::repo::utf8_lossy_borrow(&check_output.stdout);
         let unformatted_files: Vec<&str> = stdout
             .lines()
             .filter(|l| l.starts_with("Diff in"))
@@ -1330,7 +1330,7 @@ async fn run_cargo_test(backend_dir: &Path) -> Result<bool> {
         .with_context(|| "Failed to run cargo test")?;
 
     let duration = start.elapsed();
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = crate::repo::utf8_lossy_borrow(&output.stdout);
 
     // Parse test count from output
     let test_count = stdout
@@ -1352,7 +1352,7 @@ async fn run_cargo_test(backend_dir: &Path) -> Result<bool> {
         );
         Ok(true)
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = crate::repo::utf8_lossy_borrow(&output.stderr);
         println!(
             "   {} Tests failed ({:.1}s)",
             "❌".red(),

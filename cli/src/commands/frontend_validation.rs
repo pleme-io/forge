@@ -295,7 +295,7 @@ async fn run_biome_lint(web_dir: &Path) -> Result<(bool, Vec<String>)> {
     // We'll catch those in the verification step
 
     if !fix_output.status.success() {
-        let stderr = String::from_utf8_lossy(&fix_output.stderr);
+        let stderr = crate::repo::utf8_lossy_borrow(&fix_output.stderr);
         // Check if it's a real error or just unfixable issues
         if stderr.contains("Could not resolve") || stderr.contains("ENOENT") {
             println!(
@@ -499,7 +499,7 @@ pub async fn validate_frontend_with_config(
     .await?;
 
     if !install.status.success() {
-        let stderr = String::from_utf8_lossy(&install.stderr);
+        let stderr = crate::repo::utf8_lossy_borrow(&install.stderr);
         errors.push(format!("bun install failed: {}", stderr));
         return Ok(FrontendValidationResult {
             type_check_passed: false,
