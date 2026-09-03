@@ -91,7 +91,9 @@ pub async fn extract_schema(_service: String, deploy_config: &DeployConfig) -> R
             Ok(())
         }
         None => {
-            println!("ℹ️  GraphQL not enabled for this service - skipping schema extraction");
+            crate::ui::print_step_info(
+                "GraphQL not enabled for this service - skipping schema extraction",
+            );
             Ok(())
         }
     }
@@ -111,7 +113,9 @@ pub async fn update_federation(
 
     // Skip federation update if GraphQL is not enabled for this service
     if !deploy_config.service.graphql.enabled {
-        println!("ℹ️  GraphQL not enabled for this service - skipping federation update");
+        crate::ui::print_step_info(
+            "GraphQL not enabled for this service - skipping federation update",
+        );
         return Ok(());
     }
 
@@ -532,7 +536,7 @@ pub async fn update_federation(
     } else {
         // CRITICAL: If there are no changes, the supergraph is already up to date
         // This is only OK if we're re-running the same deployment
-        println!("ℹ️  No supergraph changes to commit (schema unchanged)");
+        crate::ui::print_step_info("No supergraph changes to commit (schema unchanged)");
     }
 
     // Flux reconcile to apply the changes
@@ -541,10 +545,10 @@ pub async fn update_federation(
     crate::commands::flux::reconcile(namespace.clone()).await?;
 
     crate::ui::print_step_success("Hive Router update triggered via GitOps");
-    println!(
-        "ℹ️  Flux will handle deployment - use 'kubectl get pods -n {}' to monitor",
+    crate::ui::print_step_info(&format!(
+        "Flux will handle deployment - use 'kubectl get pods -n {}' to monitor",
         namespace
-    );
+    ));
 
     // Notify BFF to reload supergraph (if configured)
     // This provides instant propagation without waiting for file watcher polling

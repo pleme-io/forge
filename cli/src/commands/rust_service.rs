@@ -345,7 +345,9 @@ pub async fn build_rust_service(
                 if available {
                     println!("✅ Cross-compilation to ARM64 available");
                 } else {
-                    println!("ℹ️  Skipping ARM64 build (cross-compilation not configured)");
+                    crate::ui::print_step_info(
+                        "Skipping ARM64 build (cross-compilation not configured)",
+                    );
                     println!("   To enable: install qemu-user-static or configure remote builders");
                     println!("   Or set: export BUILD_ARM64=force");
                 }
@@ -1610,7 +1612,7 @@ pub async fn orchestrate_release(
                                         "Step 8: {}",
                                         "Running post-deployment integration tests...".bold()
                                     );
-                                    println!("ℹ️  Testing against stable Hive Router with updated federation schema");
+                                    crate::ui::print_step_info("Testing against stable Hive Router with updated federation schema");
                                     println!();
                                     match crate::commands::integration_tests::execute(
                                         config,
@@ -1715,9 +1717,11 @@ pub async fn orchestrate_standalone_release(
     println!();
     print_success_banner(60, "✅ STANDALONE RELEASE COMPLETE");
     println!();
-    println!("ℹ️  Image pushed to {}:{}", registry, tag_suffix);
-    println!("ℹ️  GitOps reconciliation should pick up the new tag automatically.");
-    println!("ℹ️  Run `flux reconcile helmrelease <name>` to force immediate reconciliation.");
+    crate::ui::print_step_info(&format!("Image pushed to {}:{}", registry, tag_suffix));
+    crate::ui::print_step_info("GitOps reconciliation should pick up the new tag automatically.");
+    crate::ui::print_step_info(
+        "Run `flux reconcile helmrelease <name>` to force immediate reconciliation.",
+    );
 
     Ok(())
 }
@@ -1953,10 +1957,10 @@ pub async fn deploy_rust_service_with_tag(
 
     if watch {
         println!();
-        println!(
-            "ℹ️  Flux will handle deployment - use 'kubectl get pods -n {}' to monitor",
+        crate::ui::print_step_info(&format!(
+            "Flux will handle deployment - use 'kubectl get pods -n {}' to monitor",
             namespace
-        );
+        ));
     }
 
     println!();

@@ -86,7 +86,10 @@ pub async fn extract_and_validate_schema(
 
     // Skip if GraphQL is not enabled
     if !graphql_config.enabled {
-        println!("ℹ️  GraphQL not enabled for service '{}'", service_name);
+        crate::ui::print_step_info(&format!(
+            "GraphQL not enabled for service '{}'",
+            service_name
+        ));
         return Ok(None);
     }
 
