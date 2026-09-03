@@ -343,6 +343,124 @@ pub fn write_release_stage_banner<W: std::io::Write>(
     Ok(())
 }
 
+/// Rule-character glyph every pre-lift ASCII-bar banner site fed to
+/// [`String::repeat`] verbatim (`println!("=====...=====")`, a
+/// 42-glyph ASCII `=` rule with NO color and NO emphasis — distinct
+/// from every peer banner primitive in this module, all of which
+/// carry either a Unicode rule glyph (`━`, `─`, `═`) or a color
+/// wrapper). Pinned as one named constant so a future swap of the
+/// helm-chart-action banner's rule character (a promotion to `━` to
+/// unify with [`write_success_banner`]'s heavy Unicode rule, a
+/// demotion to `-` for an even leaner readout) happens at ONE typed
+/// boundary rather than six literal-argument sites (two rules per
+/// stanza across three consumer sites).
+const ASCII_BAR_BANNER_RULE_CHAR: &str = "=";
+
+/// Rule width every pre-lift ASCII-bar banner site spelled inline as
+/// the literal `"=========================================="`
+/// (measured: 42 glyphs across every one of the three consumer
+/// sites in `commands/helm.rs`). Same one-boundary pinning as
+/// [`ASCII_BAR_BANNER_RULE_CHAR`]; the width is distinct from the
+/// per-caller `width` parameter [`write_success_banner`] carries
+/// because the ASCII-bar grammar is a fixed-shape helm-chart-action
+/// banner (not a variable-width headline) — every consumer chose 42,
+/// so 42 lives in the primitive rather than repeating at every call
+/// site.
+const ASCII_BAR_BANNER_WIDTH: usize = 42;
+
+/// Title indent every pre-lift ASCII-bar banner site prepended to
+/// the middle line via the literal `"  <title>"` two-space gap. Same
+/// one-boundary pinning as [`ASCII_BAR_BANNER_RULE_CHAR`]; a future
+/// swap (a tab, four spaces, no indent under a leaner grammar)
+/// happens at ONE typed boundary rather than three literal-argument
+/// sites.
+const ASCII_BAR_BANNER_TITLE_INDENT: &str = "  ";
+
+/// Prints the four-line ASCII-bar banner every pre-lift consumer in
+/// `commands/helm.rs` spelled inline as `println!();
+/// println!("=========================================="); println!(
+/// "  <title>"); println!("==========================================");`.
+/// Marks the OPENING of a per-chart action (releasing a library
+/// chart, linting a chart, releasing a chart) inside the helm
+/// pipeline at 3 sibling call sites (`commands/helm.rs:1753` —
+/// `Releasing {lib_chart_name} {version} (library)`; `:2606` —
+/// `Linting {chart_name}`; `:2698` — `Releasing {chart_name}`) — the
+/// pre-lift 4-line stanza — so a future palette shift against
+/// rule-char, rule-width, indent glyph, or title emphasis happens at
+/// ONE site rather than three.
+///
+/// Delegates to [`write_ascii_bar_banner`] against
+/// `std::io::stdout()` (and prepends the pre-lift leading blank
+/// line); the writer split exists so the fail-before-pass test can
+/// pin the three-line body, palette, and title-indent contract by
+/// inspecting emitted bytes rather than shelling out and grepping
+/// stdout.
+///
+/// # Distinct from every peer banner primitive
+///
+/// [`print_header`] carries a `╔═…═╗` boxed grammar in `bright_blue`
+/// for top-level command titles.
+///
+/// [`print_success_banner`] carries a Unicode `━`-rule in
+/// `bright_green` + single-message headline for terminal-success
+/// milestones.
+///
+/// [`print_release_stage_banner`] carries a Unicode-repeated `=`-rule
+/// in `bright_green` + composite `<STAGE> + <product> + (<suffix>)`
+/// headline for product-release-lifecycle milestones.
+///
+/// [`print_section_header`] carries a Unicode `═`-rule in `bold` +
+/// bold-title grammar for section openings within a pipeline.
+///
+/// [`print_ascii_title_underline`] carries a single `=`-rule + blank
+/// LINE (not a banner) below a hand-authored `printh_header`-style
+/// title in the command intro.
+///
+/// This primitive carries a **distinct** ASCII-only `=`-rule +
+/// plain-text title grammar the 3 pre-lift consumer sites in the
+/// helm pipeline use to mark a per-chart action boundary. All six
+/// primitives coexist rather than one subsuming the other because
+/// the visual grammars an operator has been trained to read differ
+/// — the helm-pipeline's per-chart boundary is deliberately the
+/// only ASCII-only, uncolored banner in the crate, so a
+/// `--no-color` grep or a CI log post-processor that strips ANSI
+/// still shows a clear per-chart section boundary.
+///
+/// # Compounding
+///
+/// Pre-lift each of the 3 consumer sites restated the entire
+/// four-line stanza — a swap of the rule character in one site
+/// alone (an `=` demoted to `-` in the library-releasing site while
+/// the per-chart-releasing site stayed on `=`) silently splits the
+/// helm-pipeline visual grammar, a width drift from 42 to a fresh
+/// literal glyph count lines two adjacent chart sections against
+/// visibly different rules, a promotion of the title to `.bold()`
+/// on one site alone loses the ASCII-only grep-friendliness. Post-
+/// lift the primitive collapses all three restatements onto ONE
+/// typed function; a future palette adjustment hits one body, not
+/// three.
+pub fn print_ascii_bar_banner(title: &str) {
+    println!();
+    let _ = write_ascii_bar_banner(&mut std::io::stdout().lock(), title);
+}
+
+/// Writer-taking sibling to [`print_ascii_bar_banner`]. Emits the
+/// three ASCII-bar banner body lines (`=`-rule of
+/// [`ASCII_BAR_BANNER_WIDTH`] glyphs, `[`ASCII_BAR_BANNER_TITLE_INDENT`]
+/// + <title>` plain-text title, matching `=`-rule) via [`writeln!`]
+/// against the supplied writer. [`print_ascii_bar_banner`] is the
+/// stdout adapter (and adds the framing leading blank line the pre-
+/// lift stanza carried); this variant exists so tests can pin the
+/// body line count, palette, and title-indent contract without
+/// capturing stdout.
+pub fn write_ascii_bar_banner<W: std::io::Write>(w: &mut W, title: &str) -> std::io::Result<()> {
+    let bar = ASCII_BAR_BANNER_RULE_CHAR.repeat(ASCII_BAR_BANNER_WIDTH);
+    writeln!(w, "{}", bar)?;
+    writeln!(w, "{}{}", ASCII_BAR_BANNER_TITLE_INDENT, title)?;
+    writeln!(w, "{}", bar)?;
+    Ok(())
+}
+
 /// Rule glyph every pre-lift section-header site fed to the literal
 /// `"════════════════════════════════════════════════"`. Pinned as
 /// one named constant so a future swap of the section-header rule
@@ -1679,6 +1797,165 @@ mod tests {
              (`\\x1b[2m`); got {:?}",
             lines[1]
         );
+    }
+
+    /// Fail-before-pass envelope for [`super::write_ascii_bar_banner`].
+    /// Pins the three-line body order every pre-lift consumer in
+    /// `commands/helm.rs` spelled verbatim (`"=".repeat(42)` rule via
+    /// the literal `"=========================================="`,
+    /// `"  <title>"` plain-text two-space-indented title,
+    /// `"=".repeat(42)` rule) AND the distinguishing ASCII-only
+    /// contract: NO ANSI escape sequences on any line. A silent
+    /// contract drift a future rewrite might introduce — dropping one
+    /// bar to two `writeln!`s, swapping the title and a bar, hoisting
+    /// the rule character off `=` in one branch alone, promoting the
+    /// title to `.bold()` so it loses ASCII-only grep-friendliness,
+    /// promoting the rule to `.bright_green()` so a `--no-color`
+    /// consumer loses the per-chart-action boundary marker, dropping
+    /// the two-space indent so the title crashes against the first
+    /// column, drifting the width off 42 so two adjacent chart
+    /// sections line against visibly different rules — flips this
+    /// assertion rather than compiling and silently diverging the
+    /// three consumer sites' visual grammar.
+    #[test]
+    fn write_ascii_bar_banner_emits_three_bar_title_bar_ascii_only_lines_in_order() {
+        // Force ANSI emission (colored auto-drops sequences on a
+        // non-tty stdout) and serialize against peer banner tests
+        // via [`AnsiOverrideForTest`]. This primitive is
+        // deliberately ASCII-only (no `.color()` calls in its
+        // writer) so the guard's `set_override(true)` cannot inject
+        // colors on its own — but the guard's Drop restoring
+        // colored's auto-detection AND the [`ANSI_OVERRIDE_LOCK`]
+        // serialization matter because a regression that promotes
+        // the writer to `.color()` would light up under the
+        // override, and that failure must not race with a peer
+        // banner test that expects colors ON.
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_ascii_bar_banner(&mut buf, "Releasing example-chart 1.2.3 (library)")
+            .expect("write_ascii_bar_banner against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_ascii_bar_banner must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly three body lines — the pre-lift stanza's rule +
+        // title + rule triple is three `println!`s, not two, and not
+        // four. A refactor that drops or adds a bar fails here. The
+        // framing leading blank line the pre-lift stanza carried
+        // lives on `print_ascii_bar_banner`, not on the writer
+        // sibling.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            3,
+            "write_ascii_bar_banner must emit exactly three body lines \
+             (rule, title, rule) — the pre-lift stanza's rule+title+rule \
+             triple is three `println!`s; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The `=` rule glyph appears in the outer two lines but never
+        // in the middle line; the title text appears in the middle
+        // line but never in the outer lines. A swap of the middle
+        // line and a bar (a fusion that reorders the `writeln!`s)
+        // fails here.
+        assert!(
+            lines[0].contains('='),
+            "line 0 must be an `=` rule; got {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[2].contains('='),
+            "line 2 must be an `=` rule; got {:?}",
+            lines[2]
+        );
+        assert!(
+            !lines[1].contains('='),
+            "line 1 must NOT contain the rule glyph — it is the \
+             indented title line; got {:?}",
+            lines[1]
+        );
+        assert!(
+            lines[1].contains("Releasing example-chart 1.2.3 (library)"),
+            "line 1 must carry the title verbatim; got {:?}",
+            lines[1]
+        );
+
+        // The two-space indent every pre-lift consumer prepended to
+        // the title via the literal `"  <title>"` must reach the
+        // rendered line intact and, unlike `write_section_header`,
+        // must land at the very START of the line (this primitive
+        // adds no ANSI prologue that could push it right). A
+        // fusion that hoists the indent off the constant and drops
+        // it fails here — every consumer's pre-lift stanza carried
+        // the two-space visual gutter between the rule's left edge
+        // and the first title glyph.
+        assert_eq!(
+            lines[1], "  Releasing example-chart 1.2.3 (library)",
+            "line 1 must be exactly `\"  <title>\"` — the pre-lift \
+             stanza spelled `println!(\"  {{}}\", <title>)`; got {:?}",
+            lines[1]
+        );
+
+        // The rule width every pre-lift consumer spelled inline is
+        // 42 characters (the literal
+        // `"=========================================="`, measured
+        // with `echo -n | wc -c`). A fusion that hoists the rule off
+        // the constant and lands on a different width lines two
+        // adjacent chart-action banners against visibly different
+        // rules — pin the count here.
+        let rule_glyph_count = lines[0].chars().filter(|c| *c == '=').count();
+        assert_eq!(
+            rule_glyph_count, 42,
+            "line 0 must contain exactly `ASCII_BAR_BANNER_WIDTH` (42) \
+             `=` glyphs; got {}",
+            rule_glyph_count
+        );
+        // Both outer bars must have the EXACT same shape — no other
+        // content, no trailing whitespace, no prefix — so the two
+        // rules read as an equal-width top and bottom to operator
+        // eye. A fusion that colors one bar and leaves the other
+        // uncolored (an obvious regression of the ASCII-only
+        // contract asserted below) would also drift the two bars'
+        // rendered widths and fails here.
+        assert_eq!(
+            lines[0], lines[2],
+            "line 0 and line 2 must be byte-identical rules — the \
+             pre-lift stanza wrote the same literal twice; got {:?} \
+             vs {:?}",
+            lines[0], lines[2]
+        );
+
+        // The DISTINGUISHING property of this primitive vs. every
+        // peer banner in this module: NO ANSI escape sequences on
+        // any line. This is the reason the primitive coexists with
+        // `write_release_stage_banner` (whose rule wears
+        // `bright_green`), `write_success_banner` (`bright_green`
+        // + `green().bold()`), and `write_section_header` (`bold`
+        // on all three lines) rather than folding into any of them
+        // — the helm pipeline's per-chart-action boundary is
+        // deliberately the only ASCII-only banner in the crate, so
+        // a `--no-color` grep or a CI log post-processor that
+        // strips ANSI still surfaces the boundary. A future silent
+        // promotion of the primitive to `.color()` (e.g. a helpful
+        // "let's brighten this" edit) would break that contract
+        // silently across all three consumers; the ESC (`\x1b`)
+        // absence assertion catches it before compile.
+        for (i, line) in lines.iter().enumerate() {
+            assert!(
+                !line.contains('\x1b'),
+                "line {} must NOT contain any ANSI escape sequence \
+                 — the pre-lift stanza spelled `println!(\"...\")` \
+                 with no `.color()` wrapper, and this primitive's \
+                 distinguishing contract vs. every peer banner is \
+                 that a `--no-color` consumer still sees a clean \
+                 per-chart boundary; got {:?}",
+                i,
+                line
+            );
+        }
     }
 
     /// Fail-before-pass envelope for [`super::write_section_header`].
@@ -3925,6 +4202,82 @@ mod tests {
                  through."
             );
         }
+    }
+
+    /// Caller-migration shield for [`super::print_ascii_bar_banner`].
+    /// Asserts (1) no
+    /// `println!("==========================================")`
+    /// re-inline of the pre-lift 42-glyph ASCII `=` rule remains
+    /// anywhere in `commands/helm.rs`, and (2) the module forwards
+    /// through `crate::ui::print_ascii_bar_banner(...)` at exactly
+    /// three sites — one per pre-lift consumer. A re-inline (e.g. a
+    /// "just print the equals bar inline, it's obvious" cleanup)
+    /// would silently reopen the 3-site duplication class this lift
+    /// closed and drift the helm-pipeline's per-chart-action visual
+    /// grammar; this shield flips before compile.
+    ///
+    /// The shield does NOT bound its scan through
+    /// [`crate::test_support::module_body_before_first_cfg_test`]
+    /// because `commands/helm.rs`'s test blocks are interleaved
+    /// with production functions (the first `#[cfg(test)]` marker
+    /// sits well above the three call sites this shield covers).
+    /// The negative needle is the exact 42-`=` full println!
+    /// spelling, which the module's tests never construct, so a
+    /// source-wide `.matches(...).count()` suffices to catch a
+    /// re-inline without false-positives.
+    ///
+    /// The needle uses the exact 42-glyph rule the pre-lift stanza
+    /// carried — a fusion that lands on a different width (e.g. 40
+    /// or 50) would still flip the paired
+    /// `write_ascii_bar_banner_emits_three_bar_title_bar_ascii_only_lines_in_order`
+    /// envelope because the writer pins the width via
+    /// [`super::ASCII_BAR_BANNER_WIDTH`]. The envelope pins the
+    /// width; this shield pins the caller set.
+    #[test]
+    fn print_ascii_bar_banner_callers_delegate_through_primitive() {
+        const HELM_SRC: &str = include_str!("commands/helm.rs");
+        // Negative assertion — no pre-lift inline rule remains
+        // anywhere in the module. The literal is a full println!
+        // spelling, so tests (which never construct this raw
+        // 42-`=` string) cannot false-positive it.
+        let inline_hits = HELM_SRC
+            .matches("println!(\"==========================================\")")
+            .count();
+        assert_eq!(
+            inline_hits, 0,
+            "commands/helm.rs must NOT spell the pre-lift inline \
+             `println!(\"==========================================\
+             \");` 42-glyph ASCII `=` rule — that four-line stanza \
+             (leading blank + rule + `  <title>` + rule) was lifted \
+             onto `crate::ui::print_ascii_bar_banner`. A re-inline \
+             would silently reopen the 3-site duplication class \
+             this shield exists to close. Found {inline_hits} \
+             inline occurrences."
+        );
+        // Positive assertion — the module forwards through the
+        // primitive at exactly three sites, one per pre-lift
+        // consumer (`Releasing {lib_chart_name} {version} (library)`,
+        // `Linting {chart_name}`, `Releasing {chart_name}`). A
+        // fusion that folds one of the three consumer sites back
+        // to inline `println!`s (silently splitting the visual
+        // grammar across two chart actions) fails here — the
+        // negative half above would still pass, but this positive
+        // count would fall to two.
+        let forward_hits = HELM_SRC
+            .matches("crate::ui::print_ascii_bar_banner(")
+            .count();
+        assert_eq!(
+            forward_hits, 3,
+            "commands/helm.rs must forward through \
+             `crate::ui::print_ascii_bar_banner(<title>)` at \
+             exactly THREE sites — one per pre-lift consumer \
+             (the library-releasing site, the per-chart linting \
+             site, the per-chart releasing site). A fusion that \
+             folds one back to inline `println!`s or that adds a \
+             fourth caller without extending this shield's \
+             expected count fails here. Found {forward_hits} \
+             forwarding hits."
+        );
     }
 
     /// Fail-before-pass envelope for [`AnsiOverrideForTest`]. Pins
