@@ -362,9 +362,8 @@ pub async fn execute(
         let step_duration = step_start.elapsed();
         println!();
         info!(
-            "{} (took {:.1}s)",
-            "✅ Unit tests passed".green().bold(),
-            step_duration.as_secs_f64()
+            "{}",
+            crate::repo::msg_took_secs_1("✅ Unit tests passed".green().bold(), step_duration,)
         );
         println!();
     } else {
@@ -395,9 +394,11 @@ pub async fn execute(
 
         let step_duration = step_start.elapsed();
         info!(
-            "{} (took {:.1}s)",
-            "✅ Docker image built successfully".green().bold(),
-            step_duration.as_secs_f64()
+            "{}",
+            crate::repo::msg_took_secs_1(
+                "✅ Docker image built successfully".green().bold(),
+                step_duration,
+            )
         );
         println!();
     } else {
@@ -719,9 +720,11 @@ pub async fn execute(
                 let step_duration = step_start.elapsed();
                 println!();
                 info!(
-                    "{} (took {:.1}s)",
-                    "✅ Integration tests passed".green().bold(),
-                    step_duration.as_secs_f64()
+                    "{}",
+                    crate::repo::msg_took_secs_1(
+                        "✅ Integration tests passed".green().bold(),
+                        step_duration,
+                    )
                 );
                 println!();
             }
@@ -761,9 +764,11 @@ pub async fn execute(
 
         let step_duration = step_start.elapsed();
         info!(
-            "{} (took {:.1}s)",
-            "✅ Image pushed successfully".green().bold(),
-            step_duration.as_secs_f64()
+            "{}",
+            crate::repo::msg_took_secs_1(
+                "✅ Image pushed successfully".green().bold(),
+                step_duration,
+            )
         );
         println!();
     } else {
@@ -801,9 +806,8 @@ pub async fn execute(
 
         let step_duration = step_start.elapsed();
         info!(
-            "{} (took {:.1}s)",
-            "✅ Deployment complete".green().bold(),
-            step_duration.as_secs_f64()
+            "{}",
+            crate::repo::msg_took_secs_1("✅ Deployment complete".green().bold(), step_duration,)
         );
         println!();
     } else {

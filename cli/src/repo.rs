@@ -3003,6 +3003,118 @@ pub fn msg_completed_in_secs_1(label: &str, d: std::time::Duration) -> String {
     format!("{} completed in {:.1}s", label, d.as_secs_f64())
 }
 
+/// Suffix a step-outcome `msg` with the fleet-standard "took" elapsed-time
+/// tag ` (took NNN.Ns)` — one decimal-place seconds, parenthesized, the
+/// literal `took ` verb between the opening paren and the numeric render,
+/// single space between message and tag — and return the composed owned
+/// [`String`].
+///
+/// Peer of [`msg_with_secs_1`] and [`msg_completed_in_secs_1`] on a
+/// DISTINCT dialect: the bare `<message> ({:.1}s)` surround that
+/// [`msg_with_secs_1`]'s seventeen sites share is one convention;
+/// [`msg_completed_in_secs_1`]'s `<label> completed in {:.1}s` tail
+/// (five `commands/e2e.rs` sites) is a second; and this primitive's
+/// `<message> (took NNN.Ns)` surround is the third convention the fleet
+/// spells at the `commands/comprehensive_release.rs` phase-completion
+/// surface. The three spellings are byte-distinct and do NOT collapse
+/// into one primitive: a `msg_with_secs_1("<x>", d)` call would render
+/// `<x> (0.0s)` — dropping the `took ` verb that these five sites'
+/// operator-facing prose depends on. The non-goals lists on the two
+/// existing peers explicitly reserve dialect drift as a failure mode;
+/// this primitive is the `(took NNN.Ns)` dialect's owner.
+///
+/// The pre-lift spelling is
+/// ```text
+/// info!(
+///     "{} (took {:.1}s)",
+///     <colored-message>,
+///     <duration>.as_secs_f64()
+/// );
+/// ```
+/// carried by five sibling consumer sites in
+/// `commands/comprehensive_release.rs`, all inside the same
+/// per-step completion shape (a colored `<literal>.green().bold()`
+/// message + an `Instant::now()` .. `.elapsed()` measurement + a
+/// closing blank line):
+///
+/// - `execute` Step 1/5 unit-tests pass — `"✅ Unit tests passed"`
+/// - `execute` Step 2/5 build pass — `"✅ Docker image built successfully"`
+/// - `execute` Step 3/5 integration-tests pass — `"✅ Integration tests passed"`
+/// - `execute` Step 4/5 push pass — `"✅ Image pushed successfully"`
+/// - `execute` Step 5/5 deploy pass — `"✅ Deployment complete"`
+///
+/// Five sites is past THEORY §VI.1's three-times-is-a-law threshold, and
+/// the shape is byte-identical modulo the message — the same one-body
+/// discipline that seeded [`msg_with_secs_1`] and
+/// [`msg_completed_in_secs_1`] applies here.
+///
+/// # The three grammar invariants this primitive pins at one place
+///
+/// 1. **Precision.** One decimal digit (`{:.1}`) — a body respell to
+///    `{:.0}` would quantize a signal-carrying sub-second transient to
+///    `0s`; a `{:.2}` respell would drift the render into the
+///    `commands/integration_tests.rs` `{:.2}s` step-summary dialect.
+///    Pinned by
+///    [`tests::msg_took_secs_1_pins_one_decimal_place_precision`].
+/// 2. **Surround grammar.** The tag renders as ` (took NNN.Ns)` — single
+///    leading space, opening paren, the literal `took`+one-space, the
+///    numeric render, the unit suffix `s`, closing paren, no trailing
+///    content. A future respell to ` (NNN.Ns)` (dropping the `took `
+///    verb and drifting into the [`msg_with_secs_1`] dialect) or
+///    ` took NNN.Ns` (dropping the parens) would silently break every
+///    downstream operator log-scraper matching the pre-lift shape.
+///    Pinned by [`tests::msg_took_secs_1_pins_took_paren_grammar`].
+/// 3. **Unit suffix.** The trailing character is `s` (seconds), not
+///    `ms` / `μs` / `sec` / no-unit — the caller passes a [`Duration`]
+///    and the primitive projects it via [`Duration::as_secs_f64`], so
+///    the render always agrees with the projection. A respell to
+///    `{:.1}ms` with the same projection would over-report by 1000×.
+///    Pinned by
+///    [`tests::msg_took_secs_1_seconds_unit_agrees_with_projection`].
+///
+/// # Typed input — why `msg: impl Display`, not `msg: &str`
+///
+/// Unlike [`msg_with_secs_1`] and [`msg_completed_in_secs_1`], whose
+/// seventeen and five pre-lift sites respectively passed plain
+/// `&'static str` literals, every one of this primitive's five pre-lift
+/// sites passes a runtime-computed [`colored::ColoredString`] (the
+/// `<literal>.green().bold()` construction that renders ANSI green+bold
+/// codes around the message). A `msg: &str` signature would ask each
+/// caller to pre-`.to_string()` the ColoredString into an owned
+/// intermediate, adding a per-call allocation and syntactic weight the
+/// pre-lift sites did not carry. A `msg: impl Display` signature accepts
+/// both `&str` and `ColoredString` (and any other [`Display`] type) with
+/// no coercion at the call site, and the primitive body's `format!("{}",
+/// msg, ...)` interior threads the value's `Display::fmt` output verbatim
+/// — the ANSI codes the ColoredString emits reach the composed [`String`]
+/// unaltered.
+///
+/// The `d: Duration` half is the same load-bearing choice
+/// [`msg_with_secs_1`] documents at length: pinning [`Duration`] forces
+/// the caller to name the type at construction (`start.elapsed()`) and
+/// lets the primitive body own the [`Duration::as_secs_f64`] projection
+/// at ONE place.
+///
+/// # Non-goals
+///
+/// This primitive is deliberately NOT the home for:
+/// - **Msg-baked-in shapes** such as
+///   `"   ✅ Application is ready (took {:.1}s)"` in
+///   `commands/integration_tests.rs` (lines 536 / 555), or
+///   `"Shinka migration ready (took {:.1}s)"` in
+///   `commands/migrations.rs:1134`. These sites bake the message into
+///   the format-string literal rather than passing it as a `{}` arg,
+///   so a `msg_took_secs_1(<msg>, d)` call would ask the caller to
+///   split the literal at its whitespace boundary — dropping the
+///   compile-time argument-count check the pre-lift shape carries.
+/// - **`(took {:.2}s)` two-decimal-precision variants** — none exist
+///   in the fleet today, and if they arrive they belong on a
+///   `msg_took_secs_2` sibling for the same precision-drift reasons
+///   [`msg_with_secs_1`] carves out `{:.2}s` sites from its own body.
+pub fn msg_took_secs_1<M: std::fmt::Display>(msg: M, d: std::time::Duration) -> String {
+    format!("{} (took {:.1}s)", msg, d.as_secs_f64())
+}
+
 /// Run a command in a specific directory, restoring the original directory afterward
 ///
 /// # Arguments
@@ -9353,6 +9465,220 @@ mod tests {
              every occurrence in this file — a survivor is either a \
              missed lift target or a silent re-inline. Route the value \
              through `crate::repo::msg_completed_in_secs_1(...)` \
+             instead."
+        );
+    }
+
+    /// [`msg_took_secs_1`] must project one — and only one — decimal
+    /// digit of sub-second precision. The five pre-lift consumer sites
+    /// in `commands/comprehensive_release.rs` each spelled `{:.1}s`
+    /// inline; the primitive body OWNS this choice at one place so a
+    /// future body respell to `{:.0}s` (which quantizes a signal-
+    /// carrying 250ms transient to `0s`) or `{:.2}s` (which drifts the
+    /// render into `commands/integration_tests.rs`'s DISTINCT step-
+    /// summary dialect) fails loud here rather than propagating
+    /// silently to every consumer.
+    #[test]
+    fn msg_took_secs_1_pins_one_decimal_place_precision() {
+        let rendered = msg_took_secs_1("op", std::time::Duration::from_millis(1234));
+        assert_eq!(
+            rendered, "op (took 1.2s)",
+            "msg_took_secs_1() must render 1234ms as `1.2s` (one \
+             decimal digit) — a `{{:.0}}` respell would render `1s` \
+             and silence the sub-second signal five consumer sites \
+             depend on; a `{{:.2}}` respell would render `1.23s` and \
+             drift the render into the `integration_tests.rs` \
+             `{{:.2}}s` step-summary dialect. Got: {rendered:?}"
+        );
+
+        let subsecond = msg_took_secs_1("op", std::time::Duration::from_millis(260));
+        assert_eq!(
+            subsecond, "op (took 0.3s)",
+            "msg_took_secs_1() must render 260ms as `0.3s` — a \
+             `{{:.0}}` respell would render `0s` and silence a \
+             signal-carrying sub-second transient. Got: {subsecond:?}"
+        );
+    }
+
+    /// [`msg_took_secs_1`] must render the elapsed-time tag with the
+    /// exact ` (took NNN.Ns)` grammar — single leading space, opening
+    /// paren, the literal `took`+one-space, the numeric render, the
+    /// unit suffix `s`, closing paren. A hypothetical body respell to
+    /// ` (NNN.Ns)` (dropping the `took ` verb and drifting into the
+    /// [`msg_with_secs_1`] parenthesized dialect) or ` took NNN.Ns`
+    /// (dropping the parens) would silently break every downstream
+    /// operator log-scraper matching the pre-lift shape.
+    #[test]
+    fn msg_took_secs_1_pins_took_paren_grammar() {
+        let rendered = msg_took_secs_1(
+            "✅ Unit tests passed",
+            std::time::Duration::from_millis(3400),
+        );
+        assert_eq!(
+            rendered, "✅ Unit tests passed (took 3.4s)",
+            "msg_took_secs_1() must render with the ` (took NNN.Ns)` \
+             grammar — single leading space, opening paren, literal \
+             `took`+one-space, numeric render, `s`, closing paren. A \
+             respell to ` (NNN.Ns)` would drift the render into the \
+             DISTINCT `msg_with_secs_1` parenthesized dialect (see \
+             that peer's own paren-grammar test); a respell to \
+             ` took NNN.Ns` (dropping the parens) would break the \
+             pre-lift scraper shape every downstream consumer expects. \
+             Got: {rendered:?}"
+        );
+    }
+
+    /// [`msg_took_secs_1`]'s unit suffix (`s`) MUST agree with the
+    /// numeric projection [`Duration::as_secs_f64`]. A hypothetical
+    /// future body that respelled the render as `{:.1}ms` while
+    /// keeping the `as_secs_f64()` projection would over-report by
+    /// 1000× (a 5-second operation would render as `5.0ms`). This
+    /// test pins both halves against a known duration so the two
+    /// halves cannot drift independently.
+    #[test]
+    fn msg_took_secs_1_seconds_unit_agrees_with_projection() {
+        let d = std::time::Duration::from_secs(5);
+        let rendered = msg_took_secs_1("build", d);
+        assert_eq!(
+            rendered, "build (took 5.0s)",
+            "msg_took_secs_1() for a 5-second Duration must render \
+             the numeric `5.0` and the unit suffix `s` — a body \
+             respell to `{{:.1}}ms` with the same `as_secs_f64()` \
+             projection would over-report by 1000× (rendering `5.0ms` \
+             for a 5-second operation). Got: {rendered:?}"
+        );
+
+        // Independent check: the numeric half agrees with the
+        // projection function this primitive body calls internally.
+        let projected = d.as_secs_f64();
+        assert_eq!(
+            projected, 5.0,
+            "Duration::as_secs_f64() on a 5-second Duration must \
+             project 5.0 — if this ever changes, msg_took_secs_1's \
+             render invariant above changes with it. Got: {projected}"
+        );
+    }
+
+    /// [`msg_took_secs_1`] threads the caller's `msg` verbatim — no
+    /// truncation, no re-casing, no re-wrapping — and threads any
+    /// [`std::fmt::Display`] type (not just `&str`), including
+    /// [`colored::ColoredString`], which every one of the five
+    /// pre-lift consumer sites passes as its message argument
+    /// (`<literal>.green().bold()`). A future body respell that
+    /// folded the message through `msg.to_string().to_lowercase()`
+    /// would silently alter operator-facing prose; a respell that
+    /// narrowed the generic to `msg: &str` would ask every ColoredString
+    /// call site to pre-`.to_string()` its message and add a per-call
+    /// allocation the pre-lift shape did not carry. This test pins
+    /// both halves — verbatim pass-through on a mixed-case message,
+    /// and the ColoredString acceptance the generic makes possible.
+    #[test]
+    fn msg_took_secs_1_accepts_any_display_and_threads_verbatim() {
+        use colored::Colorize;
+
+        let rendered = msg_took_secs_1("Unit Tests Passed", std::time::Duration::from_millis(100));
+        assert!(
+            rendered.starts_with("Unit Tests Passed (took "),
+            "msg_took_secs_1() must thread the caller's message \
+             verbatim (including mixed case) — a \
+             `msg.to_string().to_lowercase()` respell would render \
+             `unit tests passed (took ...)` and silently alter \
+             operator-facing prose. Got: {rendered:?}"
+        );
+
+        // A ColoredString value must compile at the call site without
+        // an intermediate `.to_string()` — the `M: Display` generic
+        // is load-bearing on the five pre-lift ColoredString sites.
+        let colored: colored::ColoredString = "✅ Deployment complete".green().bold();
+        let via_colored = msg_took_secs_1(colored, std::time::Duration::from_millis(1500));
+        assert!(
+            via_colored.contains("Deployment complete") && via_colored.ends_with(" (took 1.5s)"),
+            "msg_took_secs_1() must accept a ColoredString via the \
+             `M: Display` generic and thread the ColoredString's \
+             Display output verbatim into the composed String — the \
+             ANSI code carrier the five pre-lift sites depend on. A \
+             respell that narrowed the parameter to `&str` would fail \
+             to compile against a bare ColoredString value. \
+             Got: {via_colored:?}"
+        );
+    }
+
+    /// [`msg_took_secs_1`] must OWN the projection from [`Duration`] to
+    /// seconds on the closed `commands/comprehensive_release.rs` sites
+    /// — no site re-inlines the pre-lift
+    /// `format!("{} (took {:.1}s)", <msg>, d.as_secs_f64())` grammar.
+    /// The shield walks the closed literal spellings and refuses any
+    /// occurrence, so a silent respell that reintroduces the inline
+    /// `(took {:.1}s)` grammar at these sites fails at this test rather
+    /// than propagating.
+    ///
+    /// `commands/comprehensive_release.rs` is the ONE file this lift
+    /// closes, and every occurrence of the `(took {:.1}s)` tag in that
+    /// file is a closed site (no out-of-scope survivor), so a bare
+    /// `.contains("(took {:.1}s)")` guard on the file is also safe as a
+    /// redundant belt-and-braces check.
+    ///
+    /// The msg-baked-in `"   ✅ Application is ready (took {:.1}s)"`
+    /// spellings in `commands/integration_tests.rs` and the analogous
+    /// `"Shinka migration ready (took {:.1}s)"` in
+    /// `commands/migrations.rs` are DELIBERATELY out of the closed
+    /// fleet map (they bake the message into the format-string literal
+    /// rather than passing it as a `{}` arg — see the primitive's
+    /// non-goals list), so this shield does not govern them.
+    #[test]
+    fn msg_took_secs_1_closed_sites_do_not_reinline_the_primitive_shape() {
+        let path = "src/commands/comprehensive_release.rs";
+        let content = std::fs::read_to_string(path).unwrap_or_else(|e| {
+            panic!(
+                "shield must read `{path}` to walk it for re-inlines \
+                 — the closed-site fleet map was frozen at the lift \
+                 boundary. Read error: {e}"
+            )
+        });
+
+        // The five pre-lift consumer messages — each was wrapped in
+        // `"{} (took {:.1}s)"` with a `.green().bold()` ColoredString
+        // holding the message. Post-lift these all pass through
+        // `crate::repo::msg_took_secs_1(...)`; a silent re-inline of
+        // the pre-lift `"{} (took {:.1}s)"` format-string tag at any
+        // of these sites is refused by the belt-and-braces check below.
+        let closed_msg_literals: &[&str] = &[
+            "\"✅ Unit tests passed\"",
+            "\"✅ Docker image built successfully\"",
+            "\"✅ Integration tests passed\"",
+            "\"✅ Image pushed successfully\"",
+            "\"✅ Deployment complete\"",
+        ];
+        // Sanity: each closed message still appears in the file
+        // (as the first arg to `msg_took_secs_1(...)`). A missing
+        // needle would signal an incomplete or lost lift.
+        for needle in closed_msg_literals {
+            assert!(
+                content.contains(needle),
+                "shield anchor missing: `{path}` no longer contains \
+                 the closed-site message literal `{needle}` — either \
+                 the lift dropped the site entirely or the message \
+                 was silently reworded, and this shield can no longer \
+                 govern the closed fleet map. Restore the site or \
+                 update the map."
+            );
+        }
+
+        // Belt-and-braces: no bare `(took {:.1}s)` tag survives
+        // anywhere in the file (every occurrence was a lift target).
+        // A survivor is either a missed lift target or a silent
+        // re-inline — both are refused here.
+        assert!(
+            !content.contains("(took {:.1}s)"),
+            "shield refuses re-inline: `{path}` still contains a bare \
+             `(took {{:.1}}s)` format-string tag. The lift closed \
+             every occurrence in this file — a survivor is either a \
+             missed lift target or a silent re-inline. A hand-swap to \
+             ` (NNN.Ns)` (dropping the `took` verb, drifting into the \
+             `msg_with_secs_1` dialect) or a precision-drift respell \
+             ({{:.0}}, {{:.2}}) at any of these sites reopens the \
+             very drift paths the primitive body pins at ONE place. \
+             Route the value through `crate::repo::msg_took_secs_1(...)` \
              instead."
         );
     }
