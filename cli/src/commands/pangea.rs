@@ -630,7 +630,7 @@ pub fn spec_gen(
         }
 
         // Read resource.rb to extract method name and basic info
-        let resource_content = std::fs::read_to_string(&resource_rb)?;
+        let resource_content = crate::repo::read_text_sync(&resource_rb)?;
 
         // Extract the def method_name line
         let method_re = regex::Regex::new(r"def\s+([\w]+)\s*\(").unwrap();

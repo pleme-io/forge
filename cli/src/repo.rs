@@ -5028,6 +5028,89 @@ mod tests {
         );
     }
 
+    /// Post-lift the three straggler command-module sites that still
+    /// spelled the pre-lift
+    /// `std::fs::read_to_string(<path>).context(<literal>)?` composition
+    /// route through [`read_text_sync`] rather than the inline shape.
+    /// Fail-before-pass shield: pins the three function bodies
+    /// (`commands/pangea.rs::spec_gen`,
+    /// `commands/rust_service.rs::update_service_federation_tests_tag`,
+    /// `commands/gem.rs::push`) forward their fs-read arm to the
+    /// primitive and no longer re-spell the pre-lift needle.
+    ///
+    /// Without this shield a helpful "just call `std::fs::read_to_string`
+    /// directly, it's shorter" cleanup at any one of the three call
+    /// sites reopens the class the earlier seven-site sweep and this
+    /// three-site tail together closed, silently diverging the operator-
+    /// visible envelope (the primitive's canonical `"Failed to read
+    /// {path}"` with the resolved `path.display()`) from three of the
+    /// crate's fs-read sites and forcing every future refinement to
+    /// hunt down each straggler by hand rather than reaching them by
+    /// construction through the primitive body.
+    ///
+    /// The three pre-lift stanzas the shield forbids re-inlining:
+    ///
+    /// - `commands/pangea.rs::spec_gen` (resource.rb read):
+    ///   `let resource_content = std::fs::read_to_string(&resource_rb)?;`
+    /// - `commands/rust_service.rs::update_service_federation_tests_tag`
+    ///   (deploy.yaml read):
+    ///   `let content = std::fs::read_to_string(&deploy_yaml_path)
+    ///        .context("Failed to read deploy.yaml")?;`
+    /// - `commands/gem.rs::push` (rubygems api-key read):
+    ///   `std::fs::read_to_string(&key_file)
+    ///        .context("Failed to read ~/.config/rubygems/api-key")?
+    ///        .trim().to_string()`
+    ///
+    /// The `commands/rust_service.rs::release_rust_service` lock-file
+    /// probe at former line 1183 spells a distinct
+    /// `if let Ok(contents) = std::fs::read_to_string(&lock_file)`
+    /// silent-probe shape (a bool test whose read failure is a
+    /// legitimate "no prior lock" signal, not an operator-visible
+    /// bounce) so the shield's per-function slice discipline lets it
+    /// survive this pass by construction — a whole-file `source.contains`
+    /// would over-match and force a spurious lift.
+    #[test]
+    fn read_text_sync_consumers_do_not_reinline_the_primitive_shape() {
+        for (name, source, marker, needle) in [
+            (
+                "commands/pangea.rs::spec_gen",
+                include_str!("commands/pangea.rs"),
+                "pub fn spec_gen(",
+                "std::fs::read_to_string(&resource_rb)",
+            ),
+            (
+                "commands/rust_service.rs::update_service_federation_tests_tag",
+                include_str!("commands/rust_service.rs"),
+                "async fn update_service_federation_tests_tag(",
+                "std::fs::read_to_string(&deploy_yaml_path)",
+            ),
+            (
+                "commands/gem.rs::push",
+                include_str!("commands/gem.rs"),
+                "pub fn push(",
+                "std::fs::read_to_string(&key_file)",
+            ),
+        ] {
+            let body =
+                crate::test_support::fn_body_slice_between_markers(source, name, marker, "\n}");
+            assert!(
+                body.contains("crate::repo::read_text_sync("),
+                "{name} body must forward its fs-read arm to \
+                 `crate::repo::read_text_sync(<path>)` — the primitive \
+                 body every sync text-mode read in the crate now \
+                 delegates through. Post-lift body: {body}"
+            );
+            assert!(
+                !body.contains(needle),
+                "{name} body must NOT re-spell the inline \
+                 `{needle}` shape — that duplication was lifted onto \
+                 `read_text_sync`. A re-inline would silently diverge \
+                 the read arm from the canonical `\"Failed to read \
+                 {{path}}\"` operator envelope. Post-lift body: {body}"
+            );
+        }
+    }
+
     /// [`write_text_sync`] writes the caller's bytes verbatim, so a
     /// consumer that hands in a spliced [`crate::version`] output, a
     /// `format!("{}\n", json)` render, or a scaffold `String` gets the

@@ -544,10 +544,7 @@ pub fn push(
                 .join(".config/rubygems/api-key");
 
             if key_file.exists() {
-                std::fs::read_to_string(&key_file)
-                    .context("Failed to read ~/.config/rubygems/api-key")?
-                    .trim()
-                    .to_string()
+                crate::repo::read_text_sync(&key_file)?.trim().to_string()
             } else {
                 bail!(
                     "No API key provided. Set GEM_HOST_API_KEY env var, \
