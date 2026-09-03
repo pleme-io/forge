@@ -557,17 +557,66 @@ pub fn write_section_header<W: std::io::Write>(w: &mut W, title: &str) -> std::i
     Ok(())
 }
 
+/// Top-border glyph line of the [`print_header`] / [`write_header`] boxed
+/// grammar — `╔` + `BOXED_HEADER_INNER_WIDTH` `═` glyphs + `╗`, 62 display
+/// columns wide. Named so a future swap of the box corner-and-rule glyphs
+/// (a downgrade to ASCII `+---+`, an upgrade to a heavier double-line
+/// weight) happens at ONE typed boundary rather than in three inline
+/// literals per consumer.
+const BOXED_HEADER_TOP: &str = "╔════════════════════════════════════════════════════════════╗";
+
+/// Bottom-border glyph line, sibling to [`BOXED_HEADER_TOP`] — `╚` +
+/// `BOXED_HEADER_INNER_WIDTH` `═` glyphs + `╝`.
+const BOXED_HEADER_BOTTOM: &str = "╚════════════════════════════════════════════════════════════╝";
+
+/// Padded width of the title field inside the middle body line — the
+/// `{:<N}` min-width the [`format!`] expression fills the title to so
+/// the right-side `║` lines up with the top border's right-side `╗`.
+///
+/// # The off-by-one bug this constant closes
+///
+/// Two pre-lift consumers — `commands/pangea.rs::print_header` and
+/// `commands/bootstrap.rs::print_header` — spelled the middle body
+/// line as `format!("║  {:58} ║", title)`, i.e. a bare `{:58}` min-width
+/// (which defaults to left-align for strings) followed by a **literal
+/// space** before the closing `║`. That put the right-side `║` at
+/// column 63, one glyph past the top border's `╗` at column 62 — a
+/// visibly-tilted right edge on every boxed header those two modules
+/// emitted. Threading both consumers through this constant closes the
+/// off-by-one at ONE named boundary.
+const BOXED_HEADER_TITLE_WIDTH: usize = 58;
+
+/// Writer-taking sibling to [`print_header`]. Emits the three body
+/// lines of the `╔═…═╗` boxed-header grammar — top border, indented
+/// title middle line, bottom border — in `bright_blue` via
+/// [`writeln!`] against the supplied writer. The leading and trailing
+/// framing blank lines the pre-lift stanza carried live on
+/// [`print_header`], not on this writer sibling — so a test that pins
+/// the box's body-line count and border-vs-body width parity can
+/// inspect emitted bytes rather than shelling out and grepping stdout.
+///
+/// # Distinct from other `write_*` box grammars
+///
+/// [`write_section_header`] carries a `═`-rule + bold-title readout
+/// used to open a section inside a pipeline. [`write_success_banner`]
+/// carries a `━`-rule + green-bold-message terminal-success readout.
+/// This writer carries the `╔═╗` boxed top-of-command title in
+/// `bright_blue`.
+pub fn write_header<W: std::io::Write>(w: &mut W, title: &str) -> std::io::Result<()> {
+    writeln!(w, "{}", BOXED_HEADER_TOP.bright_blue())?;
+    writeln!(
+        w,
+        "{}",
+        format!("║  {:<width$}║", title, width = BOXED_HEADER_TITLE_WIDTH).bright_blue()
+    )?;
+    writeln!(w, "{}", BOXED_HEADER_BOTTOM.bright_blue())?;
+    Ok(())
+}
+
 pub fn print_header(title: &str) {
     println!();
-    println!(
-        "{}",
-        "╔════════════════════════════════════════════════════════════╗".bright_blue()
-    );
-    println!("{}", format!("║  {:<58}║", title).bright_blue());
-    println!(
-        "{}",
-        "╚════════════════════════════════════════════════════════════╝".bright_blue()
-    );
+    let mut out = std::io::stdout();
+    let _ = write_header(&mut out, title);
     println!();
 }
 
@@ -2480,6 +2529,184 @@ mod tests {
                 line
             );
         }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_header`]. Pins the
+    /// three-line boxed body (top border, indented title, bottom border)
+    /// AND the border-vs-body width parity that the two pre-lift local
+    /// helpers in `commands/pangea.rs::print_header` and
+    /// `commands/bootstrap.rs::print_header` failed: both spelled the
+    /// middle line as `format!("║  {:58} ║", title)` — an extra literal
+    /// space before the closing `║` — which put the right-side `║` one
+    /// glyph past the top border's `╗`, tilting the rendered box. The
+    /// primitive threads both consumers onto a single format spec so
+    /// the border and body align at one named boundary; this test
+    /// pins that parity by measuring the rendered widths after
+    /// stripping ANSI SGR sequences.
+    #[test]
+    fn write_header_emits_three_bar_title_bar_lines_with_border_body_width_parity() {
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_header(&mut buf, "Push Pangea: pangea-compiler")
+            .expect("write_header against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_header must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly three body lines — the box's top+middle+bottom triple
+        // is three `writeln!`s, not two, and not four. The framing
+        // blank lines the pre-lift stanza carried live on
+        // [`super::print_header`], not on the writer sibling — so a
+        // future test author cannot conflate the two contracts by
+        // reading this line count.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            3,
+            "write_header must emit exactly three body lines \
+             (top border, title, bottom border); got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // Strip ANSI SGR sequences (`\x1b[<params>m`) from each line so
+        // the char-count reflects rendered display columns (glyphs),
+        // not the bright_blue color-code bytes `colored` prefixes and
+        // suffixes. A hand-rolled minimal stripper stays inside the
+        // test module (no new dep) and stops at `m` per the SGR spec;
+        // it iterates over `chars`, not raw bytes, so the multi-byte
+        // UTF-8 encodings of `╔ ═ ╗ ║ ╚ ╝` survive the pass intact
+        // (each box-drawing glyph is a single char but 3 UTF-8 bytes).
+        fn strip_ansi(s: &str) -> String {
+            let mut out = String::with_capacity(s.len());
+            let mut iter = s.chars().peekable();
+            while let Some(c) = iter.next() {
+                if c == '\x1b' && iter.peek() == Some(&'[') {
+                    iter.next(); // consume '['
+                    for inner in iter.by_ref() {
+                        if inner == 'm' {
+                            break;
+                        }
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        }
+
+        let visible: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+
+        // The top and bottom border widths (in glyph count, which for
+        // this ASCII/box-drawing subset equals display columns) must
+        // equal the middle body-line width. Pre-lift the pangea and
+        // bootstrap local helpers rendered a 63-column middle line
+        // against a 62-column border — this assertion catches that
+        // exact off-by-one drift on either side.
+        let top_width = visible[0].chars().count();
+        let mid_width = visible[1].chars().count();
+        let bot_width = visible[2].chars().count();
+        assert_eq!(
+            top_width, mid_width,
+            "write_header border and middle body widths must match \
+             (else the right-side `║` tilts off the top-right `╗`); \
+             top={} chars, middle={} chars\ntop:    {:?}\nmiddle: {:?}",
+            top_width, mid_width, visible[0], visible[1]
+        );
+        assert_eq!(
+            top_width, bot_width,
+            "write_header top and bottom border widths must match; \
+             top={} chars, bottom={} chars",
+            top_width, bot_width
+        );
+
+        // The border glyphs appear on lines 0 and 2 but never on line
+        // 1; the title text appears on line 1 but never on the border
+        // lines. A rewrite that reorders the `writeln!`s fails here.
+        assert!(
+            visible[0].starts_with('╔') && visible[0].ends_with('╗'),
+            "line 0 must be the top border framed by `╔`…`╗`; got {:?}",
+            visible[0]
+        );
+        assert!(
+            visible[2].starts_with('╚') && visible[2].ends_with('╝'),
+            "line 2 must be the bottom border framed by `╚`…`╝`; got {:?}",
+            visible[2]
+        );
+        assert!(
+            visible[1].starts_with('║') && visible[1].ends_with('║'),
+            "line 1 must be the body framed by `║`…`║`; got {:?}",
+            visible[1]
+        );
+        assert!(
+            visible[1].contains("Push Pangea: pangea-compiler"),
+            "line 1 must carry the title verbatim; got {:?}",
+            visible[1]
+        );
+
+        // Each of the three lines must carry the `bright_blue` ANSI
+        // sequence (`\x1b[94m`) — the pre-lift stanzas spelled
+        // `.bright_blue()` on each line explicitly, and the primitive
+        // must preserve that per-line color contract so a `.dimmed()`
+        // downgrade of one line does not slip in silently.
+        for (i, line) in lines.iter().enumerate() {
+            assert!(
+                line.contains("\x1b[94m"),
+                "line {} must carry the bright_blue ANSI sequence \
+                 (`\\x1b[94m`) — the pre-lift stanza spelled \
+                 `.bright_blue()` on each of the three lines; got {:?}",
+                i,
+                line
+            );
+        }
+    }
+
+    /// Shield test — grep-based assertion that no command module still
+    /// carries the boxed-header stanza inline as three sibling
+    /// `println!("{}", "╔══…══╗"…)` + body + `╚══…══╝` lines. Pre-lift
+    /// two consumers (`commands/pangea.rs`, `commands/bootstrap.rs`)
+    /// each carried a byte-identical local `fn print_header(title)`
+    /// helper; both now delegate to [`super::print_header`]. This
+    /// shield fires if a future rewrite reintroduces the inline
+    /// stanza in ANY command module rather than calling the
+    /// primitive, keeping the boxed-header color and width contract
+    /// at ONE typed boundary.
+    #[test]
+    fn print_header_callers_delegate_through_primitive() {
+        let commands_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands");
+
+        // The pre-lift needle: the exact top-border literal in
+        // `bright_blue()`. If a command module carries this literal
+        // it means the boxed-header stanza was reintroduced inline
+        // rather than routed through [`super::print_header`].
+        let needle =
+            "\"╔════════════════════════════════════════════════════════════╗\".bright_blue()";
+
+        let mut offenders: Vec<String> = Vec::new();
+        let entries = std::fs::read_dir(&commands_dir)
+            .expect("commands/ dir must exist under CARGO_MANIFEST_DIR/src");
+        for entry in entries {
+            let entry = entry.expect("read_dir entry");
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("rs") {
+                continue;
+            }
+            let content = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+            if content.contains(needle) {
+                offenders.push(path.display().to_string());
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "boxed-header stanza reintroduced inline in command \
+             module(s); call `crate::ui::print_header(title)` instead:\n  {}",
+            offenders.join("\n  ")
+        );
     }
 
     #[test]

@@ -7,20 +7,7 @@ use tracing::{info, warn};
 
 /// Verifies web build has no hardcoded API URLs and prepares runtime env.js
 pub async fn execute(dist_dir: PathBuf, template_path: PathBuf) -> Result<()> {
-    println!();
-    println!(
-        "{}",
-        "╔════════════════════════════════════════════════════════════╗".bright_blue()
-    );
-    println!(
-        "{}",
-        "║  Web Build Verification (NO SHELL SCRIPTS)                ║".bright_blue()
-    );
-    println!(
-        "{}",
-        "╚════════════════════════════════════════════════════════════╝".bright_blue()
-    );
-    println!();
+    crate::ui::print_header("Web Build Verification (NO SHELL SCRIPTS)");
 
     verify_no_hardcoded_urls(&dist_dir)?;
     verify_bundle_consistency(&dist_dir)?;

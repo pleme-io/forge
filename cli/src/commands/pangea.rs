@@ -142,24 +142,6 @@ pub struct PushResult {
 }
 
 // ============================================================================
-// UI Helpers
-// ============================================================================
-
-fn print_header(title: &str) {
-    println!();
-    println!(
-        "{}",
-        "╔════════════════════════════════════════════════════════════╗".bright_blue()
-    );
-    println!("{}", format!("║  {:58} ║", title).bright_blue());
-    println!(
-        "{}",
-        "╚════════════════════════════════════════════════════════════╝".bright_blue()
-    );
-    println!();
-}
-
-// ============================================================================
 // Public API
 // ============================================================================
 
@@ -194,7 +176,7 @@ pub async fn push_single(
 ) -> Result<()> {
     let component_def = find_component(&component)?;
 
-    print_header(&format!("Push Pangea: {}", component_def.name));
+    crate::ui::print_header(&format!("Push Pangea: {}", component_def.name));
 
     // Get git SHA for tagging
     let tags = generate_auto_tags(DEFAULT_ARCH).await?;
@@ -240,7 +222,7 @@ pub async fn push_single(
 
 /// Push all Pangea components to GHCR
 pub async fn push_all(token: Option<String>, retries: u32, parallel: bool) -> Result<()> {
-    print_header("Push All Pangea Components");
+    crate::ui::print_header("Push All Pangea Components");
 
     // Get git SHA for tagging (once, for consistency)
     let tags = generate_auto_tags(DEFAULT_ARCH).await?;
@@ -446,7 +428,7 @@ async fn build_and_push_component(
 
 /// List available Pangea components
 pub fn list_components() {
-    print_header("Available Pangea Components");
+    crate::ui::print_header("Available Pangea Components");
 
     for component in PANGEA_COMPONENTS {
         println!("   {} {}", "-".bright_cyan(), component.name.bright_white());
@@ -480,7 +462,7 @@ pub fn list_components() {
 pub async fn regenerate(pangea_dir: Option<String>) -> Result<()> {
     use crate::nix::{run_cargo_update, run_crate2nix};
 
-    print_header("Regenerate Pangea Cargo.nix");
+    crate::ui::print_header("Regenerate Pangea Cargo.nix");
 
     let repo_root = find_repo_root()?;
     let pangea_dir = pangea_dir
@@ -520,7 +502,7 @@ pub async fn regenerate(pangea_dir: Option<String>) -> Result<()> {
 
 /// Regenerate gemset.nix for Pangea Ruby compiler
 pub async fn regenerate_compiler() -> Result<()> {
-    print_header("Regenerate Pangea Compiler gemset.nix");
+    crate::ui::print_header("Regenerate Pangea Compiler gemset.nix");
 
     let pangea_dir = find_external_repo("pangea")?;
     info!("Pangea directory: {}", pangea_dir.display());

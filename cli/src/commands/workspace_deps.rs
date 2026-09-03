@@ -51,20 +51,7 @@ struct WorkspacePackage {
 
 /// Check all @pleme/* workspace packages and build any that are missing or stale
 pub async fn execute(repo_root: String) -> Result<()> {
-    println!();
-    println!(
-        "{}",
-        "╔════════════════════════════════════════════════════════════╗".bright_blue()
-    );
-    println!(
-        "{}",
-        "║  Workspace Dependencies Check                              ║".bright_blue()
-    );
-    println!(
-        "{}",
-        "╚════════════════════════════════════════════════════════════╝".bright_blue()
-    );
-    println!();
+    crate::ui::print_header("Workspace Dependencies Check");
 
     let libs_dir = PathBuf::from(&repo_root).join("pkgs/libraries/typescript");
 
