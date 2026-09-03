@@ -292,8 +292,6 @@ pub async fn execute(
         let product_dir =
             crate::config::resolve_product_dir(std::path::Path::new(&repo_root), &product);
 
-        let json_path = crate::config::resolve_artifact_json_path(&product_dir, &entry.name);
-
         // Swap: previous_tag becomes tag, current_tag becomes previous_tag
         let artifact = crate::config::ArtifactInfo {
             tag: entry.previous_tag.clone(),
@@ -302,9 +300,7 @@ pub async fn execute(
             attestation: None, // Attestation is not preserved during rollback
         };
 
-        let json =
-            serde_json::to_string_pretty(&artifact).context("Failed to serialize artifact info")?;
-        crate::repo::write_text_sync(&json_path, format!("{}\n", json))?;
+        let json_path = crate::config::write_artifact_info(&product_dir, &entry.name, &artifact)?;
 
         modified_files.push(crate::repo::path_to_string_lossy(&json_path));
         println!(

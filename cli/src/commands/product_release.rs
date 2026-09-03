@@ -215,8 +215,6 @@ async fn write_artifact_tags(
             crate::config::resolve_product_dir(std::path::Path::new(repo_root), product);
         let service_dir = product_dir.join(&svc.path);
 
-        let json_path = crate::config::resolve_artifact_json_path(&product_dir, &svc.name);
-
         // Load current artifact to get previous_tag
         let current = crate::config::load_artifact_info(&product_dir, &svc.name, &service_dir);
         let previous_tag = current
@@ -232,9 +230,7 @@ async fn write_artifact_tags(
             attestation: attestation_info.cloned(),
         };
 
-        let json =
-            serde_json::to_string_pretty(&artifact).context("Failed to serialize artifact info")?;
-        crate::repo::write_text_sync(&json_path, format!("{}\n", json))?;
+        let json_path = crate::config::write_artifact_info(&product_dir, &svc.name, &artifact)?;
 
         modified_files.push(crate::repo::path_to_string_lossy(&json_path));
         println!(

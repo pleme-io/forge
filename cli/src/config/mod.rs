@@ -246,6 +246,65 @@ pub fn load_artifact_info(
     None
 }
 
+/// Persist [`ArtifactInfo`] to the service's `{service_name}.artifact.json`
+/// under `{product_dir}/deploy/`, and return the resolved path.
+///
+/// The write-arm peer of [`load_artifact_info`] on the JSON surface: both
+/// take the same `(product_dir, service_name)` tuple to resolve the file
+/// via [`resolve_artifact_json_path`], and both target the same JSON
+/// document — `load_artifact_info` deserializes via
+/// `serde_json::from_str::<ArtifactInfo>`, this fn serializes via
+/// `serde_json::to_string_pretty(&artifact)` and appends a trailing
+/// newline so the file is line-terminated per POSIX. The
+/// `.context("Failed to serialize artifact info")` envelope on the serde
+/// step matches the two pre-lift sites verbatim.
+///
+/// # Envelope
+///
+/// Serialize failure surfaces `"Failed to serialize artifact info"`
+/// (the pre-lift literal); the underlying write failure routes through
+/// [`crate::repo::write_text_sync`]'s `"Failed to write {path}"` classifier,
+/// so an operator can tell serde failures (a struct field carrying an
+/// unrenderable value) from disk-side failures (EROFS, ENOSPC, EACCES)
+/// without cross-referencing the caller.
+///
+/// The returned [`PathBuf`] is the resolved artifact-json path — every
+/// pre-lift caller followed the write with a
+/// `modified_files.push(crate::repo::path_to_string_lossy(&json_path))`
+/// or a
+/// [`commit_artifact_tags`](crate::commands::product_release) hand-off
+/// that consumed the same path, so returning it removes the last
+/// caller-side restatement of `resolve_artifact_json_path(product_dir,
+/// service_name)` from the sibling class.
+///
+/// Pre-lift two sibling consumer sites spelled the primitive's shape
+/// verbatim — `commands/product_release.rs::write_artifact_tags`
+/// (b72c484:218–239) and `commands/rollback.rs::execute_rollback`
+/// (b72c484:295–309) — each four-line stanza:
+///
+/// ```ignore
+/// let json_path = crate::config::resolve_artifact_json_path(&product_dir, &<name>);
+/// let json =
+///     serde_json::to_string_pretty(&artifact).context("Failed to serialize artifact info")?;
+/// crate::repo::write_text_sync(&json_path, format!("{}\n", json))?;
+/// ```
+///
+/// Post-lift both collapse onto
+/// `crate::config::write_artifact_info(&product_dir, &<name>, &artifact)?`,
+/// with the returned [`PathBuf`] threaded into the caller's
+/// `modified_files` accumulator.
+pub fn write_artifact_info(
+    product_dir: &Path,
+    service_name: &str,
+    artifact: &ArtifactInfo,
+) -> Result<PathBuf> {
+    let json_path = resolve_artifact_json_path(product_dir, service_name);
+    let json =
+        serde_json::to_string_pretty(artifact).context("Failed to serialize artifact info")?;
+    crate::repo::write_text_sync(&json_path, format!("{}\n", json))?;
+    Ok(json_path)
+}
+
 /// Complete deployment configuration (merged from all levels)
 #[derive(Debug, Clone)]
 pub struct DeployConfig {
@@ -1325,5 +1384,117 @@ mod tests {
              refactor cannot silently drift the message every operator \
              has been coached to grep for. Found no code-line hit."
         );
+    }
+
+    /// [`write_artifact_info`] round-trips through [`load_artifact_info`]
+    /// at the JSON surface and pins the on-disk envelope: pretty-printed
+    /// JSON, trailing newline, path resolved via
+    /// [`resolve_artifact_json_path`] (`{product_dir}/deploy/
+    /// {service_name}.artifact.json`). Two pre-lift consumer sites
+    /// (`commands/product_release.rs::write_artifact_tags`,
+    /// `commands/rollback.rs::execute_rollback`) each spelled the
+    /// primitive's shape verbatim; this shield seals the round-trip so a
+    /// future drift onto a non-pretty encoder, a dropped trailing
+    /// newline, or a differently-resolved json path is refused by the
+    /// oracle rather than shipped past `cargo test`.
+    #[test]
+    fn test_write_artifact_info_round_trips_through_load_and_seals_disk_envelope() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let product_dir = tmp.path();
+        std::fs::create_dir_all(product_dir.join("deploy")).expect("deploy dir");
+        let service_name = "cart";
+
+        let artifact = ArtifactInfo {
+            tag: "abc123".to_string(),
+            built_at: "2026-09-03T00:00:00Z".to_string(),
+            previous_tag: "def456".to_string(),
+            attestation: None,
+        };
+
+        // Positive side: the write returns the same path the resolver
+        // computes — no caller-side restatement of the path resolver
+        // survives the lift.
+        let returned_path =
+            write_artifact_info(product_dir, service_name, &artifact).expect("write_artifact_info");
+        let expected_path = resolve_artifact_json_path(product_dir, service_name);
+        assert_eq!(
+            returned_path, expected_path,
+            "write_artifact_info must return the same path \
+             `resolve_artifact_json_path` computes; the two must be \
+             indistinguishable at the caller so `modified_files` \
+             pushes stay grep-visible under one resolver.",
+        );
+
+        // On-disk envelope: pretty-printed JSON with a trailing newline.
+        // The `format!("{}\n", json)` at the primitive is what makes the
+        // file POSIX-line-terminated; a drift onto plain
+        // `serde_json::to_writer_pretty` or `to_string_pretty` alone
+        // would drop the terminator silently. Anchor on the terminator
+        // byte so a rewriter that reflows the JSON body still trips this.
+        let on_disk = std::fs::read_to_string(&returned_path).expect("read back");
+        let expected_body = serde_json::to_string_pretty(&artifact).expect("serialize");
+        assert_eq!(
+            on_disk,
+            format!("{}\n", expected_body),
+            "write_artifact_info's on-disk shape must be \
+             `serde_json::to_string_pretty(&artifact) + \"\\n\"`; a \
+             missing terminator, a compact encoding, or a differently \
+             ordered field emission would drift the released \
+             artifact.json under CI diff review.",
+        );
+        assert!(
+            on_disk.ends_with('\n'),
+            "write_artifact_info's on-disk shape MUST end with a \
+             trailing newline so a POSIX line-oriented consumer \
+             (grep, diff, git blame) reads the last field correctly. \
+             Found no trailing `\\n` on {} bytes.",
+            on_disk.len(),
+        );
+
+        // Load-arm round-trip: the primitive's write must be a legal
+        // input to the peer read arm. A drift onto a non-JSON-compatible
+        // encoder is caught by the loader's own `serde_json::from_str`
+        // discipline, not deferred to a runtime deploy.
+        let round_tripped = load_artifact_info(product_dir, service_name, product_dir)
+            .expect("load_artifact_info round-trips its write-arm peer");
+        assert_eq!(round_tripped.tag, artifact.tag);
+        assert_eq!(round_tripped.built_at, artifact.built_at);
+        assert_eq!(round_tripped.previous_tag, artifact.previous_tag);
+    }
+
+    /// Pre-lift stanza scan: neither of the two consumer bodies
+    /// (`commands/product_release.rs`, `commands/rollback.rs`) may
+    /// re-open the pre-lift `serde_json::to_string_pretty(&artifact)
+    /// .context("Failed to serialize artifact info")` inline shape. The
+    /// primitive [`write_artifact_info`] owns this composition at ONE
+    /// body across the crate; a hand-rolled inline copy pushes the count
+    /// above zero and fails this shield before the drift can ship.
+    #[test]
+    fn test_write_artifact_info_pre_lift_stanza_is_gone_at_both_consumers() {
+        let product_release_body = crate::test_support::module_body_before_tests(
+            include_str!("../commands/product_release.rs"),
+            "commands/product_release.rs",
+        );
+        let rollback_body = crate::test_support::module_body_before_tests(
+            include_str!("../commands/rollback.rs"),
+            "commands/rollback.rs",
+        );
+        let needle = "\"Failed to serialize artifact info\"";
+        for (module_path, body) in [
+            ("commands/product_release.rs", product_release_body),
+            ("commands/rollback.rs", rollback_body),
+        ] {
+            let hits = crate::test_support::code_line_hits(body, needle);
+            assert!(
+                hits.is_empty(),
+                "{module_path} must NOT spell `{needle}` inline in the \
+                 module body — the `serde_json::to_string_pretty(&artifact) \
+                 .context(...)` composition lives at ONE body \
+                 (`config::write_artifact_info`) across the crate. Found \
+                 {} code-line hit(s): {hits:#?}. A hand-rolled inline copy \
+                 re-opens the drift class the primitive was landed to close.",
+                hits.len(),
+            );
+        }
     }
 }
