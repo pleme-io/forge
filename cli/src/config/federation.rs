@@ -178,8 +178,8 @@ impl ServiceFederationConfig {
 
         // Validate minimum schema size is reasonable
         if self.min_schema_size < 50 {
-            eprintln!(
-                "⚠️  Warning: min_schema_size ({}) is very small for service '{}'. Typical schemas are 1000+ bytes.",
+            crate::warn_config!(
+                "min_schema_size ({}) is very small for service '{}'. Typical schemas are 1000+ bytes.",
                 self.min_schema_size,
                 service_name
             );
