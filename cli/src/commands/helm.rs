@@ -1435,9 +1435,7 @@ pub fn bump(
     let charts_path = crate::repo::require_existing_labeled(charts_dir, "Charts directory")?;
 
     let lib_chart_yaml = charts_path.join(lib_chart_name).join("Chart.yaml");
-    if !lib_chart_yaml.exists() {
-        bail!("Library chart not found: {}", lib_chart_yaml.display());
-    }
+    crate::repo::require_existing_path(&lib_chart_yaml, "Library chart")?;
 
     // Parse `--level` at ONE top-of-fn site (before the manifest read via
     // [`version::read_chart_version`] and before the writer + dependency

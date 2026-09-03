@@ -23,12 +23,7 @@ pub async fn execute(
     let migrations_dir = base_dir.join("services/rust/migration/src");
     let manifest_path = migrations_dir.join("migration-manifest.yaml");
 
-    if !migrations_dir.exists() {
-        anyhow::bail!(
-            "SeaORM migrations directory not found: {}",
-            migrations_dir.display()
-        );
-    }
+    crate::repo::require_existing_path(&migrations_dir, "SeaORM migrations directory")?;
 
     // Determine today's date prefix
     let today = Utc::now().format("%Y%m%d").to_string();

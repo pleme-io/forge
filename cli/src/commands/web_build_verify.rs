@@ -26,9 +26,7 @@ fn verify_no_hardcoded_urls(dist_dir: &Path) -> Result<()> {
     info!("🔍 Verifying NO hardcoded API URLs in bundles...");
 
     let assets_dir = dist_dir.join("assets");
-    if !assets_dir.exists() {
-        bail!("Assets directory not found: {}", assets_dir.display());
-    }
+    crate::repo::require_existing_path(&assets_dir, "Assets directory")?;
 
     // Search all .js files in dist/assets/ for hardcoded API URLs
     let js_files: Vec<PathBuf> = fs::read_dir(&assets_dir)
@@ -87,9 +85,7 @@ fn verify_bundle_consistency(dist_dir: &Path) -> Result<()> {
     info!("🔍 Verifying bundle consistency...");
 
     let index_html_path = dist_dir.join("index.html");
-    if !index_html_path.exists() {
-        bail!("index.html not found: {}", index_html_path.display());
-    }
+    crate::repo::require_existing_path(&index_html_path, "index.html")?;
 
     // Read index.html
     let mut index_html_content = String::new();

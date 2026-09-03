@@ -501,9 +501,7 @@ pub fn build(working_dir: &str, name: Option<String>) -> Result<String> {
 
     let gemspec = format!("{}.gemspec", gem_name);
     let gemspec_path = dir.join(&gemspec);
-    if !gemspec_path.exists() {
-        bail!("Gemspec not found: {}", gemspec_path.display());
-    }
+    crate::repo::require_existing_path(&gemspec_path, "Gemspec")?;
 
     info!("Building gem: {}", gem_name);
 
