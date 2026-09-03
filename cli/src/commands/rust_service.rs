@@ -474,7 +474,10 @@ pub async fn build_rust_service(
         match crate::nix_hooks::NixHooks::discover().await {
             Ok(hooks) => {
                 if let Some(hook_path) = hooks.attic_push_hook_path() {
-                    println!("   ✅ Using attic post-build-hook: {}", hook_path.dimmed());
+                    crate::ui::print_step_pass(&format!(
+                        "Using attic post-build-hook: {}",
+                        hook_path.dimmed()
+                    ));
                     println!("   (Uploads EVERY built derivation automatically)");
                     crate::nix_hooks::wire_post_build_hook_env(
                         &mut cmd,
@@ -762,7 +765,7 @@ async fn verify_image_in_registry(registry: &str, full_tag_suffix: &str) -> Resu
         bail!("❌ Registry returned empty digest for {}", full_tag);
     }
 
-    println!("   ✅ Image verified: {} ({})", full_tag, &digest[..19]);
+    crate::ui::print_step_pass(&format!("Image verified: {} ({})", full_tag, &digest[..19]));
     Ok(digest)
 }
 
@@ -787,7 +790,7 @@ async fn verify_image_digest_matches(
         );
     }
 
-    println!("   ✅ Digest verified: matches pushed image");
+    crate::ui::print_step_pass("Digest verified: matches pushed image");
     Ok(())
 }
 
@@ -818,10 +821,10 @@ async fn push_docker_images(images: &[ArchImage], registry: &str, tag_suffix: &s
 
     println!();
     for tag in &result.arch_tags {
-        println!("   ✅ {}", tag);
+        crate::ui::print_step_pass(tag);
     }
     for tag in &result.manifest_tags {
-        println!("   ✅ {} (manifest index)", tag);
+        crate::ui::print_step_pass(&format!("{} (manifest index)", tag));
     }
 
     Ok(())
@@ -1880,7 +1883,7 @@ pub async fn deploy_rust_service_with_tag(
     // This prevents deploying non-existent images (ImagePullBackOff).
     match verify_image_in_registry(&registry, &tag_suffix).await {
         Ok(_digest) => {
-            println!("   ✅ Image verified in registry");
+            crate::ui::print_step_pass("Image verified in registry");
         }
         Err(e) => {
             let err_str = format!("{}", e);
@@ -2413,7 +2416,7 @@ pub async fn release_rust_service(
     .await
     {
         if was_reset {
-            println!("   ✅ Shinka migration reset, will retry with new image");
+            crate::ui::print_step_pass("Shinka migration reset, will retry with new image");
         }
     }
 
@@ -2581,7 +2584,7 @@ pub async fn release_rust_service(
             .current_dir(&federation_tests_dir);
         crate::retry::run_inherited_status_sync(cmd, "nix run .#release (federation-tests)")?;
 
-        println!("   ✅ Federation-tests image released");
+        crate::ui::print_step_pass("Federation-tests image released");
 
         // Detect which architecture was built by checking result files
         // The build creates result-amd64 or result-arm64 symlinks
@@ -2630,7 +2633,7 @@ pub async fn release_rust_service(
             "", // old_tag not needed
             &full_image_tag,
         )?;
-        println!("   ✅ Service deploy.yaml updated and committed");
+        crate::ui::print_step_pass("Service deploy.yaml updated and committed");
 
         // Return the full tag so it can be passed to Step 8.5
         // This includes the architecture prefix (e.g., "amd64-347a310176")
@@ -2774,10 +2777,10 @@ async fn update_service_federation_tests_tag(
     // Write back
     std::fs::write(&deploy_yaml_path, updated_content).context("Failed to write deploy.yaml")?;
 
-    println!(
-        "   ✅ Updated federation_tests.image_tag to: {}",
+    crate::ui::print_step_pass(&format!(
+        "Updated federation_tests.image_tag to: {}",
         tag_suffix
-    );
+    ));
 
     Ok(())
 }

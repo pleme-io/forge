@@ -977,14 +977,26 @@ pub fn write_step_failure<W: std::io::Write>(w: &mut W, message: &str) -> std::i
 }
 
 /// Prints the one-line `"   {} <message>"` (three-space indent + green
-/// `✅` glyph + plain message) in-body step-pass grammar 28 pre-lift
-/// consumer sites spelled inline as `println!("   {} <fmt>",
-/// "✅".green(), <args>)` (or its multi-line spread across five to
-/// seven source lines when the message carries a `format!`-computed
-/// argument list) across 10 command modules (`commands/{prerelease
-/// (×6), migration_new (×4), frontend_validation (×4), migration_validation
-/// (×3), post_deploy_verification (×3), codegen_validation (×3), rust_service
-/// (×2), codegen (×1), integration_tests (×1), migrations (×1)}.rs`).
+/// `✅` glyph + plain message) in-body step-pass grammar 62 pre-lift
+/// consumer sites spelled inline as one of two shapes across 15 command
+/// modules:
+///
+/// - **First lift (28 sites, 10 modules):** `println!("   {} <fmt>",
+///   "✅".green(), <args>)` — the explicit-color spelling across
+///   `commands/{prerelease (×6), migration_new (×4), frontend_validation
+///   (×4), migration_validation (×3), post_deploy_verification (×3),
+///   codegen_validation (×3), rust_service (×2), codegen (×1),
+///   integration_tests (×1), migrations (×1)}.rs`.
+/// - **Second lift (34 sites, 7 additional modules + 2 that grew):**
+///   `println!("   ✅ <fmt>", <args>)` — the plain-emoji spelling
+///   (single-line and multi-line-spread flavors) across
+///   `commands/{rust_service (+×10), flux (×6), developer_tools (×6),
+///   migrations (+×4), web_service (×4), federation_tests (×2),
+///   schema_validation (×2)}.rs`. These sites relied on the terminal
+///   to render `✅` in color; post-lift they carry the `.green()` ANSI
+///   on the glyph like every sibling site, a colored-mode drift that
+///   `colored`'s TTY auto-drop makes invisible in piped/log output.
+///
 /// Marks the successful completion of an in-body step, gate, sub-check,
 /// or per-item probe within a command's readout ("All migrations valid",
 /// "Type check passed (3.4s)", "Health check passed (12ms)", "Schema
@@ -3628,28 +3640,53 @@ mod tests {
     }
 
     /// Post-lift the callers migrated onto [`super::print_step_pass`]
-    /// no longer spell the `println!("   {} <fmt>", "✅".green(),
-    /// <args>)` shape inline. Structural regression shield — without
-    /// it, a future refactor could silently re-inline the one-liner
-    /// (e.g. a "just call `println!` directly, it's shorter" cleanup)
-    /// and reopen the 28-site duplication class this lift closed.
-    /// Enforced at the module bodies before their `#[cfg(test)]`
-    /// regions so a test-support mention of the raw shape does not
-    /// defeat the shield.
+    /// no longer spell EITHER of the two pre-lift shapes inline —
+    /// neither the explicit-color `println!("   {} <fmt>", "✅".green(),
+    /// <args>)` (28 pre-lift sites, first lift) NOR the plain-emoji
+    /// `println!("   ✅ <fmt>", <args>)` (34 pre-lift sites across 7
+    /// command modules — `commands/{rust_service (×10), flux (×6),
+    /// developer_tools (×6), migrations (×4), web_service (×4),
+    /// federation_tests (×2), schema_validation (×2)}.rs`, single-line
+    /// and multi-line-spread flavors both — closed here in the
+    /// follow-up lift). Two different pre-lift spellings collapsed onto
+    /// the same primitive because both encode the same "in-body
+    /// sub-step passed" semantics — the plain-emoji sites just relied
+    /// on the terminal to render `✅` in color, and their post-lift
+    /// bytes now carry the `.green()` ANSI on the glyph like every
+    /// sibling site (a colored-mode drift that `colored`'s TTY auto-
+    /// drop makes invisible in piped/log output).
     ///
-    /// The exact-shape needle is `"✅".green()` appearing anywhere in
-    /// the module body, MINUS one known non-step-pass site that
-    /// carries the same coloring under a different grammar: the
-    /// `prerelease.rs:182` `println!("{} Passed ({}):", "✅".green(),
-    /// self.passed.len())` gate-summary label header (no three-space
-    /// indent, plural item count in parens, colon suffix — a
-    /// section-opening banner for a batch of passed gates, distinct
-    /// from an in-body per-step pass). Survives untouched; the shield
-    /// allowlists it by an anchoring substring unique to that site.
+    /// Structural regression shield — without it, a future refactor
+    /// could silently re-inline either one-liner (e.g. a "just call
+    /// `println!` directly, it's shorter" cleanup) and reopen the
+    /// 62-site duplication class the two lifts closed. Enforced at
+    /// the module bodies before their `#[cfg(test)]` regions so a
+    /// test-support mention of the raw shape does not defeat the
+    /// shield.
+    ///
+    /// The exact-shape needles are:
+    ///
+    /// - `"✅".green()` appearing anywhere in the module body, MINUS
+    ///   one known non-step-pass site that carries the same coloring
+    ///   under a different grammar: the `prerelease.rs:182`
+    ///   `println!("{} Passed ({}):", "✅".green(), self.passed.len())`
+    ///   gate-summary label header (no three-space indent, plural item
+    ///   count in parens, colon suffix — a section-opening banner for
+    ///   a batch of passed gates, distinct from an in-body per-step
+    ///   pass). Survives untouched; the shield allowlists it by an
+    ///   anchoring substring unique to that site.
+    /// - `println!("   ✅ ` appearing anywhere in the module body —
+    ///   the plain-emoji one-liner the second lift closes. No
+    ///   allowlist exceptions: every pre-lift site was a genuine
+    ///   in-body sub-pass and forwards through the primitive
+    ///   post-lift.
+    ///
     /// `release_service.rs`'s `info!("{} {} completed in {:.1}s",
-    /// "✅".green(), ...)` tracing-logger call is routed through
-    /// `tracing::info!`, not `println!` — logger frontend, not
-    /// terminal UI — and is not enrolled in the caller set below.
+    /// "✅".green(), ...)` and similar `info!("   ✅ …", …)` calls
+    /// across `bootstrap.rs`, `comprehensive_release.rs`,
+    /// `integration_tests.rs`, `kenshi.rs`, and peers are routed
+    /// through `tracing::info!` (logger frontend, not terminal UI)
+    /// and are not enrolled in the caller set below.
     #[test]
     fn print_step_pass_callers_delegate_through_primitive() {
         const CALLERS: &[(&str, &str)] = &[
@@ -3690,6 +3727,23 @@ mod tests {
                 include_str!("commands/migrations.rs"),
                 "commands/migrations.rs",
             ),
+            (
+                include_str!("commands/developer_tools.rs"),
+                "commands/developer_tools.rs",
+            ),
+            (include_str!("commands/flux.rs"), "commands/flux.rs"),
+            (
+                include_str!("commands/schema_validation.rs"),
+                "commands/schema_validation.rs",
+            ),
+            (
+                include_str!("commands/web_service.rs"),
+                "commands/web_service.rs",
+            ),
+            (
+                include_str!("commands/federation_tests.rs"),
+                "commands/federation_tests.rs",
+            ),
         ];
         // Non-step-pass sites that carry `"✅".green()` under a
         // different grammar (a gate-summary label header). Each is
@@ -3702,29 +3756,70 @@ mod tests {
         ];
         for (source, module_path) in CALLERS {
             let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
-            for (i, line) in body.lines().enumerate() {
-                if !line.contains("\"✅\".green()") {
-                    continue;
+            let lines: Vec<&str> = body.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                let lineno = i + 1;
+                // Shield 1 — explicit-color pre-lift needle
+                // (`"✅".green()` inline).
+                if line.contains("\"✅\".green()")
+                    && !ALLOWLIST_SUBSTRINGS.iter().any(|s| line.contains(s))
+                {
+                    panic!(
+                        "{module_path}:{lineno} spells the pre-lift inline \
+                         `\"✅\".green()` step-pass marker — that shape \
+                         was lifted onto `crate::ui::print_step_pass`. \
+                         A re-inline would silently reopen the \
+                         62-site duplication class this shield exists \
+                         to close. Offending line: {line:?}"
+                    );
                 }
-                if ALLOWLIST_SUBSTRINGS.iter().any(|s| line.contains(s)) {
-                    continue;
+                // Shield 2 — plain-emoji pre-lift needle
+                // (`println!("   ✅ …` inline, single-line form). The
+                // `println!(` prefix on the same line rules out
+                // `info!(…)` / `warn!(…)` tracing-logger sites that
+                // reach `tracing`, not stdout, and are not enrolled in
+                // this caller set.
+                if line.contains("println!(\"   ✅ ") || line.contains("println!(\"   ✅\"") {
+                    panic!(
+                        "{module_path}:{lineno} spells the pre-lift inline \
+                         `println!(\"   ✅ <fmt>\", …)` plain-emoji \
+                         step-pass one-liner — that shape was lifted \
+                         onto `crate::ui::print_step_pass`. A re-inline \
+                         would silently reopen the 60-site duplication \
+                         class this shield exists to close. Offending \
+                         line: {line:?}"
+                    );
                 }
-                panic!(
-                    "{module_path}:{lineno} spells the pre-lift inline \
-                     `\"✅\".green()` step-pass marker — that shape \
-                     was lifted onto `crate::ui::print_step_pass`. \
-                     A re-inline would silently reopen the 28-site \
-                     duplication class this shield exists to close. \
-                     Offending line: {line:?}",
-                    lineno = i + 1
-                );
+                // Shield 3 — plain-emoji multi-line spread: the
+                // `println!(` opener sits on the PRECEDING line and
+                // the `"   ✅ <fmt>",` literal on THIS one. We
+                // require the immediately-preceding line to end with
+                // an unclosed `println!(` (last-non-whitespace token
+                // is `println!(`) so that `info!(` / `warn!(` /
+                // `error!(` multi-line spreads with the same literal
+                // stay unenrolled (they route through `tracing`, not
+                // stdout — logger frontend, not terminal UI).
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("\"   ✅ ") || trimmed.starts_with("\"   ✅\"") {
+                    let prev_trimmed = if i > 0 { lines[i - 1].trim_end() } else { "" };
+                    if prev_trimmed.ends_with("println!(") {
+                        panic!(
+                            "{module_path}:{lineno} spells the pre-lift \
+                             multi-line `println!(` + `\"   ✅ <fmt>\",` \
+                             plain-emoji step-pass literal — that shape \
+                             was lifted onto `crate::ui::print_step_pass`. \
+                             Offending line: {line:?}"
+                        );
+                    }
+                }
             }
             assert!(
                 body.contains("crate::ui::print_step_pass("),
                 "{module_path} body must forward to \
                  `crate::ui::print_step_pass(\"<MSG>\")` — the \
-                 primitive body every three-space-indented `✅.green()` \
-                 in-body step-pass in the crate now delegates \
+                 primitive body every three-space-indented in-body \
+                 step-pass in the crate (both `.green()`-explicit and \
+                 plain-emoji pre-lift spellings) now delegates \
                  through."
             );
         }

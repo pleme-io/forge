@@ -189,10 +189,10 @@ pub async fn health_check_with_retry(
         // Try the health check
         match check_health_status().await {
             Ok((ready, total)) => {
-                println!(
-                    "   ✅ All kustomizations healthy ({}/{} ready)",
+                crate::ui::print_step_pass(&format!(
+                    "All kustomizations healthy ({}/{} ready)",
                     ready, total
-                );
+                ));
                 return Ok(());
             }
             Err((ready, total, failures)) => {
@@ -354,7 +354,7 @@ async fn reconcile_source() -> Result<()> {
         .await
         .context("Failed to reconcile FluxCD git source")?;
 
-    println!("   ✅ Git source reconciled");
+    crate::ui::print_step_pass("Git source reconciled");
     Ok(())
 }
 
@@ -448,7 +448,7 @@ async fn reconcile_product_chain(namespace: &str) -> Result<()> {
         }
     }
 
-    println!("   ✅ Product chain reconciled");
+    crate::ui::print_step_pass("Product chain reconciled");
     Ok(())
 }
 
@@ -466,7 +466,7 @@ async fn reconcile_kustomization() -> Result<()> {
         .await
         .context("Failed to reconcile root FluxCD kustomization")?;
 
-    println!("   ✅ Kustomization reconciled");
+    crate::ui::print_step_pass("Kustomization reconciled");
     Ok(())
 }
 
@@ -507,7 +507,10 @@ pub async fn verify_deployment_image(
             Ok(pod) => {
                 if pod.image.contains(expected_tag_suffix) {
                     let tag = crate::oci_manifest::image_tag_display(&pod.image);
-                    println!("   ✅ Deployment has correct image tag: {}", tag);
+                    crate::ui::print_step_pass(&format!(
+                        "Deployment has correct image tag: {}",
+                        tag
+                    ));
                     return Ok(());
                 }
 
@@ -593,7 +596,10 @@ pub async fn wait_for_deployment(
 
                 if has_correct_image && pod.ready {
                     let current_tag = crate::oci_manifest::image_tag_display(&pod.image);
-                    println!("   ✅ Pod has correct image ({}) and is ready", current_tag);
+                    crate::ui::print_step_pass(&format!(
+                        "Pod has correct image ({}) and is ready",
+                        current_tag
+                    ));
                     println!(
                         "✅ {}",
                         format!("{} deployment is ready with new image", deployment_name).green()

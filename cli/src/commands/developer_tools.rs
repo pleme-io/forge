@@ -319,7 +319,7 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
     )
     .await
     .context("Failed to run cargo generate-lockfile")?;
-    println!("   ✅ Cargo.lock generated");
+    crate::ui::print_step_pass("Cargo.lock generated");
     println!();
 
     // Step 3: Generate Cargo.nix
@@ -330,7 +330,7 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
     );
     crate::nix::run_nix_wrapped_crate2nix(&nix_bin(), &["-f", "Cargo.toml", "-o", "Cargo.nix"])
         .await?;
-    println!("   ✅ Cargo.nix generated");
+    crate::ui::print_step_pass("Cargo.nix generated");
     println!();
 
     // Success summary
@@ -385,7 +385,7 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
         "(cargo update)".dimmed()
     );
     crate::nix::run_cargo_update(&cargo_bin()).await?;
-    println!("   ✅ Dependencies updated");
+    crate::ui::print_step_pass("Dependencies updated");
     println!();
 
     // Step 2: Generate Cargo.nix
@@ -396,7 +396,7 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
     );
     crate::nix::run_nix_wrapped_crate2nix(&nix_bin(), &["-f", "Cargo.toml", "-o", "Cargo.nix"])
         .await?;
-    println!("   ✅ Cargo.nix generated");
+    crate::ui::print_step_pass("Cargo.nix generated");
     println!();
 
     // Success summary
@@ -483,7 +483,7 @@ pub async fn rust_dev(
                 if let Some(port) = extract_port_from_url(db_url) {
                     println!("   Waiting for PostgreSQL on port {}...", port);
                     wait_for_port(port, Duration::from_secs(30)).await?;
-                    println!("   ✅ PostgreSQL is ready");
+                    crate::ui::print_step_pass("PostgreSQL is ready");
                 }
             }
         } else {
@@ -554,7 +554,7 @@ pub async fn rust_dev(
 
             match status {
                 Ok(s) if s.success() => {
-                    println!("   ✅ Migrations applied");
+                    crate::ui::print_step_pass("Migrations applied");
                 }
                 Ok(_) => {
                     println!(

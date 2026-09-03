@@ -326,7 +326,7 @@ pub async fn run_federation_tests(
         "kubectl apply federation test job",
     )?;
 
-    println!("   ✅ Job created: {}", job_name.green());
+    crate::ui::print_step_pass(&format!("Job created: {}", job_name.green()));
 
     // Wait for job completion
     println!(
@@ -348,7 +348,7 @@ pub async fn run_federation_tests(
     // Handle results
     match (wait_result, job_succeeded) {
         (Ok(()), true) => {
-            println!("   ✅ {}", "Federation tests passed!".green().bold());
+            crate::ui::print_step_pass(&format!("{}", "Federation tests passed!".green().bold()));
             Ok(())
         }
         (wait_result, _) => {

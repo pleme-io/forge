@@ -883,7 +883,7 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
         bail!("Failed to reset DatabaseMigration: {}", stderr);
     }
 
-    println!("   ✅ Reset status to Pending (retryCount: 0)");
+    crate::ui::print_step_pass("Reset status to Pending (retryCount: 0)");
 
     // Always clean up existing migration jobs to prevent "already exists" errors
     println!("🧹 Cleaning up existing migration jobs...");
@@ -922,7 +922,7 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
             .await?;
 
             if delete.status.success() {
-                println!("   ✅ Deleted job: {}", job);
+                crate::ui::print_step_pass(&format!("Deleted job: {}", job));
             }
         }
     }
@@ -948,7 +948,7 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
 
         let output = crate::repo::utf8_lossy_borrow(&cleanup_pods.stdout);
         if output.contains("deleted") {
-            println!("   ✅ Deleted orphaned pods");
+            crate::ui::print_step_pass("Deleted orphaned pods");
         } else {
             println!("   ℹ️  No orphaned pods to clean up");
         }
@@ -1310,7 +1310,7 @@ async fn set_expected_tag_annotation(migration_name: &str, namespace: &str, expe
 
     match result {
         Ok(o) if o.status.success() => {
-            println!("   ✅ Expected-tag annotation set");
+            crate::ui::print_step_pass("Expected-tag annotation set");
         }
         Ok(o) => {
             let stderr = crate::repo::utf8_lossy_borrow(&o.stderr);
