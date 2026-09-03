@@ -1360,6 +1360,171 @@ pub fn write_ascii_title_underline<W: std::io::Write>(
     writeln!(w)
 }
 
+/// Rule width every pre-lift report-section-subheader stanza in
+/// `commands/rust_service.rs`'s `print_deployment_report` fed to
+/// [`String::repeat`] verbatim (the literal `80`). Pinned as one
+/// named constant so a future narrowing (e.g. to fit an 80-column
+/// terminal that already carries a 2-space caller indent, so the
+/// rule folds onto a second line) or widening (a shift to `120` to
+/// match a wider report grammar) happens at ONE typed boundary
+/// rather than five literal-argument sites.
+const REPORT_SECTION_SUBHEADER_RULE_WIDTH: usize = 80;
+
+/// Rule glyph every pre-lift report-section-subheader stanza fed to
+/// [`String::repeat`] verbatim (a single-character `─`, U+2500 BOX
+/// DRAWINGS LIGHT HORIZONTAL). Pinned as one named constant so a
+/// future swap of the subheader grammar's rule character (a
+/// promotion to `━` for a heavier boundary, a demotion to `-` for
+/// an ASCII-only fallback under a color-stripped log) happens at
+/// ONE typed boundary rather than five literal-argument sites.
+///
+/// The glyph is distinct from every peer's — [`write_success_banner`]
+/// uses `━` in `bright_green` (a heavier + colored terminal-success
+/// milestone), [`write_ascii_bar_banner`] uses `=` uncolored (an
+/// ASCII-only per-chart-action boundary), [`write_section_header`]
+/// uses `═` bold uncolored (a section opening triple), and
+/// [`write_ascii_title_underline`] uses `=` uncolored (a
+/// command-intro underline). This primitive carries the LIGHTEST +
+/// DIMMED rule grammar the report-body subheaders wear beneath a
+/// bold-colored title inside `print_deployment_report`.
+const REPORT_SECTION_SUBHEADER_RULE_CHAR: &str = "─";
+
+/// Palette [`print_report_section_subheader`] accepts. Each variant
+/// spliced into the fixed `<title>.<COLOR>().bold()` styling every
+/// pre-lift consumer spelled hard-coded verbatim, closed to the
+/// exact three colors the pre-lift 5-site sibling class in
+/// `commands/rust_service.rs`'s `print_deployment_report` carried
+/// and nothing more — a new palette entry is a deliberate additive
+/// edit, not an open call-site choice.
+///
+/// # Compounding
+///
+/// Pre-lift each of the 5 sibling `println!("{}", "<TITLE>".<COLOR>
+/// ().bold()); println!("{}", "─".repeat(80).dimmed());` sites nailed
+/// the color into a method chain at the call site; a rename that
+/// misspells `.green` as `.grne` would compile-fail (unlike the
+/// [`SpinnerStyle`] indicatif-template class, which silently
+/// degrades on a typo), but a swap of `.yellow().bold()` for
+/// `.red().bold()` in one site alone would drift the visual grammar
+/// silently — the 5 subheaders lose their eye-navigation
+/// categorization (success / pending / info) without any compile
+/// failure. Post-lift the mapping [`ReportSectionStyle`] →
+/// [`colored::ColoredString`] lives in ONE match arm; the enum is
+/// closed, so a future variant added without an arm fails the
+/// exhaustiveness check at build time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportSectionStyle {
+    /// Success-track subheader (`<title>.green().bold()`). 2 pre-lift
+    /// sites in `commands/rust_service.rs`'s
+    /// `print_deployment_report` — the `✅ COMPLETED ACTIONS`
+    /// subheader opening the completed-actions readout and the
+    /// `✓ VERIFICATION COMMANDS` subheader opening the
+    /// verification-commands readout.
+    Success,
+    /// Warning-track subheader (`<title>.yellow().bold()`). 2 pre-lift
+    /// sites in `commands/rust_service.rs`'s
+    /// `print_deployment_report` — the `⏳ PENDING ROLLOUTS`
+    /// subheader opening the pending-rollouts readout and the
+    /// `⚠️  WATCH FOR THESE ISSUES` subheader opening the
+    /// watch-for-issues readout.
+    Warning,
+    /// Info-track subheader (`<title>.cyan().bold()`). 1 pre-lift
+    /// site in `commands/rust_service.rs`'s
+    /// `print_deployment_report` — the `🔍 MONITORING COMMANDS`
+    /// subheader opening the monitoring-commands readout.
+    Info,
+}
+
+/// Prints the two-line report-section-subheader grammar every
+/// pre-lift consumer spelled inline as `println!("{}", "<TITLE>".
+/// <COLOR>().bold()); println!("{}", "─".repeat(80).dimmed());`
+/// across 5 sibling sites in `commands/rust_service.rs`'s
+/// `print_deployment_report` — a `.bold()`-and-colored title line
+/// followed by a dimmed 80-glyph `─` rule that visually opens one
+/// subsection of the deployment-report body ("what happened",
+/// "what will happen next", "how to check", "how to watch", "what
+/// to watch for").
+///
+/// Delegates to [`write_report_section_subheader`] against
+/// [`std::io::stdout()`]; the writer split exists so the
+/// fail-before-pass test can pin the two-line body, the palette per
+/// [`ReportSectionStyle`], the dimmed 80-glyph `─` rule, and the
+/// `\x1b[2m` dim ANSI palette contract on the rule by inspecting
+/// emitted bytes rather than shelling out and grepping stdout.
+///
+/// # Distinct from the other `ui::print_*` primitives
+///
+/// [`print_step_heading`] is a bare `<title>.bold()` line with no
+/// trailing rule — its consumer sites open a numbered pipeline step
+/// whose body follows immediately, not a report-body subsection
+/// separated from its readout by a rule. [`print_section_header`]
+/// is a `═`-rule + bold-title + `═`-rule triple around a section
+/// opening WITHIN a pipeline — heavy Unicode `═` rule
+/// (uncolored), title-CONTAINED between two rules, no color choice.
+/// [`print_ascii_title_underline`] is a two-line `=`-rule + blank
+/// separator emitted BENEATH a caller's multi-part styled
+/// command-intro title, not carrying its own title or coloring.
+/// [`print_success_banner`] and [`print_release_stage_banner`] are
+/// three-line `━` / `=` colored rule + colored headline + rule
+/// terminal-milestone banners. This primitive carries the report-body
+/// subheader grammar: title line ABOVE a dimmed light-rule (the
+/// only such shape in the crate), colored per the
+/// [`ReportSectionStyle`]-signaled section role
+/// (success / warning / info) so the eye can navigate the report
+/// body by color band alone.
+///
+/// # Compounding
+///
+/// Pre-lift 5 sibling sites each restated the two-line stanza
+/// verbatim, with the title text, the color method
+/// (`.green()` / `.yellow()` / `.cyan()`), the `.bold()` chain, the
+/// rule character (`─`), the rule width (80), and the `.dimmed()`
+/// rule styling all spelled inline. A future adjustment (a swap of
+/// `─` for `━` under a heavier boundary grammar, a shift to a
+/// caller-computed width so the rule tracks the surrounding
+/// deployment report's actual column count, a promotion of
+/// `.dimmed()` to `.bright_black()` under a friendlier
+/// low-contrast-terminal readout, an OTLP `report_section_opened`
+/// span wired alongside the print) had to hit 5 sites in lockstep
+/// or drift the visual grammar; post-lift it hits ONE typed body.
+/// The [`ReportSectionStyle`] enum being closed additionally guards
+/// against a future consumer inventing a fourth palette (a
+/// `.magenta().bold()` "critical" subheader) without a deliberate
+/// enum extension.
+pub fn print_report_section_subheader(title: &str, style: ReportSectionStyle) {
+    let _ = write_report_section_subheader(&mut std::io::stdout().lock(), title, style);
+}
+
+/// Writer-taking sibling to [`print_report_section_subheader`].
+/// Emits the two report-subheader lines
+/// (`<title>.<COLOR>().bold()` per [`ReportSectionStyle`], then
+/// `"─".repeat(80).dimmed()` rule) via [`writeln!`] against the
+/// supplied writer. [`print_report_section_subheader`] is the
+/// stdout adapter; this variant exists so tests can pin the
+/// two-line body, the palette mapping, the dimmed 80-glyph `─`
+/// rule, and the `\x1b[2m` dim ANSI sequence on the rule without
+/// capturing stdout.
+pub fn write_report_section_subheader<W: std::io::Write>(
+    w: &mut W,
+    title: &str,
+    style: ReportSectionStyle,
+) -> std::io::Result<()> {
+    let colored_title = match style {
+        ReportSectionStyle::Success => title.green().bold(),
+        ReportSectionStyle::Warning => title.yellow().bold(),
+        ReportSectionStyle::Info => title.cyan().bold(),
+    };
+    writeln!(w, "{}", colored_title)?;
+    writeln!(
+        w,
+        "{}",
+        REPORT_SECTION_SUBHEADER_RULE_CHAR
+            .repeat(REPORT_SECTION_SUBHEADER_RULE_WIDTH)
+            .dimmed()
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{styled_spinner, SpinnerStyle, SPINNER_TICK};
@@ -4429,6 +4594,208 @@ mod tests {
             "ui.rs must spell a 12-space-indented unset_override() \
              call exactly ONCE — inside AnsiOverrideForTest's Drop. \
              Found {drop_body_hits} guard-body hits."
+        );
+    }
+
+    /// Fail-before-pass envelope for
+    /// [`super::write_report_section_subheader`]. Pins the two-line
+    /// body every pre-lift consumer spelled verbatim
+    /// (`<title>.<COLOR>().bold()` line, `"─".repeat(80).dimmed()`
+    /// rule line) and the exact palette per
+    /// [`super::ReportSectionStyle`] variant. A silent contract
+    /// drift a future rewrite might introduce — dropping the rule
+    /// line (a "the title is loud enough" cleanup), promoting the
+    /// dimmed rule to a colored rule that competes with the title
+    /// for eye attention, swapping the `─` glyph for `━` or `-` in
+    /// one branch alone (silently splitting the visual grammar
+    /// across the 5 consumer subheaders), narrowing the rule width
+    /// off 80 in one branch alone, hoisting `.bold()` off the title
+    /// so it disappears into surrounding body text, or swapping
+    /// `.green()` for `.bright_green()` in the [`Success`] arm
+    /// alone (losing the visual-contrast contract against the
+    /// warning-track subheader) — flips this assertion rather than
+    /// compiling and silently diverging the 5 consumer sites'
+    /// visual grammar.
+    ///
+    /// [`Success`]: super::ReportSectionStyle::Success
+    #[test]
+    fn write_report_section_subheader_emits_bold_colored_title_then_dimmed_light_rule() {
+        // Force ANSI emission (colored auto-drops sequences on a
+        // non-tty stdout) and serialize against peer banner tests
+        // via [`AnsiOverrideForTest`]; its Drop restores colored's
+        // auto-detection on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`], closing the set-write-unset window
+        // without a manual [`colored::control::unset_override`] call
+        // that a future test author could omit.
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        // Verify all three enum variants — the palette contract lives
+        // in the primitive's `match` arms, so a silent rename of one
+        // arm's color chain (`.yellow()` → `.red()` on Warning) would
+        // pass the Success and Info assertions and still flip only
+        // the Warning branch here.
+        //
+        // `colored` folds `.color().bold()` into a single composite
+        // ANSI escape whose two attributes may appear in either
+        // `\x1b[1;<c>m` or `\x1b[<c>;1m` order depending on the
+        // attribute-application sequence; accept both spellings.
+        for (style, bold_first_seq, color_first_seq, label) in [
+            (
+                super::ReportSectionStyle::Success,
+                "\x1b[1;32m",
+                "\x1b[32;1m",
+                "green (Success)",
+            ),
+            (
+                super::ReportSectionStyle::Warning,
+                "\x1b[1;33m",
+                "\x1b[33;1m",
+                "yellow (Warning)",
+            ),
+            (
+                super::ReportSectionStyle::Info,
+                "\x1b[1;36m",
+                "\x1b[36;1m",
+                "cyan (Info)",
+            ),
+        ] {
+            let mut buf: Vec<u8> = Vec::new();
+            super::write_report_section_subheader(&mut buf, "TEST SUBHEADER", style)
+                .expect("write_report_section_subheader against a Vec<u8> writer must succeed");
+            let out = String::from_utf8(buf).expect(
+                "write_report_section_subheader must emit valid UTF-8 (the pre-lift println!s did)",
+            );
+
+            // Exactly two lines — the pre-lift stanza is two
+            // `println!`s (title + rule). A refactor that drops the
+            // rule or fuses both onto one line fails here.
+            let lines: Vec<&str> = out.lines().collect();
+            assert_eq!(
+                lines.len(),
+                2,
+                "{label}: write_report_section_subheader must emit \
+                 exactly two lines (title, rule) — the pre-lift stanza \
+                 is two `println!`s; got {}:\n{}",
+                lines.len(),
+                out
+            );
+
+            // Line 0 (title) carries the message verbatim and its
+            // color's ANSI sequence + the `\x1b[1m` bold sequence.
+            // The `colored` crate may serialize either as `\x1b[1;<c>m`
+            // or `\x1b[<c>;1m` depending on the attribute order, so
+            // accept either shape — the invariant is that BOTH the
+            // color code and the bold code reach the buffer around
+            // the title text.
+            assert!(
+                lines[0].contains("TEST SUBHEADER"),
+                "{label}: line 0 must carry the title verbatim; got {:?}",
+                lines[0]
+            );
+            assert!(
+                lines[0].contains(bold_first_seq) || lines[0].contains(color_first_seq),
+                "{label}: line 0 must carry the composite `bold` + \
+                 `<color>` ANSI sequence {:?} or {:?} for the \
+                 {label} palette — a silent rename of the color chain \
+                 in the primitive's match arm (`.green()` → `.red()`) \
+                 or a silent drop of `.bold()` would flip this; got \
+                 {:?}",
+                bold_first_seq,
+                color_first_seq,
+                lines[0]
+            );
+
+            // Line 1 (rule) is exactly 80 `─` glyphs styled with
+            // `.dimmed()` (`\x1b[2m`). A refactor that narrows the
+            // width, promotes `.dimmed()` off, or swaps `─` for `━`
+            // fails here.
+            let rule_glyph_count = lines[1].chars().filter(|c| *c == '─').count();
+            assert_eq!(
+                rule_glyph_count, 80,
+                "{label}: line 1 must contain exactly 80 `─` glyphs — \
+                 the pre-lift stanza spelled `\"─\".repeat(80)` \
+                 verbatim; got {} in {:?}",
+                rule_glyph_count, lines[1]
+            );
+            assert!(
+                lines[1].contains("\x1b[2m"),
+                "{label}: line 1 must carry the `dimmed` ANSI \
+                 sequence (`\\x1b[2m`) — a silent drop of `.dimmed()` \
+                 from the primitive would flip this; got {:?}",
+                lines[1]
+            );
+            assert!(
+                !lines[1].contains('━'),
+                "{label}: line 1 must NOT contain the heavy `━` \
+                 glyph — the light `─` (U+2500) is the intentional \
+                 rule character distinguishing this primitive from \
+                 the heavy-rule banner peers; got {:?}",
+                lines[1]
+            );
+        }
+    }
+
+    /// Post-lift the callers in `commands/rust_service.rs`'s
+    /// `print_deployment_report` migrated onto
+    /// [`super::print_report_section_subheader`] no longer spell the
+    /// two-line `println!("{}", "<TITLE>".<COLOR>().bold());
+    /// println!("{}", "─".repeat(80).dimmed());` stanza inline.
+    /// Structural regression shield — without it, a future refactor
+    /// could silently re-inline the two-liner and reopen the 5-site
+    /// duplication class this lift closed. The negative needle
+    /// `"─".repeat(80)` uniquely identifies the pre-lift restatement:
+    /// the rule character (`─`, U+2500) is not used elsewhere in the
+    /// module (the peer `━`-rule and `═`-rule bars live inside
+    /// distinct `ui::` primitives), and the width 80 is not repeated
+    /// verbatim outside this class.
+    ///
+    /// The shield does NOT bound its scan through
+    /// [`crate::test_support::module_body_before_first_cfg_test`]
+    /// because `commands/rust_service.rs` has no `#[cfg(test)]`
+    /// block interleaved with `print_deployment_report`, and the
+    /// pre-lift needle `\"─\".repeat(80)` is not constructed
+    /// anywhere in the module's tests. A source-wide scan therefore
+    /// covers the 5 pre-lift sites without false positives.
+    #[test]
+    fn print_report_section_subheader_callers_delegate_through_primitive() {
+        const SRC: &str = include_str!("commands/rust_service.rs");
+        // Negative assertion — no pre-lift inline `"─".repeat(80)`
+        // stanza remains anywhere in the module. The rule character
+        // `─` (U+2500) is not shared by peer bars in the module.
+        let inline_hits = SRC.matches("\"─\".repeat(80)").count();
+        assert_eq!(
+            inline_hits, 0,
+            "commands/rust_service.rs must NOT spell the pre-lift \
+             inline `\"─\".repeat(80).dimmed()` 80-glyph light rule — \
+             that two-line stanza (a bold-colored title above a \
+             dimmed light rule) was lifted onto \
+             `crate::ui::print_report_section_subheader`. A re-inline \
+             would silently reopen the 5-site duplication class this \
+             shield exists to close. Found {inline_hits} inline \
+             occurrences."
+        );
+        // Positive assertion — the module forwards through the
+        // primitive at exactly five sites, one per pre-lift consumer
+        // (`✅ COMPLETED ACTIONS`, `⏳ PENDING ROLLOUTS`,
+        // `✓ VERIFICATION COMMANDS`, `🔍 MONITORING COMMANDS`,
+        // `⚠️  WATCH FOR THESE ISSUES`). A fusion that folds one of
+        // the 5 consumer sites back to inline `println!`s (silently
+        // splitting the visual grammar across two subheaders) fails
+        // here — the negative half above would still pass, but this
+        // positive count would fall to four.
+        let forward_hits = SRC
+            .matches("crate::ui::print_report_section_subheader(")
+            .count();
+        assert_eq!(
+            forward_hits, 5,
+            "commands/rust_service.rs must forward through \
+             `crate::ui::print_report_section_subheader(<title>, \
+             <style>)` at exactly FIVE sites — one per pre-lift \
+             consumer subheader inside `print_deployment_report`. A \
+             fusion that folds one back to inline `println!`s or that \
+             adds a sixth caller without extending this shield's \
+             expected count fails here. Found {forward_hits} \
+             forwarding hits."
         );
     }
 }
