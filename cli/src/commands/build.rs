@@ -15,20 +15,7 @@ pub async fn execute(
     push_cache: bool,
     output: String,
 ) -> Result<()> {
-    println!();
-    println!(
-        "{}",
-        "╔════════════════════════════════════════════════════════════╗".bright_blue()
-    );
-    println!(
-        "{}",
-        "║  Nix Build + Attic Cache                                   ║".bright_blue()
-    );
-    println!(
-        "{}",
-        "╚════════════════════════════════════════════════════════════╝".bright_blue()
-    );
-    println!();
+    crate::ui::print_header("Nix Build + Attic Cache");
 
     // Get full git SHA for version embedding
     let git_sha = crate::git::get_full_sha().context("Failed to get git SHA")?;

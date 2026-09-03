@@ -148,25 +148,6 @@ pub struct PushResult {
 }
 
 // ============================================================================
-// UI Helpers
-// ============================================================================
-
-/// Print a styled header box
-fn print_header(title: &str) {
-    println!();
-    println!(
-        "{}",
-        "╔════════════════════════════════════════════════════════════╗".bright_blue()
-    );
-    println!("{}", format!("║  {:58} ║", title).bright_blue());
-    println!(
-        "{}",
-        "╚════════════════════════════════════════════════════════════╝".bright_blue()
-    );
-    println!();
-}
-
-// ============================================================================
 // Core Functions
 // ============================================================================
 
@@ -263,7 +244,7 @@ pub async fn push_single(
 ) -> Result<()> {
     let binary_def = find_binary(&binary)?;
 
-    print_header(&format!("Push Bootstrap: {}", binary_def.name));
+    crate::ui::print_header(&format!("Push Bootstrap: {}", binary_def.name));
 
     // Get git SHA for tagging
     let tags = generate_auto_tags(DEFAULT_ARCH).await?;
@@ -326,7 +307,7 @@ pub async fn push_single(
 ///
 /// Returns an error if any build or push fails.
 pub async fn push_all(token: Option<String>, retries: u32, parallel: bool) -> Result<()> {
-    print_header("Push All Bootstrap Binaries");
+    crate::ui::print_header("Push All Bootstrap Binaries");
 
     // Get git SHA for tagging (once, for consistency across all binaries)
     let tags = generate_auto_tags(DEFAULT_ARCH).await?;
@@ -432,7 +413,7 @@ async fn push_all_sequential(
 /// Prints a formatted list of all bootstrap binaries with their descriptions
 /// and registry URLs.
 pub fn list_binaries() {
-    print_header("Available Bootstrap Binaries");
+    crate::ui::print_header("Available Bootstrap Binaries");
 
     for binary in BOOTSTRAP_BINARIES {
         println!("   {} {}", "•".bright_cyan(), binary.name.bright_white());
@@ -483,7 +464,7 @@ pub async fn release(
     retries: u32,
     skip_git: bool,
 ) -> Result<()> {
-    print_header(&format!("Bootstrap Release: {} {}", product, environment));
+    crate::ui::print_header(&format!("Bootstrap Release: {} {}", product, environment));
 
     // Determine cluster (default: primary)
     let cluster = cluster.unwrap_or_else(|| "primary".to_string());
@@ -635,7 +616,7 @@ pub async fn release(
 pub async fn regenerate() -> Result<()> {
     use crate::nix::{run_cargo_update, run_crate2nix};
 
-    print_header("Regenerate Bootstrap Cargo.nix");
+    crate::ui::print_header("Regenerate Bootstrap Cargo.nix");
 
     // Find repository root
     let repo_root = find_repo_root()?;

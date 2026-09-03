@@ -221,20 +221,7 @@ pub async fn execute(
     update_kustomization_path: Option<String>,
     commit_kustomization: bool,
 ) -> Result<()> {
-    println!();
-    println!(
-        "{}",
-        "╔════════════════════════════════════════════════════════════╗".bright_blue()
-    );
-    println!(
-        "{}",
-        "║  Push to Container Registry                                ║".bright_blue()
-    );
-    println!(
-        "{}",
-        "╚════════════════════════════════════════════════════════════╝".bright_blue()
-    );
-    println!();
+    crate::ui::print_header("Push to Container Registry");
 
     // Check if build result exists
     if !tokio::fs::try_exists(&image_path).await.unwrap_or(false) {
