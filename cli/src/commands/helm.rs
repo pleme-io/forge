@@ -2887,16 +2887,7 @@ fn find_latest_tgz(dir: &str, prefix: &str) -> Result<String> {
         })
         .collect();
 
-    entries.sort_by(|a, b| {
-        b.metadata()
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-            .cmp(
-                &a.metadata()
-                    .and_then(|m| m.modified())
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
-            )
-    });
+    crate::repo::sort_dir_entries_by_mtime_desc(&mut entries);
 
     entries
         .first()
