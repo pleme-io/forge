@@ -118,9 +118,9 @@ pub async fn execute(backend_dir: &Path, web_dir: &Path) -> Result<CodegenResult
         .await
         .with_context(|| format!("bun install in {}", web_dir.display()))?;
 
-    crate::ui::print_step_check(&format!(
-        "Dependencies installed ({:.1}s)",
-        install_start.elapsed().as_secs_f64()
+    crate::ui::print_step_check(&crate::repo::msg_with_secs_1(
+        "Dependencies installed",
+        install_start.elapsed(),
     ));
     println!();
 
@@ -141,9 +141,9 @@ pub async fn execute(backend_dir: &Path, web_dir: &Path) -> Result<CodegenResult
         anyhow::bail!("GraphQL codegen failed:\n{}\n{}", stderr, stdout);
     }
 
-    crate::ui::print_step_check(&format!(
-        "Codegen completed ({:.1}s)",
-        codegen_start.elapsed().as_secs_f64()
+    crate::ui::print_step_check(&crate::repo::msg_with_secs_1(
+        "Codegen completed",
+        codegen_start.elapsed(),
     ));
     println!();
 
