@@ -1750,10 +1750,7 @@ fn release_lib_chart(
     let lib_str = crate::repo::path_to_string_lossy(&lib_path);
     let version = chart_version_at(&lib_str)?;
 
-    println!();
-    println!("==========================================");
-    println!("  Releasing {lib_chart_name} {version} (library)");
-    println!("==========================================");
+    crate::ui::print_ascii_bar_banner(&format!("Releasing {lib_chart_name} {version} (library)"));
 
     if !republish_enabled()
         && chart_published(
@@ -2603,10 +2600,7 @@ pub fn lint_all(charts_dir: &str, lib_chart_dir: Option<&str>, lib_chart_name: &
     let mut failed: Vec<(String, String)> = Vec::new();
 
     for chart_name in &charts {
-        println!();
-        println!("==========================================");
-        println!("  Linting {}", chart_name);
-        println!("==========================================");
+        crate::ui::print_ascii_bar_banner(&format!("Linting {}", chart_name));
 
         // Workspace prep is isolated too — a single chart's copy/stage/
         // redirect failure must not `?`-abort the remaining charts, same as
@@ -2695,10 +2689,7 @@ pub fn release_all(
     }
 
     for chart_name in &charts {
-        println!();
-        println!("==========================================");
-        println!("  Releasing {}", chart_name);
-        println!("==========================================");
+        crate::ui::print_ascii_bar_banner(&format!("Releasing {}", chart_name));
 
         // Every chart is independent from here down: a failure at ANY stage
         // (workspace prep / lint / package / push) records the chart + a
