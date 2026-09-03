@@ -1230,7 +1230,7 @@ pub async fn orchestrate_release(
                     .dimmed()
             );
         } else {
-            println!("Step 0: {}", "Pre-release FluxCD health check...".bold());
+            crate::ui::print_numbered_step_heading("0", "Pre-release FluxCD health check...");
             crate::commands::flux::health_check("pre-release").await?;
         }
         println!();
@@ -1277,7 +1277,7 @@ pub async fn orchestrate_release(
             .unwrap_or(&deploy_config.global.deployment.pre_deployment_tests);
 
         if pre_deploy_config.enabled {
-            println!("Step 0.5: {}", "Running pre-deployment tests...".bold());
+            crate::ui::print_numbered_step_heading("0.5", "Running pre-deployment tests...");
             crate::commands::integration_tests::execute_pre_deployment_tests(
                 pre_deploy_config,
                 pre_deploy_service_dir.clone(),
@@ -1331,12 +1331,12 @@ pub async fn orchestrate_release(
             });
         }
 
-        println!("Step 1: {}", "Pushing to GHCR...".bold());
+        crate::ui::print_numbered_step_heading("1", "Pushing to GHCR...");
         push_docker_images(&images, &registry, &tag_suffix).await?;
 
         // Step 1.5: Verify image exists in registry and capture digest
         println!();
-        println!("Step 1.5: {}", "Verifying image in registry...".bold());
+        crate::ui::print_numbered_step_heading("1.5", "Verifying image in registry...");
         let verify_tag = deploy_tag.clone();
         let pushed_digest = verify_image_in_registry(&registry, &verify_tag).await?;
         println!("   📋 Captured digest: {}", pushed_digest);
@@ -1368,7 +1368,7 @@ pub async fn orchestrate_release(
     // Step 2: Run migrations BEFORE deployment (using pushed image)
     // CRITICAL: Migrations must complete successfully BEFORE updating K8s manifests
     // This ensures the database schema is ready when new pods start
-    println!("Step 2: {}", "Running database migrations...".bold());
+    crate::ui::print_numbered_step_heading("2", "Running database migrations...");
 
     if config.database_type() == &crate::commands::service_config::DatabaseType::None {
         println!(
@@ -1420,7 +1420,7 @@ pub async fn orchestrate_release(
 
     // Step 3: Deploy to each environment in order (AFTER migrations pass)
     // Now that the database schema is ready, it's safe to deploy new pods
-    println!("Step 3: {}", "Deploying to environments...".bold());
+    crate::ui::print_numbered_step_heading("3", "Deploying to environments...");
     let mut last_git_sha = String::new();
     let mut last_namespace = String::new();
 
@@ -1510,7 +1510,7 @@ pub async fn orchestrate_release(
         .unwrap_or(deploy_config.global.deployment.wait_for_rollout);
 
     if wait_for_rollout {
-        println!("Step 4: {}", "Waiting for deployment rollout...".bold());
+        crate::ui::print_numbered_step_heading("4", "Waiting for deployment rollout...");
         crate::commands::flux::wait_for_deployment(
             service.clone(),
             namespace.clone(),
@@ -1531,7 +1531,7 @@ pub async fn orchestrate_release(
     // Step 4.5 (conditional): Search service GitOps sync
     // Only runs for services with novasearch.enabled = true in deploy.yaml
     if crate::commands::search_sync::should_run_novasearch_sync(&deploy_config) {
-        println!("Step 4.5: {}", "Running search service sync...".bold());
+        crate::ui::print_numbered_step_heading("4.5", "Running search service sync...");
         let service_dir = std::path::Path::new(".");
         crate::commands::search_sync::run_novasearch_sync(service_dir, &namespace, &deploy_config)
             .await?;
@@ -1539,12 +1539,12 @@ pub async fn orchestrate_release(
     }
 
     // Step 5: Extract GraphQL schema
-    println!("Step 5: {}", "Extracting GraphQL schema...".bold());
+    crate::ui::print_numbered_step_heading("5", "Extracting GraphQL schema...");
     crate::commands::federation::extract_schema(service.clone(), &deploy_config).await?;
     println!();
 
     // Step 6: Update GraphQL Federation (Hive Router)
-    println!("Step 6: {}", "Updating Hive Router federation...".bold());
+    crate::ui::print_numbered_step_heading("6", "Updating Hive Router federation...");
     crate::commands::federation::update_federation(
         service.clone(),
         namespace.clone(),
@@ -1563,7 +1563,7 @@ pub async fn orchestrate_release(
             "Skipping post-release FluxCD health check (skip_flux_health_check: true)".dimmed()
         );
     } else {
-        println!("Step 7: {}", "Post-release FluxCD health check...".bold());
+        crate::ui::print_numbered_step_heading("7", "Post-release FluxCD health check...");
         // Wait up to 10 minutes for all kustomizations to reconcile (was 5 minutes)
         // Longer timeout handles complex deployments with multiple services
         crate::commands::flux::health_check_with_retry("post-release", 600, 10).await?;
@@ -2335,7 +2335,7 @@ pub async fn release_rust_service(
                 .dimmed()
         );
     } else {
-        println!("Step 0/8: {}", "Pre-release FluxCD health check...".bold());
+        crate::ui::print_numbered_step_heading("0/8", "Pre-release FluxCD health check...");
         crate::commands::flux::health_check("pre-release").await?;
     }
     println!();
@@ -2364,7 +2364,7 @@ pub async fn release_rust_service(
     println!();
 
     // Step 1: Build
-    println!("Step 1/8: {}", "Building with per-crate caching...".bold());
+    crate::ui::print_numbered_step_heading("1/8", "Building with per-crate caching...");
     build_rust_service(
         service.clone(),
         cache_url.clone(),
@@ -2376,7 +2376,7 @@ pub async fn release_rust_service(
 
     // Step 2: Push
     println!();
-    println!("Step 2/9: {}", "Pushing to registries...".bold());
+    crate::ui::print_numbered_step_heading("2/9", "Pushing to registries...");
     push_rust_service_with_tag(
         service.clone(),
         registry.clone(),
@@ -2389,7 +2389,7 @@ pub async fn release_rust_service(
 
     // Step 2.5: Verify image exists in registry and capture digest
     println!();
-    println!("Step 2.5/9: {}", "Verifying image in registry...".bold());
+    crate::ui::print_numbered_step_heading("2.5/9", "Verifying image in registry...");
     let pushed_digest = verify_image_in_registry(&registry, &deploy_tag).await?;
     println!("   📋 Captured digest: {}", pushed_digest);
 
@@ -2408,7 +2408,7 @@ pub async fn release_rust_service(
     }
 
     println!();
-    println!("Step 3/9: {}", "Running database migrations...".bold());
+    crate::ui::print_numbered_step_heading("3/9", "Running database migrations...");
     let image_tag = deploy_tag.clone();
     crate::commands::migrations::run_migrations(
         &config,
@@ -2428,7 +2428,7 @@ pub async fn release_rust_service(
 
     // Step 4: Deploy (commits manifest changes to git) - AFTER migrations pass
     println!();
-    println!("Step 4/9: {}", "Deploying via GitOps...".bold());
+    crate::ui::print_numbered_step_heading("4/9", "Deploying via GitOps...");
     let git_sha = deploy_rust_service_with_tag(
         service.clone(),
         manifest,
@@ -2443,7 +2443,7 @@ pub async fn release_rust_service(
 
     // Step 5: Flux reconcile (source + kustomization)
     println!();
-    println!("Step 5/9: {}", "Syncing deployment with Flux...".bold());
+    crate::ui::print_numbered_step_heading("5/9", "Syncing deployment with Flux...");
     crate::commands::flux::reconcile(namespace.clone()).await?;
 
     // Step 5.5: Verify deployment has correct image tag after flux reconcile
@@ -2469,7 +2469,7 @@ pub async fn release_rust_service(
 
     if wait_for_rollout {
         println!();
-        println!("Step 6/9: {}", "Waiting for deployment rollout...".bold());
+        crate::ui::print_numbered_step_heading("6/9", "Waiting for deployment rollout...");
         crate::commands::flux::wait_for_deployment(
             service.clone(),
             namespace.clone(),
@@ -2490,7 +2490,7 @@ pub async fn release_rust_service(
     // Only runs for services with novasearch.enabled = true in deploy.yaml
     if crate::commands::search_sync::should_run_novasearch_sync(&deploy_config) {
         println!();
-        println!("Step 6.5/9: {}", "Running search service sync...".bold());
+        crate::ui::print_numbered_step_heading("6.5/9", "Running search service sync...");
         let service_dir = std::path::Path::new(".");
         crate::commands::search_sync::run_novasearch_sync(service_dir, &namespace, &deploy_config)
             .await?;
@@ -2498,12 +2498,12 @@ pub async fn release_rust_service(
 
     // Step 7: Extract GraphQL schema
     println!();
-    println!("Step 7/9: {}", "Extracting GraphQL schema...".bold());
+    crate::ui::print_numbered_step_heading("7/9", "Extracting GraphQL schema...");
     crate::commands::federation::extract_schema(service.clone(), &deploy_config).await?;
 
     // Step 8: Update GraphQL Federation (Hive Router)
     println!();
-    println!("Step 8/9: {}", "Updating Hive Router federation...".bold());
+    crate::ui::print_numbered_step_heading("8/9", "Updating Hive Router federation...");
     crate::commands::federation::update_federation(
         service.clone(),
         namespace.clone(),
@@ -2680,7 +2680,7 @@ pub async fn release_rust_service(
                 .dimmed()
         );
     } else {
-        println!("Step 9/9: {}", "Post-release FluxCD health check...".bold());
+        crate::ui::print_numbered_step_heading("9/9", "Post-release FluxCD health check...");
         // Wait up to 10 minutes for all kustomizations to reconcile (was 5 minutes)
         // Longer timeout handles complex deployments with multiple services
         crate::commands::flux::health_check_with_retry("post-release", 600, 10).await?;

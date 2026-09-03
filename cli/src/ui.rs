@@ -514,6 +514,73 @@ pub fn write_step_heading<W: std::io::Write>(w: &mut W, title: &str) -> std::io:
     writeln!(w, "{}", title.bold())
 }
 
+/// Prints the one-line `Step <label>: <title>.bold()` labeled-step-heading
+/// grammar 23 pre-lift consumer sites spelled inline as
+/// `println!("Step <label>: {}", "<TITLE>".bold());` across
+/// `commands/rust_service.rs` (two multi-step deployment pipelines —
+/// `deploy_rust_service` steps 0/0.5/1/1.5/2/3/4/4.5/5/6/7 and
+/// `release_rust_service` steps 0/8, 1/8, 2/9, 2.5/9, 3/9, 4/9, 5/9,
+/// 6/9, 6.5/9, 7/9, 8/9, 9/9). Marks the start of one numbered step
+/// inside a multi-step pipeline, the label carrying the step's ordinal
+/// (`"1"`, `"1.5"`) or fraction (`"1/8"`, `"6.5/9"`) so the operator can
+/// read progress at a glance ("we are at step 3 of 9").
+///
+/// # Distinct from the other `ui::print_*` primitives
+///
+/// [`print_step_heading`] is a bare `<title>.bold()` line with no
+/// numeric context — its consumer sites are inside pipelines whose
+/// steps are enumerated by their bodies alone ("G1: cargo check",
+/// "Backend Gates"), not by a `Step <label>: ` prefix the operator
+/// counts against a known total. [`print_phase_heading`] is the
+/// two-line phase-level opening (`.bold().underline()` + framing
+/// blank) one scope above a numbered step. [`print_section_header`] is
+/// a `═`-rule + bold-title triple around a section opening. This
+/// primitive carries the labeled-step grammar: an UNCOLORED `Step
+/// <label>: ` prefix (so the label sits in the surrounding body
+/// palette) followed by a `.bold()` title (so the eye jumps to the
+/// title text rather than the ordinal). The two multi-step pipelines
+/// in `commands/rust_service.rs` are the only pre-lift consumers of
+/// this grammar in the crate — every other module's stepwise heading
+/// either omits the numeric label ([`print_step_heading`]) or wraps
+/// its `println!` in a multi-line `format!` because the title itself
+/// composes runtime state.
+///
+/// # Compounding
+///
+/// Pre-lift 23 sibling sites each restated the `println!("Step
+/// <label>: {}", "<TITLE>".bold())` grammar verbatim. A future
+/// adjustment (a swap of `Step ` for a locale-neutral `[<label>] `
+/// prefix, a promotion of the label to `.cyan()` for visual separation
+/// from the title, an OTLP `step_start` span wired alongside the
+/// print, a swap of `.bold()` for `.bold().underline()` under a
+/// heavier step-vs-substep distinction, a `Step <label> of <total>: `
+/// long-form spelled from a `(current, total)` typed pair rather than
+/// the operator hand-formatting `"<n>/<total>"` into the label) had to
+/// hit 23 sites in lockstep or drift the visual grammar; post-lift it
+/// hits ONE typed body. Delegates to [`write_numbered_step_heading`]
+/// against [`std::io::stdout()`]; the writer split exists so the
+/// fail-before-pass test can pin the one-line body, the `Step
+/// <label>: ` uncolored prefix, and the `\x1b[1m` bold sequence on the
+/// title by inspecting emitted bytes rather than shelling out and
+/// grepping stdout.
+pub fn print_numbered_step_heading(label: &str, title: &str) {
+    let _ = write_numbered_step_heading(&mut std::io::stdout().lock(), label, title);
+}
+
+/// Writer-taking sibling to [`print_numbered_step_heading`]. Emits the
+/// single `Step <label>: <title>.bold()` line via [`writeln!`] against
+/// the supplied writer. [`print_numbered_step_heading`] is the stdout
+/// adapter; this variant exists so tests can pin the one-line body,
+/// the uncolored `Step <label>: ` prefix, and the `\x1b[1m` bold
+/// sequence on the title without capturing stdout.
+pub fn write_numbered_step_heading<W: std::io::Write>(
+    w: &mut W,
+    label: &str,
+    title: &str,
+) -> std::io::Result<()> {
+    writeln!(w, "Step {}: {}", label, title.bold())
+}
+
 /// Prints the two-line bold-underlined phase-heading grammar 6 pre-lift
 /// consumer sites spelled inline as `println!("{}", "<TITLE>".bold().underline());`
 /// immediately followed by `println!();` across `commands/prerelease.rs`
@@ -1806,6 +1873,145 @@ mod tests {
                  `crate::ui::print_step_heading(\"<TITLE>\")` — the \
                  primitive body every one-line bold step-heading in the \
                  crate now delegates through."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_numbered_step_heading`].
+    /// Pins the exact single-line body every pre-lift consumer spelled
+    /// verbatim (`println!("Step <label>: {}", "<TITLE>".bold());`). A
+    /// silent contract drift a future rewrite might introduce — dropping
+    /// `.bold()` on the title so the label loses emphasis, swapping the
+    /// literal `Step ` prefix for a locale-neutral `[<label>] ` shape
+    /// without touching consumer sites' expectations, coloring the
+    /// `Step <label>: ` prefix into a palette that competes with the
+    /// surrounding body text, promoting the trailing `\n` off via
+    /// `write!` instead of `writeln!` — flips this assertion rather than
+    /// compiling and silently diverging the 23 consumer sites' visual
+    /// grammar.
+    #[test]
+    fn write_numbered_step_heading_emits_step_prefix_then_bold_title_line() {
+        // Force ANSI emission (colored auto-drops sequences on a
+        // non-tty stdout) and serialize against peer banner tests
+        // via [`AnsiOverrideForTest`]; its Drop restores colored's
+        // auto-detection on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`], closing the set-write-unset window
+        // without a manual [`colored::control::unset_override`] call
+        // that a future test author could omit.
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_numbered_step_heading(&mut buf, "2.5/9", "Verifying image in registry...")
+            .expect("write_numbered_step_heading against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf).expect(
+            "write_numbered_step_heading must emit valid UTF-8 (the pre-lift println!s did)",
+        );
+
+        // Exactly one line — the pre-lift stanza is one `println!`,
+        // not two, and carries no framing blank. A refactor that
+        // slips a leading or trailing blank into the primitive body
+        // fails here.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_numbered_step_heading must emit exactly one line — \
+             the pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The uncolored `Step <label>: ` prefix reaches the rendered
+        // line verbatim in the surrounding body palette; a fusion that
+        // colors the prefix (a "match the title's bold on the label
+        // too" cleanup) inserts an ANSI escape between `Step ` and
+        // the label and fails here.
+        assert!(
+            lines[0].starts_with("Step 2.5/9: "),
+            "line must start with the uncolored `Step 2.5/9: ` prefix \
+             — every pre-lift consumer spelled the literal `\"Step \
+             <label>: {{}}\"` format string with no ANSI wrapping on \
+             the prefix; got {:?}",
+            lines[0]
+        );
+
+        // The title text reaches the rendered line verbatim; a fusion
+        // that hoists the title off the parameter and pins it to a
+        // constant fails here.
+        assert!(
+            lines[0].contains("Verifying image in registry..."),
+            "line must carry the title verbatim; got {:?}",
+            lines[0]
+        );
+
+        // The `bold` ANSI sequence reaches the rendered line on the
+        // TITLE portion; a fusion that drops `.bold()` (a "just print
+        // the string, it's shorter" cleanup) fails here.
+        assert!(
+            lines[0].contains("\x1b[1m"),
+            "line must carry the `bold` ANSI sequence (`\\x1b[1m`) \
+             — every pre-lift consumer spelled `.bold()` on the \
+             title; got {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `println!` (not `print!`), so the newline is part of the
+        // contract. A fusion that swapped `writeln!` for `write!`
+        // fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_numbered_step_heading must emit a trailing `\\n` \
+             (the pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the caller sites in [`commands/rust_service.rs`] no
+    /// longer spell the `println!("Step <label>: {}", "<TITLE>".bold());`
+    /// shape inline. Structural regression shield — without it, a
+    /// future refactor could silently re-inline the one-liner (e.g. a
+    /// "just call `println!` directly, it's shorter" cleanup) and
+    /// reopen the 23-site duplication class this lift closed. Enforced
+    /// at the module body before its `#[cfg(test)]` region so a
+    /// test-support mention of the raw shape does not defeat the
+    /// shield. The exact-shape needle `println!("Step ` co-occurring
+    /// with `".bold());` on the SAME line uniquely identifies the
+    /// pre-lift restatement — the two multi-line
+    /// `println!("Step <label>: {}", "…".dimmed())` `skip_flux_health_check`
+    /// fall-through variants stay unshielded because they are morally-
+    /// adjacent shapes with their own scope (bold vs. dimmed marks the
+    /// active-vs-skipped step distinction), not this one.
+    #[test]
+    fn print_numbered_step_heading_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[(
+            include_str!("commands/rust_service.rs"),
+            "commands/rust_service.rs",
+        )];
+        for (source, module_path) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                assert!(
+                    !(line.contains("println!(\"Step ") && line.contains("\".bold());")),
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `println!(\"Step <label>: {{}}\", \"<TITLE>\".bold());` \
+                     labeled-step-heading stanza — that one-liner was \
+                     lifted onto `crate::ui::print_numbered_step_heading`. \
+                     A re-inline would silently reopen the 23-site \
+                     duplication class this shield exists to close. \
+                     Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            assert!(
+                body.contains("crate::ui::print_numbered_step_heading("),
+                "{module_path} body must forward to \
+                 `crate::ui::print_numbered_step_heading(\"<LABEL>\", \
+                 \"<TITLE>\")` — the primitive body every one-line \
+                 `Step <label>: <title>.bold()` labeled-step-heading in \
+                 the crate now delegates through."
             );
         }
     }
