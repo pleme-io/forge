@@ -139,16 +139,57 @@ pub fn test(working_dir: &str, architecture: &str) -> Result<()> {
     Ok(())
 }
 
+/// Spawn `terraform <argv>` in `working_dir` scoped to `workspace` via
+/// `TF_WORKSPACE`, routing status classification through
+/// [`run_inherited_status_sync`]. The `op` label the primitive emits is
+/// `format!("terraform {} for workspace {}", argv[0], workspace)`, matching
+/// the pre-lift dialect of `plan`/`apply`/`destroy`/`status` verbatim so
+/// operator log-scrapers keyed on the pre-lift message shape survive the
+/// lift by construction (`terraform apply for workspace prod failed
+/// (exit 1)`, etc.).
+///
+/// Pre-lift four sibling stanzas (`plan`, `apply`, `destroy`, `status`)
+/// each hand-rolled the same six lines: `terraform_bin()` sigil
+/// resolution, `Command::new(&terraform)`, `.args(...).current_dir(...
+/// ).env("TF_WORKSPACE", workspace)`, `run_inherited_status_sync(cmd,
+/// &format!("terraform <sub> for workspace {}", workspace))`. Four
+/// occurrences past the ≥2 duplication threshold the forge command-
+/// module surface enforces (THEORY §VI.1 generation-over-composition;
+/// the Compounding Directive PRIME rule). Post-lift, adding a fifth
+/// terraform subcommand (`terraform state list`, `terraform import`, …)
+/// is one call, and the `TF_WORKSPACE` env-var contract lives at ONE
+/// body — a future rename (say to a `-workspace` CLI flag) hits one
+/// site, not four.
+///
+/// # Non-goals
+///
+/// - Any non-`TF_WORKSPACE`-scoped terraform invocation. This helper
+///   bakes both the workspace env-var contract AND the op-label grammar
+///   into its body; callers that need a different env-var contract or
+///   op-label grammar keep the direct [`run_inherited_status_sync`]
+///   surface.
+/// - Any capture of stdout/stderr — the primitive inherits both to the
+///   parent process (via `run_inherited_status_sync`'s canonical
+///   `Stdio::inherit()` override), mirroring the pre-lift stanzas
+///   verbatim.
+fn run_terraform_workspace(argv: &[&str], working_dir: &str, workspace: &str) -> Result<()> {
+    let sub = argv.first().copied().unwrap_or("");
+    let terraform = terraform_bin();
+    let mut cmd = Command::new(&terraform);
+    cmd.args(argv)
+        .current_dir(working_dir)
+        .env("TF_WORKSPACE", workspace);
+    run_inherited_status_sync(
+        cmd,
+        &format!("terraform {} for workspace {}", sub, workspace),
+    )
+}
+
 /// Run terraform plan for a pangea workspace.
 pub fn plan(workspace: &str, working_dir: &str) -> Result<()> {
     info!("Running terraform plan for workspace: {}", workspace);
 
-    let terraform = terraform_bin();
-    let mut cmd = Command::new(&terraform);
-    cmd.args(["plan", "-input=false"])
-        .current_dir(working_dir)
-        .env("TF_WORKSPACE", workspace);
-    run_inherited_status_sync(cmd, &format!("terraform plan for workspace {}", workspace))?;
+    run_terraform_workspace(&["plan", "-input=false"], working_dir, workspace)?;
 
     info!("Plan complete for workspace: {}", workspace);
     Ok(())
@@ -170,12 +211,7 @@ pub fn apply(workspace: &str, working_dir: &str, auto_approve: bool) -> Result<(
         args.push("-auto-approve");
     }
 
-    let terraform = terraform_bin();
-    let mut cmd = Command::new(&terraform);
-    cmd.args(&args)
-        .current_dir(working_dir)
-        .env("TF_WORKSPACE", workspace);
-    run_inherited_status_sync(cmd, &format!("terraform apply for workspace {}", workspace))?;
+    run_terraform_workspace(&args, working_dir, workspace)?;
 
     info!("Apply complete for workspace: {}", workspace);
     Ok(())
@@ -252,15 +288,7 @@ pub fn destroy(workspace: &str, working_dir: &str, auto_approve: bool) -> Result
         args.push("-auto-approve");
     }
 
-    let terraform = terraform_bin();
-    let mut cmd = Command::new(&terraform);
-    cmd.args(&args)
-        .current_dir(working_dir)
-        .env("TF_WORKSPACE", workspace);
-    run_inherited_status_sync(
-        cmd,
-        &format!("terraform destroy for workspace {}", workspace),
-    )?;
+    run_terraform_workspace(&args, working_dir, workspace)?;
 
     info!("Destroy complete for workspace: {}", workspace);
     Ok(())
@@ -286,12 +314,7 @@ pub fn drift(workspace: &str, working_dir: &str, architecture: &str) -> Result<(
 pub fn status(workspace: &str, working_dir: &str) -> Result<()> {
     info!("Checking status for workspace: {}", workspace);
 
-    let terraform = terraform_bin();
-    let mut cmd = Command::new(&terraform);
-    cmd.args(["show", "-no-color"])
-        .current_dir(working_dir)
-        .env("TF_WORKSPACE", workspace);
-    run_inherited_status_sync(cmd, &format!("terraform show for workspace {}", workspace))?;
+    run_terraform_workspace(&["show", "-no-color"], working_dir, workspace)?;
 
     Ok(())
 }
@@ -508,10 +531,10 @@ mod tests {
     /// (6cb9442). Same three-primitive discipline: negative side forbids
     /// the inline `.status()` builder-terminator at any code line in the
     /// module body; positive side pins that `run_inherited_status_sync(`
-    /// appears at ≥6 code lines (one per pre-lift spawn), so a
-    /// regression that dropped every delegation cannot leave the
-    /// negative scan trivially satisfied by absence. Both hits route
-    /// through [`crate::test_support::code_line_hits`] for
+    /// appears at ≥3 code lines, so a regression that dropped every
+    /// delegation cannot leave the negative scan trivially satisfied by
+    /// absence. Both hits route through
+    /// [`crate::test_support::code_line_hits`] for
     /// anti-docstring-self-match discipline. Scan bounds from file start
     /// to the FIRST `\n#[cfg(test)]\n` marker (this test module's own
     /// opener), so this shield's own body — the string literal
@@ -520,14 +543,130 @@ mod tests {
     /// Same boundary discipline as the sibling shield
     /// `test_crossplane_status_spawns_route_through_run_inherited_status_sync`
     /// (6cb9442).
+    ///
+    /// # Floor lowered from ≥6 to ≥3 by the `run_terraform_workspace` lift
+    ///
+    /// Pre-lift each of the four terraform stanzas (`plan`, `apply`,
+    /// `destroy`, `status`) carried its own inline
+    /// `run_inherited_status_sync(cmd, ...)` call, so the module body
+    /// held six direct delegations (four terraform + `test` + `verify`,
+    /// with `verify` counted via the wrapped-form
+    /// `run_bin_args_inherited_status_sync`). Post-lift the four
+    /// terraform stanzas share one delegation inside
+    /// [`super::run_terraform_workspace`], collapsing the four inline
+    /// `run_inherited_status_sync(` code-line hits to ONE inside the
+    /// helper body. The remaining three delegation call sites — `test`
+    /// (direct), `verify` (wrapped), and the shared helper (direct) —
+    /// still make the negative `.status()` scan load-bearing: a
+    /// regression that dropped any one of the three would leave a spawn
+    /// site with no delegation guard, and the negative scan alone would
+    /// not catch it. Sibling shield
+    /// [`test_terraform_workspace_env_scope_lives_in_helper_only_body`]
+    /// pins the concentration itself — that no
+    /// `.env("TF_WORKSPACE", ...)` call may live outside the helper
+    /// body — so the four pre-lift call sites cannot silently re-inline
+    /// their delegation without also re-inlining a `TF_WORKSPACE` env
+    /// set that shield catches.
     #[test]
     fn test_pangea_infra_status_spawns_route_through_run_inherited_status_sync() {
         crate::test_support::assert_source_routes_status_only_spawns_through_run_inherited_status_sync(
             include_str!("pangea_infra.rs"),
             "commands/pangea_infra.rs",
-            6,
-            "all six status-only spawns \
-             (`test`/`plan`/`apply`/`verify`/`destroy`/`status`)",
+            3,
+            "all three status-only delegation call sites \
+             (`test` direct, `verify` wrapped, and the \
+             `run_terraform_workspace` helper shared by \
+             `plan`/`apply`/`destroy`/`status`)",
+        );
+    }
+
+    /// Concentration shield: every `TF_WORKSPACE` env-var scope in
+    /// `commands/pangea_infra.rs` lives inside the
+    /// [`super::run_terraform_workspace`] helper body — the four
+    /// pre-lift terraform call sites (`plan`, `apply`, `destroy`,
+    /// `status`) each hand-rolled `.env("TF_WORKSPACE", workspace)`
+    /// alongside the [`std::process::Command`] construction, and the
+    /// lift folded all four into ONE `.env("TF_WORKSPACE", workspace)`
+    /// call inside the helper. Post-lift a new terraform subcommand
+    /// stanza that re-inlined `.env("TF_WORKSPACE", ...)` would (a) miss
+    /// the helper's op-label grammar (the pre-lift dialect
+    /// `terraform <sub> for workspace <ws>`), (b) miss the helper's
+    /// `Stdio::inherit()` override (routed through
+    /// `run_inherited_status_sync`), and (c) re-open the four-way
+    /// duplication the lift closed. This shield catches the re-inlining
+    /// at the env-var construction site, so the sibling
+    /// [`test_pangea_infra_status_spawns_route_through_run_inherited_status_sync`]
+    /// count-floor cannot be silently satisfied by a re-inlined stanza
+    /// (which would add both a `.env("TF_WORKSPACE", ...)` call and its
+    /// own `run_inherited_status_sync(` call, satisfying the ≥3 floor
+    /// while re-introducing the four-way duplication).
+    ///
+    /// Scan bounds from the top of the `run_terraform_workspace` helper
+    /// body's OPENING brace to the FIRST `\n#[cfg(test)]\n` marker (this
+    /// test module's own opener), skipping the helper body itself so
+    /// the one canonical `.env("TF_WORKSPACE", workspace)` call inside
+    /// the helper does not false-match the shield. The forbidden needle
+    /// `.env("TF_WORKSPACE"` is reconstructed via [`format!`] so this
+    /// shield's own prose above the assertion cannot false-match
+    /// itself.
+    #[test]
+    fn test_terraform_workspace_env_scope_lives_in_helper_only_body() {
+        const SOURCE: &str = include_str!("pangea_infra.rs");
+
+        let helper_marker = "fn run_terraform_workspace(";
+        let helper_start = SOURCE
+            .find(helper_marker)
+            .expect("run_terraform_workspace helper must be defined");
+        // Find the helper body's closing brace at column 0 (matching
+        // the top-level fn indentation): the first `\n}\n` after the
+        // helper start.
+        let helper_body_end_rel = SOURCE[helper_start..]
+            .find("\n}\n")
+            .expect("run_terraform_workspace helper body must terminate with a top-level `}`");
+        let after_helper = helper_start + helper_body_end_rel + "\n}\n".len();
+
+        let tests_start = SOURCE
+            .find("\n#[cfg(test)]\n")
+            .expect("test module marker must follow the module body");
+
+        // Before-helper window (top of module → helper start) and
+        // after-helper window (helper end → test module opener) must
+        // BOTH be free of any `.env("TF_WORKSPACE"` call.
+        let before_helper = &SOURCE[..helper_start];
+        let after_helper_before_tests = &SOURCE[after_helper..tests_start];
+
+        let needle = format!(".env(\"{}\"", "TF_WORKSPACE");
+
+        let before_hits = crate::test_support::code_line_hits(before_helper, &needle);
+        let after_hits = crate::test_support::code_line_hits(after_helper_before_tests, &needle);
+
+        assert!(
+            before_hits.is_empty() && after_hits.is_empty(),
+            "commands/pangea_infra.rs: every `.env(\"TF_WORKSPACE\", ...)` \
+             call must live inside the `run_terraform_workspace` helper \
+             body — no pre-helper or post-helper call site may re-inline \
+             the env-var scope. This shield catches a regression that \
+             re-inlined the four pre-lift terraform stanzas (plan / apply \
+             / destroy / status) and thereby re-opened the four-way \
+             duplication the helper closed. Found: before-helper {before_hits:?}, \
+             after-helper {after_hits:?}"
+        );
+
+        // Positive side: the helper body itself must set `TF_WORKSPACE`
+        // exactly once, so a regression that deleted the env-var scope
+        // from the helper (and thereby silently stopped scoping every
+        // terraform spawn to a workspace) cannot leave the negative
+        // scan trivially satisfied by absence.
+        let helper_body = &SOURCE[helper_start..after_helper];
+        let helper_hits = crate::test_support::code_line_hits(helper_body, &needle);
+        assert_eq!(
+            helper_hits.len(),
+            1,
+            "commands/pangea_infra.rs: `run_terraform_workspace` helper body \
+             must set `TF_WORKSPACE` exactly once — a missing set would \
+             silently drop the workspace scope from every terraform spawn; \
+             a duplicated set would spread the env-var contract across the \
+             helper body rather than concentrate it. Found: {helper_hits:?}"
         );
     }
 }
