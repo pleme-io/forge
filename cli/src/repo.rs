@@ -2904,6 +2904,105 @@ pub fn msg_with_secs_1(msg: &str, d: std::time::Duration) -> String {
     format!("{} ({:.1}s)", msg, d.as_secs_f64())
 }
 
+/// Suffix a step-outcome `label` with the fleet-standard "completed
+/// in {:.1}s" elapsed-time tail — one decimal-place seconds, single
+/// space between `label` and the tail, no parentheses, no trailing
+/// content — and return the composed owned [`String`].
+///
+/// Peer of [`msg_with_secs_1`] on a DISTINCT dialect: the parenthesized
+/// `<message> ({:.1}s)` step-outcome surround grammar the seventeen
+/// `msg_with_secs_1` consumers share is one convention; this primitive's
+/// `<label> completed in {:.1}s` surround is the other convention the
+/// fleet spells at the `ui::print_info(&format!(...))` completion-timing
+/// surface. The two spellings are byte-distinct and do NOT collapse into
+/// one primitive: a `msg_with_secs_1("<x> completed in", d)` call would
+/// render `<x> completed in (0.0s)` — the parenthesized tag misplaces
+/// the temporal preposition and reads wrong to an operator. The
+/// non-goals list on [`msg_with_secs_1`] explicitly reserves the
+/// `in {:.Ns}` surround as a distinct dialect, and this primitive is
+/// that dialect's owner.
+///
+/// The pre-lift spelling is
+/// ```text
+/// format!("<label> completed in {:.1}s", <duration>.as_secs_f64())
+/// ```
+/// carried by five sibling consumer sites at
+/// `commands/e2e.rs`, all inside the same completion-timing shape
+/// (`ui::print_info(&format!(...))` wrapping an
+/// `Instant::now()` .. `.elapsed()` measurement):
+///
+/// - `run_backend_unit_tests` — `"Backend unit tests"`
+/// - `run_frontend_unit_tests` (report branch) — `"Frontend tests"`
+/// - `run_frontend_unit_tests` (no-report branch) — `"Frontend unit tests"`
+/// - `run_backend_integration_tests` — `"Integration tests"`
+/// - `run_e2e_tests` — `"E2E tests"`
+///
+/// Five sites is past THEORY §VI.1's three-times-is-a-law threshold, and
+/// the shape is byte-identical modulo the label — the same one-body
+/// discipline that seeded [`msg_with_secs_1`] applies here.
+///
+/// # The three grammar invariants this primitive pins at one place
+///
+/// 1. **Precision.** One decimal digit (`{:.1}`) — a body respell to
+///    `{:.0}` would quantize a signal-carrying 250ms transient to
+///    `0s`; a `{:.2}` respell would drift the render into the
+///    `commands/integration_tests.rs` `{:.2}s` step-summary dialect.
+///    Pinned by
+///    [`tests::msg_completed_in_secs_1_pins_one_decimal_place_precision`].
+/// 2. **Surround grammar.** The tail renders as ` completed in NNN.Ns`
+///    — a single leading space, the literal `completed in`, one more
+///    space, the numeric render, the unit suffix `s`, no trailing
+///    content. A future respell to ` finished in NNN.Ns` or
+///    ` (NNN.Ns)` (the [`msg_with_secs_1`] parenthesized dialect)
+///    would silently break every operator log-scraper matching the
+///    pre-lift shape. Pinned by
+///    [`tests::msg_completed_in_secs_1_pins_surround_grammar`].
+/// 3. **Unit suffix.** The trailing character is `s` (seconds), not
+///    `ms` / `μs` / `sec` / no-unit — the caller passes a [`Duration`]
+///    and the primitive projects it via [`Duration::as_secs_f64`], so
+///    the render always agrees with the projection. A respell to
+///    `{:.1}ms` with the same projection would over-report by 1000×.
+///    Pinned by
+///    [`tests::msg_completed_in_secs_1_seconds_unit_agrees_with_projection`].
+///
+/// # Typed input
+///
+/// The `d: Duration` parameter (not `f64`) is the same load-bearing
+/// choice [`msg_with_secs_1`] documents: pinning [`Duration`] forces
+/// the caller to name the type at construction (`start.elapsed()`) and
+/// lets the primitive body own the [`Duration::as_secs_f64`] projection
+/// at ONE place.
+///
+/// # Non-goals
+///
+/// This primitive is deliberately NOT the home for:
+/// - **Extra-adverb variants** such as
+///   `info!("Migrations completed successfully in {:.1}s", ...)` in
+///   `services/migration_service.rs`. The literal `completed`+space+`in`
+///   run is broken here by the intervening `successfully`, so a byte-
+///   identical composition through this primitive is not possible
+///   without letting the caller pass `"Migrations completed successfully"`
+///   — which would drift the pin above from a single-word tail to a
+///   variable-tail shape, and drop the compile-time guarantee the shape
+///   invariants above defend.
+/// - **Interleaved-arg shapes** such as
+///   `info!("{} {} completed in {:.1}s", icon, step_name, d.as_secs_f64())`
+///   in `services/release_service.rs`. The two-arg prefix (icon + name)
+///   is a distinct shape that would ask the caller to pre-`format!` the
+///   prefix and lose the compile-time argument-count check on the
+///   composed spelling.
+/// - **`{:.2}s` precision** step-summary sites in
+///   `commands/integration_tests.rs` (`"Test suite completed in {:.2}s"`)
+///   — a distinct dialect with two decimal digits. A future
+///   `msg_completed_in_secs_2` sibling is the natural next lift when
+///   that shape crosses the three-is-a-law threshold with a matching
+///   `Duration` input; today the `integration_tests.rs` sites carry
+///   pre-projected `f64` bindings and heterogeneous surrounds
+///   (`"Total Duration: {:.2}s"` etc.), so the collapse is not free.
+pub fn msg_completed_in_secs_1(label: &str, d: std::time::Duration) -> String {
+    format!("{} completed in {:.1}s", label, d.as_secs_f64())
+}
+
 /// Run a command in a specific directory, restoring the original directory afterward
 ///
 /// # Arguments
@@ -9088,5 +9187,173 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// [`msg_completed_in_secs_1`] must render the elapsed-time tail with
+    /// one decimal digit of sub-second precision (the fleet-standard
+    /// `{:.1}s` on this `<label> completed in {:.1}s` dialect). The five
+    /// pre-lift consumer sites in `commands/e2e.rs` each spelled `{:.1}s`
+    /// inline; the primitive body OWNS this choice at one place so a
+    /// future body respell to `{:.0}s` (which quantizes a 250ms transient
+    /// to `0s`) or `{:.2}s` (which drifts the render into the
+    /// `commands/integration_tests.rs` step-summary dialect) fails loud
+    /// here rather than propagating silently to every consumer.
+    #[test]
+    fn msg_completed_in_secs_1_pins_one_decimal_place_precision() {
+        let rendered = msg_completed_in_secs_1("op", std::time::Duration::from_millis(1234));
+        assert_eq!(
+            rendered, "op completed in 1.2s",
+            "msg_completed_in_secs_1() must render 1234ms as `1.2s` (one \
+             decimal digit) — a `{{:.0}}` respell would render `1s` \
+             and silence the sub-second signal five consumer sites depend \
+             on; a `{{:.2}}` respell would render `1.23s` and drift into \
+             the `integration_tests.rs` `{{:.2}}s` step-summary dialect. \
+             Got: {rendered:?}"
+        );
+
+        let subsecond = msg_completed_in_secs_1("op", std::time::Duration::from_millis(260));
+        assert_eq!(
+            subsecond, "op completed in 0.3s",
+            "msg_completed_in_secs_1() must render 260ms as `0.3s` — a \
+             `{{:.0}}` respell would render `0s` and silence a \
+             signal-carrying sub-second transient. Got: {subsecond:?}"
+        );
+    }
+
+    /// [`msg_completed_in_secs_1`] must render the elapsed-time tail with
+    /// the exact ` completed in NNN.Ns` grammar — a single leading space,
+    /// the literal `completed`+space+`in`+space, the numeric render, the
+    /// unit suffix `s`, no trailing content. A hypothetical body respell
+    /// to ` finished in NNN.Ns`, ` in NNN.Ns` (dropping the `completed`),
+    /// or ` (NNN.Ns)` (drifting into the [`msg_with_secs_1`]
+    /// parenthesized dialect) would silently break every downstream
+    /// operator log-scraper matching the pre-lift shape.
+    #[test]
+    fn msg_completed_in_secs_1_pins_surround_grammar() {
+        let rendered =
+            msg_completed_in_secs_1("Backend unit tests", std::time::Duration::from_millis(3400));
+        assert_eq!(
+            rendered, "Backend unit tests completed in 3.4s",
+            "msg_completed_in_secs_1() must render with the ` completed \
+             in NNN.Ns` grammar — single leading space, literal \
+             `completed in`, one more space, numeric render, `s`, no \
+             trailing content. A respell to ` finished in NNN.Ns`, \
+             ` in NNN.Ns`, or ` (NNN.Ns)` would break the pre-lift \
+             scraper shape every downstream consumer expects, and — \
+             for the parenthesized-tag respell specifically — drift the \
+             render into the DISTINCT `msg_with_secs_1` dialect (see \
+             the peer's own paren-grammar test). Got: {rendered:?}"
+        );
+    }
+
+    /// [`msg_completed_in_secs_1`]'s unit suffix (`s`) MUST agree with
+    /// the numeric projection [`Duration::as_secs_f64`]. A hypothetical
+    /// body that respelled the render as `{:.1}ms` while keeping the
+    /// `as_secs_f64()` projection would over-report by 1000× (a
+    /// 5-second operation would render as `5.0ms`). This test pins
+    /// both halves against a known duration so the two halves cannot
+    /// drift independently.
+    #[test]
+    fn msg_completed_in_secs_1_seconds_unit_agrees_with_projection() {
+        let d = std::time::Duration::from_secs(5);
+        let rendered = msg_completed_in_secs_1("build", d);
+        assert_eq!(
+            rendered, "build completed in 5.0s",
+            "msg_completed_in_secs_1() for a 5-second Duration must \
+             render the numeric `5.0` and the unit suffix `s` — a \
+             body respell to `{{:.1}}ms` with the same `as_secs_f64()` \
+             projection would over-report by 1000× (rendering `5.0ms` \
+             for a 5-second operation). Got: {rendered:?}"
+        );
+
+        // Independent check: the numeric half agrees with the
+        // projection function this primitive body calls internally.
+        let projected = d.as_secs_f64();
+        assert_eq!(
+            projected, 5.0,
+            "Duration::as_secs_f64() on a 5-second Duration must \
+             project 5.0 — if this ever changes, \
+             msg_completed_in_secs_1's render invariant above changes \
+             with it. Got: {projected}"
+        );
+    }
+
+    /// [`msg_completed_in_secs_1`] threads the caller's `label` verbatim
+    /// — no truncation, no re-casing, no re-wrapping. The five pre-lift
+    /// consumer sites each pass a short, human-authored English phrase
+    /// (`"Backend unit tests"`, `"E2E tests"`); a future body respell
+    /// that folded the label through `label.to_lowercase()` or
+    /// `label.trim()` would silently alter operator-facing prose. This
+    /// test pins byte-for-byte pass-through on a label containing mixed
+    /// case boundaries the two respells would each touch.
+    #[test]
+    fn msg_completed_in_secs_1_threads_the_caller_label_verbatim() {
+        let rendered =
+            msg_completed_in_secs_1("Backend Unit Tests", std::time::Duration::from_millis(100));
+        assert!(
+            rendered.starts_with("Backend Unit Tests completed in "),
+            "msg_completed_in_secs_1() must thread the caller's label \
+             verbatim (including mixed case) — a `label.to_lowercase()` \
+             respell would render `backend unit tests completed in ...` \
+             and silently alter operator-facing prose. Got: {rendered:?}"
+        );
+    }
+
+    /// [`msg_completed_in_secs_1`] must OWN the projection from
+    /// [`Duration`] to seconds on the closed `commands/e2e.rs` sites —
+    /// no site re-inlines the pre-lift
+    /// `format!("<label> completed in {:.1}s", d.as_secs_f64())` grammar.
+    /// The shield walks each of the five closed literal spellings and
+    /// refuses any occurrence, so a silent respell that reintroduces
+    /// the inline `completed in {:.1}s` grammar at these sites fails at
+    /// this test rather than propagating.
+    ///
+    /// `commands/e2e.rs` is the ONE file this lift closes, and every
+    /// occurrence of the `completed in {:.1}s` tail in that file is a
+    /// closed site (no out-of-scope survivor), so a bare
+    /// `.contains("completed in {:.1}s)"` guard on the file is also safe
+    /// as a redundant belt-and-braces check.
+    #[test]
+    fn msg_completed_in_secs_1_closed_sites_do_not_reinline_the_primitive_shape() {
+        let path = "src/commands/e2e.rs";
+        let content = std::fs::read_to_string(path).unwrap_or_else(|e| {
+            panic!(
+                "shield must read `{path}` to walk it for re-inlines \
+                 — the closed-site fleet map was frozen at the lift \
+                 boundary. Read error: {e}"
+            )
+        });
+        let closed_needles: &[&str] = &[
+            "\"Backend unit tests completed in {:.1}s\"",
+            "\"Frontend tests completed in {:.1}s\"",
+            "\"Frontend unit tests completed in {:.1}s\"",
+            "\"Integration tests completed in {:.1}s\"",
+            "\"E2E tests completed in {:.1}s\"",
+        ];
+        for needle in closed_needles {
+            assert!(
+                !content.contains(needle),
+                "shield refuses re-inline: `{path}` contains the pre-lift \
+                 closed-site spelling `{needle}` the lift replaced with a \
+                 `crate::repo::msg_completed_in_secs_1(...)` call. A \
+                 silent re-inline would reopen the precision-drift path \
+                 (a hand-swap to `{{:.0}}` or `{{:.2}}`) AND the surround-\
+                 grammar-drift path (a hand-swap to ` finished in `, \
+                 ` (NNN.Ns)`, etc.) at exactly this site — route the \
+                 value through the primitive instead."
+            );
+        }
+
+        // Belt-and-braces: no bare `completed in {:.1}s` tail survives
+        // anywhere in the file (every occurrence was a lift target).
+        assert!(
+            !content.contains("completed in {:.1}s"),
+            "shield refuses re-inline: `{path}` still contains a bare \
+             `completed in {{:.1}}s` format-string tail. The lift closed \
+             every occurrence in this file — a survivor is either a \
+             missed lift target or a silent re-inline. Route the value \
+             through `crate::repo::msg_completed_in_secs_1(...)` \
+             instead."
+        );
     }
 }
