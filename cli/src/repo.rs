@@ -1984,6 +1984,77 @@ pub fn dir_entry_name_lossy(entry: &std::fs::DirEntry) -> String {
     entry.file_name().to_string_lossy().into_owned()
 }
 
+/// Sort a slice of [`std::fs::DirEntry`] newest-first by modification
+/// time, treating an entry whose metadata or `mtime` cannot be resolved
+/// as ancient ([`std::time::SystemTime::UNIX_EPOCH`]) so it sorts to the
+/// tail rather than propagating the error to the caller.
+///
+/// # Duplication lift
+///
+/// Pre-lift two sibling `find_latest_<artifact>` selectors in the
+/// tarball-scanning surface each spelled the same byte-identical
+/// `entries.sort_by(|a, b| { b.metadata().and_then(|m| m.modified()).
+/// unwrap_or(std::time::SystemTime::UNIX_EPOCH).cmp(&a.metadata().
+/// and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::
+/// UNIX_EPOCH)) })` closure inline, each `dir/prefix`-scoped over a
+/// `Vec<DirEntry>` collected from a [`std::fs::read_dir`] walk:
+///
+/// - `commands/helm.rs::find_latest_tgz` — selects the newest
+///   `<prefix>*.tgz` under a `helm package` output directory (the
+///   packaged chart tarball whose path feeds the OCI push).
+/// - `commands/gem.rs::find_gem_file` — selects the newest
+///   `<prefix>*.gem` (excluding `.gemspec`) under a `gem build` output
+///   directory (the built gem whose path feeds the RubyGems push).
+///
+/// Both call `newest = entries[0]` after the sort, so the entire
+/// domain fact — "of the matching entries in a directory, pick the
+/// most-recently-written one" — is captured by the primitive, and
+/// consumers do not restate the mtime-comparator direction or the
+/// unreadable-metadata fallback at each site.
+///
+/// # Two silent-drift classes this closes
+///
+/// 1. **Comparator direction.** The closure spelling `b.cmp(&a)`
+///    (descending, so `entries[0]` is the newest) is one paren-swap
+///    away from `a.cmp(&b)` (ascending, so `entries[0]` is the
+///    OLDEST). At a call site named `find_latest_tgz` a swap would
+///    silently return the STALE tarball — an image tag that was
+///    packaged in a prior run of the same directory, which the OCI
+///    push would then advertise as the release. Lifting to a named
+///    primitive with a name that carries the ordering (`_desc`) and a
+///    single owner refuses the accidental swap at every future call
+///    site by construction.
+/// 2. **Unreadable-metadata fallback.** A `map_err`-style rewrite
+///    that lets a metadata failure bubble as `Err` would make the
+///    entire selector reject the directory on the first unreadable
+///    entry (a foreign-owned file, a broken symlink, an ACL denial),
+///    even when a perfectly readable matching artifact sits next to
+///    it. The `UNIX_EPOCH` fallback sorts the offending entry to the
+///    tail without failing the selector, and a single primitive keeps
+///    both call sites on the same tolerant contract.
+///
+/// # Behavior
+///
+/// - **Stability.** Uses [`slice::sort_by`], which is guaranteed
+///   stable, so entries whose mtimes tie preserve their pre-sort
+///   order (the [`std::fs::read_dir`] enumeration order). Neither
+///   call site relies on a tiebreak, but the guarantee is useful
+///   for reproducibility when two `helm package` runs land in the
+///   same clock second.
+/// - **Empty slice.** The sort is a no-op; the caller's
+///   `entries.first()` on an empty [`Vec`] correctly yields
+///   [`None`] and the caller's own `.context(...)` chain produces
+///   the "no artifact found" diagnostic.
+pub fn sort_dir_entries_by_mtime_desc(entries: &mut [std::fs::DirEntry]) {
+    fn mtime_or_epoch(entry: &std::fs::DirEntry) -> std::time::SystemTime {
+        entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+    }
+    entries.sort_by_key(|e| std::cmp::Reverse(mtime_or_epoch(e)));
+}
+
 /// Project a captured process output byte slice
 /// ([`std::process::Output::stdout`] / [`std::process::Output::stderr`],
 /// or any owned `Vec<u8>` that traveled through the same OS pipe) into
@@ -6108,6 +6179,140 @@ mod tests {
                      `.to_string()` tail one consumer at a time from \
                      the primitive's `.into_owned()` one-alloc \
                      discipline."
+                );
+            }
+        }
+    }
+
+    /// [`sort_dir_entries_by_mtime_desc`] orders three entries whose
+    /// modification times were written in ascending order so the newest
+    /// lands at index 0 and the oldest at the tail — pins the newest-
+    /// first ordering both `find_latest_tgz` (`commands/helm.rs`) and
+    /// `find_gem_file` (`commands/gem.rs`) rely on when they call
+    /// `entries.first()` after the sort to pick the freshly-packaged
+    /// artifact. A silent flip to ascending-by-mtime would return the
+    /// STALE tarball / gem — the exact class of bug the primitive
+    /// exists to close.
+    #[test]
+    fn sort_dir_entries_by_mtime_desc_orders_newest_first() {
+        let tmp = tempfile::tempdir().expect("mk tempdir");
+        for name in ["oldest.tgz", "middle.tgz", "newest.tgz"] {
+            let path = tmp.path().join(name);
+            std::fs::write(&path, name.as_bytes()).expect("write fixture");
+            // Space each file's mtime a full second apart so the sort
+            // never sees ties on a filesystem with 1-second mtime
+            // granularity (ext4, HFS+ on some setups). Sleeping is
+            // cheap and the test runs once.
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+        }
+        let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(tmp.path())
+            .expect("read_dir tempdir")
+            .filter_map(std::result::Result::ok)
+            .collect();
+        assert_eq!(entries.len(), 3, "fixture must produce three entries");
+
+        sort_dir_entries_by_mtime_desc(&mut entries);
+
+        let names: Vec<String> = entries.iter().map(dir_entry_name_lossy).collect();
+        assert_eq!(
+            names,
+            vec![
+                "newest.tgz".to_string(),
+                "middle.tgz".to_string(),
+                "oldest.tgz".to_string(),
+            ],
+            "sort_dir_entries_by_mtime_desc must place the most-recently \
+             modified entry at index 0 so the two `find_latest_<artifact>` \
+             selectors' `entries.first()` yields the freshly-packaged \
+             tarball / gem — a swap to ascending order would silently \
+             return the stale artifact one release at a time."
+        );
+    }
+
+    /// [`sort_dir_entries_by_mtime_desc`] treats an entry whose metadata
+    /// cannot be resolved as ancient ([`std::time::SystemTime::UNIX_EPOCH`])
+    /// rather than propagating the error, so a foreign-owned file, an
+    /// ACL denial, or a file removed between `read_dir` and the sort
+    /// pass sorts to the TAIL without failing the selector. Every
+    /// readable entry still lands ahead of every unreadable one, so the
+    /// caller's `entries.first()` continues to pick a valid artifact.
+    ///
+    /// Simulated here by capturing a [`std::fs::DirEntry`] and then
+    /// deleting the file the entry points at before the sort runs, so
+    /// [`std::fs::DirEntry::metadata`] surfaces
+    /// [`std::io::ErrorKind::NotFound`] — reliably reproducible in a
+    /// unit test without depending on symlink-follow semantics (which
+    /// differ across platforms) or on file permissions (which don't
+    /// survive `sudo`-less test runners).
+    #[test]
+    fn sort_dir_entries_by_mtime_desc_treats_unreadable_metadata_as_epoch() {
+        let tmp = tempfile::tempdir().expect("mk tempdir");
+        // Two real files with real mtimes, so both start with valid
+        // metadata at the moment `read_dir` enumerates them.
+        std::fs::write(tmp.path().join("readable.tgz"), b"x").expect("write readable");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(tmp.path().join("vanishes.tgz"), b"y").expect("write vanishes");
+
+        let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(tmp.path())
+            .expect("read_dir tempdir")
+            .filter_map(std::result::Result::ok)
+            .collect();
+        assert_eq!(entries.len(), 2, "fixture must produce two entries");
+
+        // Delete the newer file AFTER capturing its DirEntry: the
+        // DirEntry still points at the (now missing) path, so
+        // `entry.metadata()` returns ENOENT and the primitive's
+        // `.and_then(|m| m.modified()).unwrap_or(UNIX_EPOCH)` chain
+        // treats the entry as ancient.
+        std::fs::remove_file(tmp.path().join("vanishes.tgz")).expect("remove vanishes");
+
+        sort_dir_entries_by_mtime_desc(&mut entries);
+
+        let names: Vec<String> = entries.iter().map(dir_entry_name_lossy).collect();
+        assert_eq!(
+            names,
+            vec!["readable.tgz".to_string(), "vanishes.tgz".to_string()],
+            "sort_dir_entries_by_mtime_desc must sort the entry \
+             whose metadata cannot be resolved (deleted file → \
+             UNIX_EPOCH fallback) to the tail — a `map_err`-style \
+             rewrite that let the metadata failure bubble as `Err` \
+             would silently fail the entire selector on a directory \
+             that also contains a perfectly readable artifact."
+        );
+    }
+
+    /// Post-lift the two `find_latest_<artifact>` selectors lifted onto
+    /// [`sort_dir_entries_by_mtime_desc`] must not silently re-inline
+    /// the primitive's shape at their call sites — a re-inline would
+    /// reopen the comparator-direction and unreadable-metadata-
+    /// fallback drift the primitive was lifted to close. The source-
+    /// scan shield refuses either half of the pre-lift `b.metadata().
+    /// and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::
+    /// UNIX_EPOCH)` chain (the closure body is the load-bearing
+    /// half; the `.unwrap_or(UNIX_EPOCH)` tail is the fallback
+    /// half). Restatement at any call site is a re-fork one
+    /// consumer at a time from the primitive's owner-frozen contract.
+    #[test]
+    fn sort_dir_entries_by_mtime_desc_consumers_do_not_reinline_the_primitive_shape() {
+        for (name, source) in [
+            ("commands/helm.rs", include_str!("commands/helm.rs")),
+            ("commands/gem.rs", include_str!("commands/gem.rs")),
+        ] {
+            for needle in [
+                ".and_then(|m| m.modified())",
+                "std::time::SystemTime::UNIX_EPOCH",
+            ] {
+                assert!(
+                    !source.contains(needle),
+                    "{name} must NOT spell the inline `{needle}` — that \
+                     duplication was lifted onto \
+                     `crate::repo::sort_dir_entries_by_mtime_desc`. A \
+                     re-inline would silently reopen the comparator- \
+                     direction bug (a b/a → a/b swap returns the STALE \
+                     artifact one release at a time) and the \
+                     unreadable-metadata fallback bug (an unreadable \
+                     entry fails the whole selector instead of sorting \
+                     to the tail) the primitive discharges."
                 );
             }
         }
