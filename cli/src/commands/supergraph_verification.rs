@@ -562,7 +562,7 @@ pub async fn run_post_composition_checks(
     });
 
     // Check 4: Supergraph contains schema directive
-    let supergraph_content = fs::read_to_string(supergraph_path).await?;
+    let supergraph_content = crate::repo::read_text_async(supergraph_path).await?;
     let has_schema_directive = supergraph_content.contains("schema");
 
     checks.push(CheckResult {

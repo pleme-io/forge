@@ -4496,6 +4496,100 @@ mod tests {
         );
     }
 
+    /// Post-lift the seven sibling
+    /// `fs::read_to_string(<path>).await?` bare-await bail stanzas
+    /// across `commands/{rebac_validation (×5), sync (×1),
+    /// supergraph_verification (×1)}.rs` migrated onto
+    /// [`read_text_async`], gaining by construction the canonical
+    /// `"Failed to read {path.display()}"` failure envelope every peer
+    /// on the async text-mode read arm already carries. Pre-lift each
+    /// site's `.await?` propagated a bare [`std::io::Error`] that
+    /// dropped the offending path from the operator log — an operator
+    /// bounced by a missing `security-rebac.md` doc, a missing
+    /// `supergraph.graphql`, or a bad path in `count_lines` saw a
+    /// stream-classifier `"No such file or directory (os error 2)"`
+    /// with no way to tell which of several candidate paths tripped
+    /// the read. Post-lift every failure branch surfaces the
+    /// `path.display()` at the classifier layer, matching the ten
+    /// pre-existing consumer sites on this same primitive
+    /// (`commands/{kenshi, kenshi_agent, nix_builder (×3), bootstrap,
+    /// rust_service, developer_tools, push}.rs`).
+    ///
+    /// Structural regression shield — negative half asserts the
+    /// pre-lift bare shape `fs::read_to_string(<any>).await?;`
+    /// (whitespace-tolerated, single-line) reappears in NONE of the
+    /// three files; positive half asserts each file forwards through
+    /// the primitive at exactly the per-file count the lift landed
+    /// (5 / 1 / 1). Without this shield a future refactor could
+    /// silently re-inline the bare-await shape and reopen the
+    /// envelope-dropping class this lift closed. The shape only
+    /// forbids the BARE `.await?` bail; the peer sites that thread
+    /// their own `.await.context(...)?` / `.await.with_context(...)?`
+    /// envelope (`federation.rs`, `supergraph_verification.rs::load`,
+    /// `migration_validation.rs`, `attestation.rs`) already carry a
+    /// classifier and stay put.
+    #[test]
+    fn bare_fs_read_to_string_await_bail_sibling_class_closed() {
+        // (path, per-file post-lift forwarding count)
+        const CONSUMERS: &[(&str, &str, usize)] = &[
+            (
+                "commands/rebac_validation.rs",
+                include_str!("commands/rebac_validation.rs"),
+                5,
+            ),
+            ("commands/sync.rs", include_str!("commands/sync.rs"), 1),
+            (
+                "commands/supergraph_verification.rs",
+                include_str!("commands/supergraph_verification.rs"),
+                1,
+            ),
+        ];
+        for (path, src, expected_forwards) in CONSUMERS {
+            // Negative half — no line spells the pre-lift single-line
+            // bare-await bail `fs::read_to_string(<expr>).await?;`.
+            // Anchoring the needle to end-of-line rules out the peer
+            // sites that carry a `.context(...)?` / `.with_context(...)?`
+            // envelope split across two lines (`fs::read_to_string(x)\n
+            //     .await\n    .context("...")?;`).
+            let inline_hits = src
+                .lines()
+                .filter(|line| {
+                    let trimmed = line.trim_end();
+                    trimmed.contains("fs::read_to_string(")
+                        && (trimmed.ends_with(".await?;") || trimmed.ends_with(".await?"))
+                })
+                .count();
+            assert_eq!(
+                inline_hits, 0,
+                "{path} must NOT spell the pre-lift bare \
+                 `fs::read_to_string(<path>).await?;` — that seven-\
+                 site duplication class was lifted onto \
+                 `crate::repo::read_text_async` so every failure \
+                 branch carries the canonical \
+                 `\"Failed to read {{path}}\"` envelope. A re-inline \
+                 would silently reopen the envelope-dropping class \
+                 this shield closes. Found {inline_hits} inline \
+                 occurrences."
+            );
+            // Positive half — the file forwards through the primitive
+            // at exactly the count this lift landed. A fusion that
+            // folds one of the sites back to inline fs::read_to_string
+            // fails here (the negative half above would still pass,
+            // but this positive count would fall by one).
+            let forward_hits = src.matches("crate::repo::read_text_async(").count();
+            assert_eq!(
+                forward_hits, *expected_forwards,
+                "{path} must forward through \
+                 `crate::repo::read_text_async(<path>).await?` at \
+                 exactly {expected_forwards} sites — one per pre-lift \
+                 bare-await bail this shield replaces. A fusion or an \
+                 additional lift that changes the count without \
+                 updating this shield fails here. Found {forward_hits} \
+                 forwarding hits."
+            );
+        }
+    }
+
     /// [`read_text_sync`] returns the file's full contents verbatim,
     /// so line-oriented consumers (the three shell primitives inside
     /// [`crate::version`] — `apply_version_write`,

@@ -567,7 +567,7 @@ async fn count_ts_files(dir: &Path) -> usize {
 
 /// Count lines in a file
 async fn count_lines(path: &Path) -> Result<usize> {
-    let content = fs::read_to_string(path).await?;
+    let content = crate::repo::read_text_async(path).await?;
     Ok(content.lines().count())
 }
 
