@@ -446,9 +446,8 @@ mod tests {
     #[test]
     fn test_xpkg_output_file_returns_xpkg_extension_path() {
         let (_dir, path) = super::xpkg_output_file().expect("xpkg_output_file");
-        assert_eq!(
-            path.extension().and_then(|s| s.to_str()),
-            Some("xpkg"),
+        assert!(
+            crate::repo::path_has_extension(&path, "xpkg"),
             "xpkg_output_file must return a path with `.xpkg` extension, got \
              {path:?}",
         );

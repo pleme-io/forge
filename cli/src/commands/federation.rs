@@ -171,7 +171,7 @@ pub async fn update_federation(
         let entry = entry?;
         let path = entry.path();
 
-        if path.extension().and_then(|s| s.to_str()) == Some("graphql") {
+        if crate::repo::path_has_extension(&path, "graphql") {
             if let Some(service_name) = path.file_stem().and_then(|s| s.to_str()) {
                 // Build routing URL using config pattern (supports {service}, {product}, {environment}, {port}, {protocol})
                 let federation = deploy_config

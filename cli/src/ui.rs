@@ -2852,7 +2852,7 @@ mod tests {
         for entry in entries {
             let entry = entry.expect("read_dir entry");
             let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("rs") {
+            if !crate::repo::path_has_extension(&path, "rs") {
                 continue;
             }
             let content = std::fs::read_to_string(&path)

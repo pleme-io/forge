@@ -147,7 +147,7 @@ impl SupergraphMetadata {
             while let Some(entry) = entries.next_entry().await? {
                 let path = entry.path();
 
-                if path.extension().and_then(|s| s.to_str()) == Some("graphql") {
+                if crate::repo::path_has_extension(&path, "graphql") {
                     if let Some(service_name) = path.file_stem().and_then(|s| s.to_str()) {
                         let schema_content = fs::read(&path).await?;
                         let metadata = entry.metadata().await?;
@@ -427,7 +427,7 @@ pub async fn run_pre_composition_checks(subgraphs_dir: &Path) -> Result<PreCompo
 
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("graphql") {
+        if crate::repo::path_has_extension(&path, "graphql") {
             schema_files.push(path);
         }
     }
@@ -550,7 +550,7 @@ pub async fn run_post_composition_checks(
 
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("graphql") {
+        if crate::repo::path_has_extension(&path, "graphql") {
             service_count += 1;
         }
     }
