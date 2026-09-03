@@ -194,7 +194,7 @@ pub async fn extract_and_validate_schema(
             )
         })?;
 
-    println!("   ✅ Schema written: {}", schema_path.display());
+    crate::ui::print_step_pass(&format!("Schema written: {}", schema_path.display()));
 
     // Validate schema
     let validation_result = validate_schema_content(&output_stdout, graphql_config, service_name)?;
@@ -237,10 +237,10 @@ pub async fn extract_and_validate_schema(
             );
         }
 
-        println!(
-            "   ✅ All expected types present: {}",
+        crate::ui::print_step_pass(&format!(
+            "All expected types present: {}",
             graphql_config.expected_types.join(", ")
-        );
+        ));
     }
 
     crate::ui::print_step_success("Schema extraction and validation complete");

@@ -168,7 +168,7 @@ pub async fn web_regenerate(product: String, service: String, repo_root: String)
     crate::retry::run_inherited_status(cmd, "pleme-linker regen")
         .await
         .context("Failed to regenerate frontend deps.nix")?;
-    println!("   ✅ Frontend deps.nix regenerated");
+    crate::ui::print_step_pass("Frontend deps.nix regenerated");
     println!();
 
     // Step 2: Regenerate Hanabi Cargo.nix using crate2nix
@@ -183,7 +183,7 @@ pub async fn web_regenerate(product: String, service: String, repo_root: String)
     crate::retry::run_inherited_status(cmd, "crate2nix generate")
         .await
         .context("Failed to regenerate Hanabi Cargo.nix")?;
-    println!("   ✅ Hanabi Cargo.nix regenerated");
+    crate::ui::print_step_pass("Hanabi Cargo.nix regenerated");
     println!();
 
     // Success summary
@@ -258,7 +258,7 @@ pub async fn web_cargo_update(product: String, service: String, repo_root: Strin
     crate::retry::run_inherited_status(cmd, "cargo update")
         .await
         .context("Failed to update Hanabi dependencies")?;
-    println!("   ✅ Dependencies updated");
+    crate::ui::print_step_pass("Dependencies updated");
     println!();
 
     // Step 2: Regenerate Cargo.nix
@@ -273,7 +273,7 @@ pub async fn web_cargo_update(product: String, service: String, repo_root: Strin
     crate::retry::run_inherited_status(cmd, "crate2nix generate")
         .await
         .context("Failed to regenerate Hanabi Cargo.nix")?;
-    println!("   ✅ Cargo.nix regenerated");
+    crate::ui::print_step_pass("Cargo.nix regenerated");
     println!();
 
     // Success summary
