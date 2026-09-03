@@ -12,7 +12,6 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use tokio::fs;
 use tokio::process::Command;
 
 /// Resolve the `redis-cli` binary path via `REDIS_CLI_BIN`, falling back to
@@ -275,7 +274,7 @@ async fn check_object_type_mapping(
         return Ok(());
     }
 
-    let content = fs::read_to_string(&rebac_doc).await?;
+    let content = crate::repo::read_text_async(&rebac_doc).await?;
 
     // Extract object types from documentation
     // Look for patterns like ("ritual", "viewer") or ("provider_profile", "editor")
@@ -365,7 +364,7 @@ async fn check_relation_hierarchy(
             continue;
         }
 
-        let content = fs::read_to_string(impl_file).await?;
+        let content = crate::repo::read_text_async(impl_file).await?;
 
         if content.contains("get_implied_relations") {
             log_success(
@@ -405,7 +404,7 @@ async fn check_relation_hierarchy(
     if let Some(docs_dir) = &config.docs_dir {
         let rebac_doc = docs_dir.join("security-rebac.md");
         if rebac_doc.exists() {
-            let content = fs::read_to_string(&rebac_doc).await?;
+            let content = crate::repo::read_text_async(&rebac_doc).await?;
             if content.contains("owner → editor → viewer") || content.contains("owner → editor")
             {
                 log_success(
@@ -450,7 +449,7 @@ async fn check_redis_key_patterns(
         return Ok(());
     }
 
-    let content = fs::read_to_string(&rebac_doc).await?;
+    let content = crate::repo::read_text_async(&rebac_doc).await?;
 
     let prefix = &config.redis_key_prefix;
     let rel_pattern = format!("{}:rel:", prefix);
@@ -593,7 +592,7 @@ async fn check_graphql_operations(
         return Ok(());
     }
 
-    let content = fs::read_to_string(&schema_file).await?;
+    let content = crate::repo::read_text_async(&schema_file).await?;
 
     // Check for permission-related operations
     if content.contains("checkPermission") {
