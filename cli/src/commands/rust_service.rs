@@ -1992,8 +1992,10 @@ async fn print_deployment_report(
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // COMPLETED ACTIONS
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    println!("{}", "✅ COMPLETED ACTIONS".green().bold());
-    println!("{}", "─".repeat(80).dimmed());
+    crate::ui::print_report_section_subheader(
+        "✅ COMPLETED ACTIONS",
+        crate::ui::ReportSectionStyle::Success,
+    );
     println!();
 
     println!("  {} Docker Image", "✓".green());
@@ -2023,8 +2025,10 @@ async fn print_deployment_report(
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // PENDING ROLLOUTS (FluxCD-managed)
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    println!("{}", "⏳ PENDING ROLLOUTS".yellow().bold());
-    println!("{}", "─".repeat(80).dimmed());
+    crate::ui::print_report_section_subheader(
+        "⏳ PENDING ROLLOUTS",
+        crate::ui::ReportSectionStyle::Warning,
+    );
     println!();
 
     // Check current pod status
@@ -2095,8 +2099,10 @@ async fn print_deployment_report(
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // VERIFICATION COMMANDS
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    println!("{}", "✓ VERIFICATION COMMANDS".green().bold());
-    println!("{}", "─".repeat(80).dimmed());
+    crate::ui::print_report_section_subheader(
+        "✓ VERIFICATION COMMANDS",
+        crate::ui::ReportSectionStyle::Success,
+    );
     println!();
 
     println!("  Verify Docker image exists in registry:");
@@ -2186,8 +2192,10 @@ async fn print_deployment_report(
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // MONITORING COMMANDS
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    println!("{}", "🔍 MONITORING COMMANDS".cyan().bold());
-    println!("{}", "─".repeat(80).dimmed());
+    crate::ui::print_report_section_subheader(
+        "🔍 MONITORING COMMANDS",
+        crate::ui::ReportSectionStyle::Info,
+    );
     println!();
 
     println!("  Watch service pod rollout:");
@@ -2240,8 +2248,10 @@ async fn print_deployment_report(
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // WHAT TO WATCH FOR
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    println!("{}", "⚠️  WATCH FOR THESE ISSUES".yellow().bold());
-    println!("{}", "─".repeat(80).dimmed());
+    crate::ui::print_report_section_subheader(
+        "⚠️  WATCH FOR THESE ISSUES",
+        crate::ui::ReportSectionStyle::Warning,
+    );
     println!();
 
     println!("  {} Pod fails to start", "□".dimmed());
