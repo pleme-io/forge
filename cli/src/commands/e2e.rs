@@ -423,9 +423,9 @@ fn run_backend_unit_tests(backend_dir: &str, filter: Option<&str>) -> Result<()>
     let outcome = run_inherited_status_sync(cmd, "Backend unit tests");
     let elapsed = start.elapsed();
 
-    ui::print_info(&format!(
-        "Backend unit tests completed in {:.1}s",
-        elapsed.as_secs_f64()
+    ui::print_info(&crate::repo::msg_completed_in_secs_1(
+        "Backend unit tests",
+        elapsed,
     ));
 
     outcome
@@ -471,9 +471,9 @@ fn run_frontend_unit_tests(
         let elapsed = start.elapsed();
 
         println!();
-        ui::print_info(&format!(
-            "Frontend tests completed in {:.1}s",
-            elapsed.as_secs_f64()
+        ui::print_info(&crate::repo::msg_completed_in_secs_1(
+            "Frontend tests",
+            elapsed,
         ));
         ui::print_info(&format!("JSON report: {}", output_file));
 
@@ -497,9 +497,9 @@ fn run_frontend_unit_tests(
         let outcome = run_inherited_status_sync(cmd, "Frontend unit tests");
         let elapsed = start.elapsed();
 
-        ui::print_info(&format!(
-            "Frontend unit tests completed in {:.1}s",
-            elapsed.as_secs_f64()
+        ui::print_info(&crate::repo::msg_completed_in_secs_1(
+            "Frontend unit tests",
+            elapsed,
         ));
 
         outcome?;
@@ -531,9 +531,9 @@ fn run_backend_integration_tests(backend_dir: &str, filter: Option<&str>) -> Res
     let outcome = run_inherited_status_sync(cmd, "Backend integration tests");
     let elapsed = start.elapsed();
 
-    ui::print_info(&format!(
-        "Integration tests completed in {:.1}s",
-        elapsed.as_secs_f64()
+    ui::print_info(&crate::repo::msg_completed_in_secs_1(
+        "Integration tests",
+        elapsed,
     ));
 
     outcome
@@ -671,10 +671,7 @@ pub fn run_e2e_tests(
     }
 
     println!();
-    ui::print_info(&format!(
-        "E2E tests completed in {:.1}s",
-        elapsed.as_secs_f64()
-    ));
+    ui::print_info(&crate::repo::msg_completed_in_secs_1("E2E tests", elapsed));
 
     if outcome.is_err() {
         print_failure_diagnostics();
