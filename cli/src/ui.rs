@@ -699,6 +699,96 @@ pub fn write_numbered_step_heading<W: std::io::Write>(
     writeln!(w, "Step {}: {}", label, title.bold())
 }
 
+/// Prints the one-line `Check <index>: <title>.blue()` numbered-check-heading
+/// grammar 7 pre-lift consumer sites spelled inline as
+/// `println!("{}", "Check <N>: <TITLE>".blue());` across
+/// `commands/rebac_validation.rs` (Check 1: ReBAC Documentation,
+/// Check 2: Permission Engine Source Files, Check 3: Object Type →
+/// Entity Mapping, Check 4: Relation Hierarchy Consistency, Check 5:
+/// Redis Key Pattern Validation, Check 6: Redis Connectivity, Check 7:
+/// GraphQL Permission Operations). Marks the start of one numbered
+/// quality check inside a multi-check validation pipeline, the
+/// `<index>` carrying the check's 1-based ordinal so the operator can
+/// read progress against a known total ("we are at check 3 of 7").
+///
+/// # Distinct from the other `ui::print_*` primitives
+///
+/// [`print_numbered_step_heading`] is the peer for a numbered-STEP
+/// grammar (`Step <label>: <title>.bold()`, uncolored `Step ` prefix,
+/// `.bold()` title, `&str` label because pipeline steps compose
+/// fractional labels like `"2.5/9"`). This primitive is its numbered-
+/// CHECK sibling: an ENTIRE-line `.blue()` palette (the pre-lift
+/// `println!("{}", "Check <N>: <title>".blue())` wraps the whole
+/// composed string, not just the title, per THEORY §V.1 knowable
+/// construction — the check-heading is a distinct semantic scope
+/// warranting its own palette), a `u32` index because a rebac
+/// validation check is enumerated as a plain positive ordinal and a
+/// typed `u32` locks that invariant in (a caller reaching for `"2.5"`
+/// would fail to compile, per THEORY §V.1 unrepresentability), and a
+/// literal `Check <index>: ` prefix baked into the format string so
+/// the "Check" keyword is one edit away from a locale swap or a
+/// grammar tightening. [`print_step_check`] is the `.green()` in-body
+/// `   ✓ <message>` sub-check line that a check-body emits AFTER the
+/// heading to record one passing sub-assertion — same "check" word,
+/// different scope (a HEADING that opens a numbered check vs. an
+/// in-body ROW that names one sub-assertion inside it).
+/// [`print_step_heading`] is the bare `<title>.bold()` line with no
+/// numeric context — its consumer sites open steps whose bodies alone
+/// enumerate them, not against a known total.
+///
+/// # `.blue()` on the whole line
+///
+/// Pre-lift every consumer spelled the coloring as
+/// `"Check <N>: <title>".blue()` on the FULL composed string, never
+/// as `format!("Check {}: {}", n, title.blue())` on the title alone
+/// or as `format!("{}: {}", "Check <N>".blue(), title)` on the prefix
+/// alone. The primitive preserves that: the `\x1b[34m` blue ANSI
+/// sequence wraps the entire `Check <index>: <title>` composed string,
+/// so a terminal without color renders `Check <index>: <title>`
+/// legibly and a terminal with color paints the whole heading in one
+/// visual span that separates it from the surrounding uncolored body.
+///
+/// # Compounding
+///
+/// Pre-lift 7 sibling sites each restated the
+/// `println!("{}", "Check <N>: <TITLE>".blue())` grammar verbatim, with
+/// the `Check ` prefix, the numeric ordinal, the `: ` separator, the
+/// title text, and the `.blue()` coloring on the composed line all
+/// spelled inline. A future adjustment (a swap of `Check ` for a
+/// locale-neutral `[<index>] ` prefix, a promotion to
+/// `.blue().bold()` for heavier emphasis against the surrounding
+/// pass/fail rows, an OTLP `rebac_check_start` observability event
+/// wired alongside the print, a swap of `.blue()` for
+/// `.bright_blue()` under a themed palette, a `Check <index> of
+/// <total>: ` long-form spelled from a `(current, total)` typed pair)
+/// had to hit 7 sites in lockstep or drift the visual grammar; post-
+/// lift it hits ONE typed body. Delegates to
+/// [`write_numbered_check_heading`] against [`std::io::stdout()`]; the
+/// writer split exists so the fail-before-pass test can pin the one-
+/// line body, the `Check <index>: <title>` composed layout, the
+/// `\x1b[34m` blue ANSI palette contract on the whole line, and the
+/// trailing `\n` by inspecting emitted bytes rather than shelling out
+/// and grepping stdout.
+pub fn print_numbered_check_heading(index: u32, title: &str) {
+    let _ = write_numbered_check_heading(&mut std::io::stdout().lock(), index, title);
+}
+
+/// Writer-taking sibling to [`print_numbered_check_heading`]. Emits
+/// the single `Check <index>: <title>` line, `.blue()`-wrapped in
+/// full, via [`writeln!`] against the supplied writer.
+/// [`print_numbered_check_heading`] is the stdout adapter; this
+/// variant exists so tests can pin the one-line body, the
+/// `Check <index>: <title>` composed layout, and the `\x1b[34m` blue
+/// ANSI sequence wrapping the whole composed string without capturing
+/// stdout.
+pub fn write_numbered_check_heading<W: std::io::Write>(
+    w: &mut W,
+    index: u32,
+    title: &str,
+) -> std::io::Result<()> {
+    writeln!(w, "{}", format!("Check {}: {}", index, title).blue())
+}
+
 /// Prints the two-line bold-underlined phase-heading grammar 6 pre-lift
 /// consumer sites spelled inline as `println!("{}", "<TITLE>".bold().underline());`
 /// immediately followed by `println!();` across `commands/prerelease.rs`
@@ -2690,6 +2780,138 @@ mod tests {
                  \"<TITLE>\")` — the primitive body every one-line \
                  `Step <label>: <title>.bold()` labeled-step-heading in \
                  the crate now delegates through."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_numbered_check_heading`].
+    /// Pins the exact single-line body every pre-lift consumer spelled
+    /// verbatim (`println!("{}", "Check <N>: <TITLE>".blue());`). A
+    /// silent contract drift a future rewrite might introduce —
+    /// dropping `.blue()` so the heading collapses onto the surrounding
+    /// uncolored body palette and loses its scope marker, coloring only
+    /// the title portion (a "match the sub-check green" cleanup) so the
+    /// `Check <N>: ` prefix ends up in the plain body palette while
+    /// the title carries the color, swapping `Check ` for a lowercase
+    /// or otherwise-cased prefix, dropping the `: ` separator, promoting
+    /// the trailing `\n` off via `write!` instead of `writeln!` — flips
+    /// this assertion rather than compiling and silently diverging the 7
+    /// consumer sites' visual grammar.
+    #[test]
+    fn write_numbered_check_heading_emits_blue_check_prefix_index_title_line() {
+        // Force ANSI emission (colored auto-drops sequences on a
+        // non-tty stdout) and serialize against peer banner tests
+        // via [`AnsiOverrideForTest`]; its Drop restores colored's
+        // auto-detection on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`], closing the set-write-unset window
+        // without a manual [`colored::control::unset_override`] call
+        // that a future test author could omit.
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_numbered_check_heading(&mut buf, 3, "Object Type → Entity Mapping")
+            .expect("write_numbered_check_heading against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf).expect(
+            "write_numbered_check_heading must emit valid UTF-8 (the pre-lift println!s did)",
+        );
+
+        // Exactly one line — the pre-lift stanza is one `println!`,
+        // not two, and carries no framing blank (the leading
+        // `println!()` some sites spell BEFORE the heading is a
+        // separator concern outside this primitive's scope). A
+        // refactor that slips a leading or trailing blank into the
+        // primitive body fails here.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_numbered_check_heading must emit exactly one line — \
+             the pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The composed `Check <index>: <title>` layout reaches the
+        // rendered line verbatim inside the blue span; a fusion that
+        // reorders (`<title> (Check <index>)`) or drops the `: `
+        // separator fails here.
+        assert!(
+            lines[0].contains("Check 3: Object Type → Entity Mapping"),
+            "line must carry the composed `Check <index>: <title>` \
+             layout verbatim; got {:?}",
+            lines[0]
+        );
+
+        // The `blue` ANSI sequence wraps the WHOLE composed string; a
+        // fusion that colors only the title portion (a "just tint the
+        // title" cleanup) would emit the blue sequence AFTER `Check
+        // 3: ` rather than before it, and this assertion fails.
+        assert!(
+            lines[0].starts_with("\x1b[34m"),
+            "line must open with the `blue` ANSI sequence \
+             (`\\x1b[34m`) — every pre-lift consumer spelled \
+             `.blue()` on the FULL composed string, not just the \
+             title; got {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `println!` (not `print!`), so the newline is part of the
+        // contract. A fusion that swapped `writeln!` for `write!`
+        // fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_numbered_check_heading must emit a trailing `\\n` \
+             (the pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the caller sites in [`commands/rebac_validation.rs`]
+    /// no longer spell the `println!("{}", "Check <N>: <TITLE>".blue());`
+    /// shape inline. Structural regression shield — without it, a
+    /// future refactor could silently re-inline the one-liner (e.g. a
+    /// "just call `println!` directly, it's shorter" cleanup) and
+    /// reopen the 7-site duplication class this lift closed. Enforced
+    /// at the module body before its `#[cfg(test)]` region so a
+    /// test-support mention of the raw shape does not defeat the
+    /// shield. The exact-shape needle `println!("{}", "Check ` co-
+    /// occurring with `".blue());` on the SAME line uniquely
+    /// identifies the pre-lift restatement — other blue-carrying
+    /// `println!`s in the crate (composite `format!` args, non-
+    /// `Check`-prefixed titles) stay unshielded because they are
+    /// morally-adjacent shapes with their own lift targets, not this
+    /// one.
+    #[test]
+    fn print_numbered_check_heading_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[(
+            include_str!("commands/rebac_validation.rs"),
+            "commands/rebac_validation.rs",
+        )];
+        for (source, module_path) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                assert!(
+                    !(line.contains("println!(\"{}\", \"Check ") && line.contains("\".blue());")),
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `println!(\"{{}}\", \"Check <N>: <TITLE>\".blue());` \
+                     numbered-check-heading stanza — that one-liner was \
+                     lifted onto `crate::ui::print_numbered_check_heading`. \
+                     A re-inline would silently reopen the 7-site \
+                     duplication class this shield exists to close. \
+                     Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            assert!(
+                body.contains("crate::ui::print_numbered_check_heading("),
+                "{module_path} body must forward to \
+                 `crate::ui::print_numbered_check_heading(<INDEX>, \
+                 \"<TITLE>\")` — the primitive body every one-line \
+                 `Check <index>: <title>.blue()` numbered-check-heading \
+                 in the crate now delegates through."
             );
         }
     }
