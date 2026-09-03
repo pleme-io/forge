@@ -407,33 +407,21 @@ pub async fn execute(working_dir: &Path, skip_entities: bool) -> Result<SyncResu
     // Summary
     let duration = start.elapsed().as_secs_f64();
 
-    println!(
-        "{}",
-        "════════════════════════════════════════════════".bold()
-    );
     if errors.is_empty() {
-        println!(
-            "{}",
-            format!("  Sync Complete - All checks passed ({:.1}s)", duration)
-                .green()
-                .bold()
+        crate::ui::print_section_completion_banner(
+            &format!("Sync Complete - All checks passed ({:.1}s)", duration),
+            crate::ui::SectionCompletionStyle::Success,
         );
     } else {
-        println!(
-            "{}",
-            format!(
-                "  Sync Complete - {} errors found ({:.1}s)",
+        crate::ui::print_section_completion_banner(
+            &format!(
+                "Sync Complete - {} errors found ({:.1}s)",
                 errors.len(),
                 duration
-            )
-            .red()
-            .bold()
+            ),
+            crate::ui::SectionCompletionStyle::Failure,
         );
     }
-    println!(
-        "{}",
-        "════════════════════════════════════════════════".bold()
-    );
     println!();
 
     println!("Next steps:");
