@@ -318,8 +318,8 @@ impl ProductConfig {
         // Validate environment is one of the known values (or warn)
         let known_environments = ["dev", "development", "staging", "production", "prod"];
         if !known_environments.contains(&self.environment.as_str()) {
-            eprintln!(
-                "⚠️  Warning: Environment '{}' is not a standard value. Known environments: {}",
+            crate::warn_config!(
+                "Environment '{}' is not a standard value. Known environments: {}",
                 self.environment,
                 known_environments.join(", ")
             );

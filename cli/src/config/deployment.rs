@@ -51,8 +51,8 @@ impl AbSliceConfig {
 
         // Validate first slice has delay_secs = 0
         if slice_index == 0 && self.delay_secs != 0 {
-            eprintln!(
-                "⚠️  Warning: First slice '{}' has delay_secs = {}, should be 0 for immediate deployment",
+            crate::warn_config!(
+                "First slice '{}' has delay_secs = {}, should be 0 for immediate deployment",
                 self.name,
                 self.delay_secs
             );
@@ -60,8 +60,8 @@ impl AbSliceConfig {
 
         // Warn if delay is very short (less than 30 seconds) for non-first slices
         if slice_index > 0 && self.delay_secs > 0 && self.delay_secs < 30 {
-            eprintln!(
-                "⚠️  Warning: Slice '{}' has delay_secs = {}s, which may not allow enough time for health checks",
+            crate::warn_config!(
+                "Slice '{}' has delay_secs = {}s, which may not allow enough time for health checks",
                 self.name,
                 self.delay_secs
             );
@@ -215,8 +215,8 @@ impl PreDeploymentTestsConfig {
         }
 
         if self.test_suites.is_empty() {
-            eprintln!(
-                "⚠️  Warning: pre_deployment_tests.enabled is true but no test_suites defined for '{}'",
+            crate::warn_config!(
+                "pre_deployment_tests.enabled is true but no test_suites defined for '{}'",
                 service_name
             );
         }
@@ -394,8 +394,8 @@ impl DeploymentConfig {
         )?;
 
         if self.deployment_wait_timeout_secs > 3600 {
-            eprintln!(
-                "⚠️  Warning: deployment_wait_timeout_secs is {}s (>1 hour), this may be too long",
+            crate::warn_config!(
+                "deployment_wait_timeout_secs is {}s (>1 hour), this may be too long",
                 self.deployment_wait_timeout_secs
             );
         }
@@ -509,7 +509,7 @@ impl CloudflareConfig {
         }
 
         if self.files.is_empty() {
-            eprintln!("⚠️  Warning: cloudflare.files is empty, no files will be purged from cache");
+            crate::warn_config!("cloudflare.files is empty, no files will be purged from cache");
         }
 
         Ok(())

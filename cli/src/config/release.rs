@@ -179,8 +179,8 @@ impl ReleaseConfig {
 
             // Validate staging is first in active_environments (if it's included)
             if active.contains(&"staging".to_string()) && active[0] != "staging" {
-                eprintln!(
-                    "⚠️  Warning: 'staging' is in active_environments but not first. \
+                crate::warn_config!(
+                    "'staging' is in active_environments but not first. \
                      First environment is '{}'. This may cause migration ordering issues.",
                     active[0]
                 );
@@ -189,8 +189,8 @@ impl ReleaseConfig {
 
         // Validate staging is first in environment_order (for promotion workflow)
         if self.environment_order.len() > 1 && self.environment_order[0] != "staging" {
-            eprintln!(
-                "⚠️  Warning: First environment in release order is '{}', not 'staging'. \
+            crate::warn_config!(
+                "First environment in release order is '{}', not 'staging'. \
                  This may cause migration ordering issues.",
                 self.environment_order[0]
             );
@@ -218,7 +218,7 @@ impl ReleaseConfig {
                 if active.contains(&"staging".to_string()) {
                     vec!["staging".to_string()]
                 } else {
-                    eprintln!("⚠️  Warning: 'staging' requested but not in active_environments");
+                    crate::warn_config!("'staging' requested but not in active_environments");
                     vec![]
                 }
             }
@@ -227,9 +227,10 @@ impl ReleaseConfig {
                 if active.iter().any(|a| a == env) {
                     vec![env.to_string()]
                 } else {
-                    eprintln!(
-                        "⚠️  Warning: Environment '{}' requested but not in active_environments: {:?}",
-                        env, active
+                    crate::warn_config!(
+                        "Environment '{}' requested but not in active_environments: {:?}",
+                        env,
+                        active
                     );
                     vec![]
                 }

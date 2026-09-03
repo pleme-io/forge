@@ -165,7 +165,10 @@ impl ServiceConfig {
             "elasticsearch" | "meilisearch" => DatabaseType::Elasticsearch, // Treat both as Elasticsearch-like
             "none" => DatabaseType::None,
             other => {
-                eprintln!("⚠️  Warning: Unknown database_type '{}' in deploy.yaml, defaulting to postgres", other);
+                crate::warn_config!(
+                    "Unknown database_type '{}' in deploy.yaml, defaulting to postgres",
+                    other
+                );
                 DatabaseType::Postgres
             }
         };

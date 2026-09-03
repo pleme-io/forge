@@ -35,6 +35,7 @@ pub mod product_release;
 mod registry;
 mod release;
 mod service;
+mod validation_warning;
 
 // Re-export all public types
 pub use deployment::{
@@ -63,6 +64,7 @@ pub use release::{
     ArtifactInfo, AttestationInfoRecord, EnvironmentConfig, EnvironmentsConfig, ReleaseConfig,
 };
 pub use service::{LocalConfig, ServiceConfig};
+pub use validation_warning::write_validation_warning;
 
 use anyhow::{anyhow, bail, Context, Result};
 use std::path::{Path, PathBuf};
