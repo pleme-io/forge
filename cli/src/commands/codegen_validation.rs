@@ -119,11 +119,7 @@ pub async fn validate_codegen_with_autocommit(
         }
     };
 
-    println!(
-        "   {} Schema exported ({} bytes)",
-        "✓".green(),
-        schema_bytes.len()
-    );
+    crate::ui::print_step_check(&format!("Schema exported ({} bytes)", schema_bytes.len()));
 
     // Write schema to web directory
     let schema_path = web_dir.join("schema.graphql");
@@ -202,7 +198,7 @@ pub async fn validate_codegen_with_autocommit(
         });
     }
 
-    println!("   {} Codegen completed successfully", "✓".green());
+    crate::ui::print_step_check("Codegen completed successfully");
 
     // Step 3: Auto-commit changes if enabled
     let changes_committed = if auto_commit {
@@ -316,7 +312,7 @@ async fn auto_commit_codegen_changes(web_dir: &Path) -> Result<bool> {
 
     let changes = crate::repo::utf8_lossy_borrow(&status_output.stdout);
     if changes.trim().is_empty() {
-        println!("   {} No codegen changes to commit", "✓".green());
+        crate::ui::print_step_check("No codegen changes to commit");
         return Ok(false);
     }
 
@@ -361,10 +357,7 @@ async fn auto_commit_codegen_changes(web_dir: &Path) -> Result<bool> {
 
         // Check if it's just "nothing to commit" which is actually OK
         if stdout.contains("nothing to commit") || stderr.contains("nothing to commit") {
-            println!(
-                "   {} No changes to commit (already up to date)",
-                "✓".green()
-            );
+            crate::ui::print_step_check("No changes to commit (already up to date)");
             return Ok(false);
         }
 
