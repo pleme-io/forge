@@ -2552,7 +2552,7 @@ fn stage_file_sibling_deps(
             Ok(p) => p,
             Err(_) => continue, // unresolved file:// dep — let helm surface it
         };
-        let Some(dep_name) = dep_src.file_name().and_then(|n| n.to_str()) else {
+        let Some(dep_name) = crate::repo::file_name_opt_str(&dep_src) else {
             continue;
         };
         if copied.contains(dep_name) || !dep_src.is_dir() {

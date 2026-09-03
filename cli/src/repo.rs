@@ -1674,8 +1674,8 @@ pub fn find_product_dir(start: &Path, layout: ProductDirLayout) -> Option<PathBu
     loop {
         if let Some(parent) = current.parent() {
             if let Some(grandparent) = parent.parent() {
-                if parent.file_name().and_then(|n| n.to_str()) == Some("products")
-                    && grandparent.file_name().and_then(|n| n.to_str()) == Some("pkgs")
+                if file_name_opt_str(parent) == Some("products")
+                    && file_name_opt_str(grandparent) == Some("pkgs")
                 {
                     return Some(current);
                 }
@@ -1920,6 +1920,72 @@ pub fn file_name_str(path: &Path) -> &str {
     path.file_name()
         .and_then(std::ffi::OsStr::to_str)
         .unwrap_or("")
+}
+
+/// Return the file-name component of `path` as `Some(&str)`, or `None`
+/// if the path has no file-name component (`path` ends in `..` or is
+/// `/`) or the file name is not valid UTF-8. The
+/// `Option<&str>`-returning peer to [`file_name_str`], whose unit on
+/// the miss arm is `""` instead of `None`.
+///
+/// # The pre-lift sigil
+///
+/// Sixteen sibling consumers on the `Option<&str>`-returning
+/// file-name-read surface spelled the same two-step chain inline:
+///
+/// ```ignore
+/// path.file_name().and_then(|n| n.to_str())
+/// ```
+///
+/// Every consumer wanted the `Option<&str>` semantics — the `Some(name)`
+/// arm carried a valid UTF-8 file-name projection, the `None` arm meant
+/// "this path has no UTF-8 file-name" and gated a short-circuit branch
+/// downstream. The sixteen pre-lift sites split by miss-arm handler:
+///
+/// - `if let Some(name) = path.file_name().and_then(|n| n.to_str()) {…}`
+///   — three walk-a-dir loops in `commands/{migration_validation.rs,
+///   sync.rs, helm.rs}` that filter dir entries by file-name predicate
+///   (SeaORM `m*.rs` migration files, `.ts` / `.tsx` frontend sources,
+///   `file://` helm-chart dependency subdirs).
+/// - `path.file_name().and_then(|s| s.to_str()) == Some("<literal>")`
+///   — nine skip-filter and ancestor-match sites: five identical
+///   `== Some("test_support.rs")` shield-scan skip filters
+///   (`test_support.rs`), one `== Some("target")` walk-tree skip
+///   (`test_support.rs`), two `== Some("products"|"pkgs")`
+///   ancestor-match sites in `repo::find_product_dir` (`repo.rs`), and
+///   one `== Some("<basename>")` route-predicate equality.
+/// - `assert_eq!(path.file_name().and_then(…), Some("<basename>"))` —
+///   four unit-test pins on primitives whose return contract carries a
+///   fixed file-name segment (`hermetic_scratch.rs::
+///   hermetic_scratch_file`, `test_support.rs::make_executable_shim`,
+///   `test_support.rs::ArgvLog::reserve`, `commands/e2e.rs::
+///   e2e_image_output_symlink`).
+///
+/// # Peer to `file_name_str`
+///
+/// [`file_name_str`] projects onto `&str` with the `""` miss-arm unit;
+/// callers that push their miss-arm handling into a downstream
+/// predicate (`starts_with(…)`, `regex.is_match(…)`, `==` against a
+/// non-empty literal) route through it. This peer projects onto
+/// `Option<&str>` for callers whose miss-arm handling is a
+/// short-circuit branch (`if let Some(…)`, `let Some(…) else { … }`)
+/// or an `Option`-typed equality (`== Some("<literal>")`, `assert_eq!(
+/// _, Some("<basename>"))`). The two primitives split the sigil class
+/// along the miss-arm shape: neither embeds a policy the other's
+/// callers can't reach.
+///
+/// # Zero-alloc borrow lifetime
+///
+/// The returned `&str` borrows from `path` (via
+/// [`std::ffi::OsStr::to_str`]'s contract on Unix, where the UTF-8
+/// projection of the file-name segment is a byte-slice view over the
+/// underlying [`std::ffi::OsStr`]), so no [`String`] allocation
+/// happens on any call. A downstream [`str::starts_with`] /
+/// [`str::ends_with`] / equality against an `&'static str` literal
+/// consumes the `&str` directly without an intermediate owned copy —
+/// the exact zero-alloc discipline every pre-lift consumer relied on.
+pub fn file_name_opt_str(path: &Path) -> Option<&str> {
+    path.file_name().and_then(std::ffi::OsStr::to_str)
 }
 
 /// Project a caller-owned [`Path`] into an owned [`String`] via the
@@ -6253,6 +6319,67 @@ mod tests {
                      the primitive, and fork the miss-arm unit (`\"\"`) \
                      into a hand-typed literal that could drift from \
                      the primitive one consumer at a time."
+                );
+            }
+        }
+    }
+
+    /// Post-lift the sixteen `Option<&str>`-returning consumer sites
+    /// lifted onto [`file_name_opt_str`] must not silently re-inline
+    /// the primitive's shape at their call points — a re-inline would
+    /// reopen the sibling class this lift closed and force every other
+    /// consumer to divorce from the primitive one edit at a time.
+    ///
+    /// The needles below (`.file_name().and_then(|n| n.to_str())` and
+    /// the `|s|`-bindered variant) are proper prefixes of the
+    /// `file_name_str`-shielded shapes above
+    /// (`…and_then(…).unwrap_or("")`), so this shield subsumes that
+    /// one on the migrated files: any re-inline of either shape trips
+    /// here. The two shields nonetheless share zero scanned-file
+    /// overlap between their strict scopes (this shield's scope is the
+    /// six files migrated onto `file_name_opt_str`; the sibling
+    /// shield's scope is three command modules migrated onto
+    /// `file_name_str`), so post-lift both surfaces stay closed by
+    /// construction.
+    ///
+    /// The primitive body in `repo.rs` legitimately spells the raw
+    /// `.and_then(std::ffi::OsStr::to_str)` fn-pointer form (a
+    /// distinct byte sequence from the two `|<x>| <x>.to_str()`
+    /// closure forms this shield's needles pin), and the primitive's
+    /// doc-comment carries the pre-lift closure shape inside a
+    /// documentation code block; this shield does NOT scan `repo.rs`
+    /// so the primitive body and its docs survive it by construction,
+    /// mirroring the discipline every sibling shield test in this
+    /// module already carries.
+    #[test]
+    fn file_name_opt_str_consumers_do_not_reinline_the_primitive_shape() {
+        for (name, source) in [
+            (
+                "commands/migration_validation.rs",
+                include_str!("commands/migration_validation.rs"),
+            ),
+            ("commands/sync.rs", include_str!("commands/sync.rs")),
+            ("commands/helm.rs", include_str!("commands/helm.rs")),
+            ("commands/e2e.rs", include_str!("commands/e2e.rs")),
+            ("hermetic_scratch.rs", include_str!("hermetic_scratch.rs")),
+            ("test_support.rs", include_str!("test_support.rs")),
+        ] {
+            for needle in [
+                ".file_name().and_then(|n| n.to_str())",
+                ".file_name().and_then(|s| s.to_str())",
+            ] {
+                assert!(
+                    !source.contains(needle),
+                    "{name} must NOT spell the inline `{needle}` \
+                     two-step projection — that duplication was lifted \
+                     onto `crate::repo::file_name_opt_str`. A re-inline \
+                     would silently diverge the file-name-read from the \
+                     sixteen sibling `Option<&str>`-returning consumers \
+                     routing through the primitive, and fork the miss-arm \
+                     unit (`None`) into hand-typed closure spellings that \
+                     could drift from the primitive one consumer at a \
+                     time. See the sibling `file_name_str` shield above \
+                     for the `.unwrap_or(\"\")`-chained peer surface."
                 );
             }
         }

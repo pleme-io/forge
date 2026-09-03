@@ -2349,7 +2349,7 @@ mod e2e_image_output_symlink_tests {
         let (_dir, path) =
             super::e2e_image_output_symlink("backend").expect("e2e_image_output_symlink backend");
         assert_eq!(
-            path.file_name().and_then(|s| s.to_str()),
+            crate::repo::file_name_opt_str(&path),
             Some("backend-image"),
             "e2e_image_output_symlink(\"backend\") must return a path \
              whose basename is exactly `backend-image` — same shape the \
@@ -2359,7 +2359,7 @@ mod e2e_image_output_symlink_tests {
         let (_dir_web, path_web) =
             super::e2e_image_output_symlink("web").expect("e2e_image_output_symlink web");
         assert_eq!(
-            path_web.file_name().and_then(|s| s.to_str()),
+            crate::repo::file_name_opt_str(&path_web),
             Some("web-image"),
             "e2e_image_output_symlink(\"web\") must return a path whose \
              basename is exactly `web-image`; got {path_web:?}",

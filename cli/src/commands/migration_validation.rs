@@ -701,7 +701,7 @@ async fn find_seaorm_migration_files(
         let path = entry.path();
 
         if path.is_file() {
-            if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+            if let Some(filename) = crate::repo::file_name_opt_str(&path) {
                 // Match m*.rs pattern (SeaORM migrations)
                 if filename.starts_with('m')
                     && filename.ends_with(".rs")

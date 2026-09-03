@@ -572,7 +572,7 @@ async fn calculate_directory_hash(dir: &Path) -> Result<String> {
                 let path = entry.path();
                 if path.is_dir() {
                     visit_dir(&path, file_hashes)?;
-                } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                } else if let Some(name) = crate::repo::file_name_opt_str(&path) {
                     if name.ends_with(".ts") || name.ends_with(".tsx") {
                         let content = std::fs::read(&path)?;
                         let hash = format!("{:x}", md5::compute(&content));
