@@ -86,12 +86,11 @@ pub async fn execute(backend_dir: &Path, web_dir: &Path) -> Result<CodegenResult
     // can be recovered with `err.downcast_ref::<SchemaExtractionError>()`.
     let schema_bytes = crate::graphql_schema::extract_graphql_schema(backend_dir).await?;
     let schema_size = schema_bytes.len();
-    println!(
-        "   {} Schema extracted ({} bytes, {:.1}s)",
-        "✓".green(),
+    crate::ui::print_step_check(&format!(
+        "Schema extracted ({} bytes, {:.1}s)",
         schema_size,
         schema_start.elapsed().as_secs_f64()
-    );
+    ));
 
     // Step 2: Write schema to web directory
     let schema_path = web_dir.join("schema.graphql");
@@ -99,11 +98,7 @@ pub async fn execute(backend_dir: &Path, web_dir: &Path) -> Result<CodegenResult
         .await
         .with_context(|| format!("Failed to write schema to {}", schema_path.display()))?;
 
-    println!(
-        "   {} Schema written to {}",
-        "✓".green(),
-        schema_path.display()
-    );
+    crate::ui::print_step_check(&format!("Schema written to {}", schema_path.display()));
     println!();
 
     // Step 3: Install dependencies
@@ -124,11 +119,10 @@ pub async fn execute(backend_dir: &Path, web_dir: &Path) -> Result<CodegenResult
         .await
         .with_context(|| format!("bun install in {}", web_dir.display()))?;
 
-    println!(
-        "   {} Dependencies installed ({:.1}s)",
-        "✓".green(),
+    crate::ui::print_step_check(&format!(
+        "Dependencies installed ({:.1}s)",
         install_start.elapsed().as_secs_f64()
-    );
+    ));
     println!();
 
     // Step 4: Run codegen
@@ -148,11 +142,10 @@ pub async fn execute(backend_dir: &Path, web_dir: &Path) -> Result<CodegenResult
         anyhow::bail!("GraphQL codegen failed:\n{}\n{}", stderr, stdout);
     }
 
-    println!(
-        "   {} Codegen completed ({:.1}s)",
-        "✓".green(),
+    crate::ui::print_step_check(&format!(
+        "Codegen completed ({:.1}s)",
         codegen_start.elapsed().as_secs_f64()
-    );
+    ));
     println!();
 
     // Summary

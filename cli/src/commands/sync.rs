@@ -201,7 +201,7 @@ pub async fn execute_drift_check(working_dir: &Path) -> Result<DriftCheckResult>
             error: None,
         });
     }
-    println!("   {} Schema in sync", "✓".green());
+    crate::ui::print_step_check("Schema in sync");
 
     // Run codegen
     println!("Running codegen drift check...");
@@ -258,7 +258,7 @@ pub async fn execute_drift_check(working_dir: &Path) -> Result<DriftCheckResult>
             error: None,
         });
     }
-    println!("   {} Codegen in sync", "✓".green());
+    crate::ui::print_step_check("Codegen in sync");
 
     println!();
     println!(
@@ -305,7 +305,7 @@ pub async fn execute(working_dir: &Path, skip_entities: bool) -> Result<SyncResu
         match generate_entities(&config).await {
             Ok(generated) => {
                 if generated {
-                    println!("   {} Entities generated", "✓".green());
+                    crate::ui::print_step_check("Entities generated");
                 } else {
                     crate::ui::print_step_skip(
                         "Skipped (DATABASE_URL not set or sea-orm-cli not found)",
@@ -346,11 +346,7 @@ pub async fn execute(working_dir: &Path, skip_entities: bool) -> Result<SyncResu
     if config.schema_file.exists() {
         let metadata = fs::metadata(&config.schema_file).await?;
         if metadata.len() > 0 {
-            println!(
-                "   {} schema.graphql ({} bytes)",
-                "✓".green(),
-                metadata.len()
-            );
+            crate::ui::print_step_check(&format!("schema.graphql ({} bytes)", metadata.len()));
         } else {
             println!("   {} schema.graphql missing or empty", "✗".red());
             errors.push("schema.graphql missing or empty".to_string());
@@ -364,11 +360,7 @@ pub async fn execute(working_dir: &Path, skip_entities: bool) -> Result<SyncResu
     let gql_dir = config.web_dir.join("src/gql");
     if gql_dir.exists() {
         let file_count = count_ts_files(&gql_dir).await;
-        println!(
-            "   {} src/gql/ ({} TypeScript files)",
-            "✓".green(),
-            file_count
-        );
+        crate::ui::print_step_check(&format!("src/gql/ ({} TypeScript files)", file_count));
     } else {
         println!("   {} src/gql/ directory missing", "✗".red());
         errors.push("src/gql/ directory missing".to_string());
@@ -379,7 +371,7 @@ pub async fn execute(working_dir: &Path, skip_entities: bool) -> Result<SyncResu
     if hooks_file.exists() {
         let metadata = fs::metadata(&hooks_file).await?;
         let line_count = count_lines(&hooks_file).await.unwrap_or(0);
-        println!("   {} src/gql/hooks.ts ({} lines)", "✓".green(), line_count);
+        crate::ui::print_step_check(&format!("src/gql/hooks.ts ({} lines)", line_count));
     } else {
         println!(
             "   {} src/gql/hooks.ts missing (may need operations defined)",
@@ -393,7 +385,7 @@ pub async fn execute(working_dir: &Path, skip_entities: bool) -> Result<SyncResu
     let rebac_valid = match super::rebac_validation::execute(working_dir, true).await {
         Ok(result) => {
             if result.all_passed() {
-                println!("   {} ReBAC validation passed", "✓".green());
+                crate::ui::print_step_check("ReBAC validation passed");
                 true
             } else {
                 println!(

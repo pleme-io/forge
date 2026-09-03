@@ -181,7 +181,7 @@ impl GateSummary {
         if !self.passed.is_empty() {
             println!("{} Passed ({}):", "✅".green(), self.passed.len());
             for gate in &self.passed {
-                println!("   {} {}", "✓".green(), gate);
+                crate::ui::print_step_check(gate);
             }
         }
 

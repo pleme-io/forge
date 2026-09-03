@@ -499,7 +499,7 @@ pub async fn validate_frontend_with_config(
         });
     }
 
-    println!("   {} Dependencies installed", "✓".green());
+    crate::ui::print_step_check("Dependencies installed");
     println!();
 
     // Run type check if enabled

@@ -655,7 +655,7 @@ fn log_success(
     message: &str,
 ) {
     if !config.quiet {
-        println!("   {} {}", "✓".green(), message);
+        crate::ui::print_step_check(message);
     }
     result.messages.push(ValidationMessage {
         level: ValidationLevel::Success,
