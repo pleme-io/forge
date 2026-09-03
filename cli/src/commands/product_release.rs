@@ -501,11 +501,7 @@ pub async fn product_release(
         let source_att = attestation::compute_source_attestation(repo_path, &git_sha)
             .await
             .unwrap_or_else(|e| {
-                eprintln!(
-                    "   {} Source attestation failed (non-fatal): {}",
-                    "WARN".yellow(),
-                    e
-                );
+                crate::ui::print_nonfatal_warn("Source attestation", &e);
                 tameshi::ci::source_attestation(
                     "unknown",
                     &git_sha,
@@ -528,11 +524,9 @@ pub async fn product_release(
                     println!("   {} Build attestation: {}", "OK".green(), svc.name.cyan());
                 }
                 Err(e) => {
-                    eprintln!(
-                        "   {} Build attestation for {} failed (non-fatal): {}",
-                        "WARN".yellow(),
-                        svc.name,
-                        e
+                    crate::ui::print_nonfatal_warn(
+                        &format!("Build attestation for {}", svc.name),
+                        &e,
                     );
                 }
             }
@@ -546,11 +540,9 @@ pub async fn product_release(
                     println!("   {} Image attestation: {}", "OK".green(), svc.name.cyan());
                 }
                 Err(e) => {
-                    eprintln!(
-                        "   {} Image attestation for {} failed (non-fatal): {}",
-                        "WARN".yellow(),
-                        svc.name,
-                        e
+                    crate::ui::print_nonfatal_warn(
+                        &format!("Image attestation for {}", svc.name),
+                        &e,
                     );
                 }
             }
@@ -593,11 +585,7 @@ pub async fn product_release(
                 })
             }
             Err(e) => {
-                eprintln!(
-                    "   {} Product certification failed (non-fatal): {}",
-                    "WARN".yellow(),
-                    e
-                );
+                crate::ui::print_nonfatal_warn("Product certification", &e);
                 None
             }
         };
@@ -788,11 +776,7 @@ pub async fn product_release(
         {
             Ok(_) => println!("   {} Post-deploy checks passed", "OK".green()),
             Err(e) => {
-                eprintln!(
-                    "   {} Post-deploy verification failed (non-fatal): {}",
-                    "WARN".yellow(),
-                    e
-                );
+                crate::ui::print_nonfatal_warn("Post-deploy verification", &e);
             }
         }
         println!();

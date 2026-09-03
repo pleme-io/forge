@@ -1150,6 +1150,146 @@ pub fn write_step_warn<W: std::io::Write>(w: &mut W, message: &str) -> std::io::
     writeln!(w, "   {} {}", "⚠️".yellow(), message)
 }
 
+/// Prints the one-line `"   {} {} failed (non-fatal): {}"` (three-space
+/// indent + `"WARN".yellow()` textual prefix + verb-phrase label +
+/// literal ` failed (non-fatal): ` connective + [`std::fmt::Display`]
+/// error tail) stderr-routed non-fatal-failure grammar 5 pre-lift
+/// consumer sites spelled inline as `eprintln!("   {} <label> failed
+/// (non-fatal): {}", "WARN".yellow(), <opt-args>, e)` across a single
+/// command module (`commands/product_release.rs`), each marking a
+/// non-fatal failure inside the release pipeline — a source /
+/// build-per-service / image-per-service attestation computation, a
+/// product certification composition, or a post-deploy verification
+/// re-invocation — where the pipeline deliberately continues under a
+/// degraded contract (attestation absent, certification skipped,
+/// staging verification hollow) rather than abort the release.
+///
+/// # Distinct from every peer `ui::print_*` primitive
+///
+/// [`print_step_warn`] shares the three-space body indent and yellow
+/// palette but wears the `.yellow()`-colored `⚠️` emoji glyph on an
+/// UNCOLORED tail, routes through STDOUT (not stderr), and carries a
+/// PLAIN message with no fixed structural template — its consumer sites
+/// mark an in-body irregularity mid-pipeline that the operator wants
+/// drawn to attention (a retry attempt firing, a missing optional
+/// artifact, a pre-cleanup surprise), NOT a non-fatal failure with an
+/// error tail. [`print_warning`] is the milestone-level
+/// `bright_yellow().bold()` `⚠️ <msg>` command-warning sigil emitted at
+/// the top-level of the command with NO indent, NO error tail, and a
+/// heavier palette — one scope above an in-body pipeline step.
+/// [`print_step_failure`] shares the three-space body indent but wears
+/// the `.red()`-colored `❌` glyph and routes through STDOUT — its
+/// consumer sites mark a FATAL failure inside a validation pipeline
+/// (a gate that has decided the release must abort), NOT a non-fatal
+/// one where the caller has chosen to continue.
+///
+/// This primitive carries the SEVEN distinguishing properties every
+/// pre-lift consumer site spelled in lockstep — a three-space indent,
+/// a `"WARN".yellow()` TEXTUAL prefix (not the `⚠️` emoji glyph the
+/// [`print_step_warn`] sibling wears), an interpolated verb-phrase
+/// label naming what failed, the literal connective ` failed
+/// (non-fatal): `, an interpolated [`std::fmt::Display`] error tail,
+/// STDERR (`eprintln!`) routing rather than stdout, and a mandatory
+/// error tail (no error-less call site — every pre-lift consumer bound
+/// its `e` at the failure boundary). All seven together give this
+/// primitive a distinct visual and semantic identity from every peer
+/// UI primitive in this module.
+///
+/// # `"WARN"` text label, not the `⚠️` emoji glyph
+///
+/// Pre-lift every consumer spelled the marker as `"WARN".yellow()` —
+/// the ASCII word `WARN` in yellow — rather than the `⚠️` emoji glyph
+/// [`print_step_warn`] wears. The primitive preserves that split: a
+/// terminal without emoji-glyph support (a CI runner's plain text log,
+/// a downstream `grep`-in-logs pipeline pattern-matching on `\bWARN\b`,
+/// a variable-width-font renderer that squashes the `⚠️` combining
+/// pair) renders `   WARN <label> failed (non-fatal): <err>` legibly
+/// where it would fold `   ⚠️ <label> failed (non-fatal): <err>` into
+/// an unreadable shape. A future palette adjustment (a promotion to
+/// `.yellow().bold()` for lower-contrast terminals, a swap of `"WARN"`
+/// for `"⚠️  WARN"` under a "log-scanner + human-readable" hybrid, a
+/// shift to `\x1b[93m` bright-yellow) hits ONE typed body rather than
+/// 5 sites.
+///
+/// # stderr, not stdout
+///
+/// Every pre-lift consumer routed through `eprintln!` (stderr), not
+/// `println!` (stdout). The primitive preserves that routing: the
+/// stdout/stderr stream is an observable behavior contract (a
+/// downstream consumer piping stdout while leaving stderr on the
+/// terminal, a log-shipper tagging streams differently, a
+/// `--json`-mode consumer parsing structured stdout while allowing
+/// free-text human warnings to stderr), and folding this class into a
+/// stdout primitive would silently shift the release pipeline's
+/// non-fatal warnings out of the stderr channel operators pipe
+/// separately to alerts. Distinct from [`print_step_warn`]'s stdout
+/// routing.
+///
+/// # Mandatory error tail
+///
+/// The signature takes `err: &dyn std::fmt::Display` rather than
+/// folding it into `what` — every pre-lift consumer bound its `e` at
+/// the failure boundary, and the primitive splits the label (the
+/// caller's static verb-phrase describing what failed, e.g. `"Source
+/// attestation"` or `"Post-deploy verification"`) from the runtime
+/// error state so the `failed (non-fatal): ` connective lives ONCE in
+/// the primitive body rather than being spelled by each caller.
+/// `anyhow::Error` implements [`std::fmt::Display`], so every pre-lift
+/// `e` binding forwards through unchanged; a caller with a
+/// [`std::io::Error`] or a boxed dyn error can also forward directly
+/// without adaptation.
+///
+/// # Compounding
+///
+/// Pre-lift 5 sibling sites each restated the `eprintln!("   {}
+/// <label> failed (non-fatal): {}", "WARN".yellow(), ..., e)` grammar
+/// verbatim, with the three-space indent, the `"WARN"` textual prefix,
+/// the `.yellow()` coloring, the ` failed (non-fatal): ` connective,
+/// the stderr routing, and the `Display`-formatted error tail all
+/// spelled inline. A future adjustment — routing them through
+/// `tracing::warn!(target: "forge::release", ...)` for structured
+/// observability so a downstream OTLP subscriber can count non-fatal
+/// failures per release stage, promoting them to hard errors under
+/// `--strict-attestation` mode, collecting them into a
+/// release-completion summary panel, standardizing the connective on a
+/// locale-neutral `" — non-fatal: "`, promoting `.yellow()` to
+/// `.yellow().bold()` under a lower-contrast-terminal grammar — had
+/// to hit 5 sites in lockstep or drift the surface (label palette,
+/// connective, destination stream, glyph vs text). Post-lift the
+/// stream, prefix, connective, and coloring live in ONE writer body
+/// and the sites carry only the (label, error) pair. Delegates to
+/// [`write_nonfatal_warn`] against [`std::io::stderr`]; the writer
+/// split exists so the fail-before-pass test can pin the one-line
+/// body, the three-space indent, the `WARN` text (not `⚠️`), the
+/// `\x1b[33m` yellow ANSI palette contract, the ` failed (non-fatal):
+/// ` connective, and the trailing error interpolation by inspecting
+/// emitted bytes rather than shelling out and grepping stderr.
+pub fn print_nonfatal_warn(what: &str, err: &dyn std::fmt::Display) {
+    let _ = write_nonfatal_warn(&mut std::io::stderr().lock(), what, err);
+}
+
+/// Writer-taking sibling to [`print_nonfatal_warn`]. Emits the single
+/// `   <WARN.yellow()> <what> failed (non-fatal): <err>` line via
+/// [`writeln!`] against the supplied writer. [`print_nonfatal_warn`]
+/// is the stderr adapter; this variant exists so tests can pin the
+/// one-line body, the three-space indent, the `WARN` text prefix, the
+/// `\x1b[33m` yellow ANSI sequence around the prefix (never the label
+/// or the error), the literal ` failed (non-fatal): ` connective, and
+/// the error interpolation without capturing stderr.
+pub fn write_nonfatal_warn<W: std::io::Write>(
+    w: &mut W,
+    what: &str,
+    err: &dyn std::fmt::Display,
+) -> std::io::Result<()> {
+    writeln!(
+        w,
+        "   {} {} failed (non-fatal): {}",
+        "WARN".yellow(),
+        what,
+        err
+    )
+}
+
 /// Prints the single `   <○.yellow()> <message>` line 5 pre-lift
 /// consumer sites spelled inline as `println!("   {} <fmt>",
 /// "○".yellow(), <args>)`. Peer to [`print_step_pass`] (`✅.green()` /
@@ -3829,6 +3969,264 @@ mod tests {
                  primitive body every three-space-indented `⚠️.yellow()` \
                  in-body step-warn in the crate now delegates \
                  through."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_nonfatal_warn`].
+    /// Pins the one-line body every pre-lift consumer spelled verbatim
+    /// (`eprintln!("   {} <label> failed (non-fatal): {}",
+    /// "WARN".yellow(), <opt-args>, e)`): a three-space indent, a
+    /// `.yellow()`-colored `WARN` ASCII text prefix (NOT the `⚠️` emoji
+    /// glyph the [`super::print_step_warn`] sibling wears), a single
+    /// space, the verb-phrase label interpolated verbatim, the literal
+    /// ` failed (non-fatal): ` connective, and the
+    /// [`std::fmt::Display`]-formatted error tail. A silent contract
+    /// drift a future rewrite might introduce — dropping the
+    /// three-space indent (a "tighter body spacing" cleanup),
+    /// promoting the whole line's coloring (`format!("   WARN {}
+    /// failed (non-fatal): {}", label, err).yellow()`) so the label
+    /// and error text paint yellow at every site, swapping the `WARN`
+    /// text for the `⚠️` emoji glyph under a "match the step-warn
+    /// visual grammar" cleanup (which would collapse the
+    /// human-readable + log-scanner-`\bWARN\b`-friendly split the
+    /// pre-lift consumers deliberately preserved), promoting
+    /// `.yellow()` to `.bright_yellow()` (`\x1b[93m` — the milestone
+    /// [`super::print_warning`] palette), reflowing the connective to
+    /// omit the space after `(non-fatal):`, slipping a trailing blank
+    /// line into the primitive body — flips this assertion rather
+    /// than compiling and silently diverging the 5 consumer sites'
+    /// visual grammar.
+    #[test]
+    fn write_nonfatal_warn_emits_exactly_one_warn_prefixed_indented_line_with_error_tail() {
+        // Force ANSI emission (colored auto-drops sequences on a
+        // non-tty stderr) and serialize against peer banner tests via
+        // [`AnsiOverrideForTest`]; its Drop restores colored's
+        // auto-detection on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`], closing the set-write-unset window
+        // without a manual [`colored::control::unset_override`] call
+        // that a future test author could omit.
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        // Use a plain `&str` as the `&dyn Display` — `anyhow::Error`,
+        // `std::io::Error`, and every other `Display` type reach the
+        // writer through the same trait object at the pre-lift call
+        // sites, so a `&str` witness pins the byte contract without
+        // dragging an error-building preamble into the test body.
+        super::write_nonfatal_warn(&mut buf, "Source attestation", &"connection refused")
+            .expect("write_nonfatal_warn against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_nonfatal_warn must emit valid UTF-8 (the pre-lift eprintln!s did)");
+
+        // Exactly one line — the pre-lift stanza is one `eprintln!`,
+        // not two, and carries no framing blank. A refactor that slips
+        // a leading or trailing blank into the primitive body fails
+        // here.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_nonfatal_warn must emit exactly one line — the \
+             pre-lift stanza is one `eprintln!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The three-space indent reaches the rendered line before any
+        // ANSI escape — a fusion that hoisted the indent inside the
+        // coloring span (`"   WARN".yellow()`) or dropped it altogether
+        // fails here.
+        assert!(
+            lines[0].starts_with("   "),
+            "line 0 must begin with a three-space indent — every \
+             pre-lift consumer spelled `\"   {{}} <label> failed \
+             (non-fatal): {{}}\"` verbatim, so the indent must reach \
+             the writer OUTSIDE the coloring span; got {:?}",
+            lines[0]
+        );
+
+        // The `WARN` ASCII text reaches the rendered line — a fusion
+        // that swapped `WARN` for the `⚠️` emoji glyph under a "match
+        // the step-warn visual grammar" cleanup fails here. The
+        // pre-lift consumers deliberately used the ASCII word so
+        // log-scanners can pattern-match on `\bWARN\b` and terminals
+        // without emoji-glyph support render legibly.
+        assert!(
+            lines[0].contains("WARN"),
+            "line 0 must contain the `WARN` ASCII text prefix — every \
+             pre-lift consumer spelled `\"WARN\".yellow()` on the \
+             marker (NOT the `⚠️` emoji glyph the `print_step_warn` \
+             sibling wears); got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('⚠'),
+            "line 0 must NOT contain the `⚠️` emoji glyph — that glyph \
+             belongs to the sibling `print_step_warn` primitive (stdout \
+             + `⚠️.yellow()` glyph, in-body step-warn grammar); this \
+             primitive deliberately wears the `WARN` ASCII text prefix \
+             so a log-scanner can pattern-match on `\\bWARN\\b` and \
+             terminals without emoji-glyph support render legibly; \
+             got {:?}",
+            lines[0]
+        );
+
+        // The verb-phrase label reaches the rendered line verbatim —
+        // a fusion that hoists the label off the parameter and pins
+        // it to a constant fails here.
+        assert!(
+            lines[0].contains("Source attestation"),
+            "line 0 must carry the label verbatim; got {:?}",
+            lines[0]
+        );
+
+        // The literal ` failed (non-fatal): ` connective reaches the
+        // rendered line — a fusion that reflowed it to `" — non-fatal: "`,
+        // dropped the parenthetical, or capitalized `non-fatal` fails
+        // here. Every pre-lift consumer spelled it verbatim.
+        assert!(
+            lines[0].contains(" failed (non-fatal): "),
+            "line 0 must carry the literal ` failed (non-fatal): ` \
+             connective — every pre-lift consumer spelled it verbatim \
+             between the label and the error tail; got {:?}",
+            lines[0]
+        );
+
+        // The `Display`-formatted error tail reaches the rendered line.
+        assert!(
+            lines[0].contains("connection refused"),
+            "line 0 must carry the `Display`-formatted error tail \
+             verbatim; got {:?}",
+            lines[0]
+        );
+
+        // The `yellow` ANSI sequence (`\x1b[33m`) reaches the rendered
+        // line; a fusion that dropped `.yellow()` (a "just print the
+        // string, it's shorter" cleanup) or promoted the palette to
+        // `.bright_yellow()` (`\x1b[93m` — the milestone
+        // [`super::print_warning`] palette) fails here. A promotion
+        // collapses the visual distinction between the non-fatal warn
+        // and the milestone warning grammars this primitive exists to
+        // preserve.
+        assert!(
+            lines[0].contains("\x1b[33m"),
+            "line 0 must carry the `yellow` ANSI sequence (`\\x1b[33m`) \
+             — every pre-lift consumer spelled `.yellow()` (never \
+             `.bright_yellow()` or `.yellow().bold()`) on the `WARN` \
+             text; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[93m"),
+            "line 0 must NOT carry the `bright_yellow` ANSI sequence \
+             (`\\x1b[93m`) — that palette belongs to the heavier \
+             milestone-level `print_warning`, not this in-pipeline \
+             non-fatal-warn primitive; got {:?}",
+            lines[0]
+        );
+
+        // The `.yellow()` coloring wraps the `WARN` PREFIX alone,
+        // never the label or the error tail — a fusion that hoisted
+        // the color onto the composed line (`format!("   WARN {}
+        // failed (non-fatal): {}", label, err).yellow()`) would paint
+        // the label and error yellow at every site. Pin that the
+        // label text is NOT inside the yellow span: the yellow span
+        // must close (`\x1b[0m`) BEFORE the space that precedes the
+        // label.
+        let warn_pos = lines[0].find("WARN").expect("WARN prefix must be present");
+        let reset_pos = lines[0]
+            .find("\x1b[0m")
+            .expect("reset must be present after the WARN prefix");
+        let label_pos = lines[0]
+            .find("Source attestation")
+            .expect("label must be present");
+        assert!(
+            warn_pos < reset_pos && reset_pos < label_pos,
+            "the `\\x1b[0m` reset must close the yellow span BEFORE the \
+             label begins — every pre-lift consumer spelled `.yellow()` \
+             on the `WARN` text alone, never on the label or the error \
+             tail. Got positions warn={warn_pos}, reset={reset_pos}, \
+             label={label_pos} in line {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `eprintln!` (not `eprint!`), so the newline is part of the
+        // contract. A fusion that swapped `writeln!` for `write!`
+        // fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_nonfatal_warn must emit a trailing `\\n` (the \
+             pre-lift `eprintln!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_nonfatal_warn`] no longer spell the
+    /// `eprintln!("   {} <label> failed (non-fatal): {}",
+    /// "WARN".yellow(), <opt-args>, e)` shape inline. Structural
+    /// regression shield — without it, a future refactor could
+    /// silently re-inline the stanza (a "just call `eprintln!`
+    /// directly, it's shorter" cleanup) and reopen the 5-site
+    /// duplication class this lift closed. Enforced at the module
+    /// body before its `#[cfg(test)]` region so a test-support mention
+    /// of the raw shape does not defeat the shield.
+    ///
+    /// The exact-shape needle is `"WARN".yellow()` appearing anywhere
+    /// in the module body. `commands/product_release.rs` is the only
+    /// module in the crate whose pre-lift body carried this shape
+    /// (source-wide grep before the lift returned 5 hits, all in
+    /// `product_release.rs`); if a future adjustment routes a
+    /// non-fatal release-pipeline warning through a NEW module, that
+    /// module belongs on this shield.
+    #[test]
+    fn print_nonfatal_warn_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[(
+            include_str!("commands/product_release.rs"),
+            "commands/product_release.rs",
+        )];
+        // No known non-`print_nonfatal_warn` sites carry
+        // `"WARN".yellow()` under a different grammar: the source-wide
+        // grep before the lift returned 5 hits and every one migrated
+        // onto the primitive. Kept as an allowlist for
+        // future-proofing — a peer stderr-routed `"WARN".yellow()`
+        // sibling on a distinct grammar (e.g. a `WARN` prefix with a
+        // suggestion tail instead of `failed (non-fatal): ` connective)
+        // would land here, be flagged by the shield, and either enroll
+        // in a new peer primitive or add an anchoring substring to
+        // this list.
+        const ALLOWLIST_SUBSTRINGS: &[&str] = &[];
+        for (source, module_path) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("\"WARN\".yellow()") {
+                    continue;
+                }
+                if ALLOWLIST_SUBSTRINGS.iter().any(|s| line.contains(s)) {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `\"WARN\".yellow()` non-fatal-warn marker — that \
+                     shape was lifted onto \
+                     `crate::ui::print_nonfatal_warn`. A re-inline \
+                     would silently reopen the 5-site duplication \
+                     class this shield exists to close. Offending \
+                     line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            assert!(
+                body.contains("crate::ui::print_nonfatal_warn("),
+                "{module_path} body must forward to \
+                 `crate::ui::print_nonfatal_warn(<label>, &<err>)` — \
+                 the primitive body every three-space-indented \
+                 `\"WARN\".yellow()` non-fatal-failure in the crate \
+                 now delegates through."
             );
         }
     }
