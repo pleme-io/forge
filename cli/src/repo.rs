@@ -2709,6 +2709,126 @@ pub fn now_rfc3339_utc() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
+/// Suffix a step-outcome `msg` with the fleet-standard elapsed-time tag
+/// ` (NNN.Ns)` — one decimal-place seconds, parenthesized, single space
+/// between message and tag — and return the composed owned [`String`].
+///
+/// The pre-lift spelling is
+/// ```text
+/// format!("<message> ({:.1}s)", <duration>.as_secs_f64())
+/// ```
+/// or its multi-line
+/// ```text
+/// format!(
+///     "<message> ({:.1}s)",
+///     <duration>.as_secs_f64(),
+/// )
+/// ```
+/// carried by seventeen sibling step-outcome sites (past THEORY §VI.1's
+/// three-times-is-a-law threshold; PRIME DIRECTIVE: duplication budget
+/// is zero):
+///
+/// - `commands/frontend_validation.rs::run_type_check` pass —
+///   `"Type check passed"`
+/// - `commands/frontend_validation.rs::run_lint` (Biome-not-installed
+///   branch) — `"Biome auto-fix failed - biome may not be installed"`
+/// - `commands/frontend_validation.rs::run_lint` verify pass —
+///   `"Biome lint applied and verified"`
+/// - `commands/frontend_validation.rs::run_unit_tests` no-tests-found
+///   branch — `"No unit tests found"`
+/// - `commands/frontend_validation.rs::run_unit_tests` failure branch
+///   — `"Unit tests failed"`
+/// - `commands/frontend_validation.rs::run_unit_tests` unknown-error
+///   branch — `"Test execution failed"`
+/// - `commands/prerelease.rs::run_integration_tests` pass /
+///   failure — `"Integration tests passed"` / `"Integration tests failed"`
+/// - `commands/prerelease.rs::run_e2e_tests` pass / failure —
+///   `"E2E tests passed"` / `"E2E tests failed"`
+/// - `commands/prerelease.rs::run_compilation_check` pass /
+///   failure — `"Compilation check passed"` / `"Compilation check failed"`
+/// - `commands/prerelease.rs::run_format_check` cargo-fmt failure
+///   branch — `"cargo fmt failed"`
+/// - `commands/prerelease.rs::run_format_check` verify pass —
+///   `"Code formatting applied and verified"`
+/// - `commands/prerelease.rs::run_tests` bare-failure branch —
+///   `"Tests failed"`
+/// - `commands/codegen.rs::execute` bun-install completion —
+///   `"Dependencies installed"`
+/// - `commands/codegen.rs::execute` codegen completion —
+///   `"Codegen completed"`
+///
+/// # The three grammar invariants this primitive pins at one place
+///
+/// 1. **Precision.** One decimal digit (`{:.1}`) — not zero (`{:.0}`,
+///    which quantizes a 250ms transient to `0s` and silences a
+///    signal-carrying sub-second timing), not two (`{:.2}`, which
+///    is [`commands/integration_tests.rs`]'s DISTINCT step-summary
+///    convention and would drift the two dialects together if fused
+///    into ONE primitive). A future respell of the primitive body
+///    to `{:.0}` or `{:.2}` fails
+///    [`tests::msg_with_secs_1_pins_one_decimal_place_precision`].
+/// 2. **Parenthesization.** The tag renders as ` (NNN.Ns)` — leading
+///    single space, opening paren, closing paren, no trailing content.
+///    A future respell to ` — NNN.Ns` (em-dash) or ` [NNN.Ns]`
+///    (square brackets) fails
+///    [`tests::msg_with_secs_1_pins_paren_delimiter_grammar`], catching
+///    a UI-drift the seventeen consumer sites collectively depend on
+///    (a scraper matching `.*\(\d+\.\ds\)$` breaks silently otherwise).
+/// 3. **Unit suffix.** The trailing character is `s` (seconds), not
+///    `ms` / `μs` / `sec` / no-unit — the caller passes a [`Duration`]
+///    and the primitive projects it via [`Duration::as_secs_f64`], so
+///    the render always agrees with the projection. A future respell
+///    that added `ms` to the tag but kept the seconds projection
+///    would silently over-report by 1000× and fails
+///    [`tests::msg_with_secs_1_seconds_unit_agrees_with_projection`].
+///
+/// # Typed input
+///
+/// The `d: Duration` parameter is the load-bearing choice: every
+/// pre-lift site sourced the value from a [`std::time::Instant`]'s
+/// `.elapsed()`, whose return type is [`Duration`]. A hypothetical
+/// `d: f64` signature (or `d: impl Into<f64>`) would let a caller
+/// pass a pre-projected `.as_secs_f64()` OR a raw millisecond `u64`
+/// OR any other numeric value silently — the compiler cannot
+/// distinguish "1234 seconds" from "1234 milliseconds" at an untyped
+/// `f64` surface. Pinning [`Duration`] here forces the caller to name
+/// the type at construction (`start.elapsed()`, `Duration::from_millis(n)`)
+/// and lets the primitive body own the `.as_secs_f64()` projection at
+/// ONE place — the same one-oracle discipline [`now_rfc3339_utc`] pins
+/// on the timestamp surface.
+///
+/// # Non-goals
+///
+/// This primitive is deliberately NOT the home for:
+/// - **`({:.2}s)` step-summary sites** in
+///   `commands/integration_tests.rs` — a DISTINCT dialect (two decimal
+///   digits, and often composed with a non-paren surround such as
+///   `Total Duration: {:.2}s`). A future `msg_with_secs_2` sibling is
+///   the natural next lift when that dialect crosses the three-is-a-law
+///   threshold with a matching shape; today the sites are heterogeneous
+///   in surround grammar (`in {:.2}s` / `after {:.2}s` / `Total: {:.2}s`)
+///   and a single primitive would fit none of them cleanly.
+/// - **Interleaved-arg shapes** such as
+///   `format!("{} passed ({:.1}s)", linter_name, d.as_secs_f64())`
+///   (`commands/frontend_validation.rs::run_lint` pass branch, and
+///   the two `... ({} errors, {:.1}s)` variants in the same file).
+///   These carry a semantic-argument slot BEFORE the seconds slot,
+///   so a bare-`msg`-then-suffix primitive would ask the caller to
+///   pre-`format!` the semantic-arg half and lose the compile-time
+///   argument-count check on the composed shape. The three-is-a-law
+///   threshold for the interleaved shape is a distinct lift.
+/// - **Pre-projected `f64` `duration` bindings** in
+///   `commands/sync.rs::execute` and `services/release_service.rs`
+///   — the pre-lift line assigns `let duration = start.elapsed()
+///   .as_secs_f64();` and consumes the `f64` binding TWICE (once
+///   in each of two format arms). Routing through this primitive
+///   would re-do the [`Duration::as_secs_f64`] projection per arm and
+///   drop the shared `f64` binding, so the ergonomic win at that
+///   two-arm site does not survive the lift.
+pub fn msg_with_secs_1(msg: &str, d: std::time::Duration) -> String {
+    format!("{} ({:.1}s)", msg, d.as_secs_f64())
+}
+
 /// Run a command in a specific directory, restoring the original directory afterward
 ///
 /// # Arguments
@@ -8411,6 +8531,200 @@ mod tests {
                  carried. Same fix: route through \
                  `crate::repo::now_rfc3339_utc()`."
             );
+        }
+    }
+
+    /// [`msg_with_secs_1`] must project one — and only one — decimal
+    /// digit of sub-second precision. The seventeen pre-lift consumer
+    /// sites each spelled `{:.1}s` inline; the primitive body OWNS
+    /// this choice at one place so a future body respell to `{:.0}s`
+    /// (which quantizes a signal-carrying 250ms transient to `0s`)
+    /// or `{:.2}s` (which drifts the render into
+    /// `commands/integration_tests.rs`'s DISTINCT step-summary
+    /// dialect) fails loud here rather than propagating silently to
+    /// every consumer.
+    #[test]
+    fn msg_with_secs_1_pins_one_decimal_place_precision() {
+        let rendered = msg_with_secs_1("op", std::time::Duration::from_millis(1234));
+        assert_eq!(
+            rendered, "op (1.2s)",
+            "msg_with_secs_1() must render 1234ms as `1.2s` (one \
+             decimal digit) — a `{{:.0}}` respell would render `1s` \
+             and silence the sub-second signal seventeen consumer \
+             sites depend on; a `{{:.2}}` respell would render `1.23s` \
+             and drift the render into the `integration_tests.rs` \
+             step-summary dialect. Got: {rendered:?}"
+        );
+
+        let subsecond = msg_with_secs_1("op", std::time::Duration::from_millis(260));
+        assert_eq!(
+            subsecond, "op (0.3s)",
+            "msg_with_secs_1() must render 260ms as `0.3s` — a \
+             `{{:.0}}` respell would render `0s` and silence a \
+             signal-carrying sub-second transient. (250ms is avoided \
+             here because IEEE-754 round-half-to-even renders 0.25 as \
+             `0.2`, obscuring the rounding-behaviour signal this test \
+             pins.) Got: {subsecond:?}"
+        );
+    }
+
+    /// [`msg_with_secs_1`] must render the elapsed-time tag with the
+    /// exact ` (NNN.Ns)` grammar — a single leading space, an opening
+    /// paren, the numeric render, the unit suffix `s`, and a closing
+    /// paren. A hypothetical body respell to ` — NNN.Ns` (em-dash),
+    /// ` [NNN.Ns]` (square brackets), or `: NNN.Ns` (colon separator)
+    /// would silently break every downstream scraper matching the
+    /// pre-lift `.*\(\d+\.\ds\)$` shape.
+    #[test]
+    fn msg_with_secs_1_pins_paren_delimiter_grammar() {
+        let rendered = msg_with_secs_1("Type check passed", std::time::Duration::from_millis(3400));
+        assert_eq!(
+            rendered, "Type check passed (3.4s)",
+            "msg_with_secs_1() must render with the ` (NNN.Ns)` \
+             grammar — single leading space, opening paren, numeric \
+             render, `s`, closing paren. A respell to ` — NNN.Ns` \
+             or ` [NNN.Ns]` would break the pre-lift scraper shape \
+             `.*\\(\\d+\\.\\ds\\)$` every downstream consumer expects. \
+             Got: {rendered:?}"
+        );
+    }
+
+    /// [`msg_with_secs_1`]'s unit suffix (`s`) MUST agree with the
+    /// numeric projection [`Duration::as_secs_f64`]. A hypothetical
+    /// future body that respells the render as `{:.1}ms` while
+    /// keeping the `as_secs_f64()` projection would over-report by
+    /// 1000× (a 1.5-second operation would render as `1.5ms`). This
+    /// test pins both halves against a known duration so the two
+    /// halves cannot drift independently.
+    #[test]
+    fn msg_with_secs_1_seconds_unit_agrees_with_projection() {
+        let d = std::time::Duration::from_secs(5);
+        let rendered = msg_with_secs_1("build", d);
+        assert_eq!(
+            rendered, "build (5.0s)",
+            "msg_with_secs_1() for a 5-second Duration must render \
+             the numeric `5.0` and the unit suffix `s` — a body \
+             respell to `{{:.1}}ms` with the same `as_secs_f64()` \
+             projection would over-report by 1000× (rendering `5.0ms` \
+             for a 5-second operation). Got: {rendered:?}"
+        );
+
+        // Independent check: the numeric half agrees with the
+        // projection function this primitive body calls internally.
+        let projected = d.as_secs_f64();
+        assert_eq!(
+            projected, 5.0,
+            "Duration::as_secs_f64() on a 5-second Duration must \
+             project 5.0 — if this ever changes, msg_with_secs_1's \
+             render invariant above changes with it. Got: {projected}"
+        );
+    }
+
+    /// [`msg_with_secs_1`] threads the caller's message verbatim — no
+    /// truncation, no re-casing, no re-wrapping. The seventeen
+    /// pre-lift consumer sites each pass a short, human-authored
+    /// English phrase (`"Type check passed"`, `"cargo fmt failed"`);
+    /// a future body respell that folded the message through
+    /// `msg.to_lowercase()` or `msg.trim()` would silently alter
+    /// operator-facing prose. This test pins byte-for-byte pass-through
+    /// on a message containing mixed case AND leading/trailing
+    /// whitespace boundaries the two respells above would each touch.
+    #[test]
+    fn msg_with_secs_1_threads_the_caller_message_verbatim() {
+        let rendered = msg_with_secs_1("Biome Auto-Fix", std::time::Duration::from_millis(100));
+        assert!(
+            rendered.starts_with("Biome Auto-Fix "),
+            "msg_with_secs_1() must thread the caller's message \
+             verbatim (including mixed case) — a `msg.to_lowercase()` \
+             respell would render `biome auto-fix ...` and silently \
+             alter operator-facing prose. Got: {rendered:?}"
+        );
+    }
+
+    /// [`msg_with_secs_1`] must OWN the projection from [`Duration`] to
+    /// seconds — no consumer that this lift closed re-inlines the pre-lift
+    /// `format!("... ({:.1}s)", d.as_secs_f64())` grammar. This shield
+    /// walks each of the three closed consumer files and refuses any
+    /// occurrence of the pre-lift byte pattern, so a silent respell that
+    /// reintroduces the inline `{:.1}s` grammar at these sites fails at
+    /// this test rather than propagating.
+    ///
+    /// Files not in this fleet map are ALLOWED to spell either form —
+    /// the same file may legitimately carry interleaved-arg shapes
+    /// (`"{} passed ({:.1}s)"`, `"({} errors, {:.1}s)"`) that the
+    /// primitive's non-goals list explicitly leaves to the caller. This
+    /// shield's `.contains("({:.1}s)")` check catches both the closed
+    /// bare-message shape AND those in-file survivors, so it can only
+    /// govern files where every occurrence of the tag is a lift target.
+    /// The two multi-consumer files (`frontend_validation.rs` /
+    /// `prerelease.rs`) carry both closed sites and out-of-scope
+    /// interleaved-arg survivors, so they cannot be governed by a bare
+    /// `.contains` shield here without a false positive on the
+    /// legitimate survivor — they are excluded from the map, and their
+    /// shield instead rides on the compile-time removal of the closed
+    /// call sites (the primitive is called seventeen times across the
+    /// crate; the compiler would flag an unused import at the file
+    /// scope if every reference were re-inlined). `codegen.rs` closes
+    /// two sites AND its remaining `{:.1}s` occurrence is the
+    /// interleaved-arg `"Schema extracted ({} bytes, {:.1}s)"` survivor
+    /// on a DIFFERENT line, so a byte-for-byte match on the closed
+    /// spelling is still tractable at that file.
+    #[test]
+    fn msg_with_secs_1_closed_sites_do_not_reinline_the_primitive_shape() {
+        let closed_bare_spellings: &[(&str, &[&str])] = &[
+            (
+                "src/commands/codegen.rs",
+                &[
+                    "\"Dependencies installed ({:.1}s)\"",
+                    "\"Codegen completed ({:.1}s)\"",
+                ],
+            ),
+            (
+                "src/commands/frontend_validation.rs",
+                &[
+                    "\"Type check passed ({:.1}s)\"",
+                    "\"Biome auto-fix failed - biome may not be installed ({:.1}s)\"",
+                    "\"Biome lint applied and verified ({:.1}s)\"",
+                    "\"No unit tests found ({:.1}s)\"",
+                    "\"Unit tests failed ({:.1}s)\"",
+                    "\"Test execution failed ({:.1}s)\"",
+                ],
+            ),
+            (
+                "src/commands/prerelease.rs",
+                &[
+                    "\"Integration tests passed ({:.1}s)\"",
+                    "\"Integration tests failed ({:.1}s)\"",
+                    "\"E2E tests passed ({:.1}s)\"",
+                    "\"E2E tests failed ({:.1}s)\"",
+                    "\"Compilation check passed ({:.1}s)\"",
+                    "\"Compilation check failed ({:.1}s)\"",
+                    "\"cargo fmt failed ({:.1}s)\"",
+                    "\"Code formatting applied and verified ({:.1}s)\"",
+                    "\"Tests failed ({:.1}s)\"",
+                ],
+            ),
+        ];
+        for (path, needles) in closed_bare_spellings {
+            let content = std::fs::read_to_string(path).unwrap_or_else(|e| {
+                panic!(
+                    "shield must read `{path}` to walk it for \
+                     re-inlines — the closed-site fleet map was frozen \
+                     at the lift boundary. Read error: {e}"
+                )
+            });
+            for needle in *needles {
+                assert!(
+                    !content.contains(needle),
+                    "shield refuses re-inline: `{path}` contains the \
+                     pre-lift closed-site spelling `{needle}` the lift \
+                     replaced with a `crate::repo::msg_with_secs_1(...)` \
+                     call. A silent re-inline would silently reopen the \
+                     precision-drift path (a hand-swap to `{{:.0}}` or \
+                     `{{:.2}}`) at exactly this site — route the value \
+                     through the primitive instead."
+                );
+            }
         }
     }
 }
