@@ -475,12 +475,10 @@ fn create_federation_test_job(
             .join("tests/federation");
 
         let federation_deploy_yaml = federation_tests_dir.join("deploy.yaml");
-        if !federation_deploy_yaml.exists() {
-            bail!(
-                "Federation tests deploy.yaml not found: {}",
-                federation_deploy_yaml.display()
-            );
-        }
+        crate::repo::require_existing_path(
+            &federation_deploy_yaml,
+            "Federation tests deploy.yaml",
+        )?;
 
         // Read and parse federation-tests deploy.yaml
         #[derive(serde::Deserialize)]

@@ -121,12 +121,7 @@ pub async fn update_federation(
 
     let federation_dir = deploy_config.federation_directory()?;
 
-    if !federation_dir.exists() {
-        bail!(
-            "Federation directory not found: {}",
-            federation_dir.display()
-        );
-    }
+    crate::repo::require_existing_path(&federation_dir, "Federation directory")?;
 
     // Get repo root for path resolution (not current service directory)
     let current_dir = crate::repo::current_dir()?;

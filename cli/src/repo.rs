@@ -1187,6 +1187,83 @@ pub fn require_existing_labeled<'a>(path: &'a str, label: &str) -> Result<&'a Pa
     Ok(p)
 }
 
+/// Assert a caller-owned [`&Path`] exists on disk, bailing with the exact
+/// `"{label} not found: {path.display()}"` envelope on the miss arm.
+///
+/// The `&Path + &str → Result<()>` peer of [`require_existing_labeled`]
+/// on the caller-already-owns-the-path surface. Where
+/// [`require_existing_labeled`] takes a `path: &str` and constructs the
+/// [`Path`] inside the body (returning the borrowed `&Path` so downstream
+/// code can `.join(...)` off it), this variant is for the consumer that
+/// has already resolved a [`PathBuf`] / `&Path` on their side — typically
+/// via a preceding `.join(...)`, a `deploy_config.<...>_directory()?`, or
+/// a config-typed accessor — and just needs the `.exists()` gate + bail
+/// wording. Returning `Ok(())` keeps the caller's existing binding in
+/// scope; a `&Path`-echoing return would be redundant identity work at
+/// every call site.
+///
+/// # Pre-lift sites fused into ONE body
+///
+/// Seven sibling command-module sites spelled the 3-line
+///
+/// ```text
+/// if !<pathbuf>.exists() {
+///     bail!("<Label> not found: {}", <pathbuf>.display());
+/// }
+/// ```
+///
+/// stanza verbatim, each with a different noun fixed at its own call site:
+///
+/// - [`crate::commands::gem::build`] — `"Gemspec"` on `dir.join(&gemspec)`.
+/// - [`crate::commands::helm`] — `"Library chart"` on
+///   `charts_path.join(lib_chart_name).join("Chart.yaml")`.
+/// - [`crate::commands::web_build_verify`] x2 — `"Assets directory"` on
+///   `dist_dir.join("assets")` and `"index.html"` on
+///   `dist_dir.join("index.html")`.
+/// - [`crate::commands::federation::update_federation`] —
+///   `"Federation directory"` on `deploy_config.federation_directory()?`.
+/// - [`crate::commands::migration_new`] — `"SeaORM migrations directory"`
+///   on `base_dir.join("services/rust/migration/src")`.
+/// - [`crate::commands::federation_tests`] —
+///   `"Federation tests deploy.yaml"` on
+///   `federation_tests_dir.join("deploy.yaml")`.
+///
+/// # Envelope
+///
+/// The bail wording is `"{label} not found: {path.display()}"`,
+/// projecting the [`Path`] through [`Path::display`] because pre-lift every
+/// consumer already projected via `.display()` — the caller-owned
+/// [`PathBuf`] has no raw-`&str` form the operator originally typed (unlike
+/// [`require_existing_labeled`], which interpolates the raw string
+/// verbatim). A drift that swapped the interpolation to `path.to_string_lossy()`
+/// or a debug-format `{:?}` variant would silently change the operator-
+/// facing wording for every one of the seven consumers.
+///
+/// # Errors
+///
+/// Returns `Err` if `path` does not exist on disk. On the miss arm the
+/// caller-facing wording is `"{label} not found: {path.display()}"`; the
+/// primitive does NOT probe why the path is missing (permission denied,
+/// ENOENT on an intermediate component, dangling symlink) — the
+/// discipline is a next-step `ls {path}` for the operator, not a
+/// diagnostic tree at the primitive body.
+///
+/// # Sibling primitives
+///
+/// - [`require_existing_labeled`] — the `&str + &str → Result<&Path>` peer
+///   at the caller-supplies-a-string surface. Interpolates the raw `&str`
+///   verbatim, NOT via `.display()`, because the pre-lift `&str` consumers
+///   carried the operator-typed value directly.
+/// - [`require_existing_working_dir`] — the `&str → Result<&Path>`
+///   command-entry-point specialization that fixes `label = "Working
+///   directory"`.
+pub fn require_existing_path(path: &Path, label: &str) -> Result<()> {
+    if !path.exists() {
+        anyhow::bail!("{} not found: {}", label, path.display());
+    }
+    Ok(())
+}
+
 /// Resolve a substrate-declared env var into a `String`, falling back
 /// to `default` on the unset case.
 ///
@@ -5272,6 +5349,128 @@ mod tests {
                  silently change the operator-facing message for every \
                  one of the nine consumer sites. Got: {msg}"
             );
+        }
+    }
+
+    /// [`require_existing_path`] returns `Ok(())` on the exists-hit case
+    /// — the primitive's `&Path + &str → Result<()>` success arm carries
+    /// no side effect and no allocated return, structurally identical to
+    /// the pre-lift `if !<path>.exists() { bail!(...); }` idiom every one
+    /// of the seven consumer sites relied on. A drift that swapped the
+    /// return to an owned `PathBuf` (via `.to_path_buf()` /
+    /// `.canonicalize()`) or `&Path` (echoing the input) would silently
+    /// allocate or introduce a redundant identity binding at every call
+    /// site, breaking the "caller already owns the path" invariant the
+    /// pre-lift `PathBuf`-typed consumers carried.
+    #[test]
+    fn require_existing_path_returns_unit_on_exists_hit() {
+        let dir = std::env::temp_dir();
+        require_existing_path(&dir, "Scratch dir")
+            .expect("require_existing_path must succeed on an existing PathBuf");
+    }
+
+    /// [`require_existing_path`] bails with the exact wording
+    /// `"{label} not found: {path.display()}"` interpolating BOTH the
+    /// caller-supplied `label` prefix AND the [`Path::display`] projection
+    /// of the caller-owned path — where the [`&str`]-taking peer
+    /// [`require_existing_labeled`] interpolates the raw string verbatim,
+    /// this variant projects via `.display()` because pre-lift every one
+    /// of the seven `PathBuf`-typed consumers already spelled `.display()`
+    /// (the caller-owned [`PathBuf`] has no raw-`&str` form). A drift that
+    /// swapped the interpolation to `path.to_string_lossy()` or a debug-
+    /// format `{:?}` variant would silently change the operator-facing
+    /// message for every one of the seven consumer sites, so this shield
+    /// pins both the label-then-path ordering and the `.display()`
+    /// projection at the primitive body.
+    #[test]
+    fn require_existing_path_bails_with_label_and_display_verbatim_on_miss() {
+        let sentinel =
+            Path::new("/tmp/forge-require-existing-path-sigil-shield-nonexistent-path-5432109876");
+        assert!(
+            !sentinel.exists(),
+            "test sentinel must not exist for the shield to be meaningful"
+        );
+        for label in ["Gemspec", "SeaORM migrations directory", "index.html"] {
+            let err = require_existing_path(sentinel, label)
+                .expect_err("require_existing_path must bail on a nonexistent path");
+            let msg = format!("{err:#}");
+            assert_eq!(
+                msg,
+                format!("{label} not found: {}", sentinel.display()),
+                "require_existing_path() must bail with the EXACT wording \
+                 `\"{{label}} not found: {{path.display()}}\"` interpolating \
+                 the caller-supplied label and the caller-owned `Path::display()` \
+                 verbatim — pre-lift every consumer spelled \
+                 `bail!(\"<Label> not found: {{}}\", <pathbuf>.display());` \
+                 with the label baked in as a fixed literal, so a drift that \
+                 lowercased/uppercased the label or projected the path through \
+                 `.to_string_lossy()` / `{{:?}}` would silently change the \
+                 operator-facing message for every one of the seven consumer \
+                 sites. Got: {msg}"
+            );
+        }
+    }
+
+    /// Post-lift the seven consumer sites lifted onto
+    /// [`require_existing_path`] must not silently re-inline the
+    /// `if !<pathbuf>.exists() { bail!("<Label> not found: {}",
+    /// <pathbuf>.display()); }` shape at their call points — a re-inline
+    /// would reopen the class this lift closed. This source-scan shield
+    /// walks every hand-lifted consumer file and refuses the label-and-
+    /// display bail wordings the pre-lift sites carried.
+    ///
+    /// A helpful "just inline it, it's shorter" cleanup at any one site
+    /// re-opens the duplication class this lift closed and forces every
+    /// other consumer to divorce from the primitive one edit at a time.
+    ///
+    /// The primitive body and its doc-comment code blocks legitimately
+    /// spell the shape at their own body; this shield does NOT scan
+    /// `repo.rs` so the sibling primitive survives it by construction,
+    /// mirroring the discipline every sibling shield test in this module
+    /// already carries.
+    #[test]
+    fn require_existing_path_consumers_do_not_reinline_the_primitive_shape() {
+        for (name, source) in [
+            ("commands/gem.rs", include_str!("commands/gem.rs")),
+            ("commands/helm.rs", include_str!("commands/helm.rs")),
+            (
+                "commands/web_build_verify.rs",
+                include_str!("commands/web_build_verify.rs"),
+            ),
+            (
+                "commands/federation.rs",
+                include_str!("commands/federation.rs"),
+            ),
+            (
+                "commands/migration_new.rs",
+                include_str!("commands/migration_new.rs"),
+            ),
+            (
+                "commands/federation_tests.rs",
+                include_str!("commands/federation_tests.rs"),
+            ),
+        ] {
+            for needle in [
+                "Gemspec not found:",
+                "Library chart not found:",
+                "Assets directory not found:",
+                "index.html not found:",
+                "Federation directory not found:",
+                "SeaORM migrations directory not found:",
+                "Federation tests deploy.yaml not found:",
+            ] {
+                assert!(
+                    !source.contains(needle),
+                    "{name} must NOT spell the inline `{needle}` bail \
+                     wording — that duplication was lifted onto \
+                     `crate::repo::require_existing_path(&<pathbuf>, <label>)`. \
+                     A re-inline would silently diverge the label-and-`.display()` \
+                     envelope from the sibling consumers routing through \
+                     the primitive, and fork the bail wording into a \
+                     hand-typed literal that could drift from the \
+                     primitive one consumer at a time."
+                );
+            }
         }
     }
 
