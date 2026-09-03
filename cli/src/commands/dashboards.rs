@@ -200,7 +200,7 @@ async fn scan_entities(config: &DashboardConfig) -> Result<Vec<ObservedEntity>> 
     for entry in walkdir::WalkDir::new(&src_dir)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "rs"))
+        .filter(|e| crate::repo::path_has_extension(e.path(), "rs"))
     {
         let content = fs::read_to_string(entry.path())?;
         let file_entities = parse_observed_entities(&content, entry.path())?;
@@ -213,7 +213,7 @@ async fn scan_entities(config: &DashboardConfig) -> Result<Vec<ObservedEntity>> 
         for entry in walkdir::WalkDir::new(&entities_dir)
             .into_iter()
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |ext| ext == "rs"))
+            .filter(|e| crate::repo::path_has_extension(e.path(), "rs"))
         {
             let content = fs::read_to_string(entry.path())?;
             let model_entities =
@@ -595,7 +595,7 @@ fn check_pruned_dashboards(
         let entry = entry?;
         let path = entry.path();
 
-        if path.extension().map_or(false, |ext| ext == "yaml") {
+        if crate::repo::path_has_extension(&path, "yaml") {
             let filename = path.file_stem().unwrap_or_default().to_string_lossy();
 
             // Check if this is an entity dashboard

@@ -1116,9 +1116,8 @@ mod tests {
         let (_dir, path) =
             super::federation_test_job_manifest_file("myapp-auth-federation-tests-1699999999")
                 .expect("federation_test_job_manifest_file");
-        assert_eq!(
-            path.extension().and_then(|s| s.to_str()),
-            Some("yaml"),
+        assert!(
+            crate::repo::path_has_extension(&path, "yaml"),
             "federation_test_job_manifest_file must return a path with `.yaml` \
              extension, got {path:?}",
         );

@@ -1988,6 +1988,81 @@ pub fn file_name_opt_str(path: &Path) -> Option<&str> {
     path.file_name().and_then(std::ffi::OsStr::to_str)
 }
 
+/// Return `true` iff `path` carries a file-name extension whose UTF-8
+/// projection equals `ext` byte-for-byte. The rank-one extension-
+/// predicate primitive on the `<Path> → <bool>` surface, discharging
+/// the [`Path::extension`] + UTF-8 projection + equality composition
+/// every pre-lift consumer spelled inline.
+///
+/// # The pre-lift sigil
+///
+/// Thirteen sibling consumer sites across nine modules restated the
+/// same extension-predicate composition inline in three byte-distinct
+/// spellings and three consumer shapes:
+///
+/// - Six `Option<&str>`-comparison walker-filter sites spelled
+///   `path.extension().and_then(|s| s.to_str()) == Some("<lit>")` (or
+///   the negated `!= Some("<lit>")` form in the `ui.rs` shield test):
+///   `commands/{supergraph_verification.rs (×3), federation.rs}`
+///   keep-only-`.graphql` entries from a `subgraphs/` walk; the
+///   `test_support.rs` + `ui.rs` sites keep-only-`.rs` entries from a
+///   crate-source walk.
+/// - Two `bool`-short-circuit walker-filter sites in `commands/{e2e.rs,
+///   prerelease.rs}` spelled `path.extension().map(|ext| ext ==
+///   "png").unwrap_or(false)` — screenshot enumerators that keep only
+///   `.png` files under `target/screenshots/`.
+/// - Three `.map_or(false, |ext| ext == "<lit>")` walker-filter sites
+///   in `commands/dashboards.rs` — two keep-only-`.rs` `walkdir`
+///   filters over an observability-source tree, and one
+///   keep-only-`.yaml` sync-`read_dir` filter over an entity-
+///   dashboard output directory.
+/// - Two `assert_eq!(<projection>, Some("<lit>"))` test-pin sites in
+///   `commands/{federation_tests.rs, crossplane.rs}` on the tempfile-
+///   returning primitives `federation_test_job_manifest_file()` (pins
+///   `.yaml`) and `xpkg_output_file()` (pins `.xpkg`) — post-lift
+///   they spell `assert!(path_has_extension(&path, "<lit>"))` on the
+///   direct-`bool` primitive so a future primitive-body change
+///   ripples through the shield uniformly.
+///
+/// The three spellings differ only in surface syntax: the
+/// `.and_then(|s| s.to_str()) == Some(<lit>)` form projects the
+/// [`std::ffi::OsStr`] to `&str` via [`std::ffi::OsStr::to_str`] and
+/// compares as [`Option<&str>`]; the `.map(|e| e == <lit>).
+/// unwrap_or(false)` form leverages the [`std::ffi::OsStr`] `==`
+/// against `&str` and short-circuits the miss arm (no extension) to
+/// `false`; the `.map_or(false, |e| e == <lit>)` form fuses the same
+/// two steps into [`Option::map_or`]'s "default + mapper" call. For
+/// every ASCII extension in the pre-lift set — `graphql`, `png`,
+/// `rs`, `yaml`, `xpkg` — all three spellings return byte-identical
+/// results, so the primitive body picks the `Option<&str>` spelling
+/// to stay byte-for-byte identical to the six `.and_then(...).to_str()`
+/// sites at their point of lift, and the `.map`/`.map_or` callers
+/// ride onto the same body without a semantic drift.
+///
+/// # The miss-arm unit
+///
+/// `false` — a path with no extension segment (`README`,
+/// `subgraphs/`), a non-UTF-8 extension segment (a byte sequence
+/// [`std::ffi::OsStr::to_str`] rejects), or an extension segment
+/// whose UTF-8 projection differs from `ext` byte-for-byte all
+/// short-circuit to `false`. Every pre-lift consumer routed
+/// through the same miss-arm unit; the primitive owns it once.
+///
+/// # Peer
+///
+/// Sibling to [`file_name_opt_str`] on the `<Path> → <segment
+/// projection>` surface: [`file_name_opt_str`] projects the file-name
+/// segment as `Option<&str>` for callers whose downstream logic
+/// branches on the projection value itself; [`path_has_extension`]
+/// collapses the extension-segment projection + equality composition
+/// into a direct `bool` for callers whose downstream logic is a filter
+/// predicate (a `Vec<_>` collect, a `for` loop guard, a `Path`
+/// counter). Together they discharge the `<Path> → <segment predicate>`
+/// primitive family the `crate::repo::*` surface owns.
+pub fn path_has_extension(path: &Path, ext: &str) -> bool {
+    path.extension().and_then(std::ffi::OsStr::to_str) == Some(ext)
+}
+
 /// Project a caller-owned [`Path`] into an owned [`String`] via the
 /// lossy UTF-8 repair every pre-lift consumer relied on: a non-UTF-8
 /// byte is replaced by [`U+FFFD REPLACEMENT CHARACTER`], and the
@@ -6583,6 +6658,210 @@ mod tests {
                      could drift from the primitive one consumer at a \
                      time. See the sibling `file_name_str` shield above \
                      for the `.unwrap_or(\"\")`-chained peer surface."
+                );
+            }
+        }
+    }
+
+    /// [`path_has_extension`] returns `true` on the ASCII hit arm for
+    /// every one of the three extensions the pre-lift consumer set
+    /// carried — `graphql` (the four subgraph-walker sites in
+    /// `commands/{supergraph_verification, federation}.rs`), `png`
+    /// (the two screenshot-enumerator sites in `commands/{e2e,
+    /// prerelease}.rs`), and `rs` (the two crate-source walker sites
+    /// in `test_support.rs` + `ui.rs`). Pins the primitive to the
+    /// byte-identical predicate every pre-lift consumer relied on for
+    /// its downstream `Vec<_>::push` / `count += 1` / `for` guard.
+    #[test]
+    fn path_has_extension_returns_true_on_matching_ascii_extension() {
+        assert!(
+            path_has_extension(Path::new("auth.graphql"), "graphql"),
+            "`.graphql` walker predicate — every pre-lift subgraph-\
+             enumeration site fed this hit arm."
+        );
+        assert!(
+            path_has_extension(Path::new("subgraphs/auth.graphql"), "graphql"),
+            "same hit arm through a multi-segment path — the pre-\
+             lift `entry.path()` in the tokio::fs walker returns \
+             a rooted path."
+        );
+        assert!(
+            path_has_extension(Path::new("/abs/target/screenshots/failure.png"), "png"),
+            "`.png` screenshot enumerator predicate — the two \
+             e2e/prerelease pre-lift sites fed this hit arm through \
+             an absolute path."
+        );
+        assert!(
+            path_has_extension(Path::new("m20260101_000001_seed.rs"), "rs"),
+            "`.rs` crate-source walker predicate — the pre-lift \
+             `test_support.rs` walker fed this hit arm through a \
+             SeaORM-style migration file name."
+        );
+    }
+
+    /// [`path_has_extension`] short-circuits every miss-arm shape to
+    /// `false` byte-for-byte with the pre-lift `.and_then(|s| s.to_
+    /// str()) == Some(<lit>)` and `.map(|e| e == <lit>).unwrap_or(
+    /// false)` compositions — a path with no extension, a wrong
+    /// extension, a case-mismatched extension, and an empty path all
+    /// route to `false`. Pins the miss-arm unit every pre-lift
+    /// consumer relied on for its downstream `continue` / `push`-skip
+    /// / `count`-skip predicate.
+    #[test]
+    fn path_has_extension_returns_false_on_missing_or_wrong_extension() {
+        assert!(
+            !path_has_extension(Path::new("README"), "md"),
+            "no-extension miss arm — a bare basename returns `false`."
+        );
+        assert!(
+            !path_has_extension(Path::new("foo.jpg"), "png"),
+            "wrong-extension miss arm — a different suffix returns `false`."
+        );
+        assert!(
+            !path_has_extension(Path::new("foo.PNG"), "png"),
+            "case-sensitive predicate — the primitive matches by \
+             byte-for-byte equality; `PNG` and `png` are distinct."
+        );
+        assert!(
+            !path_has_extension(Path::new("subgraphs/"), "graphql"),
+            "trailing-slash directory-shaped path miss arm — `Path::\
+             extension` returns `None` for a path whose final \
+             component is empty."
+        );
+        assert!(
+            !path_has_extension(Path::new(""), "graphql"),
+            "empty-path miss arm — no file-name segment means no \
+             extension segment."
+        );
+    }
+
+    /// [`path_has_extension`] matches the FINAL extension segment
+    /// only, mirroring [`Path::extension`]'s contract that
+    /// `foo.tar.gz`'s extension is `gz`, not `tar.gz` or `tar`. Pins
+    /// the primitive to the surface [`Path::extension`] already
+    /// carries so a future rewrite (a "helpful" multi-segment
+    /// extractor) does not silently divorce the predicate from the
+    /// pre-lift consumers, all of whom fed a single-segment
+    /// extension literal.
+    #[test]
+    fn path_has_extension_returns_true_on_final_segment_of_multi_dot_stem() {
+        let path = Path::new("archive.tar.gz");
+        assert!(
+            path_has_extension(path, "gz"),
+            "final-segment hit — `Path::extension` returns `gz` for \
+             `archive.tar.gz`, matching the primitive's predicate."
+        );
+        assert!(
+            !path_has_extension(path, "tar.gz"),
+            "multi-segment miss — `Path::extension` does NOT return \
+             `tar.gz`; a caller wanting a compound-suffix predicate \
+             must build it another way."
+        );
+        assert!(
+            !path_has_extension(path, "tar"),
+            "penultimate-segment miss — `Path::extension` returns \
+             only the final segment, so `tar` does not match."
+        );
+    }
+
+    /// Post-lift the thirteen sibling extension-predicate consumer
+    /// sites lifted onto [`path_has_extension`] must not silently
+    /// re-inline the primitive's three pre-lift shapes at their call
+    /// points — a re-inline would reopen the sibling class this lift
+    /// closed and force every other consumer to divorce from the
+    /// primitive one edit at a time.
+    ///
+    /// The four needles below cover both pre-lift spellings and both
+    /// closure-binder conventions:
+    ///
+    /// - `.extension().and_then(|s| s.to_str()) == Some(` and
+    ///   `.extension().and_then(|n| n.to_str()) == Some(` — the
+    ///   `Option<&str>`-comparison form used by
+    ///   `commands/{supergraph_verification, federation}.rs` +
+    ///   `test_support.rs` + `ui.rs` (the `ui.rs` shield test uses the
+    ///   `!= Some(` negation, which the equality needle still covers
+    ///   because the prefix `.extension().and_then(|s| s.to_str())` is
+    ///   distinct in either polarity).
+    /// - `.extension().map(|ext| ext ==` and `.extension().map(|e| e
+    ///   ==` — the `bool`-short-circuit form used by `commands/{e2e,
+    ///   prerelease}.rs` under both single-char and full-word closure
+    ///   binders.
+    ///
+    /// The primitive body in `repo.rs` legitimately spells the
+    /// `.and_then(std::ffi::OsStr::to_str) == Some(ext)` fn-pointer
+    /// form (a distinct byte sequence from every closure-binder shape
+    /// this shield's needles pin), and the primitive's doc-comment
+    /// carries the pre-lift closure shapes inside a documentation
+    /// code block; this shield does NOT scan `repo.rs` so the
+    /// primitive body and its docs survive it by construction,
+    /// mirroring the discipline every sibling shield test in this
+    /// module already carries.
+    ///
+    /// The `ui.rs` sibling `.extension().and_then(|s| s.to_str())`
+    /// spelling ALSO fires the `file_name_opt_str` shield's needle in
+    /// principle — but that shield's scanned-file set does NOT include
+    /// `ui.rs`, and vice versa (that shield's needles pin the
+    /// `.file_name().and_then(…)` file-name-projection prefix, not the
+    /// `.extension().and_then(…)` extension-projection prefix). The
+    /// two shields carry strictly-disjoint prefix needles by
+    /// construction, so a re-inline of either surface trips its own
+    /// shield without cross-triggering the sibling.
+    ///
+    /// The negation polarity in the `ui.rs` shield test (`!crate::
+    /// repo::path_has_extension(&path, "rs")`) does NOT reintroduce
+    /// the pre-lift `.extension()` prefix at the call site — the `!`
+    /// is a plain boolean negation on the primitive's return value,
+    /// spelled at the outermost expression boundary, so post-lift the
+    /// `.extension()` chain is gone from `ui.rs` entirely.
+    #[test]
+    fn path_has_extension_consumers_do_not_reinline_the_primitive_shape() {
+        for (name, source) in [
+            (
+                "commands/supergraph_verification.rs",
+                include_str!("commands/supergraph_verification.rs"),
+            ),
+            (
+                "commands/federation.rs",
+                include_str!("commands/federation.rs"),
+            ),
+            ("commands/e2e.rs", include_str!("commands/e2e.rs")),
+            (
+                "commands/prerelease.rs",
+                include_str!("commands/prerelease.rs"),
+            ),
+            ("test_support.rs", include_str!("test_support.rs")),
+            ("ui.rs", include_str!("ui.rs")),
+            (
+                "commands/federation_tests.rs",
+                include_str!("commands/federation_tests.rs"),
+            ),
+            (
+                "commands/crossplane.rs",
+                include_str!("commands/crossplane.rs"),
+            ),
+            (
+                "commands/dashboards.rs",
+                include_str!("commands/dashboards.rs"),
+            ),
+        ] {
+            for needle in [
+                ".extension().and_then(|s| s.to_str())",
+                ".extension().and_then(|n| n.to_str())",
+                ".extension().map(|ext| ext ==",
+                ".extension().map(|e| e ==",
+                ".extension().map_or(false, |ext| ext ==",
+                ".extension().map_or(false, |e| e ==",
+            ] {
+                assert!(
+                    !source.contains(needle),
+                    "{name} must NOT spell the inline `{needle}` \
+                     extension-predicate composition — that duplication \
+                     was lifted onto `crate::repo::path_has_extension`. A \
+                     re-inline would silently diverge the extension \
+                     predicate from the thirteen sibling consumers \
+                     routing through the primitive, and fork the miss-arm \
+                     unit (`false`) into hand-typed spellings that could \
+                     drift from the primitive one consumer at a time."
                 );
             }
         }

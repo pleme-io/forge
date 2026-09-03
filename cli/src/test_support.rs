@@ -7738,7 +7738,7 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
                     continue;
                 }
                 walk_rs_files(&path, visit);
-            } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
+            } else if crate::repo::path_has_extension(&path, "rs") {
                 visit(&path);
             }
         }

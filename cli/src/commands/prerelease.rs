@@ -947,12 +947,7 @@ fn print_e2e_diagnostics(backend_dir: &Path) {
     if let Ok(entries) = std::fs::read_dir(&screenshot_dir) {
         let screenshots: Vec<_> = entries
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .map(|ext| ext == "png")
-                    .unwrap_or(false)
-            })
+            .filter(|e| crate::repo::path_has_extension(&e.path(), "png"))
             .collect();
         if !screenshots.is_empty() {
             println!("\n   Screenshots captured:");
