@@ -145,35 +145,25 @@ pub async fn execute_with_options(
     // Print summary
     if !quiet {
         println!();
-        println!(
-            "{}",
-            "════════════════════════════════════════════════".bold()
-        );
-
         if result.all_passed() && result.warnings == 0 {
-            println!("{}", "  All ReBAC validations passed".green().bold());
+            crate::ui::print_section_completion_banner(
+                "All ReBAC validations passed",
+                crate::ui::SectionCompletionStyle::Success,
+            );
         } else if result.all_passed() {
-            println!(
-                "{}",
-                format!("  Validation complete with {} warning(s)", result.warnings)
-                    .yellow()
-                    .bold()
+            crate::ui::print_section_completion_banner(
+                &format!("Validation complete with {} warning(s)", result.warnings),
+                crate::ui::SectionCompletionStyle::Warning,
             );
         } else {
-            println!(
-                "{}",
-                format!(
-                    "  Validation failed: {} error(s), {} warning(s)",
+            crate::ui::print_section_completion_banner(
+                &format!(
+                    "Validation failed: {} error(s), {} warning(s)",
                     result.errors, result.warnings
-                )
-                .red()
-                .bold()
+                ),
+                crate::ui::SectionCompletionStyle::Failure,
             );
         }
-        println!(
-            "{}",
-            "════════════════════════════════════════════════".bold()
-        );
     }
 
     Ok(result)

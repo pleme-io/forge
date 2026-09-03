@@ -6,7 +6,6 @@
 //! Replaces shell script logic with pure Rust implementation.
 
 use anyhow::{Context, Result};
-use colored::Colorize;
 use std::path::Path;
 use std::time::Instant;
 use tokio::fs;
@@ -150,19 +149,9 @@ pub async fn execute(backend_dir: &Path, web_dir: &Path) -> Result<CodegenResult
 
     // Summary
     let total_time = start.elapsed().as_secs_f64();
-    println!(
-        "{}",
-        "════════════════════════════════════════════════".bold()
-    );
-    println!(
-        "{}",
-        format!("  Codegen Complete ({:.1}s total)", total_time)
-            .green()
-            .bold()
-    );
-    println!(
-        "{}",
-        "════════════════════════════════════════════════".bold()
+    crate::ui::print_section_completion_banner(
+        &format!("Codegen Complete ({:.1}s total)", total_time),
+        crate::ui::SectionCompletionStyle::Success,
     );
     println!();
     println!("Generated files:");

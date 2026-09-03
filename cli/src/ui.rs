@@ -557,6 +557,128 @@ pub fn write_section_header<W: std::io::Write>(w: &mut W, title: &str) -> std::i
     Ok(())
 }
 
+/// Palette-selector enum for [`print_section_completion_banner`] /
+/// [`write_section_completion_banner`]. Closed over the three status
+/// roles the pre-lift consumer sites in `commands/{codegen, sync,
+/// rebac_validation}.rs` selected between at their completion-banner
+/// body line — a section that finished cleanly, one that finished with
+/// warnings but no errors, one that finished with errors. Same
+/// knowable-construction pattern as [`ReportSectionStyle`]: the color
+/// choice lives in ONE closed enum whose `match` arms name the palette
+/// per role, so a future variant added without an arm fails the
+/// exhaustiveness check at build time rather than silently degrading
+/// via a stringly-typed `&str` color name.
+///
+/// # Compounding
+///
+/// Pre-lift each consumer inlined the color into a method chain at the
+/// body-line `println!` (`.green().bold()` for a clean run,
+/// `.yellow().bold()` for a warnings-only run, `.red().bold()` for a
+/// run with errors). A rename that misspells `.green` as `.grne` would
+/// compile-fail, but a swap of `.yellow().bold()` for `.red().bold()`
+/// in one branch alone would drift the visual grammar silently — the
+/// three status roles lose their eye-navigation categorization
+/// (success / warning / failure) without any compile failure. Post-lift
+/// the mapping [`SectionCompletionStyle`] → [`colored::ColoredString`]
+/// lives in ONE `match` arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionCompletionStyle {
+    /// Success-track completion banner (`<title>.green().bold()`).
+    /// Pre-lift sites: `codegen.rs` (always), `sync.rs` (errors empty
+    /// branch), `rebac_validation.rs` (`all_passed && warnings == 0`
+    /// branch).
+    Success,
+    /// Warning-track completion banner (`<title>.yellow().bold()`).
+    /// Pre-lift sites: `rebac_validation.rs` (`all_passed` with
+    /// non-zero warnings branch).
+    Warning,
+    /// Failure-track completion banner (`<title>.red().bold()`).
+    /// Pre-lift sites: `sync.rs` (errors non-empty branch),
+    /// `rebac_validation.rs` (validation-failed branch).
+    Failure,
+}
+
+/// Prints the three-line section-completion banner every pre-lift
+/// consumer spelled inline as a
+/// `"════════════════════════════════════════════════".bold()` rule,
+/// a `"  <TITLE>".<COLOR>().bold()` indented status-colored title, and
+/// a second identical rule. Marks the CLOSING of a section in a
+/// pipeline run at 3 sibling call sites across
+/// `commands/{codegen, sync, rebac_validation}.rs` — the pre-lift
+/// rule + status-colored-title + rule triple — so a future palette
+/// shift against rule-char, rule-width, indent glyph, or the
+/// success/warning/failure color mapping happens at ONE site rather
+/// than three.
+///
+/// Delegates to [`write_section_completion_banner`] against
+/// [`std::io::stdout()`]; the writer split exists so the
+/// fail-before-pass test can pin the three-line body, the palette per
+/// [`SectionCompletionStyle`], the two-space title indent, and the
+/// `═`-rule + `\x1b[1m` bold ANSI palette contract by inspecting
+/// emitted bytes rather than shelling out and grepping stdout.
+///
+/// # Distinct from [`print_section_header`]
+///
+/// [`print_section_header`] carries the OPENING of a section within a
+/// pipeline — same 48-glyph `═`-rule + two-space title indent
+/// grammar, but the title is always `.bold()` in the default
+/// foreground and framed by leading + trailing blank lines the
+/// primitive adds around its writer. This primitive is the CLOSING
+/// mirror: the same rule sigil (a matched section boundary a
+/// [`print_section_header`] opened is closed with the same visual
+/// weight), but the title is colored per the completion status the
+/// section finished under, and no framing blank lines are added (the
+/// pre-lift consumer sites did not carry them at the closing banner).
+///
+/// # Compounding
+///
+/// Pre-lift each of the 3 consumer sites restated the entire
+/// three-line stanza with the rule character (`═`), the rule width
+/// (48), the two-space title indent, the color method
+/// (`.green()` / `.yellow()` / `.red()`), and the `.bold()` chain all
+/// spelled inline — six literal-argument rule prints across three
+/// files, plus five status-colored body branches (codegen×1, sync×2,
+/// rebac×3). A width drift between `.repeat(48)` and a fresh literal
+/// glyph count in one site alone lines two adjacent section closings
+/// against visibly different rules. A swap of `.green().bold()` for
+/// `.bright_green().bold()` in one site alone loses the contrast
+/// against the peer failure-track closing. Post-lift the primitive
+/// collapses all three restatements onto ONE typed function; a future
+/// palette adjustment hits one body, not three. The
+/// [`SectionCompletionStyle`] enum being closed additionally guards
+/// against a future consumer inventing a fourth palette (a
+/// `.magenta().bold()` "partial" banner) without a deliberate enum
+/// extension.
+pub fn print_section_completion_banner(title: &str, style: SectionCompletionStyle) {
+    let _ = write_section_completion_banner(&mut std::io::stdout().lock(), title, style);
+}
+
+/// Writer-taking sibling to [`print_section_completion_banner`]. Emits
+/// the three section-completion body lines (`bold` `═` rule,
+/// `SECTION_HEADER_TITLE_INDENT + <title>` in the color chosen per
+/// [`SectionCompletionStyle`] + `.bold()`, `bold` `═` rule) via
+/// [`writeln!`] against the supplied writer.
+/// [`print_section_completion_banner`] is the stdout adapter; this
+/// variant exists so tests can pin the three-line body, the palette
+/// mapping, the two-space title indent, and the 48-glyph `═` rule
+/// without capturing stdout.
+pub fn write_section_completion_banner<W: std::io::Write>(
+    w: &mut W,
+    title: &str,
+    style: SectionCompletionStyle,
+) -> std::io::Result<()> {
+    let indented = format!("{}{}", SECTION_HEADER_TITLE_INDENT, title);
+    let colored_title = match style {
+        SectionCompletionStyle::Success => indented.green().bold(),
+        SectionCompletionStyle::Warning => indented.yellow().bold(),
+        SectionCompletionStyle::Failure => indented.red().bold(),
+    };
+    writeln!(w, "{}", SECTION_HEADER_RULE.bold())?;
+    writeln!(w, "{}", colored_title)?;
+    writeln!(w, "{}", SECTION_HEADER_RULE.bold())?;
+    Ok(())
+}
+
 /// Top-border glyph line of the [`print_header`] / [`write_header`] boxed
 /// grammar — `╔` + `BOXED_HEADER_INNER_WIDTH` `═` glyphs + `╗`, 62 display
 /// columns wide. Named so a future swap of the box corner-and-rule glyphs
@@ -5739,5 +5861,245 @@ mod tests {
              expected count fails here. Found {forward_hits} \
              forwarding hits."
         );
+    }
+
+    /// Fail-before-pass envelope for
+    /// [`super::write_section_completion_banner`]. Pins the three-line
+    /// body every pre-lift consumer spelled verbatim (a
+    /// `"════════════════════════════════════════════════".bold()`
+    /// rule, a `"  <title>".<COLOR>().bold()` indented status-colored
+    /// title, and a second identical rule) and the exact palette per
+    /// [`super::SectionCompletionStyle`] variant. A silent contract
+    /// drift a future rewrite might introduce — dropping one rule to
+    /// two `writeln!`s, swapping the middle line and a rule, hoisting
+    /// the rule character off `═` in one branch alone, dropping
+    /// `.bold()` from the title so it loses emphasis against the rule,
+    /// dropping the two-space indent so the title crashes against the
+    /// first column, promoting the `.green()` in the [`Success`] arm
+    /// to `.bright_green()` (losing the visual-contrast contract
+    /// against the failure-track closing), or swapping `.yellow()` in
+    /// the [`Warning`] arm for `.red()` (collapsing the three status
+    /// roles' eye-navigation categorization) — flips this assertion
+    /// rather than compiling and silently diverging the 3 consumer
+    /// sites' visual grammar.
+    ///
+    /// [`Success`]: super::SectionCompletionStyle::Success
+    /// [`Warning`]: super::SectionCompletionStyle::Warning
+    #[test]
+    fn write_section_completion_banner_emits_three_bar_title_bar_lines_per_status_palette() {
+        // Force ANSI emission (colored auto-drops sequences on a
+        // non-tty stdout) and serialize against peer banner tests via
+        // [`AnsiOverrideForTest`]; its Drop restores colored's
+        // auto-detection on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`], closing the set-write-unset window
+        // without a manual [`colored::control::unset_override`] call
+        // that a future test author could omit.
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        // Verify all three enum variants — the palette contract lives
+        // in the primitive's `match` arms, so a silent rename of one
+        // arm's color chain (`.yellow()` → `.red()` on Warning) would
+        // pass the Success and Failure assertions and still flip only
+        // the Warning branch here.
+        //
+        // `colored` folds `.color().bold()` into a single composite
+        // ANSI escape whose two attributes may appear in either
+        // `\x1b[1;<c>m` or `\x1b[<c>;1m` order depending on the
+        // attribute-application sequence; accept both spellings.
+        for (style, bold_first_seq, color_first_seq, label) in [
+            (
+                super::SectionCompletionStyle::Success,
+                "\x1b[1;32m",
+                "\x1b[32;1m",
+                "green (Success)",
+            ),
+            (
+                super::SectionCompletionStyle::Warning,
+                "\x1b[1;33m",
+                "\x1b[33;1m",
+                "yellow (Warning)",
+            ),
+            (
+                super::SectionCompletionStyle::Failure,
+                "\x1b[1;31m",
+                "\x1b[31;1m",
+                "red (Failure)",
+            ),
+        ] {
+            let mut buf: Vec<u8> = Vec::new();
+            super::write_section_completion_banner(&mut buf, "TEST COMPLETION", style)
+                .expect("write_section_completion_banner against a Vec<u8> writer must succeed");
+            let out = String::from_utf8(buf).expect(
+                "write_section_completion_banner must emit valid UTF-8 (the pre-lift println!s did)",
+            );
+
+            // Exactly three body lines — the pre-lift stanza's
+            // rule+title+rule triple is three `println!`s, not two,
+            // and not four. A refactor that drops or adds a rule
+            // fails here.
+            let lines: Vec<&str> = out.lines().collect();
+            assert_eq!(
+                lines.len(),
+                3,
+                "{label}: write_section_completion_banner must emit \
+                 exactly three body lines (rule, title, rule) — the \
+                 pre-lift stanza is three `println!`s; got {}:\n{}",
+                lines.len(),
+                out
+            );
+
+            // The `═` rule glyph appears in the outer two lines but
+            // never in the middle line; the title text appears in the
+            // middle line but never in the outer lines.
+            assert!(
+                lines[0].contains('═'),
+                "{label}: line 0 must be an `═` rule; got {:?}",
+                lines[0]
+            );
+            assert!(
+                lines[2].contains('═'),
+                "{label}: line 2 must be an `═` rule; got {:?}",
+                lines[2]
+            );
+            assert!(
+                !lines[1].contains('═'),
+                "{label}: line 1 must NOT contain the rule glyph — it \
+                 is the indented status-colored title line; got {:?}",
+                lines[1]
+            );
+            assert!(
+                lines[1].contains("TEST COMPLETION"),
+                "{label}: line 1 must carry the title verbatim; got {:?}",
+                lines[1]
+            );
+            assert!(
+                lines[1].contains("  TEST COMPLETION"),
+                "{label}: line 1 must carry the two-space title \
+                 indent verbatim — the pre-lift stanza spelled \
+                 `\"  <TITLE>\".<COLOR>().bold()`; got {:?}",
+                lines[1]
+            );
+
+            // The rule width every pre-lift consumer spelled inline
+            // is 48 characters — pin it here so a fusion that hoists
+            // the rule off `SECTION_HEADER_RULE` onto a fresh width
+            // fails the shield.
+            let rule_glyph_count = lines[0].chars().filter(|c| *c == '═').count();
+            assert_eq!(
+                rule_glyph_count, 48,
+                "{label}: line 0 must contain exactly 48 `═` glyphs \
+                 (`SECTION_HEADER_RULE.len()`); got {} in {:?}",
+                rule_glyph_count, lines[0]
+            );
+
+            // The two outer rule lines carry the `bold` ANSI sequence
+            // (`\x1b[1m`) alone — a silent drop of `.bold()` on
+            // either rule loses the section-boundary emphasis.
+            for i in [0usize, 2] {
+                assert!(
+                    lines[i].contains("\x1b[1m"),
+                    "{label}: line {i} must carry the `bold` ANSI \
+                     sequence (`\\x1b[1m`) on the rule — the pre-lift \
+                     stanza spelled `.bold()` on both rules; got {:?}",
+                    lines[i]
+                );
+            }
+
+            // Line 1 (title) carries the composite `bold` +
+            // `<color>` ANSI sequence per the enum variant. The
+            // `colored` crate may serialize either as `\x1b[1;<c>m`
+            // or `\x1b[<c>;1m` depending on the attribute order, so
+            // accept either shape — the invariant is that BOTH the
+            // color code and the bold code reach the buffer around
+            // the title text.
+            assert!(
+                lines[1].contains(bold_first_seq) || lines[1].contains(color_first_seq),
+                "{label}: line 1 must carry the composite `bold` + \
+                 `<color>` ANSI sequence {:?} or {:?} for the \
+                 {label} palette — a silent rename of the color chain \
+                 in the primitive's match arm (`.green()` → `.red()`) \
+                 or a silent drop of `.bold()` would flip this; got \
+                 {:?}",
+                bold_first_seq,
+                color_first_seq,
+                lines[1]
+            );
+        }
+    }
+
+    /// Post-lift the callers in `commands/{codegen, sync,
+    /// rebac_validation}.rs` migrated onto
+    /// [`super::print_section_completion_banner`] no longer spell the
+    /// three-line
+    /// `println!("{}", "════════════════════════════════════════════════".bold());
+    /// println!("{}", "  <TITLE>".<COLOR>().bold());
+    /// println!("{}", "════════════════════════════════════════════════".bold());`
+    /// stanza inline. Structural regression shield — without it, a
+    /// future refactor could silently re-inline the three-liner and
+    /// reopen the 6-site rule-print duplication class this lift
+    /// closed. The negative needle
+    /// `"════════════════════════════════════════════════"` uniquely
+    /// identifies the pre-lift restatement: the 48-glyph `═` sigil is
+    /// the module-private [`super::SECTION_HEADER_RULE`] constant and
+    /// is not spelled as a literal anywhere else in the crate outside
+    /// this shield and the peer [`super::print_section_header`]
+    /// shield.
+    #[test]
+    fn print_section_completion_banner_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str, usize)] = &[
+            // (source, module_path, expected forward count)
+            (
+                include_str!("commands/codegen.rs"),
+                "commands/codegen.rs",
+                1, // one always-Success completion at end of `run_codegen`
+            ),
+            (
+                include_str!("commands/sync.rs"),
+                "commands/sync.rs",
+                2, // one Success branch + one Failure branch at end of `run_sync`
+            ),
+            (
+                include_str!("commands/rebac_validation.rs"),
+                "commands/rebac_validation.rs",
+                3, // one Success + one Warning + one Failure at end of `run_rebac_validation`
+            ),
+        ];
+        for (source, module_path, expected_forwards) in CALLERS {
+            // Negative assertion — no pre-lift inline
+            // `"════════════════════════════════════════════════"`
+            // stanza remains in the module body. The 48-glyph `═`
+            // sigil uniquely identifies the pre-lift restatement.
+            let inline_hits = source
+                .matches("\"════════════════════════════════════════════════\"")
+                .count();
+            assert_eq!(
+                inline_hits, 0,
+                "{module_path} must NOT spell the pre-lift inline 48-glyph \
+                 `\"════════════════════════════════════════════════\".bold()` \
+                 rule — that three-line stanza was lifted onto \
+                 `crate::ui::print_section_completion_banner`. A re-inline \
+                 would silently reopen the 6-site duplication class this \
+                 shield exists to close. Found {inline_hits} inline \
+                 occurrences."
+            );
+            // Positive assertion — the module forwards through the
+            // primitive at exactly the expected number of sites, one
+            // per pre-lift branch. A fusion that folds one branch
+            // back to inline `println!`s (silently splitting the
+            // visual grammar across the pipeline) fails here.
+            let forward_hits = source
+                .matches("crate::ui::print_section_completion_banner(")
+                .count();
+            assert_eq!(
+                forward_hits, *expected_forwards,
+                "{module_path} must forward through \
+                 `crate::ui::print_section_completion_banner(<title>, \
+                 <style>)` at exactly {expected_forwards} sites — one \
+                 per pre-lift status branch. A fusion that folds one \
+                 back to inline `println!`s or that adds a caller \
+                 without extending this shield's expected count fails \
+                 here. Found {forward_hits} forwarding hits."
+            );
+        }
     }
 }
