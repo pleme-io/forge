@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use colored::Colorize;
 use tokio::process::Command;
 use tracing::{info, warn};
 
@@ -294,7 +293,7 @@ pub async fn execute(
     }
 
     println!();
-    println!("{}", "✅ Build complete!".bright_green().bold());
+    crate::ui::print_success("Build complete!");
     println!();
 
     Ok(())

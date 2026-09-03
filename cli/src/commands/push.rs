@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Context, Result};
-use colored::Colorize;
 use std::process::Stdio;
 use tokio::process::Command;
 use tracing::info;
@@ -293,7 +292,7 @@ pub async fn execute(
     push_tags_with_progress(&image_path, &registry, &tags, &ghcr_token, retries).await?;
 
     println!();
-    println!("{}", "✅ Images pushed successfully!".bright_green().bold());
+    crate::ui::print_success("Images pushed successfully!");
     for tag in &tags {
         println!("   • {}:{}", registry, tag);
     }

@@ -577,7 +577,7 @@ pub async fn release(
 
     // Success summary
     println!();
-    println!("{}", "✅ Bootstrap release complete!".bright_green().bold());
+    crate::ui::print_success("Bootstrap release complete!");
     println!();
     println!("   📦 Images pushed:");
     for result in &results {
