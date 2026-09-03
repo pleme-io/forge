@@ -185,7 +185,7 @@ async fn check_rebac_documentation(
     result: &mut RebacValidationResult,
 ) -> Result<()> {
     if !config.quiet {
-        println!("{}", "Check 1: ReBAC Documentation".blue());
+        crate::ui::print_numbered_check_heading(1, "ReBAC Documentation");
     }
 
     let Some(docs_dir) = &config.docs_dir else {
@@ -223,7 +223,7 @@ async fn check_permission_engine_files(
 ) -> Result<()> {
     if !config.quiet {
         println!();
-        println!("{}", "Check 2: Permission Engine Source Files".blue());
+        crate::ui::print_numbered_check_heading(2, "Permission Engine Source Files");
     }
 
     let Some(backend_dir) = &config.backend_dir else {
@@ -259,7 +259,7 @@ async fn check_object_type_mapping(
 ) -> Result<()> {
     if !config.quiet {
         println!();
-        println!("{}", "Check 3: Object Type → Entity Mapping".blue());
+        crate::ui::print_numbered_check_heading(3, "Object Type → Entity Mapping");
     }
 
     let (Some(docs_dir), Some(backend_dir)) = (&config.docs_dir, &config.backend_dir) else {
@@ -343,7 +343,7 @@ async fn check_relation_hierarchy(
 ) -> Result<()> {
     if !config.quiet {
         println!();
-        println!("{}", "Check 4: Relation Hierarchy Consistency".blue());
+        crate::ui::print_numbered_check_heading(4, "Relation Hierarchy Consistency");
     }
 
     let Some(backend_dir) = &config.backend_dir else {
@@ -434,7 +434,7 @@ async fn check_redis_key_patterns(
 ) -> Result<()> {
     if !config.quiet {
         println!();
-        println!("{}", "Check 5: Redis Key Pattern Validation".blue());
+        crate::ui::print_numbered_check_heading(5, "Redis Key Pattern Validation");
     }
 
     let Some(docs_dir) = &config.docs_dir else {
@@ -489,7 +489,7 @@ async fn check_redis_connectivity(
 ) -> Result<()> {
     if !config.quiet {
         println!();
-        println!("{}", "Check 6: Redis Connectivity".blue());
+        crate::ui::print_numbered_check_heading(6, "Redis Connectivity");
     }
 
     let redis_url = crate::repo::env_var_or_default("REDIS_URL", "redis://localhost:6379");
@@ -571,7 +571,7 @@ async fn check_graphql_operations(
 ) -> Result<()> {
     if !config.quiet {
         println!();
-        println!("{}", "Check 7: GraphQL Permission Operations".blue());
+        crate::ui::print_numbered_check_heading(7, "GraphQL Permission Operations");
     }
 
     let Some(web_dir) = &config.web_dir else {
