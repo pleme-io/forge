@@ -113,7 +113,7 @@ mod tests {
         let (_dir, path) =
             hermetic_scratch_file("test-basename-", "widget.yaml").expect("hermetic_scratch_file");
         assert_eq!(
-            path.file_name().and_then(|s| s.to_str()),
+            crate::repo::file_name_opt_str(&path),
             Some("widget.yaml"),
             "hermetic_scratch_file(prefix, \"widget.yaml\") must return \
              a path whose basename is exactly `widget.yaml`; got {path:?}",

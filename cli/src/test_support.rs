@@ -3915,7 +3915,7 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         let p = std::path::Path::new(&path);
         assert!(p.is_absolute(), "path must be absolute, got: {path}");
         assert!(p.exists(), "shim must exist on disk: {path}");
-        assert_eq!(p.file_name().and_then(|s| s.to_str()), Some("alpha"));
+        assert_eq!(crate::repo::file_name_opt_str(p), Some("alpha"));
     }
 
     /// On Unix, the shim is chmod 0o755 — executable by every user the
@@ -4169,7 +4169,7 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
     fn test_argv_log_path_basename_is_argv_log() {
         let argv_log = ArgvLog::reserve();
         assert_eq!(
-            argv_log.path().file_name().and_then(|n| n.to_str()),
+            crate::repo::file_name_opt_str(argv_log.path()),
             Some("argv.log"),
             "argv log path must end in `argv.log`, got {:?}",
             argv_log.path(),
@@ -6496,7 +6496,7 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         let crate_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut offenders: Vec<String> = Vec::new();
         walk_rs_files(&crate_src, &mut |path| {
-            if path.file_name().and_then(|s| s.to_str()) == Some("test_support.rs") {
+            if crate::repo::file_name_opt_str(path) == Some("test_support.rs") {
                 return;
             }
             let contents =
@@ -6732,7 +6732,7 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         let crate_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut offenders: Vec<String> = Vec::new();
         walk_rs_files(&crate_src, &mut |path| {
-            if path.file_name().and_then(|s| s.to_str()) == Some("test_support.rs") {
+            if crate::repo::file_name_opt_str(path) == Some("test_support.rs") {
                 return;
             }
             let contents =
@@ -6831,7 +6831,7 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         let crate_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut offenders: Vec<String> = Vec::new();
         walk_rs_files(&crate_src, &mut |path| {
-            if path.file_name().and_then(|s| s.to_str()) == Some("test_support.rs") {
+            if crate::repo::file_name_opt_str(path) == Some("test_support.rs") {
                 return;
             }
             let contents =
@@ -6938,7 +6938,7 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         let crate_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut offenders: Vec<String> = Vec::new();
         walk_rs_files(&crate_src, &mut |path| {
-            if path.file_name().and_then(|s| s.to_str()) == Some("test_support.rs") {
+            if crate::repo::file_name_opt_str(path) == Some("test_support.rs") {
                 return;
             }
             let contents =
@@ -7040,7 +7040,7 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         let crate_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut offenders: Vec<String> = Vec::new();
         walk_rs_files(&crate_src, &mut |path| {
-            if path.file_name().and_then(|s| s.to_str()) == Some("test_support.rs") {
+            if crate::repo::file_name_opt_str(path) == Some("test_support.rs") {
                 return;
             }
             let contents =
@@ -7734,7 +7734,7 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                if path.file_name().and_then(|s| s.to_str()) == Some("target") {
+                if crate::repo::file_name_opt_str(&path) == Some("target") {
                     continue;
                 }
                 walk_rs_files(&path, visit);
