@@ -2722,8 +2722,7 @@ async fn update_service_federation_tests_tag(
     println!("   📝 Updating deploy.yaml...");
 
     // Read current content
-    let content =
-        std::fs::read_to_string(&deploy_yaml_path).context("Failed to read deploy.yaml")?;
+    let content = crate::repo::read_text_sync(deploy_yaml_path)?;
 
     // Update or add the image_tag line under federation_tests section
     let mut updated_content = String::new();
