@@ -339,7 +339,7 @@ pub async fn run_migrations(
 
     // Skip migrations for services without databases
     if config.database_type() == &DatabaseType::None {
-        println!("ℹ️  Skipping migrations (service has no database)");
+        crate::ui::print_step_info("Skipping migrations (service has no database)");
         return Ok(());
     }
 

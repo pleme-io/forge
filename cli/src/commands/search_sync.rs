@@ -30,7 +30,7 @@ pub async fn run_novasearch_sync(
     let novasearch_config = &deploy_config.service.novasearch;
 
     if !novasearch_config.enabled {
-        println!("ℹ️  Search sync is disabled, skipping");
+        crate::ui::print_step_info("Search sync is disabled, skipping");
         return Ok(());
     }
 

@@ -302,7 +302,7 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
             .context("Failed to remove Cargo.lock")?;
         println!("   ✓ Removed");
     } else {
-        println!("ℹ️  No existing Cargo.lock found");
+        crate::ui::print_step_info("No existing Cargo.lock found");
     }
     println!();
 
@@ -567,7 +567,7 @@ pub async fn rust_dev(
             }
         } else {
             println!();
-            println!("ℹ️  No migrations directory found");
+            crate::ui::print_step_info("No migrations directory found");
         }
     } else {
         println!();
