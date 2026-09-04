@@ -1801,6 +1801,98 @@ pub fn write_summary_pass<W: std::io::Write>(w: &mut W, message: &str) -> std::i
     writeln!(w, "  {} {}", "✅".bright_green(), message)
 }
 
+/// Prints the one-line `"── <label> ──"` dashed-label section-marker
+/// 4 pre-lift consumer sites in `commands/prerelease.rs` spelled inline
+/// as `println!("{}", "── <label> ──".dimmed())` — a `── ` prefix, a
+/// literal label, a ` ──` suffix, the whole span painted `.dimmed()`.
+/// Marks a diagnostic-stream boundary: the leading edge of a raw
+/// `cargo test stdout` / `cargo test stderr` / `cargo test output` /
+/// `stderr (last 40 lines)` block dumped below a failed gate. Sits
+/// beneath the [`print_step_failure`] `❌` line that reports the gate
+/// verdict and above the raw `for line in stdout.lines() { println!("
+///    {}", line); }` echo — a lightweight visual boundary between the
+/// operator-facing verdict and the debug-facing subprocess corpus.
+///
+/// # Distinct from the other `ui::print_*` primitives
+///
+/// [`print_section_header`] and [`print_section_completion_banner`]
+/// carry the HEAVY `═` U+2550 double-horizontal rule at the top-level
+/// section grammar — a permanent milestone the operator scrolls back
+/// to find. This primitive carries the LIGHT `─` U+2500
+/// single-horizontal rule at a nested diagnostic-block grammar — a
+/// throwaway marker around a subprocess dump that only exists under a
+/// failure. Folding the two would let a subprocess-stream boundary
+/// promote to the top-level section grammar (or collapse a section
+/// header down to a dimmed label) and drift the visual hierarchy.
+/// [`print_step_info`] / [`print_step_warn`] / [`print_step_pass`] all
+/// carry a three-space in-body indent with a leading glyph and a
+/// message — they mark a per-step outcome, not a stream boundary; the
+/// `── ` / ` ──` dash-fence carries the boundary semantics and this
+/// primitive preserves it.
+///
+/// # Distinct from the bold+red E2E diagnostics sibling
+///
+/// `commands/prerelease.rs:891` carries the visually related
+/// `println!("{}", "── E2E Failure Diagnostics ──".bold().red())` —
+/// the same `── <label> ──` dash-fence shape but with a `.bold().red()`
+/// palette instead of `.dimmed()`. That site is NOT enrolled in this
+/// primitive: the `.bold().red()` palette marks it as the top-level
+/// diagnostic-block heading for the whole E2E post-mortem (Docker
+/// containers, images, screenshots, troubleshooting steps), one shade
+/// louder than the per-stream `── cargo test stdout ──` labels
+/// underneath which are `.dimmed()`. A future
+/// `print_bold_red_dashed_marker` peer can lift that site if a second
+/// bold+red diagnostic-header sibling appears.
+///
+/// # Palette on the whole span, NOT the label alone
+///
+/// Pre-lift every consumer spelled the coloring as
+/// `"── cargo test stdout ──".dimmed()` — the `.dimmed()` wraps the
+/// FULL literal (leading dashes + label + trailing dashes), not the
+/// label text alone. The primitive preserves that: the `\x1b[2m ...
+/// \x1b[0m` dimmed span begins BEFORE the leading `── ` and closes
+/// AFTER the trailing ` ──`. A re-lift that split the coloring
+/// (`.dimmed()` on the dashes alone with a plain label between) would
+/// invert the visual weight — the label would jump forward against
+/// the dimmed frame instead of receding into it — and change the
+/// visual grammar silently.
+///
+/// # Compounding
+///
+/// Pre-lift 4 sibling sites each restated the `println!("{}",
+/// "── <label> ──".dimmed())` grammar verbatim, with the `── ` prefix,
+/// the ` ──` suffix, and the whole-span `.dimmed()` coloring all
+/// spelled inline. A future palette adjustment (a swap of `── / ──`
+/// for `[ / ]` under a CI-log-friendly grammar, a promotion of
+/// `.dimmed()` to `.dimmed().italic()` under a leaner diagnostic-vs-
+/// operator distinction, an OTLP `diagnostic_block_opened`
+/// observability event wired alongside the print, a shift of the
+/// U+2500 `─` to U+2015 `―` or ASCII `-` under a terminal-compatibility
+/// pass) had to hit 4 sites in lockstep or drift the visual grammar;
+/// post-lift it hits ONE typed body. Delegates to
+/// [`write_dimmed_dashed_marker`] against [`std::io::stdout()`]; the
+/// writer split exists so the fail-before-pass test can pin the
+/// one-line body, the `── <label> ──` dash-fence shape, and the
+/// `\x1b[2m` dimmed ANSI palette contract by inspecting emitted bytes
+/// rather than shelling out and grepping stdout.
+pub fn print_dimmed_dashed_marker(label: &str) {
+    let _ = write_dimmed_dashed_marker(&mut std::io::stdout().lock(), label);
+}
+
+/// Writer-taking sibling to [`print_dimmed_dashed_marker`]. Emits the
+/// single `<── <label> ──.dimmed()>` line via [`writeln!`] against
+/// the supplied writer. [`print_dimmed_dashed_marker`] is the stdout
+/// adapter; this variant exists so tests can pin the one-line body,
+/// the `── ` prefix, the ` ──` suffix, and the `\x1b[2m` dimmed ANSI
+/// sequence around the WHOLE dash-fence (never split between dashes
+/// and label) without capturing stdout.
+pub fn write_dimmed_dashed_marker<W: std::io::Write>(
+    w: &mut W,
+    label: &str,
+) -> std::io::Result<()> {
+    writeln!(w, "{}", format!("── {} ──", label).dimmed())
+}
+
 /// Prints the one-line `"   {} <message>"` (three-space indent + yellow
 /// `⚠️` glyph + plain message) in-body step-warning grammar 5 pre-lift
 /// consumer sites spelled inline as `println!("   {} <fmt>",
@@ -8146,6 +8238,199 @@ mod tests {
                  primitive body every two-space-indented \
                  `✅.bright_green()` summary-pass line in the crate \
                  now delegates through."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for
+    /// [`super::write_dimmed_dashed_marker`]. Pins the exact one-line
+    /// body the 4 pre-lift sites in `commands/prerelease.rs` spelled
+    /// verbatim — a `── ` prefix, the caller-supplied label, a ` ──`
+    /// suffix, the whole span painted `.dimmed()` (`\x1b[2m`
+    /// begin-span before the leading `── `, `\x1b[0m` end-span after
+    /// the trailing ` ──`), and a trailing `\n`. Written to fail
+    /// before the primitive body lands and pass once it does.
+    #[test]
+    fn write_dimmed_dashed_marker_emits_exactly_one_dimmed_dash_fenced_line() {
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_dimmed_dashed_marker(&mut buf, "cargo test stdout")
+            .expect("write_dimmed_dashed_marker against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf).expect(
+            "write_dimmed_dashed_marker must emit valid UTF-8 (the pre-lift println!s did)",
+        );
+
+        // Exactly one line — the pre-lift stanza is one `println!`
+        // carrying no framing blank on either side. A refactor that
+        // slips a leading blank (to visually separate the marker from
+        // the failure verdict above) or a trailing blank (to lift the
+        // subprocess corpus off the marker below) into the primitive
+        // body would silently change the four callers' output at once.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_dimmed_dashed_marker must emit exactly one line — \
+             the pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The `── ` prefix and ` ──` suffix reach the rendered line —
+        // U+2500 BOX DRAWINGS LIGHT HORIZONTAL, NOT U+2015 HORIZONTAL
+        // BAR, NOT U+2014 EM DASH, NOT ASCII `-`.
+        assert!(
+            lines[0].contains("── cargo test stdout ──"),
+            "line 0 must carry the exact `── <label> ──` dash-fence \
+             the pre-lift consumers spelled — U+2500 LIGHT HORIZONTAL \
+             on both sides, one space between the dashes and the \
+             label; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("── cargo test stdout ──\n──"),
+            "line 0 must be a single dash-fenced marker, not a \
+             multi-line block; got {:?}",
+            lines[0]
+        );
+
+        // The label reaches the rendered line verbatim; a fusion that
+        // pins the label to a constant fails here.
+        assert!(
+            lines[0].contains("cargo test stdout"),
+            "line 0 must carry the label verbatim; got {:?}",
+            lines[0]
+        );
+
+        // The `dimmed` ANSI sequence (`\x1b[2m`) reaches the rendered
+        // line — NOT `.bold()` (`\x1b[1m`), NOT `.italic()`
+        // (`\x1b[3m`), NOT `.red()` (`\x1b[31m` — the sibling
+        // `── E2E Failure Diagnostics ──` bold+red diagnostic-block
+        // heading grammar). A silent palette promotion off `.dimmed()`
+        // would erase the receding-vs-verdict visual weight that
+        // separates the subprocess dump from the operator-facing
+        // failure line.
+        assert!(
+            lines[0].contains("\x1b[2m"),
+            "line 0 must carry the `dimmed` ANSI sequence \
+             (`\\x1b[2m`); got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[1m"),
+            "line 0 must NOT carry the `bold` ANSI sequence \
+             (`\\x1b[1m`) — that palette belongs to the sibling \
+             bold+red diagnostic-block heading grammar \
+             (`── E2E Failure Diagnostics ──`), not this dimmed \
+             stream-boundary marker; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[31m"),
+            "line 0 must NOT carry the `red` ANSI sequence \
+             (`\\x1b[31m`) — that palette belongs to the sibling \
+             bold+red diagnostic-block heading grammar, not this \
+             dimmed stream-boundary marker; got {:?}",
+            lines[0]
+        );
+
+        // The `.dimmed()` coloring wraps the WHOLE `── <label> ──`
+        // dash-fence, not the label text alone — the `\x1b[2m` begin
+        // must precede the leading `──` and the `\x1b[0m` reset must
+        // follow the trailing `──`. A re-lift that split the coloring
+        // (`.dimmed()` on the dashes with a plain label between)
+        // would invert the visual weight and change the grammar
+        // silently.
+        let dim_pos = lines[0]
+            .find("\x1b[2m")
+            .expect("dimmed begin-span must be present");
+        let leading_dash_pos = lines[0].find("──").expect("leading `──` must be present");
+        let label_pos = lines[0]
+            .find("cargo test stdout")
+            .expect("label must be present");
+        let reset_pos = lines[0]
+            .find("\x1b[0m")
+            .expect("reset must be present after the fence");
+        assert!(
+            dim_pos < leading_dash_pos,
+            "the `\\x1b[2m` dimmed begin-span must precede the \
+             leading `──` — every pre-lift consumer spelled \
+             `.dimmed()` on the composed literal, not on the label \
+             alone. Got positions dim={dim_pos}, dash={leading_dash_pos} \
+             in line {:?}",
+            lines[0]
+        );
+        assert!(
+            label_pos < reset_pos,
+            "the `\\x1b[0m` reset must follow the label — every \
+             pre-lift consumer spelled `.dimmed()` on the composed \
+             literal so the reset closes after the trailing `──`. \
+             Got positions label={label_pos}, reset={reset_pos} in \
+             line {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza
+        // used `println!` (not `print!`), so the newline is part of
+        // the contract. A fusion that swapped `writeln!` for
+        // `write!` fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_dimmed_dashed_marker must emit a trailing `\\n` \
+             (the pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_dimmed_dashed_marker`] no longer spell the
+    /// `"── <label> ──".dimmed()` shape inline in
+    /// `commands/prerelease.rs`. Structural regression shield — a
+    /// future refactor could silently re-inline the one-liner and
+    /// reopen the 4-site duplication class this lift closed. The
+    /// exact-shape needle is `── ` immediately followed on the same
+    /// source line by `.dimmed()` — the bold+red sibling
+    /// (`── E2E Failure Diagnostics ──.bold().red()`) at
+    /// `commands/prerelease.rs:891` is allowlisted because its
+    /// distinct palette places it in a different grammar (bold+red
+    /// diagnostic-block heading, not dimmed stream boundary) and it
+    /// is NOT enrolled in this lift.
+    #[test]
+    fn print_dimmed_dashed_marker_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[(
+            include_str!("commands/prerelease.rs"),
+            "commands/prerelease.rs",
+        )];
+        for (source, module_path) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("── ") || !line.contains(".dimmed()") {
+                    continue;
+                }
+                if line.contains(".bold().red()") {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `\"── <label> ──\".dimmed()` dash-fenced \
+                     stream-boundary marker — that shape was lifted \
+                     onto `crate::ui::print_dimmed_dashed_marker`. A \
+                     re-inline would silently reopen the 4-site \
+                     duplication class this shield exists to close. \
+                     Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            assert!(
+                body.contains("crate::ui::print_dimmed_dashed_marker("),
+                "{module_path} body must forward to \
+                 `crate::ui::print_dimmed_dashed_marker(\"<LABEL>\")` \
+                 — the primitive body every `── <label> ──.dimmed()` \
+                 stream-boundary marker in the crate now delegates \
+                 through."
             );
         }
     }

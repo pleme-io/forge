@@ -1044,11 +1044,11 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
 
                 // Show all test output for debugging
                 println!();
-                println!("{}", "── cargo test stdout ──".dimmed());
+                crate::ui::print_dimmed_dashed_marker("cargo test stdout");
                 for line in stdout.lines() {
                     println!("   {}", line);
                 }
-                println!("{}", "── cargo test stderr ──".dimmed());
+                crate::ui::print_dimmed_dashed_marker("cargo test stderr");
                 for line in stderr
                     .lines()
                     .rev()
@@ -1317,7 +1317,7 @@ async fn run_cargo_test(backend_dir: &Path) -> Result<bool> {
         println!();
         // Show full stdout (cargo test writes results there)
         if !stdout.trim().is_empty() {
-            println!("{}", "── cargo test output ──".dimmed());
+            crate::ui::print_dimmed_dashed_marker("cargo test output");
             for line in stdout.lines() {
                 if line.contains("FAILED") || line.contains("panicked") || line.contains("error[") {
                     println!("   {}", line.red());
@@ -1329,7 +1329,7 @@ async fn run_cargo_test(backend_dir: &Path) -> Result<bool> {
         // Show last 40 lines of stderr for compile errors / panic details
         let stderr_lines: Vec<&str> = stderr.lines().collect();
         if !stderr_lines.is_empty() {
-            println!("{}", "── stderr (last 40 lines) ──".dimmed());
+            crate::ui::print_dimmed_dashed_marker("stderr (last 40 lines)");
             let start = stderr_lines.len().saturating_sub(40);
             for line in &stderr_lines[start..] {
                 if line.contains("error") || line.contains("FAILED") || line.contains("panicked") {
