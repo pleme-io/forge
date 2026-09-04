@@ -3101,6 +3101,112 @@ pub fn write_next_steps_heading<W: std::io::Write>(w: &mut W) -> std::io::Result
     writeln!(w, "{}", NEXT_STEPS_HEADING_TEXT)
 }
 
+/// Prints the one-line `"   {}"` (three-space indent + red-colored raw
+/// captured-output line body) diagnostic-stream error-line grammar 7
+/// pre-lift consumer sites spelled inline as `println!("   {}",
+/// <line>.red())` across 2 command modules
+/// (`commands/{prerelease (×5), frontend_validation (×2)}.rs`). Marks
+/// ONE captured-output line inside a diagnostic-stream dump — a
+/// stdout/stderr line from a spawned subprocess (`cargo test`, `nx
+/// test`, `npm run typecheck`) that matched a caller-side error
+/// substring filter (`.contains("FAILED")`, `.contains("panicked")`,
+/// `.contains("error")`, `.contains("error[")`, `.contains("✕")`) and
+/// was therefore highlighted red so the operator can find it inside a
+/// scrollable subprocess corpus. Sits INSIDE a
+/// [`print_dimmed_dashed_marker`]-fenced diagnostic block above a
+/// plain `println!("   {}", line)` else-branch that emits non-matching
+/// lines uncolored under the same three-space body indent.
+///
+/// # Distinct from every peer `ui::print_*` primitive
+///
+/// [`print_error`] is the milestone-level `bright_red().bold()`
+/// `❌ <msg>` command-error sigil emitted at the top-level of the
+/// command via STDERR with NO indent and NO structural template — one
+/// scope above an in-body diagnostic line. [`print_step_failure`]
+/// shares the three-space body indent and marks a fatal step failure
+/// but wears a `.red()`-colored `❌` glyph prefix on the message — this
+/// primitive carries NO glyph prefix, just an indented raw line body
+/// the subprocess itself emitted. [`print_step_ok`] /
+/// [`print_step_pass`] / [`print_step_check`] / [`print_step_warn`]
+/// all wear a leading glyph (text label / `✅` / `✓` / `⚠️`) before the
+/// message in a three-space body indent — this primitive carries NO
+/// glyph and paints the whole line body `.red()`.
+/// [`print_dimmed_dashed_marker`] carries the `── <label> ──.dimmed()`
+/// dash-fence that OPENS and CLOSES the diagnostic-block window inside
+/// which this primitive emits the filtered per-line rows.
+///
+/// # `.red()` on the whole line body, no glyph prefix
+///
+/// Pre-lift every consumer spelled the coloring as `line.red()` — the
+/// FULL captured-output line body (the exact string from the
+/// subprocess's stdout/stderr, verbatim including any embedded ANSI
+/// escapes and tabs) painted `.red()`, with NO leading `❌` / `⚠️` /
+/// `✗` glyph interposed and NO structural template between the
+/// three-space indent and the line body. The primitive preserves that
+/// split: the `\x1b[31m` red ANSI sequence wraps the line body alone,
+/// the three-space indent is emitted OUTSIDE the `.red()` span, and
+/// no glyph reaches the writer. A re-lift that hoisted a leading `❌`
+/// or `✗` glyph would change the visual grammar silently — the
+/// pre-lift filter branches deliberately kept the raw captured line
+/// unadorned so the operator sees the subprocess's own output shape
+/// and can grep against it downstream.
+///
+/// # stdout, not stderr
+///
+/// Every pre-lift consumer routed through `println!` (stdout), not
+/// `eprintln!` (stderr), even though the diagnostic block often dumps
+/// STDERR contents from a subprocess capture. The primitive preserves
+/// that routing: the stdout/stderr stream is an observable behavior
+/// contract, and the pre-lift consumers deliberately funneled every
+/// diagnostic-block line (stdout AND stderr from the subprocess) into
+/// THIS process's stdout so a caller piping stdout captures the whole
+/// scrollable failure post-mortem in one stream. Two visually related
+/// stderr-routed siblings live at `commands/federation.rs:151` and
+/// `:261` — `eprintln!("   {}", check.message.red())` inside a
+/// federation-check post-run failure summary — and are NOT enrolled
+/// here: their `eprintln!` routing places them in a distinct grammar
+/// (stderr-routed federation-check summary line), one shade
+/// out-of-band from an operator's piped stdout capture, and folding
+/// them into this stdout primitive would silently shift their stream.
+/// A future `eprint_diagnostic_error_line` peer can lift that
+/// stderr-routed sibling class once it grows past two sites.
+///
+/// # Compounding
+///
+/// Pre-lift 7 sibling sites each restated the `println!("   {}",
+/// <line>.red())` grammar verbatim, with the three-space indent and
+/// the `.red()` coloring on the whole line body all spelled inline.
+/// A future palette adjustment (a swap of `.red()` for
+/// `.bright_red()` under a leaner error-vs-warning distinction, a
+/// promotion to `.red().bold()` under CI-log-highlight pressure, a
+/// shift of the three-space indent to four-space under a standardized
+/// diagnostic grammar, an OTLP `diagnostic_error_line_emitted`
+/// observability event wired alongside the print, a swap of the
+/// three-space indent for a `❌ ` glyph prefix under a leaner
+/// per-line-marker distinction) had to hit 7 sites in lockstep or
+/// drift the visual grammar; post-lift it hits ONE typed body.
+/// Delegates to [`write_diagnostic_error_line`] against
+/// [`std::io::stdout()`]; the writer split exists so the
+/// fail-before-pass test can pin the one-line body, the three-space
+/// indent, and the `\x1b[31m` red ANSI palette contract by inspecting
+/// emitted bytes rather than shelling out and grepping stdout.
+pub fn print_diagnostic_error_line(line: &str) {
+    let _ = write_diagnostic_error_line(&mut std::io::stdout().lock(), line);
+}
+
+/// Writer-taking sibling to [`print_diagnostic_error_line`]. Emits
+/// the single `   <line.red()>` row via [`writeln!`] against the
+/// supplied writer. [`print_diagnostic_error_line`] is the stdout
+/// adapter; this variant exists so tests can pin the one-line body,
+/// the three-space indent, and the `\x1b[31m` red ANSI sequence
+/// around the line body (never the indent) without capturing stdout.
+pub fn write_diagnostic_error_line<W: std::io::Write>(
+    w: &mut W,
+    line: &str,
+) -> std::io::Result<()> {
+    writeln!(w, "   {}", line.red())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{styled_spinner, SpinnerStyle, SPINNER_TICK};
@@ -10159,6 +10265,244 @@ mod tests {
                  consumer sites into one call or dropped one of the \
                  intro banners silently fails here. Found \
                  {forward_hits} forwarding hits."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for
+    /// [`super::write_diagnostic_error_line`]. Pins the one-line body
+    /// every pre-lift consumer spelled verbatim (`println!("   {}",
+    /// <line>.red())`): a three-space indent OUTSIDE the coloring
+    /// span, then a red-painted line-body span. A silent contract
+    /// drift a future rewrite might introduce — dropping the
+    /// three-space indent (a "tighter body spacing" cleanup),
+    /// promoting `.red()` to `.bright_red()` (`\x1b[91m` — one shade
+    /// louder than the pre-lift consumers spelled), promoting to
+    /// `.red().bold()` under CI-log-highlight pressure, folding a
+    /// leading `❌ ` glyph into the primitive body (silently shifting
+    /// the raw captured-line grammar into the peer
+    /// [`super::print_step_failure`] grammar), or slipping a framing
+    /// blank into the primitive body — flips this assertion rather
+    /// than compiling and silently diverging the 7 consumer sites'
+    /// visual grammar.
+    #[test]
+    fn write_diagnostic_error_line_emits_exactly_one_three_space_indented_red_line() {
+        // Force ANSI emission (colored auto-drops sequences on a
+        // non-tty stdout) and serialize against peer banner tests via
+        // [`AnsiOverrideForTest`]; its Drop restores colored's
+        // auto-detection on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`], closing the set-write-unset window
+        // without a manual [`colored::control::unset_override`] call
+        // that a future test author could omit.
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_diagnostic_error_line(
+            &mut buf,
+            "test tests::foo::bar_returns_zero has FAILED",
+        )
+        .expect("write_diagnostic_error_line against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf).expect(
+            "write_diagnostic_error_line must emit valid UTF-8 (the pre-lift println!s did)",
+        );
+
+        // Exactly one line — the pre-lift stanza is one `println!`,
+        // not two, and carries no framing blank on either side. A
+        // refactor that slips a leading blank (to visually separate
+        // the highlighted line from the plain lines above) or a
+        // trailing blank (to lift a run of highlighted lines apart)
+        // into the primitive body would silently change the 7
+        // callers' output at once.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_diagnostic_error_line must emit exactly one line \
+             — the pre-lift stanza is one `println!` carrying no \
+             framing blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The three-space indent reaches the rendered line before
+        // any ANSI escape — a fusion that hoisted the indent inside
+        // the coloring span (`"   ".to_string() + &line.red()...`)
+        // or dropped it altogether (`println!("{}", line.red())`)
+        // fails here. The indent must be plain ASCII spaces, not a
+        // tab, and it must precede every `\x1b[` byte.
+        assert!(
+            lines[0].starts_with("   "),
+            "line 0 must begin with a three-space indent — every \
+             pre-lift consumer spelled `\"   {{}}\"` verbatim, so \
+             the indent must reach the writer OUTSIDE the coloring \
+             span; got {:?}",
+            lines[0]
+        );
+        let esc_pos = lines[0]
+            .find('\x1b')
+            .expect("red begin-span must be present");
+        assert!(
+            esc_pos >= 3,
+            "the `\\x1b[31m` red begin-span must FOLLOW the three-space \
+             indent — every pre-lift consumer spelled `.red()` on the \
+             line body alone, never on the indent. Got esc_pos={esc_pos} \
+             in line {:?}",
+            lines[0]
+        );
+
+        // The captured-output line text reaches the rendered line
+        // verbatim; a fusion that hoists the message off the
+        // parameter and pins it to a constant, or truncates the
+        // line, fails here.
+        assert!(
+            lines[0].contains("test tests::foo::bar_returns_zero has FAILED"),
+            "line 0 must carry the captured-output line verbatim; \
+             got {:?}",
+            lines[0]
+        );
+
+        // The `red` ANSI sequence (`\x1b[31m`) reaches the rendered
+        // line; a fusion that dropped `.red()` (a "just print the
+        // string, it's shorter" cleanup) or promoted the palette to
+        // `.bright_red()` (`\x1b[91m` — the [`super::print_error`]
+        // milestone palette) fails here. A promotion collapses the
+        // visual distinction between a highlighted-in-body
+        // diagnostic line and a milestone-level command-error sigil
+        // this primitive exists to preserve.
+        assert!(
+            lines[0].contains("\x1b[31m"),
+            "line 0 must carry the `red` ANSI sequence (`\\x1b[31m`) \
+             — every pre-lift consumer spelled `.red()` (never \
+             `.bright_red()` or `.red().bold()`) on the line body; \
+             got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[91m"),
+            "line 0 must NOT carry the `bright_red` ANSI sequence \
+             (`\\x1b[91m`) — that palette belongs to the heavier \
+             milestone-level `print_error` (`bright_red().bold()` \
+             `❌ <msg>` command-error sigil), not this in-body \
+             highlighted diagnostic line; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[1m"),
+            "line 0 must NOT carry the `bold` ANSI sequence \
+             (`\\x1b[1m`) — every pre-lift consumer spelled `.red()` \
+             (never `.red().bold()`) on the line body; got {:?}",
+            lines[0]
+        );
+
+        // The `.red()` coloring wraps the LINE BODY alone, never
+        // the leading three-space indent — a fusion that hoisted
+        // the color onto the composed line (`format!("   {}", line)
+        // .red()`) would paint the indent red at every site, which
+        // reads as an off-by-column-3 misalignment against every
+        // peer three-space-indent primitive in this module. Pin
+        // that the indent is NOT bracketed by the red span: the red
+        // begin (`\x1b[31m`) must open AFTER the three-space indent.
+        let red_pos = lines[0]
+            .find("\x1b[31m")
+            .expect("red begin-span must be present");
+        assert!(
+            red_pos >= 3,
+            "the `\\x1b[31m` red begin-span must open AFTER the \
+             three-space indent — every pre-lift consumer spelled \
+             `.red()` on the line body alone. Got red_pos={red_pos} \
+             in line {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza
+        // used `println!` (not `print!`), so the newline is part of
+        // the contract. A fusion that swapped `writeln!` for
+        // `write!` fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_diagnostic_error_line must emit a trailing `\\n` \
+             (the pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_diagnostic_error_line`] no longer spell the
+    /// `println!("   {}", <line>.red())` shape inline across
+    /// `commands/{prerelease.rs, frontend_validation.rs}`.
+    /// Structural regression shield — without it, a future refactor
+    /// could silently re-inline the one-liner (e.g. a "just call
+    /// `println!` directly, it's shorter" cleanup) and reopen the
+    /// 7-site duplication class this lift closed. Enforced against
+    /// each module body BEFORE its first `#[cfg(test)]` region so a
+    /// test-support mention of the raw shape does not defeat the
+    /// shield.
+    ///
+    /// The exact-shape needle is `println!("   {}",` immediately
+    /// followed on the same source line by any suffix ending in
+    /// `.red())` — the macro invocation with the exact three-space
+    /// indent-template and the whole-line-body `.red()` chain on
+    /// the same source line. The visually related stderr-routed
+    /// sibling (`eprintln!("   {}", check.message.red())` at
+    /// `commands/federation.rs:151` and `:261`) is NOT enrolled in
+    /// this lift and is scoped out by the module list here: those
+    /// sites route through `eprintln!` (stderr), not `println!`
+    /// (stdout), and the shield's needle anchors on `println!`.
+    ///
+    /// The positive count is pinned per-module at the pre-lift site
+    /// count (`prerelease.rs` ×5, `frontend_validation.rs` ×2). A
+    /// fusion that folded two consumer sites into one call or
+    /// dropped one of the highlighted lines silently fails here —
+    /// the negative half above would still pass, but the positive
+    /// count would fall below the pre-lift census.
+    #[test]
+    fn print_diagnostic_error_line_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str, usize)] = &[
+            (
+                include_str!("commands/prerelease.rs"),
+                "commands/prerelease.rs",
+                5,
+            ),
+            (
+                include_str!("commands/frontend_validation.rs"),
+                "commands/frontend_validation.rs",
+                2,
+            ),
+        ];
+        for (source, module_path, expected_forwards) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("println!(\"   {}\",") {
+                    continue;
+                }
+                if !line.contains(".red())") {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `println!(\"   {{}}\", <line>.red())` three-space \
+                     indented red-highlighted diagnostic-stream \
+                     error-line stanza — that shape was lifted onto \
+                     `crate::ui::print_diagnostic_error_line`. A \
+                     re-inline would silently reopen the 7-site \
+                     duplication class this shield exists to close. \
+                     Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            let forward_hits = body
+                .matches("crate::ui::print_diagnostic_error_line(")
+                .count();
+            assert_eq!(
+                forward_hits, *expected_forwards,
+                "{module_path} body must forward to \
+                 `crate::ui::print_diagnostic_error_line(...)` at \
+                 exactly {expected_forwards} site(s) — one per \
+                 pre-lift consumer in this module. A fusion that \
+                 folded two consumer sites into one call or dropped \
+                 one of the highlighted lines silently fails here. \
+                 Found {forward_hits} forwarding hits."
             );
         }
     }

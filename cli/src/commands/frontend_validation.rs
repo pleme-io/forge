@@ -191,7 +191,7 @@ pub async fn run_type_check(web_dir: &Path) -> Result<(bool, Vec<String>)> {
         let mut details = Vec::new();
         for line in combined.lines().take(20) {
             if line.contains("error") || line.contains("Error") {
-                println!("   {}", line.red());
+                crate::ui::print_diagnostic_error_line(line);
                 details.push(line.to_string());
             }
         }
@@ -408,9 +408,9 @@ pub async fn run_unit_tests(web_dir: &Path) -> Result<(bool, Option<usize>, Vec<
             // Collect failure lines for summary details
             let mut details = Vec::new();
             let lines: Vec<&str> = combined.lines().collect();
-            for line in lines.iter().take(20) {
+            for &line in lines.iter().take(20) {
                 if line.contains("FAIL") || line.contains("Error") || line.contains("✕") {
-                    println!("   {}", line.red());
+                    crate::ui::print_diagnostic_error_line(line);
                     details.push(line.to_string());
                 }
             }
