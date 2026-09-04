@@ -1375,6 +1375,96 @@ pub fn write_step_check<W: std::io::Write>(w: &mut W, message: &str) -> std::io:
     writeln!(w, "   {} {}", "✓".green(), message)
 }
 
+/// Prints the one-line `"   {} <message>"` (three-space indent + green
+/// `"OK"` text label + plain message) in-body step-report grammar 15
+/// pre-lift consumer sites spelled inline as `println!("   {} <fmt>",
+/// "OK".green(), <args>)` (single-line and multi-line-spread flavors
+/// both) across 2 release-orchestration command modules
+/// (`commands/{product_release (×11), rollback (×4)}.rs`). Marks a
+/// step's per-item completion inside a release/rollback phase readout
+/// ("Updated artifact tag in deploy/<svc>.artifact.json", "<svc>
+/// pushed", "Source attestation computed", "<svc> deployed to <env>",
+/// "Post-deploy checks passed", "<svc> rolled back to <tag> in
+/// <env>", "Swapped tags in deploy/<svc>.artifact.json", …) — the
+/// exact-shape text-label sibling to [`print_step_pass`]'s
+/// `✅.green()` emoji-label grammar and [`print_step_check`]'s
+/// `✓.green()` glyph-label grammar.
+///
+/// # Distinct from [`print_step_pass`] and [`print_step_check`]
+///
+/// All three wear the `.green()` palette (same `\x1b[32m` ANSI
+/// sequence) on the leading marker under a shared three-space in-body
+/// indent, but they carry different markers and different semantic
+/// registers: `print_step_pass` paints the heavy `✅` glyph for
+/// operator-visible milestone-flavored step results
+/// (`✅ All migrations valid`, `✅ Type check passed`);
+/// `print_step_check` paints the thin `✓` glyph for finer-grained
+/// per-file / per-row sub-items inside a step's iteration
+/// (`✓ Schema in sync`, `✓ hooks.ts (12 lines)`); this primitive
+/// paints the two-character `OK` TEXT label for release-orchestration
+/// phase step-report lines whose visual grammar the release-tooling
+/// operator has been trained to read as a CI-log-friendly
+/// `[OK] <fact>` shape rather than an emoji annotation
+/// (`OK forge_customer_service deployed to staging`, `OK Post-deploy
+/// checks passed`). The two-character `OK` label survives on a
+/// TTY-stripped log surface — deploy pipelines rewind these lines
+/// under a grep window during incident triage where an emoji glyph
+/// would appear as a mojibake box, so the release-orchestration
+/// modules deliberately chose the text-label spelling. The three
+/// primitives coexist rather than one subsuming the other because
+/// the register the operator reads differs at each: emoji marks a
+/// per-step milestone, `✓` glyph marks a sub-item, `OK` text marks a
+/// release-phase per-service action.
+///
+/// # `.green()` on the label, plain on the message
+///
+/// Pre-lift every consumer spelled the coloring as `"OK".green()` on
+/// the LABEL alone, never on the composed line (`format!("   OK {}",
+/// msg).green()`). The primitive preserves that split: the
+/// `\x1b[32m` green ANSI sequence wraps the `OK` label, the message
+/// reaches the writer uncolored, and the three-space indent is
+/// emitted OUTSIDE both spans — so a terminal without color renders
+/// `   OK <msg>` legibly. A re-lift that hoisted the color onto the
+/// whole line would paint the message text green at every site
+/// (colliding with sibling sites that already color a sub-field of
+/// the message via `.cyan()` / `.yellow()` / `.dimmed()`), changing
+/// the visual grammar silently.
+///
+/// # Compounding
+///
+/// Pre-lift 15 sibling sites each restated the `println!("   {}
+/// <fmt>", "OK".green(), <args>)` grammar verbatim, with the
+/// three-space indent, the `OK` text label, the `.green()` coloring
+/// on the label, and the plain-message tail all spelled inline. A
+/// future palette adjustment (a swap of `OK` for `[OK]` under a
+/// bracketed-label CI grammar, a promotion of `.green()` to
+/// `.bright_green()` collapsing the phase-report vs step-pass
+/// distinction, an OTLP `phase_step_ok` observability event wired
+/// alongside the print, a shift of the three-space indent to
+/// two-space under a standardized report-indent, a fusion with a
+/// sibling that carries a preceding blank line under a
+/// section-opener grammar) had to hit 15 sites in lockstep or drift
+/// the visual grammar; post-lift it hits ONE typed body. Delegates
+/// to [`write_step_ok`] against [`std::io::stdout()`]; the writer
+/// split exists so the fail-before-pass test can pin the one-line
+/// body, the three-space indent, the `OK` text label, and the
+/// `\x1b[32m` green ANSI palette contract by inspecting emitted
+/// bytes rather than shelling out and grepping stdout.
+pub fn print_step_ok(message: &str) {
+    let _ = write_step_ok(&mut std::io::stdout().lock(), message);
+}
+
+/// Writer-taking sibling to [`print_step_ok`]. Emits the single
+/// `   <OK.green()> <message>` line via [`writeln!`] against the
+/// supplied writer. [`print_step_ok`] is the stdout adapter; this
+/// variant exists so tests can pin the one-line body, the
+/// three-space indent, the `OK` text label, and the `\x1b[32m` green
+/// ANSI sequence around the label (never the message) without
+/// capturing stdout.
+pub fn write_step_ok<W: std::io::Write>(w: &mut W, message: &str) -> std::io::Result<()> {
+    writeln!(w, "   {} {}", "OK".green(), message)
+}
+
 /// Prints the one-line `"  {} <message>"` (two-space indent + green
 /// `✓` thin-checkmark glyph + plain message) wider-body
 /// summary-check grammar 7 pre-lift consumer sites spelled inline as
@@ -5665,6 +5755,233 @@ mod tests {
                  primitive body every three-space-indented `✓.green()` \
                  in-body step-check in the crate now delegates \
                  through."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_step_ok`]. Pins
+    /// the one-line body every pre-lift consumer spelled verbatim
+    /// (`println!("   {} <fmt>", "OK".green(), <args>)`): a
+    /// three-space indent, a `.green()`-colored `OK` text label, a
+    /// single space, then the plain (uncolored) message. A silent
+    /// contract drift a future rewrite might introduce — dropping
+    /// the three-space indent, promoting the whole line's coloring
+    /// (`format!("   OK {}", msg).green()`) so the message text
+    /// paints green at every site (colliding with sibling sites that
+    /// color a sub-field of the message via `.cyan()` / `.yellow()`
+    /// / `.dimmed()`), swapping `OK` for `[OK]` under a
+    /// bracketed-label CI grammar, swapping `OK` for `✅` (collapsing
+    /// this text-label primitive into a variant of the sibling
+    /// [`super::print_step_pass`] emoji-label grammar), promoting
+    /// `.green()` to `.bright_green()` (`\x1b[92m` — the
+    /// milestone-level [`super::print_success`] palette), slipping a
+    /// trailing blank line into the primitive body — flips this
+    /// assertion rather than compiling and silently diverging the 15
+    /// consumer sites' visual grammar.
+    #[test]
+    fn write_step_ok_emits_exactly_one_ok_prefixed_indented_line() {
+        // Force ANSI emission (colored auto-drops sequences on a
+        // non-tty stdout) and serialize against peer banner tests
+        // via [`AnsiOverrideForTest`]; its Drop restores colored's
+        // auto-detection on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`], closing the set-write-unset window
+        // without a manual [`colored::control::unset_override`] call
+        // that a future test author could omit.
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_step_ok(&mut buf, "Source attestation computed")
+            .expect("write_step_ok against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_step_ok must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — the pre-lift stanza is one `println!`,
+        // not two, and carries no framing blank. A refactor that
+        // slips a leading or trailing blank into the primitive body
+        // fails here.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_step_ok must emit exactly one line — the pre-lift \
+             stanza is one `println!` carrying no framing blank; \
+             got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The three-space indent reaches the rendered line before
+        // any ANSI escape — a fusion that hoisted the indent inside
+        // the coloring span (`"   OK".green()`) or dropped it
+        // altogether (`println!("{} <msg>", "OK".green())`) fails
+        // here.
+        assert!(
+            lines[0].starts_with("   "),
+            "line 0 must begin with a three-space indent — every \
+             pre-lift consumer spelled `\"   {{}} <fmt>\"` verbatim, \
+             so the indent must reach the writer OUTSIDE the \
+             coloring span; got {:?}",
+            lines[0]
+        );
+
+        // The `OK` text label reaches the rendered line — a fusion
+        // that swapped `OK` for `[OK]` under a bracketed-label CI
+        // grammar or dropped the label altogether fails here.
+        assert!(
+            lines[0].contains("OK"),
+            "line 0 must contain the `OK` text label — every \
+             pre-lift consumer spelled `\"OK\".green()` on the \
+             marker; got {:?}",
+            lines[0]
+        );
+        // NOT the sibling emoji-label grammar — a swap of `OK` for
+        // `✅` or `✓` collapses this text-label primitive into a
+        // variant of the sibling `print_step_pass` /
+        // `print_step_check` emoji-label grammars.
+        assert!(
+            !lines[0].contains('✅'),
+            "line 0 must NOT contain the `✅` glyph — that glyph \
+             belongs to the sibling `print_step_pass` primitive for \
+             emoji-label step-pass, not this text-label step-ok \
+             primitive; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('✓'),
+            "line 0 must NOT contain the `✓` glyph — that glyph \
+             belongs to the sibling `print_step_check` primitive \
+             for emoji-label sub-check, not this text-label step-ok \
+             primitive; got {:?}",
+            lines[0]
+        );
+
+        // The message text reaches the rendered line verbatim; a
+        // fusion that hoists the message off the parameter and pins
+        // it to a constant fails here.
+        assert!(
+            lines[0].contains("Source attestation computed"),
+            "line 0 must carry the message verbatim; got {:?}",
+            lines[0]
+        );
+
+        // The `green` ANSI sequence (`\x1b[32m`) reaches the
+        // rendered line; a fusion that dropped `.green()` (a "just
+        // print the string, it's shorter" cleanup) or promoted the
+        // palette to `.bright_green()` (`\x1b[92m` — the
+        // [`super::print_success`] milestone palette) fails here. A
+        // promotion collapses the visual distinction between the
+        // release-phase step-ok and milestone grammars this
+        // primitive exists to preserve.
+        assert!(
+            lines[0].contains("\x1b[32m"),
+            "line 0 must carry the `green` ANSI sequence \
+             (`\\x1b[32m`) — every pre-lift consumer spelled \
+             `.green()` (never `.bright_green()` or \
+             `.green().bold()`) on the label; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[92m"),
+            "line 0 must NOT carry the `bright_green` ANSI sequence \
+             (`\\x1b[92m`) — that palette belongs to the heavier \
+             milestone-level `print_success`, not this in-body \
+             release-phase step-ok primitive; got {:?}",
+            lines[0]
+        );
+
+        // The `.green()` coloring wraps the LABEL alone, never the
+        // message text — a fusion that hoisted the color onto the
+        // composed line (`format!("   OK {}", msg).green()`) would
+        // paint the message green at every site (colliding with
+        // sibling sites that already color a sub-field of the
+        // message via `.cyan()` / `.yellow()` / `.dimmed()`). Pin
+        // that the message text is NOT bracketed by a green-open +
+        // reset pair: the green span must close (`\x1b[0m`) BEFORE
+        // the space that precedes the message.
+        let ok_pos = lines[0].find("OK").expect("label must be present");
+        let reset_pos = lines[0]
+            .find("\x1b[0m")
+            .expect("reset must be present after the label");
+        let msg_pos = lines[0]
+            .find("Source attestation")
+            .expect("message must be present");
+        assert!(
+            ok_pos < reset_pos && reset_pos < msg_pos,
+            "the `\\x1b[0m` reset must close the green span BEFORE \
+             the message begins — every pre-lift consumer spelled \
+             `.green()` on the `OK` label alone, never on the \
+             message. Got positions ok={ok_pos}, reset={reset_pos}, \
+             msg={msg_pos} in line {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza
+        // used `println!` (not `print!`), so the newline is part of
+        // the contract. A fusion that swapped `writeln!` for
+        // `write!` fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_step_ok must emit a trailing `\\n` (the pre-lift \
+             `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto [`super::print_step_ok`]
+    /// no longer spell the `println!("   {} <fmt>", "OK".green(),
+    /// <args>)` shape inline (single-line and multi-line-spread
+    /// flavors both — 15 pre-lift sites across `commands/{
+    /// product_release (×11), rollback (×4)}.rs`). Structural
+    /// regression shield — without it, a future refactor could
+    /// silently re-inline the one-liner (e.g. a "just call
+    /// `println!` directly, it's shorter" cleanup) and reopen the
+    /// 15-site duplication class this lift closed. Enforced at the
+    /// module bodies before their `#[cfg(test)]` regions so a
+    /// test-support mention of the raw shape does not defeat the
+    /// shield.
+    ///
+    /// The exact-shape needle is `"OK".green()` appearing anywhere
+    /// in the module body. Every `"OK".green()` occurrence in each
+    /// of the two caller files carries the three-space in-body
+    /// release-phase step-ok grammar and is expected to have been
+    /// migrated — no allowlist exceptions.
+    #[test]
+    fn print_step_ok_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[
+            (
+                include_str!("commands/product_release.rs"),
+                "commands/product_release.rs",
+            ),
+            (include_str!("commands/rollback.rs"), "commands/rollback.rs"),
+        ];
+        const ALLOWLIST_SUBSTRINGS: &[&str] = &[];
+        for (source, module_path) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("\"OK\".green()") {
+                    continue;
+                }
+                if ALLOWLIST_SUBSTRINGS.iter().any(|s| line.contains(s)) {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `\"OK\".green()` step-ok marker — that shape \
+                     was lifted onto `crate::ui::print_step_ok`. A \
+                     re-inline would silently reopen the 15-site \
+                     duplication class this shield exists to close. \
+                     Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            assert!(
+                body.contains("crate::ui::print_step_ok("),
+                "{module_path} body must forward to \
+                 `crate::ui::print_step_ok(\"<MSG>\")` — the \
+                 primitive body every three-space-indented \
+                 `OK.green()` in-body release-phase step-ok in the \
+                 crate now delegates through."
             );
         }
     }
