@@ -2654,6 +2654,118 @@ pub fn write_ascii_title_underline<W: std::io::Write>(
     writeln!(w)
 }
 
+/// Rule width [`write_command_intro_banner`] feeds
+/// [`write_ascii_title_underline`] verbatim (the literal `50`). Every
+/// pre-lift consumer of the four-part `<emoji> <verb.bold()>
+/// <subject.cyan()> <detail.dimmed()>` intro + underline sibling
+/// class hardcoded this width at the following-line
+/// `crate::ui::print_ascii_title_underline(50)` call. Pinned as one
+/// named constant so a future standardization (a widening to 60 to
+/// match the peer `Pattern A` release-workflow intro banners, a
+/// narrowing to 40 under a tighter terminal grammar) happens at ONE
+/// typed boundary rather than seven literal-argument sites.
+const COMMAND_INTRO_BANNER_UNDERLINE_WIDTH: usize = 50;
+
+/// Prints the four-part command-intro banner (emoji + bold verb +
+/// cyan subject + dimmed detail) followed by the
+/// [`COMMAND_INTRO_BANNER_UNDERLINE_WIDTH`]-wide ASCII underline
+/// [`print_ascii_title_underline`] emits, 7 pre-lift consumer sites
+/// spelled inline as
+/// `println!("<emoji> {} {} {}", <verb>.bold(), <subject>.cyan(),
+/// <detail>.dimmed()); crate::ui::print_ascii_title_underline(50);`
+/// across 3 command modules
+/// (`commands/{rust_service (×3: 🔨 Building, 📤 Pushing, 🎯 Deploying),
+/// web_service (×2: 🔄 Regenerating, 🔄 Updating Hanabi),
+/// developer_tools (×2: 🔄 Regenerating Cargo.lock/nix, 🔄 Updating
+/// dependencies)}.rs`). Marks the opening banner every long-running
+/// forge command emits before its own body — a build, a push, a
+/// deploy, a regen — so the operator's eye locks onto the verb and
+/// subject before the pipeline output starts scrolling.
+///
+/// # Distinct from every peer `ui::print_*` intro primitive
+///
+/// [`print_header`] is a `╔═╗` boxed top-level command title in
+/// `bright_blue` — heavy Unicode box-drawing, a self-contained
+/// framed title, no preceding caller `println!`. [`print_section_header`]
+/// is a `═`-rule + bold-title + `═`-rule triple around a section
+/// opening WITHIN a pipeline — heavy Unicode rule, palette-carrying,
+/// title-CONTAINED. [`print_ascii_title_underline`] is the LEANEST
+/// separator — the caller emits the title line itself and asks the
+/// primitive only for the `=`-rule + blank pair beneath. This
+/// primitive fuses the two: it emits BOTH the four-part intro title
+/// line AND the underlining rule + blank, closing the pre-lift
+/// two-print sibling stanza onto one typed body. A distinct
+/// peer-class `Pattern A` release-workflow intro banner (`🚀 {}
+/// {} {}` with `<subject>.cyan().bold() + <mode>.bold() + <detail>.dimmed()`
+/// at 5 pre-lift sites across `commands/{rust_service, developer_tools}.rs`)
+/// carries a different color slot ordering and an underline width
+/// of 60, so remains a separate class outside this primitive's scope.
+///
+/// # Fixed underline width (50)
+///
+/// The trailing rule is pinned at
+/// [`COMMAND_INTRO_BANNER_UNDERLINE_WIDTH`] (50) — the exact width
+/// every one of the 7 pre-lift sites fed to
+/// `crate::ui::print_ascii_title_underline`. The width is not a
+/// caller parameter because opening the choice would silently
+/// reopen the pre-lift drift risk (a future consumer picking 40 or
+/// 60 by feel rather than by grammar). A future standardization
+/// happens by editing the constant, not the primitive signature.
+///
+/// # Compounding
+///
+/// Pre-lift 7 sibling sites each restated the four-part title +
+/// `crate::ui::print_ascii_title_underline(50)` stanza verbatim,
+/// with the color slot ordering (bold verb, cyan subject, dimmed
+/// detail), the `{} {} {}` template shape, and the fixed 50-width
+/// underline call all spelled inline. A future adjustment (a swap
+/// of the verb's `.bold()` for `.bright_white().bold()` under a
+/// higher-contrast grammar, a promotion of the subject to `.cyan().bold()`
+/// so it competes for weight with the peer `Pattern A` intro,
+/// dropping the trailing underline entirely under a tighter body
+/// spacing, wiring an OTLP `command_intro_emitted` observability
+/// event alongside the print) had to hit 7 sites in lockstep or
+/// drift the visual grammar; post-lift it hits ONE typed body.
+/// Delegates to [`write_command_intro_banner`] against
+/// [`std::io::stdout()`]; the writer split exists so the
+/// fail-before-pass test can pin the four-part color ordering, the
+/// exact ANSI escape sequences, and the fused underline width by
+/// inspecting emitted bytes rather than shelling out and grepping
+/// stdout.
+pub fn print_command_intro_banner(emoji: &str, verb: &str, subject: &str, detail: &str) {
+    let _ = write_command_intro_banner(&mut std::io::stdout().lock(), emoji, verb, subject, detail);
+}
+
+/// Writer-taking sibling to [`print_command_intro_banner`]. Emits the
+/// three-line body (title line: `<emoji> <verb.bold()> <subject.cyan()>
+/// <detail.dimmed()>`, then the [`COMMAND_INTRO_BANNER_UNDERLINE_WIDTH`]
+/// `=`-rule, then a blank) via [`writeln!`] against the supplied
+/// writer. The rule + blank pair is delegated to
+/// [`write_ascii_title_underline`] so the underline grammar reaches
+/// this primitive through the peer's typed body rather than a
+/// second literal `"=".repeat(50)`. [`print_command_intro_banner`]
+/// is the stdout adapter; this variant exists so tests can pin the
+/// color slot ordering, the `\x1b[1m` bold + `\x1b[36m` cyan +
+/// `\x1b[2m` dim palette on each of the three arguments, and the
+/// trailing underline width without capturing stdout.
+pub fn write_command_intro_banner<W: std::io::Write>(
+    w: &mut W,
+    emoji: &str,
+    verb: &str,
+    subject: &str,
+    detail: &str,
+) -> std::io::Result<()> {
+    writeln!(
+        w,
+        "{} {} {} {}",
+        emoji,
+        verb.bold(),
+        subject.cyan(),
+        detail.dimmed()
+    )?;
+    write_ascii_title_underline(w, COMMAND_INTRO_BANNER_UNDERLINE_WIDTH)
+}
+
 /// Rule width every pre-lift report-section-subheader stanza in
 /// `commands/rust_service.rs`'s `print_deployment_report` fed to
 /// [`String::repeat`] verbatim (the literal `80`). Pinned as one
@@ -7884,16 +7996,24 @@ mod tests {
                 include_str!("commands/developer_tools.rs"),
                 "commands/developer_tools.rs",
             ),
-            (
-                include_str!("commands/web_service.rs"),
-                "commands/web_service.rs",
-            ),
             (include_str!("commands/rollback.rs"), "commands/rollback.rs"),
             (
                 include_str!("commands/product_release.rs"),
                 "commands/product_release.rs",
             ),
         ];
+        // `commands/web_service.rs` is deliberately absent from
+        // this positive-forwarding roster: its two pre-lift
+        // consumers of `crate::ui::print_ascii_title_underline(50)`
+        // migrated onto the fused
+        // [`super::print_command_intro_banner`] primitive, which
+        // delegates internally to
+        // [`super::write_ascii_title_underline`]. Post-lift the
+        // module has NO direct call to `print_ascii_title_underline`
+        // — the underline reaches its rendered banner transitively
+        // through the fused primitive. The negative re-inline check
+        // still runs for this module below as part of a
+        // whole-crate sweep.
         for (source, module_path) in CALLERS {
             let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
             for (i, line) in body.lines().enumerate() {
@@ -7917,6 +8037,31 @@ mod tests {
                  command-intro underline in the crate now delegates \
                  through."
             );
+        }
+        // Negative re-inline sweep for `commands/web_service.rs`
+        // (no positive forwarding count — its two consumers now
+        // reach the underline transitively through
+        // [`super::print_command_intro_banner`]).
+        {
+            let source = include_str!("commands/web_service.rs");
+            let module_path = "commands/web_service.rs";
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                assert!(
+                    !line.contains("println!(\"{}\", \"=\".repeat("),
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `println!(\"{{}}\", \"=\".repeat(<width>));` \
+                     ASCII title-underline rule — that two-liner was \
+                     lifted onto `crate::ui::print_ascii_title_underline` \
+                     (and, for the fused four-part title + underline \
+                     stanza this module carried pre-lift, onto \
+                     `crate::ui::print_command_intro_banner`). A \
+                     re-inline would silently reopen the duplication \
+                     class this shield exists to close. Offending \
+                     line: {line:?}",
+                    lineno = i + 1
+                );
+            }
         }
     }
 
@@ -9451,6 +9596,252 @@ mod tests {
                  consumer sites into one call or dropped one of the \
                  headings silently fails here. Found {forward_hits} \
                  forwarding hits."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for
+    /// [`super::write_command_intro_banner`]. Pins the four-part
+    /// intro title line (emoji + bold verb + cyan subject + dimmed
+    /// detail) followed by the 50-glyph `=`-rule + trailing blank
+    /// the 7 pre-lift sites carried across
+    /// `commands/{rust_service (×3), web_service (×2),
+    /// developer_tools (×2)}.rs`. The color slot ordering is the
+    /// contract: a silent swap (a promotion of subject to
+    /// `.cyan().bold()` to compete with the peer `Pattern A`
+    /// release-workflow banner grammar, a demotion of verb to
+    /// `.dimmed()`, dropping the trailing underline entirely) flips
+    /// this assertion rather than compiling and silently diverging
+    /// the 7 consumer sites' visual grammar.
+    #[test]
+    fn write_command_intro_banner_emits_ordered_four_part_intro_then_50_glyph_underline() {
+        // Force ANSI-emission serialization against peer banner
+        // tests via [`AnsiOverrideForTest`] — the primitive emits
+        // `.bold()`, `.cyan()`, and `.dimmed()` chains whose ANSI
+        // escape sequences must actually reach the buffer for the
+        // per-argument palette assertions below to detect them
+        // rather than being auto-stripped by [`colored`]'s non-tty
+        // fallback. The guard's Drop restores colored's
+        // auto-detection on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`].
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_command_intro_banner(&mut buf, "🔨", "Building", "backend", "with crate2nix")
+            .expect("write_command_intro_banner against a Vec<u8> writer must succeed");
+        let out = String::from_utf8(buf).expect(
+            "write_command_intro_banner must emit valid UTF-8 (the pre-lift println!s did)",
+        );
+
+        // Exactly three lines — the fused four-part title, the
+        // 50-glyph `=`-rule, then the framing blank. A refactor
+        // that drops the underline delegation, doubles the trailing
+        // blank, or fuses the title onto two lines fails here.
+        let lines: Vec<&str> = out.split_inclusive('\n').collect();
+        assert_eq!(
+            lines.len(),
+            3,
+            "write_command_intro_banner must emit exactly three lines — \
+             the fused four-part title, the 50-glyph `=`-rule, then a \
+             framing blank; got {}:\n{:?}",
+            lines.len(),
+            out
+        );
+
+        // Line 0: the four-part title in the color slot ordering
+        // every pre-lift consumer carried. Assert on the exact
+        // ANSI-wrapped bytes so a swap of any color slot flips
+        // this. `colored`'s `\x1b[1mBuilding\x1b[0m` /
+        // `\x1b[36mbackend\x1b[0m` / `\x1b[2mwith crate2nix\x1b[0m`
+        // shape is stable across `colored` versions pinned by the
+        // workspace.
+        assert_eq!(
+            lines[0],
+            "🔨 \x1b[1mBuilding\x1b[0m \x1b[36mbackend\x1b[0m \x1b[2mwith crate2nix\x1b[0m\n",
+            "line 0 must carry the four-part title with emoji + \
+             bold verb + cyan subject + dimmed detail in that exact \
+             slot ordering — every pre-lift consumer spelled the \
+             stanza with `.bold()` on the verb, `.cyan()` on the \
+             subject, and `.dimmed()` on the detail. A slot swap \
+             (e.g. promoting the subject to `.cyan().bold()` to \
+             compete with the `Pattern A` peer) flips this; got {:?}",
+            lines[0]
+        );
+
+        // Line 1: exactly 50 `=` bytes + `\n`. The underline is
+        // delegated to [`super::write_ascii_title_underline`] via
+        // the [`super::COMMAND_INTRO_BANNER_UNDERLINE_WIDTH`]
+        // constant; a width drift (a widening to 60 to match the
+        // `Pattern A` peer, a narrowing to 40) flips the length
+        // check.
+        assert_eq!(
+            lines[1], "==================================================\n",
+            "line 1 must be exactly 50 `=` bytes + `\\n` — every \
+             pre-lift consumer followed the title with \
+             `crate::ui::print_ascii_title_underline(50)`, and the \
+             lift preserves that width via \
+             `COMMAND_INTRO_BANNER_UNDERLINE_WIDTH`; got {:?}",
+            lines[1]
+        );
+
+        // Line 2: exactly `\n`. The trailing blank comes from
+        // [`super::write_ascii_title_underline`]'s own second
+        // `writeln!(w)`; a fusion that dropped it fails here.
+        assert_eq!(
+            lines[2], "\n",
+            "line 2 must be exactly `\\n` — the trailing framing \
+             blank comes from `write_ascii_title_underline`; got {:?}",
+            lines[2]
+        );
+
+        // Positive palette assertions — each of the three colored
+        // arguments reaches the buffer with its expected ANSI
+        // sequence. A silent drop of any styling (`.bold()`,
+        // `.cyan()`, `.dimmed()`) flips the corresponding check.
+        assert!(
+            out.contains("\x1b[1m"),
+            "output must carry the `bold` ANSI sequence (`\\x1b[1m`) — \
+             a silent drop of `.bold()` from the verb slot flips this; \
+             got {:?}",
+            out
+        );
+        assert!(
+            out.contains("\x1b[36m"),
+            "output must carry the `cyan` ANSI sequence (`\\x1b[36m`) — \
+             a silent drop of `.cyan()` from the subject slot flips \
+             this; got {:?}",
+            out
+        );
+        assert!(
+            out.contains("\x1b[2m"),
+            "output must carry the `dim` ANSI sequence (`\\x1b[2m`) — \
+             a silent drop of `.dimmed()` from the detail slot flips \
+             this; got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_command_intro_banner`] no longer spell the
+    /// four-part
+    /// `println!("<emoji> {} {} {}", <v>.bold(), <s>.cyan(),
+    /// <d>.dimmed()); crate::ui::print_ascii_title_underline(50);`
+    /// sibling stanza inline across
+    /// `commands/{rust_service, web_service, developer_tools}.rs`.
+    /// Structural regression shield — a future refactor could
+    /// silently re-inline the two-print stanza (e.g. a "just spell
+    /// the `println!` inline, one call is fine" cleanup) and
+    /// reopen the 7-site duplication class this lift closed.
+    ///
+    /// The exact-shape needle scans each module body for the
+    /// pre-lift `<subject>.cyan(),` clause landing on its own
+    /// source line — the unique middle-slot palette every one of
+    /// the 7 pre-lift stanzas carried. That needle survives the
+    /// lift only in a re-inline: peer `.cyan()` uses in these
+    /// modules land inline (not on a dedicated line) inside
+    /// non-intro-banner grammars (e.g. `entry.name.cyan()` in
+    /// `commands/rollback.rs`'s rollback-plan row, which is scoped
+    /// out by the module list here).
+    #[test]
+    fn print_command_intro_banner_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str, usize)] = &[
+            (
+                include_str!("commands/rust_service.rs"),
+                "commands/rust_service.rs",
+                3,
+            ),
+            (
+                include_str!("commands/web_service.rs"),
+                "commands/web_service.rs",
+                2,
+            ),
+            (
+                include_str!("commands/developer_tools.rs"),
+                "commands/developer_tools.rs",
+                2,
+            ),
+        ];
+        for (source, module_path, expected_forwards) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            let lines: Vec<&str> = body.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                // Match the pre-lift four-part sibling shape's
+                // unique fingerprint: three consecutive argument
+                // lines ending `.bold(),`, `.cyan(),`, and
+                // `.dimmed()` (with or without trailing comma).
+                // A bare `.cyan()` elsewhere (a peer three-arg
+                // `<verb>.bold() + <subject>.cyan() + <plain>`
+                // row grammar with NO dimmed detail slot, or a
+                // `.cyan().bold(),` middle slot from the peer
+                // `Pattern A` release-workflow banner) does not
+                // carry all three predecessors and is scoped out.
+                let trimmed = line.trim_end();
+                if !trimmed.ends_with(".cyan(),") {
+                    continue;
+                }
+                let prev = lines
+                    .get(i.saturating_sub(1))
+                    .copied()
+                    .unwrap_or("")
+                    .trim_end();
+                if !prev.ends_with(".bold(),") {
+                    continue;
+                }
+                // Skip peer `Pattern A` release-workflow rows
+                // whose middle slot is `<subject>.cyan().bold(),` —
+                // those live in the same modules and carry a
+                // distinct color-slot ordering outside this class.
+                if trimmed.ends_with(".cyan().bold(),") {
+                    continue;
+                }
+                let next = lines.get(i + 1).copied().unwrap_or("").trim_end();
+                if !next.ends_with(".dimmed()") {
+                    continue;
+                }
+                // Require the trailing underline call on the line
+                // two below the `.dimmed()` slot (the pre-lift
+                // shape carried a `);` line then the
+                // `crate::ui::print_ascii_title_underline(50);`
+                // line). A three-arg title-without-underline
+                // shape (a peer `🛑 Stopping` grammar in the same
+                // module, no follow-up rule) is scoped out —
+                // dropping the underline would silently widen the
+                // primitive's visual grammar and is a distinct
+                // sibling class outside this lift.
+                let close = lines.get(i + 2).copied().unwrap_or("").trim();
+                let underline = lines.get(i + 3).copied().unwrap_or("");
+                if close != ");"
+                    || !underline.contains("crate::ui::print_ascii_title_underline(50)")
+                {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     four-part command-intro banner stanza (a \
+                     `<verb>.bold(),` line immediately above a \
+                     `<subject>.cyan(),` line, matching the fused \
+                     `println!(\"<emoji> {{}} {{}} {{}}\", …); \
+                     crate::ui::print_ascii_title_underline(50);` \
+                     grammar) — that shape was lifted onto \
+                     `crate::ui::print_command_intro_banner`. A \
+                     re-inline would silently reopen the 7-site \
+                     duplication class this shield exists to close. \
+                     Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            let forward_hits = body
+                .matches("crate::ui::print_command_intro_banner(")
+                .count();
+            assert_eq!(
+                forward_hits, *expected_forwards,
+                "{module_path} body must forward to \
+                 `crate::ui::print_command_intro_banner(...)` at exactly \
+                 {expected_forwards} site(s) — one per pre-lift \
+                 consumer in this module. A fusion that folded two \
+                 consumer sites into one call or dropped one of the \
+                 intro banners silently fails here. Found \
+                 {forward_hits} forwarding hits."
             );
         }
     }

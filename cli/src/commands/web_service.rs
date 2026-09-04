@@ -107,13 +107,12 @@ fn cargo_bin() -> String {
 ///   PATH); also propagated into pleme-linker's `--crate2nix` arg so the
 ///   substrate-pinned crate2nix reaches pleme-linker's inner spawn too
 pub async fn web_regenerate(product: String, service: String, repo_root: String) -> Result<()> {
-    println!(
-        "🔄 {} {} {}",
-        "Regenerating".bold(),
-        format!("{}-{}", product, service).cyan(),
-        "dependencies".dimmed()
+    crate::ui::print_command_intro_banner(
+        "🔄",
+        "Regenerating",
+        &format!("{}-{}", product, service),
+        "dependencies",
     );
-    crate::ui::print_ascii_title_underline(50);
 
     let repo_root_path = Path::new(&repo_root);
     let service_dir = repo_root_path
@@ -220,13 +219,12 @@ pub async fn web_regenerate(product: String, service: String, repo_root: String)
 ///   PATH); matches `commands/bootstrap.rs::regenerate` and
 ///   `commands/pangea.rs`
 pub async fn web_cargo_update(product: String, service: String, repo_root: String) -> Result<()> {
-    println!(
-        "🔄 {} {} {}",
-        "Updating Hanabi".bold(),
-        "(shared BFF)".cyan(),
-        format!("for {}-{}", product, service).dimmed()
+    crate::ui::print_command_intro_banner(
+        "🔄",
+        "Updating Hanabi",
+        "(shared BFF)",
+        &format!("for {}-{}", product, service),
     );
-    crate::ui::print_ascii_title_underline(50);
 
     let repo_root_path = Path::new(&repo_root);
     let hanabi_dir = repo_root_path.join("pkgs").join("platform").join("hanabi");

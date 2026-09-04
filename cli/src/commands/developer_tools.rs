@@ -272,13 +272,12 @@ pub async fn rust_service_help(service: String) -> Result<()> {
 /// This command is used by the auto-discovered `nix run .#regenerate-{product}-{service}` apps.
 /// It regenerates the workspace-level Cargo.lock and Cargo.nix after dependency changes.
 pub async fn rust_regenerate(service: String) -> Result<()> {
-    println!(
-        "🔄 {} {} {}",
-        "Regenerating".bold(),
-        "Cargo.lock and Cargo.nix".cyan(),
-        format!("for {} workspace", service).dimmed()
+    crate::ui::print_command_intro_banner(
+        "🔄",
+        "Regenerating",
+        "Cargo.lock and Cargo.nix",
+        &format!("for {} workspace", service),
     );
-    crate::ui::print_ascii_title_underline(50);
 
     // Get workspace root from environment (set by setup_service_directory)
     let service_path = service_path_from_env()?;
@@ -357,13 +356,12 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
 /// This command is used by the auto-discovered `nix run .#cargo-update-{product}-{service}` apps.
 /// It updates dependencies to their latest compatible versions and regenerates Cargo.nix.
 pub async fn rust_cargo_update(service: String) -> Result<()> {
-    println!(
-        "🔄 {} {} {}",
-        "Updating dependencies".bold(),
-        "and regenerating Cargo.nix".cyan(),
-        format!("for {} workspace", service).dimmed()
+    crate::ui::print_command_intro_banner(
+        "🔄",
+        "Updating dependencies",
+        "and regenerating Cargo.nix",
+        &format!("for {} workspace", service),
     );
-    crate::ui::print_ascii_title_underline(50);
 
     // Get workspace root from environment (set by setup_service_directory)
     let service_path = service_path_from_env()?;
