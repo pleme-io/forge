@@ -2072,7 +2072,7 @@ async fn print_deployment_report(
             let phase = crate::repo::utf8_lossy_borrow(&status_output.stdout);
             let image = crate::repo::utf8_lossy_borrow(&image_output.stdout);
 
-            println!("  {} Service Pod Rollout", "⏳".yellow());
+            crate::ui::print_pending_item("Service Pod Rollout");
             println!("    • Current pod status: {}", phase);
             println!("    • Current image: {}", image.dimmed());
 
@@ -2087,16 +2087,16 @@ async fn print_deployment_report(
                 println!("    • ⏳ Waiting for Flux to deploy new image...");
             }
         } else {
-            println!("  {} Service Pod Rollout", "⏳".yellow());
+            crate::ui::print_pending_item("Service Pod Rollout");
             println!("    • Flux will create/update pod with new image");
         }
     } else {
-        println!("  {} Service Pod Rollout", "⏳".yellow());
+        crate::ui::print_pending_item("Service Pod Rollout");
         println!("    • Flux will deploy the new pod (typically 30-60 seconds)");
     }
     println!();
 
-    println!("  {} Hive Router Update", "⏳".yellow());
+    crate::ui::print_pending_item("Hive Router Update");
     println!("    • Flux will detect supergraph.graphql changes");
     println!("    • New ConfigMap will be generated (hash suffix)");
     println!("    • Hive Router pod will restart automatically");
@@ -2294,11 +2294,8 @@ async fn print_deployment_report(
     println!();
 
     crate::ui::print_report_item("All build and GitOps operations completed successfully");
-    println!(
-        "  {} Flux will deploy the new pod in 30-60 seconds",
-        "⏳".yellow()
-    );
-    println!("  {} Hive Router will update in 1-2 minutes", "⏳".yellow());
+    crate::ui::print_pending_item("Flux will deploy the new pod in 30-60 seconds");
+    crate::ui::print_pending_item("Hive Router will update in 1-2 minutes");
     println!(
         "  {} Monitor the rollout using the commands above",
         "→".cyan()
