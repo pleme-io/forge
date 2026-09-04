@@ -814,9 +814,7 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
     {
         if !stdout.trim().is_empty() {
             diag.push_str("\n  Deployment Conditions:\n");
-            for line in stdout.trim().lines() {
-                diag.push_str(&format!("    {}\n", line));
-            }
+            crate::repo::push_indented_lines_4sp(&mut diag, stdout.trim().lines());
         }
     }
 
@@ -835,9 +833,7 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
     {
         if !stdout.trim().is_empty() {
             diag.push_str("\n  All Pods:\n");
-            for line in stdout.trim().lines() {
-                diag.push_str(&format!("    {}\n", line));
-            }
+            crate::repo::push_indented_lines_4sp(&mut diag, stdout.trim().lines());
         }
     }
 
@@ -856,9 +852,7 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
     {
         if !stdout.trim().is_empty() {
             diag.push_str("\n  Container States:\n");
-            for line in stdout.trim().lines() {
-                diag.push_str(&format!("    {}\n", line));
-            }
+            crate::repo::push_indented_lines_4sp(&mut diag, stdout.trim().lines());
         }
     }
 
@@ -881,9 +875,7 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
         });
         if has_reasons {
             diag.push_str("\n  Container Wait/Termination Reasons:\n");
-            for line in stdout.trim().lines() {
-                diag.push_str(&format!("    {}\n", line));
-            }
+            crate::repo::push_indented_lines_4sp(&mut diag, stdout.trim().lines());
         }
     }
 
@@ -904,9 +896,7 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
     {
         if !stdout.trim().is_empty() {
             diag.push_str("\n  Deployment Events:\n");
-            for line in stdout.trim().lines().rev().take(10) {
-                diag.push_str(&format!("    {}\n", line));
-            }
+            crate::repo::push_indented_lines_4sp(&mut diag, stdout.trim().lines().rev().take(10));
         }
     }
 
@@ -931,9 +921,7 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
             .collect();
         if !pod_events.is_empty() {
             diag.push_str("\n  Related Pod Events (last 15):\n");
-            for line in pod_events.iter().rev().take(15) {
-                diag.push_str(&format!("    {}\n", line));
-            }
+            crate::repo::push_indented_lines_4sp(&mut diag, pod_events.iter().rev().take(15));
         }
     }
 
