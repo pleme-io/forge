@@ -641,7 +641,9 @@ pub async fn build_rust_service(
         // bypassed at all three sites.
         println!("   Analyzing AMD64 closure...");
         match crate::nix::path_info_recursive("result-amd64").await {
-            Err(e) => eprintln!("   ⚠️  Failed to get AMD64 closure info (non-fatal): {}", e),
+            Err(e) => {
+                crate::ui::eprint_step_warn("Failed to get AMD64 closure info (non-fatal)", &e)
+            }
             Ok(info) => {
                 println!(
                     "   AMD64: Found {} derivations in closure",
@@ -655,7 +657,9 @@ pub async fn build_rust_service(
                     .await
                 {
                     Ok(()) => println!("   {}", "✅ AMD64 closure cached".green()),
-                    Err(e) => eprintln!("   ⚠️  AMD64 closure push failed (non-fatal): {}", e),
+                    Err(e) => {
+                        crate::ui::eprint_step_warn("AMD64 closure push failed (non-fatal)", &e)
+                    }
                 }
             }
         }
@@ -670,7 +674,7 @@ pub async fn build_rust_service(
             println!("   Analyzing ARM64 closure...");
             match crate::nix::path_info_recursive("result-arm64").await {
                 Err(e) => {
-                    eprintln!("   ⚠️  Failed to get ARM64 closure info (non-fatal): {}", e)
+                    crate::ui::eprint_step_warn("Failed to get ARM64 closure info (non-fatal)", &e)
                 }
                 Ok(info) => {
                     println!(
@@ -686,7 +690,7 @@ pub async fn build_rust_service(
                     {
                         Ok(()) => println!("   {}", "✅ ARM64 closure cached".green()),
                         Err(e) => {
-                            eprintln!("   ⚠️  ARM64 closure push failed (non-fatal): {}", e)
+                            crate::ui::eprint_step_warn("ARM64 closure push failed (non-fatal)", &e)
                         }
                     }
                 }

@@ -389,10 +389,10 @@ pub async fn run_federation_tests(
                 }
                 Ok(output) => {
                     let stderr = crate::repo::utf8_lossy_borrow(&output.stderr);
-                    eprintln!("   ⚠️  Could not fetch logs: {}", stderr);
+                    crate::ui::eprint_step_warn("Could not fetch logs", &stderr);
                 }
                 Err(e) => {
-                    eprintln!("   ⚠️  Could not fetch logs: {}", e);
+                    crate::ui::eprint_step_warn("Could not fetch logs", &e);
                 }
             }
 
