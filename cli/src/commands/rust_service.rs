@@ -2296,10 +2296,7 @@ async fn print_deployment_report(
     crate::ui::print_report_item("All build and GitOps operations completed successfully");
     crate::ui::print_pending_item("Flux will deploy the new pod in 30-60 seconds");
     crate::ui::print_pending_item("Hive Router will update in 1-2 minutes");
-    println!(
-        "  {} Monitor the rollout using the commands above",
-        "→".cyan()
-    );
+    crate::ui::print_arrow_item("Monitor the rollout using the commands above");
     println!();
 
     println!("{}", "🎉 Deployment workflow complete!".green().bold());

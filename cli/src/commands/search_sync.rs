@@ -7,7 +7,6 @@
 //! its own GitOps reconciliation for search resources (indexes, policies).
 
 use anyhow::{bail, Context, Result};
-use colored::Colorize;
 use std::env;
 use std::path::Path;
 use std::time::Duration;
@@ -112,14 +111,13 @@ async fn run_sync_direct(config_path: &Path, config: &NovaSearchConfig) -> Resul
         cmd.arg("--prune");
     }
 
-    println!(
-        "  {} novasearchctl --server {} sync --source {}{}{}",
-        "→".cyan(),
+    crate::ui::print_arrow_item(&format!(
+        "novasearchctl --server {} sync --source {}{}{}",
         config.api_url,
         config_path.display(),
         if config.dry_run { " --dry-run" } else { "" },
         if config.prune { " --prune" } else { "" },
-    );
+    ));
 
     let timeout_duration = Duration::from_secs(config.timeout_secs);
 
@@ -152,10 +150,7 @@ async fn run_sync_via_kubectl(
     namespace: &str,
     config: &NovaSearchConfig,
 ) -> Result<()> {
-    println!(
-        "  {} Using kubectl to run sync inside search service pod",
-        "→".cyan()
-    );
+    crate::ui::print_arrow_item("Using kubectl to run sync inside search service pod");
 
     // Find the search service pod
     let pod_name =
@@ -168,7 +163,7 @@ async fn run_sync_via_kubectl(
                 )
             })?;
 
-    println!("  {} Found pod: {}", "→".cyan(), pod_name);
+    crate::ui::print_arrow_item(&format!("Found pod: {}", pod_name));
 
     // Copy config files to the pod. Routed through
     // `crate::retry::run_inherited_status` so a non-zero exit bails
@@ -223,13 +218,10 @@ async fn run_sync_via_kubectl(
         exec_args.push("--prune");
     }
 
-    println!(
-        "  {} kubectl exec -n {} {} -- novasearchctl sync --source {}",
-        "→".cyan(),
-        namespace,
-        pod_name,
-        remote_config_path,
-    );
+    crate::ui::print_arrow_item(&format!(
+        "kubectl exec -n {} {} -- novasearchctl sync --source {}",
+        namespace, pod_name, remote_config_path,
+    ));
 
     let timeout_duration = Duration::from_secs(config.timeout_secs);
 
