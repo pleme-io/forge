@@ -1701,6 +1701,91 @@ pub fn write_watch_item<W: std::io::Write>(w: &mut W, message: &str) -> std::io:
     writeln!(w, "  {} {}", "□".dimmed(), message)
 }
 
+/// Prints the one-line `"    → <message>"` (four-space indent + plain
+/// `→` forward-arrow glyph + single space + plain uncolored message)
+/// nested arrow-hint grammar every pre-lift consumer in
+/// `commands/rust_service.rs` spelled inline as
+/// `println!("    → <literal>")`. Marks a sub-hint dangling one indent
+/// scope BELOW a preceding [`print_watch_item`] (`"  □ <watch-item>"`)
+/// entry in the operator's "WATCH FOR THESE ISSUES" troubleshooting
+/// checklist — a leaf suggestion the operator should try if the parent
+/// failure mode appears (e.g. "Pod fails to start" watch-item followed
+/// by "Check logs for startup errors" / "Verify database connection" /
+/// "Check if migrations broke the schema" leaf hints). One indent scope
+/// deeper than [`print_arrow_item`]'s two-space `.cyan()` narrative
+/// marker, and carries NO color so the leaf hints recede visually
+/// beneath the `□`.dimmed()` watch-item head without competing for eye
+/// attention.
+///
+/// # Distinct from the other `ui::print_*` primitives
+///
+/// [`print_arrow_item`] carries the two-space `→.cyan()` narrative-
+/// marker row — DIFFERENT indent width (two vs. four spaces),
+/// DIFFERENT palette (`\x1b[36m` cyan on the glyph vs. plain
+/// uncolored), and DIFFERENT semantic role (a top-level "here is what
+/// happens next" narration vs. a leaf troubleshooting hint dangling
+/// beneath a `□.dimmed()` watch-item head). Folding this primitive
+/// into `print_arrow_item` would either widen the narrative marker's
+/// indent (silently pushing every `search_sync` and `rust_service`
+/// narration two spaces to the right) or narrow the leaf hint's
+/// indent (silently pulling every WATCH-FOR-THESE-ISSUES sub-hint
+/// two spaces to the left, collapsing the visual nesting under the
+/// `□` head), and either painting the leaf hints cyan (competing with
+/// the `□.dimmed()` head for weight) or stripping the narrative
+/// marker's cyan (losing the cross-consumer narrative signal). All
+/// four drifts change the visual grammar at every site the operator
+/// has been trained to read.
+///
+/// # No coloring at all
+///
+/// Pre-lift every consumer spelled the hint as a plain
+/// `println!("    → <literal>")` with no `.dimmed()` / `.cyan()` /
+/// `.italic()` chain — the leaf hint reaches the terminal with the
+/// default palette so it recedes beneath the sibling `□.dimmed()`
+/// watch-item head without competing for eye attention. The primitive
+/// preserves that: neither the four-space indent, nor the `→` glyph,
+/// nor the space, nor the message reach the writer through any
+/// [`colored`] chain, so no `\x1b[<..>m` ANSI sequence appears in the
+/// rendered line. A future palette adjustment that wraps this
+/// primitive in `.dimmed()` is a deliberate additive edit; the
+/// pre-lift shape reaches ONE typed boundary rather than 12 literal
+/// sites.
+///
+/// # Compounding
+///
+/// Pre-lift 12 sibling sites in `commands/rust_service.rs` (the
+/// `verify_deployment_status` "WATCH FOR THESE ISSUES" checklist:
+/// Pod-fails-to-start ×3, Pod-is-CrashLoopBackOff ×3,
+/// Hive-Router-fails-after-update ×3, GraphQL-queries-fail ×3) each
+/// restated the `println!("    → <literal>")` grammar verbatim, with
+/// the four-space indent, the `→` forward-arrow glyph, and the plain
+/// uncolored default palette all spelled inline. A future adjustment
+/// (a swap of `→ ` for `- ` under a CI-log-friendly grammar, a
+/// promotion of the whole line to `.dimmed()` under a leaner leaf-vs-
+/// head contrast, an OTLP `troubleshoot_hint_emitted` observability
+/// event wired alongside the print, a shift of the four-space indent
+/// to two or six spaces under a standardized report-indent) had to
+/// hit 12 sites in lockstep or drift the visual grammar; post-lift it
+/// hits ONE typed body. Delegates to [`write_arrow_hint`] against
+/// [`std::io::stdout()`]; the writer split exists so the fail-before-
+/// pass test can pin the one-line body, the four-space indent, the
+/// `→` glyph, and the absence of every `\x1b[<..>m` ANSI palette
+/// sequence by inspecting emitted bytes rather than shelling out and
+/// grepping stdout.
+pub fn print_arrow_hint(message: &str) {
+    let _ = write_arrow_hint(&mut std::io::stdout().lock(), message);
+}
+
+/// Writer-taking sibling to [`print_arrow_hint`]. Emits the single
+/// `"    → <message>"` line via [`writeln!`] against the supplied
+/// writer. [`print_arrow_hint`] is the stdout adapter; this variant
+/// exists so tests can pin the one-line body, the four-space indent,
+/// the `→` forward-arrow glyph, and the ABSENCE of every ANSI palette
+/// sequence around glyph or message without capturing stdout.
+pub fn write_arrow_hint<W: std::io::Write>(w: &mut W, message: &str) -> std::io::Result<()> {
+    writeln!(w, "    → {}", message)
+}
+
 /// Prints the one-line `"  {} <message>"` (two-space indent +
 /// `bright_green`-colored `✅` glyph + plain message) wider-body
 /// summary-pass grammar every pre-lift consumer in `commands/test.rs`
@@ -6113,6 +6198,260 @@ mod tests {
                  watch-item in the crate now delegates through."
             );
         }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_arrow_hint`]. Pins
+    /// the one-line body every pre-lift consumer spelled verbatim
+    /// (`println!("    → <literal>")`): a four-space indent, a plain
+    /// `→` forward-arrow glyph, a single space, then the plain
+    /// (uncolored) message. A silent contract drift a future rewrite
+    /// might introduce — narrowing the indent to two-space (collapsing
+    /// this leaf hint grammar into the sibling
+    /// [`super::print_arrow_item`] wider-body narrative grammar),
+    /// widening the indent to six-space (drifting the visual nesting
+    /// beneath the `□.dimmed()` watch-item head), swapping `→` for
+    /// `-` or `>` under a CI-log-friendly grammar, swapping `→` for
+    /// `✓` (would collide with [`super::print_report_item`] completed-
+    /// row grammar) or `⏳` (would collide with
+    /// [`super::print_pending_item`] still-pending grammar), wrapping
+    /// the glyph or message in `.cyan()` (would collide with
+    /// [`super::print_arrow_item`] narrative palette) or `.dimmed()`
+    /// (would promote the leaf hint to the same weight as its
+    /// `□.dimmed()` watch-item head), slipping a trailing blank line
+    /// into the primitive body — flips this assertion rather than
+    /// compiling and silently diverging the 12 consumer sites' visual
+    /// grammar.
+    #[test]
+    fn write_arrow_hint_emits_exactly_one_four_indented_uncolored_arrow_leaf_hint_line() {
+        // Force ANSI-emission serialization against peer banner tests
+        // via [`AnsiOverrideForTest`] — even though this primitive
+        // emits NO ANSI sequences, the guard's presence pins the
+        // discipline: if a future refactor slips a `.dimmed()` /
+        // `.cyan()` chain into the writer, the guard ensures the
+        // sequence actually reaches the buffer for detection here
+        // rather than being auto-stripped by [`colored`]'s non-tty
+        // fallback. The guard's Drop restores colored's auto-detection
+        // on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`].
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_arrow_hint(&mut buf, "Check logs for startup errors")
+            .expect("write_arrow_hint against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_arrow_hint must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — the pre-lift stanza is one `println!`
+        // carrying no framing blank.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_arrow_hint must emit exactly one line — the \
+             pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // Exactly four spaces of indent — NOT two (the sibling
+        // wider-body [`super::print_arrow_item`] narrative marker),
+        // NOT three (the sibling in-body `print_step_*` grammar).
+        // The needle uses a five-char prefix guard so a fusion that
+        // widened the indent to five or more spaces also flips this.
+        assert!(
+            lines[0].starts_with("    → "),
+            "line 0 must begin with a four-space indent followed by \
+             `→ ` verbatim — every pre-lift consumer spelled \
+             `\"    → <literal>\"` verbatim, so the four-space indent \
+             AND the plain `→ ` prefix must reach the writer together; \
+             got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].starts_with("     "),
+            "line 0 must NOT begin with a five-or-more-space indent — \
+             a widened indent would drift the visual nesting beneath \
+             the `□.dimmed()` watch-item head; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].starts_with("  → "),
+            "line 0 must NOT begin with a two-space indent followed \
+             by `→ ` — that two-space grammar belongs to the sibling \
+             wider-body `print_arrow_item` narrative marker, not \
+             this leaf hint primitive; got {:?}",
+            lines[0]
+        );
+
+        // The `→` forward-arrow glyph reaches the rendered line — NOT
+        // `✓` (the sibling `print_report_item` completed-row grammar),
+        // NOT `⏳` (the sibling `print_pending_item` still-pending
+        // grammar), NOT `□` (the sibling `print_watch_item` watch
+        // head grammar).
+        assert!(
+            lines[0].contains('→'),
+            "line 0 must contain the `→` forward-arrow glyph; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('✓'),
+            "line 0 must NOT contain the `✓` glyph — that glyph \
+             belongs to the sibling `print_report_item` primitive for \
+             completed rows, not this arrow-hint leaf primitive; \
+             got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('⏳'),
+            "line 0 must NOT contain the `⏳` glyph — that glyph \
+             belongs to the sibling `print_pending_item` primitive \
+             for still-pending rows, not this arrow-hint leaf \
+             primitive; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('□'),
+            "line 0 must NOT contain the `□` glyph — that glyph \
+             belongs to the sibling `print_watch_item` primitive for \
+             watch-head rows, not this arrow-hint leaf primitive; \
+             got {:?}",
+            lines[0]
+        );
+
+        // The message text reaches the rendered line verbatim.
+        assert!(
+            lines[0].contains("Check logs for startup errors"),
+            "line 0 must carry the message verbatim; got {:?}",
+            lines[0]
+        );
+
+        // ABSENCE OF ALL PALETTE ANSI SEQUENCES — no coloring at all.
+        // A silent promotion of the whole line to `.dimmed()` (which
+        // would collide visually with the `□.dimmed()` watch head) or
+        // to `.cyan()` (which would collide with `print_arrow_item`'s
+        // narrative palette) reaches the buffer as one of these
+        // sequences and flips the corresponding assertion.
+        for (ansi_seq, palette_label, colliding_primitive) in [
+            ("\x1b[2m", "dim", "print_watch_item (`.dimmed()`)"),
+            ("\x1b[90m", "bright_black", "no current sibling"),
+            ("\x1b[36m", "cyan", "print_arrow_item (`.cyan()` narrative)"),
+            (
+                "\x1b[96m",
+                "bright_cyan",
+                "no current sibling; would drift arrow-item palette",
+            ),
+            (
+                "\x1b[32m",
+                "green",
+                "print_report_item (`.green()` completed)",
+            ),
+            (
+                "\x1b[33m",
+                "yellow",
+                "print_pending_item (`.yellow()` still-pending)",
+            ),
+            (
+                "\x1b[31m",
+                "red",
+                "print_step_failure (`.red()` step-failure)",
+            ),
+            ("\x1b[1m", "bold", "no current sibling"),
+        ] {
+            assert!(
+                !lines[0].contains(ansi_seq),
+                "line 0 must NOT carry the `{palette_label}` ANSI \
+                 sequence ({ansi_seq:?}) — every pre-lift consumer \
+                 spelled the hint as a plain `println!(\"    → \
+                 <literal>\")` with NO coloring chain, so the leaf \
+                 hint recedes beneath the sibling `□.dimmed()` \
+                 watch-item head without competing for eye attention. \
+                 A promotion to this palette would collide with \
+                 {colliding_primitive}. Got {:?}",
+                lines[0]
+            );
+        }
+        // Sanity: no ANSI escape byte at all in the rendered line.
+        assert!(
+            !lines[0].contains('\x1b'),
+            "line 0 must contain no ANSI escape byte (`\\x1b`) at all \
+             — this leaf hint primitive emits no coloring; got {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `println!`, so the newline is part of the contract.
+        assert!(
+            out.ends_with('\n'),
+            "write_arrow_hint must emit a trailing `\\n` (the \
+             pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers in `commands/rust_service.rs` migrated
+    /// onto [`super::print_arrow_hint`] no longer spell the
+    /// `println!("    → <literal>")` shape inline. Structural
+    /// regression shield — without it a future refactor could
+    /// silently re-inline the one-liner (e.g. a "just call `println!`
+    /// directly, it's shorter" cleanup) and reopen the 12-site
+    /// duplication class this lift closed. Enforced at the module
+    /// body BEFORE its first `#[cfg(test)]` region so a test-support
+    /// mention of the raw shape does not defeat the shield.
+    ///
+    /// The exact-shape needle is the four-space `println!("    → `
+    /// prefix, which is the pre-lift `println!("    → <literal>")`
+    /// grammar in full (indent + macro + opening quote + four spaces
+    /// + arrow + space). No allowlist is required because every
+    /// pre-lift occurrence in the crate belonged to this class; a
+    /// re-inline with any literal completing the shape flips the
+    /// shield.
+    ///
+    /// The positive count is pinned at TWELVE — one per pre-lift
+    /// consumer (Pod-fails-to-start ×3, Pod-is-CrashLoopBackOff ×3,
+    /// Hive-Router-fails-after-update ×3, GraphQL-queries-fail ×3).
+    /// A fusion that fused two consumer sites into one call (e.g. a
+    /// join into a single `println!`) or dropped one of the hints
+    /// silently fails here — the negative half above would still
+    /// pass, but this positive count would fall to eleven.
+    #[test]
+    fn print_arrow_hint_callers_in_rust_service_delegate_through_primitive() {
+        const SRC: &str = include_str!("commands/rust_service.rs");
+        const MODULE_PATH: &str = "commands/rust_service.rs";
+        let body = crate::test_support::module_body_before_first_cfg_test(SRC, MODULE_PATH);
+        for (i, line) in body.lines().enumerate() {
+            // Match the pre-lift `println!("    → ` prefix in full —
+            // indent + macro + opening quote + four spaces + arrow +
+            // space. A comment or docstring line whose payload text
+            // happens to spell `    → ` never matches because the
+            // needle demands the `println!("` prefix reach the byte
+            // before the four-space indent.
+            if !line.contains("println!(\"    → ") {
+                continue;
+            }
+            panic!(
+                "{MODULE_PATH}:{lineno} spells the pre-lift inline \
+                 `println!(\"    → <literal>\")` four-space nested \
+                 arrow-hint stanza — that shape was lifted onto \
+                 `crate::ui::print_arrow_hint`. A re-inline would \
+                 silently reopen the 12-site duplication class this \
+                 shield exists to close. Offending line: {line:?}",
+                lineno = i + 1
+            );
+        }
+        let forward_hits = body.matches("crate::ui::print_arrow_hint(").count();
+        assert_eq!(
+            forward_hits, 12,
+            "{MODULE_PATH} body must forward to \
+             `crate::ui::print_arrow_hint(\"<MSG>\")` at exactly \
+             TWELVE sites — one per pre-lift consumer (Pod-fails-to-\
+             start ×3, Pod-is-CrashLoopBackOff ×3, Hive-Router-fails-\
+             after-update ×3, GraphQL-queries-fail ×3). A fusion \
+             that fused two consumer sites into one call or dropped \
+             one of the hints silently fails here. Found \
+             {forward_hits} forwarding hits."
+        );
     }
 
     /// Fail-before-pass envelope for [`super::write_step_warn`]. Pins
