@@ -259,7 +259,7 @@ async fn run_rust_tests(service: &str, service_dir: &str, test_type: TestType) -
             .await
             .context("Failed to run cargo test")?;
 
-        println!("  {} Rust unit tests passed", "✅".bright_green());
+        crate::ui::print_summary_pass("Rust unit tests passed");
     }
 
     if run_integration {
@@ -275,7 +275,7 @@ async fn run_rust_tests(service: &str, service_dir: &str, test_type: TestType) -
             .await
             .context("Failed to run cargo integration tests")?;
 
-        println!("  {} Rust integration tests passed", "✅".bright_green());
+        crate::ui::print_summary_pass("Rust integration tests passed");
     }
 
     print_success_summary();
@@ -378,16 +378,15 @@ async fn run_web_tests(service: &str, service_dir: &str, test_type: TestType) ->
     );
 
     if tests_run > 0 {
-        println!(
-            "  {} {} test suite(s) passed{}",
-            "✅".bright_green(),
+        crate::ui::print_summary_pass(&format!(
+            "{} test suite(s) passed{}",
             tests_run,
             if tests_skipped > 0 {
                 format!(", {} skipped", tests_skipped).dimmed().to_string()
             } else {
                 String::new()
             }
-        );
+        ));
     } else {
         println!(
             "  {} No tests were run ({} skipped)",
@@ -487,7 +486,7 @@ async fn run_test_suite(
 
         match result {
             Ok(Ok(true)) => {
-                println!("  {} {} tests passed", "✅".bright_green(), suite_name);
+                crate::ui::print_summary_pass(&format!("{} tests passed", suite_name));
                 return Ok(());
             }
             Ok(Ok(false)) => {
@@ -531,7 +530,7 @@ fn print_success_summary() {
         "{}",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".bright_blue()
     );
-    println!("  {} All tests passed!", "✅".bright_green());
+    crate::ui::print_summary_pass("All tests passed!");
     println!(
         "{}",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".bright_blue()
