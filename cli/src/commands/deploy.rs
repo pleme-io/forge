@@ -209,13 +209,16 @@ pub async fn execute(
     println!("🎯 Strategy: FluxCD GitOps");
     println!();
     println!("Monitor deployment:");
-    println!("  • FluxCD status: flux get kustomizations -A");
-    println!("  • Watch pods:    kubectl get pods -n {} -w", namespace);
-    println!(
-        "  • View logs:     kubectl logs -n {} -l app={} --tail=50",
+    crate::ui::print_bullet_item("FluxCD status: flux get kustomizations -A");
+    crate::ui::print_bullet_item(&format!(
+        "Watch pods:    kubectl get pods -n {} -w",
+        namespace
+    ));
+    crate::ui::print_bullet_item(&format!(
+        "View logs:     kubectl logs -n {} -l app={} --tail=50",
         namespace, name
-    );
-    println!("  • Rollback:      git revert HEAD && git push");
+    ));
+    crate::ui::print_bullet_item("Rollback:      git revert HEAD && git push");
     println!();
 
     Ok(())

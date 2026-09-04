@@ -1786,6 +1786,116 @@ pub fn write_arrow_hint<W: std::io::Write>(w: &mut W, message: &str) -> std::io:
     writeln!(w, "    → {}", message)
 }
 
+/// Prints the one-line `"  • <message>"` (two-space indent + U+2022 `•`
+/// BULLET glyph + single space + plain uncolored message) wider-body
+/// declarative-item grammar every pre-lift consumer spelled inline as
+/// `println!("  • <literal>")` or `println!("  • <fmt>", <args>)`
+/// across four command modules. Marks a leaf entry inside a
+/// human-facing declarative list under a `println!("<HEADING>:")`
+/// heading — the "Generated files:" / "Updated files:" bullet rows
+/// under `commands/{developer_tools,web_service}.rs::regenerate_*` /
+/// `update_*` closers, the "Monitor deployment:" bullet rows under
+/// `commands/deploy.rs`, the "Summary:" bullet rows under
+/// `commands/comprehensive_release.rs` — an inert catalog the
+/// operator reads for orientation, distinct from every semantic-loaded
+/// glyph in the surrounding wider-body item grammar.
+///
+/// # Distinct from the other `ui::print_*` primitives
+///
+/// [`print_report_item`] carries the two-space `✓.green()` completed-
+/// summary row — same two-space indent width, DIFFERENT glyph (thin
+/// checkmark vs. U+2022 bullet), DIFFERENT palette (`\x1b[32m` green
+/// on the glyph vs. plain uncolored), and DIFFERENT semantic role (a
+/// per-item check-mark tally of what already succeeded vs. an
+/// undecorated entry in a declarative list). [`print_pending_item`]
+/// carries the two-space `⏳.yellow()` still-pending row — same
+/// two-space indent width, DIFFERENT glyph (hourglass vs. bullet),
+/// DIFFERENT palette (`\x1b[33m` yellow vs. plain), and DIFFERENT
+/// semantic role (a background rollout the operator waits for vs. an
+/// inert catalog entry). [`print_arrow_item`] carries the two-space
+/// `→.cyan()` narrative marker — same two-space indent width,
+/// DIFFERENT glyph (forward arrow vs. bullet), DIFFERENT palette
+/// (`\x1b[36m` cyan vs. plain), and DIFFERENT semantic role (a
+/// forward-pointing narration of what happens next vs. a static list
+/// entry). [`print_watch_item`] carries the two-space `□.dimmed()`
+/// watch-for-these-issues row — same two-space indent width,
+/// DIFFERENT glyph (hollow square vs. filled bullet), DIFFERENT
+/// palette (`\x1b[2m` dim vs. plain), and DIFFERENT semantic role (a
+/// troubleshooting-checklist head the operator scans for problems vs.
+/// a declarative list entry). Folding this primitive into any of the
+/// four would either paint every "Generated files: <path>" bullet
+/// row green/yellow/cyan/dim (colliding with the summary-tally,
+/// pending, narrative, or watch-checklist grammars operators are
+/// trained to read) or swap the U+2022 `•` glyph for `✓ / ⏳ / → / □`
+/// (misclassifying an inert catalog entry as a completed step, an
+/// in-flight step, a narration, or a troubleshooting head), silently
+/// changing the visual grammar at every site.
+///
+/// # No coloring at all
+///
+/// Pre-lift every consumer spelled the row as a plain
+/// `println!("  • <literal>")` / `println!("  • <fmt>", <args>)` with
+/// no `.dimmed()` / `.green()` / `.cyan()` chain — the declarative
+/// list entry reaches the terminal with the default palette so the
+/// bullet catalog reads as inert data, not as a status signal. The
+/// primitive preserves that: neither the two-space indent, nor the
+/// `•` glyph, nor the space, nor the message reach the writer through
+/// any [`colored`] chain, so no `\x1b[<..>m` ANSI sequence appears in
+/// the rendered line. A future palette adjustment that wraps this
+/// primitive in `.dimmed()` is a deliberate additive edit; the
+/// pre-lift shape reaches ONE typed boundary rather than 24 literal
+/// sites.
+///
+/// # U+2022 `•` BULLET, not U+00B7 `·` middle-dot or ASCII `*`
+///
+/// Pre-lift every consumer spelled the glyph as the U+2022 `•` BULLET
+/// codepoint (three UTF-8 bytes `e2 80 a2`), not U+00B7 `·` middle-dot
+/// (two UTF-8 bytes `c2 b7`), not the ASCII `*` asterisk. The
+/// primitive preserves that: the exact three-byte `• ` sequence reaches
+/// the writer between the two-space indent and the message. A swap to
+/// `·` would render as a nearly-invisible middle-dot on most fonts; a
+/// swap to `*` would collide with markdown/README list grammars the
+/// operator reads in a wholly different visual register. Both drifts
+/// are captured by the fail-before-pass envelope's byte-level match.
+///
+/// # Compounding
+///
+/// Pre-lift 24 sibling sites across `commands/{developer_tools (×11),
+/// comprehensive_release (×5), deploy (×4), web_service (×4)}.rs`
+/// each restated the `println!("  • <literal>")` or
+/// `println!("  • <fmt>", <args>)` grammar verbatim (some as
+/// single-line `println!`s, some spread across a four-line
+/// `println!(\n    "  • <fmt>",\n    <arg>\n);` when the tail is a
+/// ternary/format-expression argument), with the two-space indent,
+/// the U+2022 `•` glyph, the single trailing space, and the absence of
+/// every ANSI palette sequence all spelled inline. A future palette
+/// adjustment (a swap of `• ` for `- ` under a markdown-friendly
+/// grammar, a promotion of the bullet catalog to `.dimmed()` so a
+/// heading pulls forward against a receded catalog, an OTLP
+/// `bullet_item_emitted` observability event wired alongside the
+/// print, a shift of the two-space indent to zero or four spaces
+/// under a standardized report-indent) had to hit 24 sites in
+/// lockstep or drift the visual grammar; post-lift it hits ONE typed
+/// body. Delegates to [`write_bullet_item`] against
+/// [`std::io::stdout()`]; the writer split exists so the fail-before-
+/// pass test can pin the one-line body, the two-space indent, the
+/// `•` U+2022 glyph, and the ABSENCE of every `\x1b[<..>m` ANSI
+/// palette sequence by inspecting emitted bytes rather than shelling
+/// out and grepping stdout.
+pub fn print_bullet_item(message: &str) {
+    let _ = write_bullet_item(&mut std::io::stdout().lock(), message);
+}
+
+/// Writer-taking sibling to [`print_bullet_item`]. Emits the single
+/// `"  • <message>"` line via [`writeln!`] against the supplied
+/// writer. [`print_bullet_item`] is the stdout adapter; this variant
+/// exists so tests can pin the one-line body, the two-space indent,
+/// the U+2022 `•` BULLET glyph, and the ABSENCE of every ANSI palette
+/// sequence around glyph or message without capturing stdout.
+pub fn write_bullet_item<W: std::io::Write>(w: &mut W, message: &str) -> std::io::Result<()> {
+    writeln!(w, "  • {}", message)
+}
+
 /// Prints the one-line `"  {} <message>"` (two-space indent +
 /// `bright_green`-colored `✅` glyph + plain message) wider-body
 /// summary-pass grammar every pre-lift consumer in `commands/test.rs`
@@ -6532,6 +6642,269 @@ mod tests {
              one of the hints silently fails here. Found \
              {forward_hits} forwarding hits."
         );
+    }
+
+    /// Fail-before-pass envelope for [`super::write_bullet_item`]. Pins
+    /// the one-line body every pre-lift consumer spelled verbatim
+    /// (`println!("  • <literal>")` or `println!("  • <fmt>", <args>)`):
+    /// a two-space indent, a plain U+2022 `•` BULLET glyph, a single
+    /// space, then the plain (uncolored) message. A silent contract drift
+    /// a future rewrite might introduce — narrowing the indent to
+    /// zero-space (colliding with `println!("Generated files:")` heading
+    /// grammar sitting immediately above the bullet list), widening the
+    /// indent to three-space (colliding with the in-body `print_step_*`
+    /// grammar), swapping U+2022 `•` for U+00B7 `·` middle-dot (would
+    /// render as a nearly-invisible dot on most fonts) or ASCII `*`
+    /// (would collide with markdown/README list grammars), wrapping the
+    /// glyph or message in `.green()` / `.yellow()` / `.cyan()` /
+    /// `.dimmed()` (would collide with [`super::print_report_item`] /
+    /// [`super::print_pending_item`] / [`super::print_arrow_item`] /
+    /// [`super::print_watch_item`] semantic-loaded item grammars),
+    /// slipping a trailing blank line into the primitive body — flips
+    /// this assertion rather than compiling and silently diverging the
+    /// 24 consumer sites' visual grammar.
+    #[test]
+    fn write_bullet_item_emits_exactly_one_two_indented_uncolored_bullet_list_entry_line() {
+        // Force ANSI-emission serialization against peer banner tests
+        // via [`AnsiOverrideForTest`] — even though this primitive
+        // emits NO ANSI sequences, the guard's presence pins the
+        // discipline: if a future refactor slips a `.dimmed()` /
+        // `.green()` / `.cyan()` chain into the writer, the guard
+        // ensures the sequence actually reaches the buffer for
+        // detection here rather than being auto-stripped by
+        // [`colored`]'s non-tty fallback. The guard's Drop restores
+        // colored's auto-detection on scope exit AFTER releasing the
+        // shared [`ANSI_OVERRIDE_LOCK`].
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_bullet_item(&mut buf, "FluxCD status: flux get kustomizations -A")
+            .expect("write_bullet_item against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_bullet_item must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — the pre-lift stanza is one `println!`
+        // carrying no framing blank.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_bullet_item must emit exactly one line — the \
+             pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // Exactly two spaces of indent followed by `• ` verbatim —
+        // NOT zero-space (the sibling `println!("Generated files:")`
+        // heading grammar sitting immediately above the bullet list),
+        // NOT three-space (the sibling in-body `print_step_*`
+        // grammar). The needle uses a four-char prefix guard so a
+        // fusion that widened the indent to four or more spaces also
+        // flips this.
+        assert!(
+            lines[0].starts_with("  • "),
+            "line 0 must begin with a two-space indent followed by \
+             `• ` verbatim — every pre-lift consumer spelled \
+             `\"  • <literal>\"` or `\"  • <fmt>\"` verbatim, so the \
+             indent + glyph + space triple must reach the writer \
+             OUTSIDE any coloring span; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].starts_with("   "),
+            "line 0 must NOT begin with a three-space indent — that \
+             indent belongs to the sibling in-body `print_step_*` \
+             grammar, not this wider-body bullet-item grammar; \
+             got {:?}",
+            lines[0]
+        );
+
+        // The U+2022 BULLET glyph reaches the rendered line as the
+        // three-byte `e2 80 a2` UTF-8 sequence — NOT U+00B7 `·`
+        // middle-dot (two bytes `c2 b7`), NOT ASCII `*` (one byte
+        // `2a`). A silent codepoint drift renders the catalog nearly-
+        // invisible or collides with markdown list grammar.
+        assert!(
+            lines[0]
+                .as_bytes()
+                .windows(3)
+                .any(|w| w == [0xe2, 0x80, 0xa2]),
+            "line 0 must carry the U+2022 `•` BULLET codepoint as the \
+             three-byte UTF-8 sequence `e2 80 a2` — a swap to U+00B7 \
+             `·` middle-dot or ASCII `*` silently changes the visual \
+             grammar; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('·'),
+            "line 0 must NOT contain the U+00B7 `·` middle-dot glyph \
+             — that codepoint renders nearly-invisibly on most fonts; \
+             got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('*'),
+            "line 0 must NOT contain the ASCII `*` asterisk — that \
+             glyph collides with markdown/README list grammars the \
+             operator reads in a wholly different visual register; \
+             got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('✓'),
+            "line 0 must NOT contain the `✓` glyph — that glyph \
+             belongs to the sibling `print_report_item` primitive for \
+             completed rows, not this bullet-item primitive; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('⏳'),
+            "line 0 must NOT contain the `⏳` glyph — that glyph \
+             belongs to the sibling `print_pending_item` primitive \
+             for in-flight rows, not this bullet-item primitive; \
+             got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('→'),
+            "line 0 must NOT contain the `→` glyph — that glyph \
+             belongs to the sibling `print_arrow_item` primitive for \
+             narration markers, not this bullet-item primitive; \
+             got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('□'),
+            "line 0 must NOT contain the `□` glyph — that glyph \
+             belongs to the sibling `print_watch_item` primitive for \
+             watch-for-these-issues rows, not this bullet-item \
+             primitive; got {:?}",
+            lines[0]
+        );
+
+        // The message text reaches the rendered line verbatim.
+        assert!(
+            lines[0].contains("FluxCD status: flux get kustomizations -A"),
+            "line 0 must carry the message verbatim; got {:?}",
+            lines[0]
+        );
+
+        // Absolutely no ANSI escape sequence reaches the writer — the
+        // pre-lift consumers all spelled the bullet row plain
+        // (no `.dimmed()` / `.green()` / `.cyan()` / `.yellow()` /
+        // `.bright_black()` chain). A silent palette promotion would
+        // paint the inert catalog with a status color, collapsing the
+        // visual distinction against the sibling item-list primitives.
+        assert!(
+            !lines[0].contains("\x1b["),
+            "line 0 must NOT contain any `\\x1b[` ANSI escape prefix \
+             — every pre-lift consumer emitted the bullet row plain, \
+             and a silent palette promotion would collide with the \
+             sibling `print_report_item` / `print_pending_item` / \
+             `print_arrow_item` / `print_watch_item` semantic-loaded \
+             grammars; got {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `println!`, so the newline is part of the contract.
+        assert!(
+            out.ends_with('\n'),
+            "write_bullet_item must emit a trailing `\\n` (the \
+             pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_bullet_item`] no longer spell the
+    /// `println!("  • <literal>")` / `println!("  • <fmt>", <args>)`
+    /// shape inline. Structural regression shield — without it a
+    /// future refactor could silently re-inline the one-liner (e.g. a
+    /// "just call `println!` directly, it's shorter" cleanup) and
+    /// reopen the 24-site duplication class this lift closed.
+    /// Enforced at the module body BEFORE its first `#[cfg(test)]`
+    /// region so a test-support mention of the raw shape does not
+    /// defeat the shield.
+    ///
+    /// The exact-shape needle is the `"  • ` prefix (opening quote +
+    /// two spaces + U+2022 bullet + space), which is the pre-lift
+    /// `println!("  • ...")` and multi-line
+    /// `println!(\n    "  • ...",\n    <arg>\n);` grammar in full.
+    /// No allowlist is required because every pre-lift occurrence in
+    /// the crate belonged to this class; a re-inline with any literal
+    /// completing the shape flips the shield.
+    #[test]
+    fn print_bullet_item_callers_delegate_through_primitive() {
+        // `commands/deploy.rs` carries no `#[cfg(test)]` block so the
+        // shared `module_body_before_first_cfg_test` helper panics on
+        // its miss; the raw source is safe to scan whole because the
+        // module's entire body is production code (no test bodies to
+        // filter out) and this shield's own diagnostic prose lives in
+        // `ui.rs`, never in the target modules the `include_str!`
+        // above pulls in.
+        const CALLERS: &[(&str, &str, bool, usize)] = &[
+            (
+                include_str!("commands/developer_tools.rs"),
+                "commands/developer_tools.rs",
+                true,
+                11,
+            ),
+            (
+                include_str!("commands/comprehensive_release.rs"),
+                "commands/comprehensive_release.rs",
+                true,
+                5,
+            ),
+            (
+                include_str!("commands/deploy.rs"),
+                "commands/deploy.rs",
+                false,
+                4,
+            ),
+            (
+                include_str!("commands/web_service.rs"),
+                "commands/web_service.rs",
+                true,
+                4,
+            ),
+        ];
+        for (source, module_path, has_cfg_test, expected_forwards) in CALLERS {
+            let body: &str = if *has_cfg_test {
+                crate::test_support::module_body_before_first_cfg_test(source, module_path)
+            } else {
+                source
+            };
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("\"  • ") {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `\"  • ` two-space bullet-list stanza — that \
+                     shape was lifted onto \
+                     `crate::ui::print_bullet_item`. A re-inline \
+                     would silently reopen the 24-site duplication \
+                     class this shield exists to close. Offending \
+                     line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            let forward_hits = body.matches("crate::ui::print_bullet_item(").count();
+            assert_eq!(
+                forward_hits, *expected_forwards,
+                "{module_path} body must forward to \
+                 `crate::ui::print_bullet_item(\"<MSG>\")` at exactly \
+                 {expected_forwards} site(s) — one per pre-lift \
+                 consumer in this module. A fusion that folded two \
+                 consumer sites into one call or dropped one of the \
+                 bullet rows silently fails here. Found \
+                 {forward_hits} forwarding hits."
+            );
+        }
     }
 
     /// Fail-before-pass envelope for [`super::write_step_warn`]. Pins

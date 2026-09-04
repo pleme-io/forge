@@ -234,10 +234,12 @@ pub async fn rust_service_help(service: String) -> Result<()> {
     );
     crate::ui::print_ascii_title_underline(50);
     crate::ui::print_step_heading("🏗️  Architecture:");
-    println!("  • Per-crate derivation caching via crate2nix");
-    println!("  • Each dependency (tokio, axum, sqlx, etc.) cached separately in Attic");
-    println!("  • 60-80% faster builds with cache hits across all services");
-    println!("  • Parallel AMD64/ARM64 builds for maximum speed");
+    crate::ui::print_bullet_item("Per-crate derivation caching via crate2nix");
+    crate::ui::print_bullet_item(
+        "Each dependency (tokio, axum, sqlx, etc.) cached separately in Attic",
+    );
+    crate::ui::print_bullet_item("60-80% faster builds with cache hits across all services");
+    crate::ui::print_bullet_item("Parallel AMD64/ARM64 builds for maximum speed");
     println!();
     crate::ui::print_step_heading("🚀 Deployment Commands:");
     println!("  nix run .#build           - Build Docker images (parallel AMD64+ARM64)");
@@ -256,9 +258,11 @@ pub async fn rust_service_help(service: String) -> Result<()> {
     println!("  nix run .#update-cargo-nix - Update Cargo.nix after dependency changes");
     println!();
     crate::ui::print_step_heading("📝 Notes:");
-    println!("  • Run 'nix run .#update-cargo-nix' after adding/updating dependencies");
-    println!("  • All builds automatically push per-crate derivations to Attic");
-    println!("  • Use 'nix run .' to show this help message");
+    crate::ui::print_bullet_item(
+        "Run 'nix run .#update-cargo-nix' after adding/updating dependencies",
+    );
+    crate::ui::print_bullet_item("All builds automatically push per-crate derivations to Attic");
+    crate::ui::print_bullet_item("Use 'nix run .' to show this help message");
 
     Ok(())
 }
@@ -337,8 +341,8 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
     print_success_banner(80, "✅ REGENERATION COMPLETE");
     println!();
     println!("Generated files:");
-    println!("  • {}", cargo_lock.display());
-    println!("  • {}", workspace_root.join("Cargo.nix").display());
+    crate::ui::print_bullet_item(&format!("{}", cargo_lock.display()));
+    crate::ui::print_bullet_item(&format!("{}", workspace_root.join("Cargo.nix").display()));
     println!();
     crate::ui::print_next_steps_heading();
     println!("  1. Review the changes: git diff");
@@ -403,8 +407,8 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
     print_success_banner(80, "✅ UPDATE COMPLETE");
     println!();
     println!("Updated files:");
-    println!("  • {}", workspace_root.join("Cargo.lock").display());
-    println!("  • {}", workspace_root.join("Cargo.nix").display());
+    crate::ui::print_bullet_item(&format!("{}", workspace_root.join("Cargo.lock").display()));
+    crate::ui::print_bullet_item(&format!("{}", workspace_root.join("Cargo.nix").display()));
     println!();
     crate::ui::print_next_steps_heading();
     println!("  1. Review the changes: git diff");

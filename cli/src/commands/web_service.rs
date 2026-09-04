@@ -190,8 +190,8 @@ pub async fn web_regenerate(product: String, service: String, repo_root: String)
     print_success_banner(80, "✅ REGENERATION COMPLETE");
     println!();
     println!("Generated files:");
-    println!("  • {}", service_dir.join("deps.nix").display());
-    println!("  • {}", hanabi_dir.join("Cargo.nix").display());
+    crate::ui::print_bullet_item(&format!("{}", service_dir.join("deps.nix").display()));
+    crate::ui::print_bullet_item(&format!("{}", hanabi_dir.join("Cargo.nix").display()));
     println!();
     crate::ui::print_next_steps_heading();
     println!("  1. Review the changes: git diff");
@@ -280,8 +280,8 @@ pub async fn web_cargo_update(product: String, service: String, repo_root: Strin
     print_success_banner(80, "✅ UPDATE COMPLETE");
     println!();
     println!("Updated files:");
-    println!("  • {}", hanabi_dir.join("Cargo.lock").display());
-    println!("  • {}", hanabi_dir.join("Cargo.nix").display());
+    crate::ui::print_bullet_item(&format!("{}", hanabi_dir.join("Cargo.lock").display()));
+    crate::ui::print_bullet_item(&format!("{}", hanabi_dir.join("Cargo.nix").display()));
     println!();
     crate::ui::print_next_steps_heading();
     println!("  1. Review the changes: git diff");
