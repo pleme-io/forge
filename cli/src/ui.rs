@@ -2709,6 +2709,86 @@ pub fn write_report_section_subheader<W: std::io::Write>(
     Ok(())
 }
 
+/// Literal heading text the [`print_next_steps_heading`] /
+/// [`write_next_steps_heading`] pair emits — every pre-lift consumer
+/// spelled this same eleven-byte string (`"Next steps:"`) verbatim as
+/// the first argument to a `println!` above a numbered "what to do
+/// next" instruction list. Pinned as a `pub const` so consumers that
+/// want to assert against the heading text (a fleet-wide sweep, a
+/// downstream log-shipper filtering on the label) read the same
+/// constant the writer emits rather than re-typing the string literal.
+pub const NEXT_STEPS_HEADING_TEXT: &str = "Next steps:";
+
+/// Prints the one-line `"Next steps:"` plain-text uncolored,
+/// unindented heading 5 pre-lift consumer sites spelled inline as
+/// `println!("Next steps:")` across 3 command modules
+/// (`commands/{web_service (×2), sync (×1), developer_tools (×2)}.rs`).
+/// Marks the label above a numbered "what to do next" instruction list
+/// the caller emits itself — each pre-lift site follows this heading
+/// with two or three `println!("  N. <instruction>")` rows the
+/// operator reads after the surrounding pipeline reports a completion
+/// banner.
+///
+/// # Distinct from every peer `ui::print_*` primitive
+///
+/// [`print_step_heading`] carries the same plain-title shape but
+/// paints its title `.bold()` and marks a step-level heading inside a
+/// pipeline body (e.g. `"Building supergraph:"` above a build's own
+/// sub-output). This primitive carries NO bold and marks a
+/// post-completion instruction label the operator reads AFTER the
+/// pipeline has finished emitting its own body — a distinct visual
+/// grammar the pre-lift 5 sites deliberately kept as plain, uncolored
+/// text so the numbered instruction rows beneath it carry the reader's
+/// eye rather than the heading itself. [`print_phase_heading`] paints
+/// its title `.bold().underline()` for a top-level phase marker, one
+/// weight heavier still. [`print_section_header`] wears a `═`-rule
+/// frame and marks a section boundary, a wholly different grammar.
+///
+/// # No coloring, no bold, no indent
+///
+/// Pre-lift every consumer spelled the heading as a plain
+/// `println!("Next steps:")` with no `.dimmed()` / `.bold()` /
+/// `.italic()` chain and no leading whitespace — the heading reaches
+/// the terminal with the default palette so it recedes beneath the
+/// numbered instruction rows that follow. The primitive preserves
+/// that: neither the label nor its trailing colon reaches the writer
+/// through any [`colored`] chain, so no `\x1b[<..>m` ANSI sequence
+/// appears in the rendered line. A future palette adjustment that
+/// wraps this primitive in `.bold()` or `.dimmed()` is a deliberate
+/// additive edit; the pre-lift shape reaches ONE typed boundary
+/// rather than 5 literal sites.
+///
+/// # Compounding
+///
+/// Pre-lift 5 sibling sites each restated the `println!("Next
+/// steps:")` grammar verbatim, with the plain uncolored default
+/// palette, the `"Next steps:"` label text, and the trailing colon
+/// all spelled inline. A future adjustment (a swap of `"Next steps:"`
+/// for `"To do next:"` under a friendlier grammar, a promotion to
+/// `.bold()` under a leaner post-completion-instruction distinction,
+/// an OTLP `next_steps_heading_emitted` observability event wired
+/// alongside the print, a swap of the trailing colon for a middle
+/// dot) had to hit 5 sites in lockstep or drift the visual grammar;
+/// post-lift it hits ONE typed body. Delegates to
+/// [`write_next_steps_heading`] against [`std::io::stdout()`]; the
+/// writer split exists so the fail-before-pass test can pin the
+/// one-line body, the exact `"Next steps:"` heading text, and the
+/// absence of every `\x1b[<..>m` ANSI palette sequence by inspecting
+/// emitted bytes rather than shelling out and grepping stdout.
+pub fn print_next_steps_heading() {
+    let _ = write_next_steps_heading(&mut std::io::stdout().lock());
+}
+
+/// Writer-taking sibling to [`print_next_steps_heading`]. Emits the
+/// single `Next steps:` line via [`writeln!`] against the supplied
+/// writer. [`print_next_steps_heading`] is the stdout adapter; this
+/// variant exists so tests can pin the one-line body, the exact
+/// heading text ([`NEXT_STEPS_HEADING_TEXT`]), and the absence of
+/// every `\x1b[<..>m` ANSI palette sequence without capturing stdout.
+pub fn write_next_steps_heading<W: std::io::Write>(w: &mut W) -> std::io::Result<()> {
+    writeln!(w, "{}", NEXT_STEPS_HEADING_TEXT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{styled_spinner, SpinnerStyle, SPINNER_TICK};
@@ -8770,6 +8850,234 @@ mod tests {
                  — the primitive body every `── <label> ──.dimmed()` \
                  stream-boundary marker in the crate now delegates \
                  through."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_next_steps_heading`].
+    /// Pins the one-line body every pre-lift consumer spelled verbatim
+    /// (`println!("Next steps:")`): the exact
+    /// [`super::NEXT_STEPS_HEADING_TEXT`] eleven-byte heading text and
+    /// NO indent, NO leading whitespace, NO trailing whitespace before
+    /// the newline, NO coloring, NO bold. A silent contract drift a
+    /// future rewrite might introduce — swapping the label text for a
+    /// friendlier grammar (`"Next steps:"` → `"To do next:"`),
+    /// promoting the whole line to `.bold()` (making it compete for
+    /// weight with the numbered instruction rows beneath), promoting
+    /// to `.dimmed()` (making it recede so far the reader misses the
+    /// section boundary), slipping a leading indent (drifting the
+    /// visual grammar off zero-indent), slipping a trailing space
+    /// before the newline, or fusing a leading or trailing blank into
+    /// the primitive body — flips this assertion rather than compiling
+    /// and silently diverging the 5 consumer sites' visual grammar.
+    #[test]
+    fn write_next_steps_heading_emits_exactly_one_uncolored_plain_next_steps_label_line() {
+        // Force ANSI-emission serialization against peer banner tests
+        // via [`AnsiOverrideForTest`] — even though this primitive
+        // emits NO ANSI sequences, the guard's presence pins the
+        // discipline: if a future refactor slips a `.bold()` /
+        // `.dimmed()` chain into the writer, the guard ensures the
+        // sequence actually reaches the buffer for detection here
+        // rather than being auto-stripped by [`colored`]'s non-tty
+        // fallback. The guard's Drop restores colored's auto-detection
+        // on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`].
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_next_steps_heading(&mut buf)
+            .expect("write_next_steps_heading against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_next_steps_heading must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — the pre-lift stanza is one `println!`
+        // carrying no framing blank.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_next_steps_heading must emit exactly one line — \
+             the pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The exact heading text reaches the rendered line verbatim.
+        // Compare against the pub const so a silent divergence between
+        // the constant and the writer's format string (a future edit
+        // to one but not the other) flips this.
+        assert_eq!(
+            lines[0],
+            super::NEXT_STEPS_HEADING_TEXT,
+            "line 0 must equal `NEXT_STEPS_HEADING_TEXT` verbatim — \
+             the pre-lift stanza was `println!(\"Next steps:\")` at \
+             every site, so the primitive's single-line body must \
+             carry the same eleven-byte label with no indent, no \
+             coloring, and no trailing whitespace; got {:?}",
+            lines[0]
+        );
+
+        // NO leading indent — pre-lift every consumer spelled the
+        // heading at column zero (no `"  "`, `"    "`, or `"\t"`
+        // prefix). A fusion that added an indent would push the label
+        // away from the left margin and drift the visual grammar.
+        assert!(
+            !lines[0].starts_with(char::is_whitespace),
+            "line 0 must NOT begin with any leading whitespace — every \
+             pre-lift consumer spelled `println!(\"Next steps:\")` \
+             starting at column zero, so no `\" \"`, `\"\\t\"`, or any \
+             other whitespace may prefix the heading; got {:?}",
+            lines[0]
+        );
+
+        // NO trailing whitespace before the newline — the label ends
+        // at the colon, and the newline follows immediately.
+        assert!(
+            !lines[0].ends_with(char::is_whitespace),
+            "line 0 must NOT end with any trailing whitespace before \
+             the newline — the pre-lift `println!(\"Next steps:\")` \
+             ended at the colon; got {:?}",
+            lines[0]
+        );
+
+        // ABSENCE OF ALL PALETTE ANSI SEQUENCES — no coloring at all.
+        // A silent promotion to `.bold()` (making the label compete
+        // for weight with the numbered instruction rows), `.dimmed()`
+        // (making it recede so far the reader misses the section
+        // boundary), or any color chain reaches the buffer as one of
+        // these sequences and flips the corresponding assertion.
+        for (ansi_seq, palette_label, colliding_primitive) in [
+            ("\x1b[1m", "bold", "print_step_heading (`.bold()`)"),
+            (
+                "\x1b[2m",
+                "dim",
+                "print_dimmed_dashed_marker (`.dimmed()` on the whole span)",
+            ),
+            (
+                "\x1b[4m",
+                "underline",
+                "print_phase_heading (`.bold().underline()`)",
+            ),
+            (
+                "\x1b[32m",
+                "green",
+                "print_step_success (`.green()` completion)",
+            ),
+            (
+                "\x1b[33m",
+                "yellow",
+                "print_step_warn (`.yellow()` warning)",
+            ),
+            ("\x1b[31m", "red", "print_step_failure (`.red()` failure)"),
+            ("\x1b[36m", "cyan", "print_arrow_item (`.cyan()` narrative)"),
+            (
+                "\x1b[34m",
+                "blue",
+                "print_numbered_check_heading (`.blue()` heading)",
+            ),
+        ] {
+            assert!(
+                !lines[0].contains(ansi_seq),
+                "line 0 must NOT carry the `{palette_label}` ANSI \
+                 sequence ({ansi_seq:?}) — every pre-lift consumer \
+                 spelled the heading as a plain `println!(\"Next \
+                 steps:\")` with NO coloring chain, so the label \
+                 recedes beneath the numbered instruction rows that \
+                 follow it. A promotion to this palette would collide \
+                 with {colliding_primitive}. Got {:?}",
+                lines[0]
+            );
+        }
+        // Sanity: no ANSI escape byte at all in the rendered line.
+        assert!(
+            !lines[0].contains('\x1b'),
+            "line 0 must contain no ANSI escape byte (`\\x1b`) at all \
+             — this plain heading primitive emits no coloring; got {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `println!` (not `print!`), so the newline is part of the
+        // contract. A fusion that swapped `writeln!` for `write!`
+        // fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_next_steps_heading must emit a trailing `\\n` (the \
+             pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_next_steps_heading`] no longer spell the
+    /// `println!("Next steps:")` shape inline across
+    /// `commands/{web_service.rs, sync.rs, developer_tools.rs}`.
+    /// Structural regression shield — a future refactor could silently
+    /// re-inline the one-liner (e.g. a "just call `println!` directly,
+    /// it's shorter" cleanup) and reopen the 5-site duplication class
+    /// this lift closed. Enforced against each module body BEFORE its
+    /// first `#[cfg(test)]` region so a test-support mention of the
+    /// raw shape does not defeat the shield.
+    ///
+    /// The exact-shape needle is `println!("Next steps:` — the macro
+    /// invocation with the opening quote and the heading label prefix
+    /// on the same source line. No allowlist is required because
+    /// every pre-lift occurrence in the crate belonged to this class;
+    /// a re-inline with any suffix completing the shape (e.g.
+    /// `println!("Next steps:")` verbatim, or a hypothetical
+    /// `println!("Next steps: {}", ...)` widening) flips the shield.
+    ///
+    /// The positive count is pinned per-module at the pre-lift site
+    /// count (`web_service.rs` ×2, `sync.rs` ×1, `developer_tools.rs`
+    /// ×2). A fusion that folded two consumer sites into one call or
+    /// dropped one of the headings silently fails here — the negative
+    /// half above would still pass, but the positive count would fall
+    /// below the pre-lift census.
+    #[test]
+    fn print_next_steps_heading_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str, usize)] = &[
+            (
+                include_str!("commands/web_service.rs"),
+                "commands/web_service.rs",
+                2,
+            ),
+            (include_str!("commands/sync.rs"), "commands/sync.rs", 1),
+            (
+                include_str!("commands/developer_tools.rs"),
+                "commands/developer_tools.rs",
+                2,
+            ),
+        ];
+        for (source, module_path, expected_forwards) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("println!(\"Next steps:") {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `println!(\"Next steps:\")` plain-text \
+                     post-completion instruction heading — that shape \
+                     was lifted onto \
+                     `crate::ui::print_next_steps_heading`. A re-inline \
+                     would silently reopen the 5-site duplication \
+                     class this shield exists to close. Offending \
+                     line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            let forward_hits = body.matches("crate::ui::print_next_steps_heading(").count();
+            assert_eq!(
+                forward_hits, *expected_forwards,
+                "{module_path} body must forward to \
+                 `crate::ui::print_next_steps_heading()` at exactly \
+                 {expected_forwards} site(s) — one per pre-lift \
+                 consumer in this module. A fusion that folded two \
+                 consumer sites into one call or dropped one of the \
+                 headings silently fails here. Found {forward_hits} \
+                 forwarding hits."
             );
         }
     }

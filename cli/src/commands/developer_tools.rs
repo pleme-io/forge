@@ -340,7 +340,7 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
     println!("  • {}", cargo_lock.display());
     println!("  • {}", workspace_root.join("Cargo.nix").display());
     println!();
-    println!("Next steps:");
+    crate::ui::print_next_steps_heading();
     println!("  1. Review the changes: git diff");
     println!("  2. Commit both files: git add Cargo.lock Cargo.nix && git commit");
     println!();
@@ -406,7 +406,7 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
     println!("  • {}", workspace_root.join("Cargo.lock").display());
     println!("  • {}", workspace_root.join("Cargo.nix").display());
     println!();
-    println!("Next steps:");
+    crate::ui::print_next_steps_heading();
     println!("  1. Review the changes: git diff");
     println!("  2. Test the build: cargo build");
     println!("  3. Commit both files: git add Cargo.lock Cargo.nix && git commit");
