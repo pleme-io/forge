@@ -39,7 +39,7 @@
 //! - Choose linter (biome vs eslint)
 //! - Control whether failures stop the release
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use colored::Colorize;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -108,6 +108,82 @@ fn docker_bin() -> String {
 /// their respective spawn surfaces.
 fn cargo_bin() -> String {
     crate::repo::get_tool_path("CARGO", "cargo")
+}
+
+/// Spawn `cargo <args>` at `cwd`, capturing stdout/stderr and returning the
+/// raw [`std::process::Output`] regardless of exit status — the cargo-frontier
+/// captured-output fusion primitive, sibling of
+/// [`frontend_validation::bun_output_at`] on the bun frontier and
+/// [`crate::infrastructure::kubectl::kubectl_output_spawn_anyhow`] on the
+/// kubectl frontier.
+///
+/// # Fusion of five occurrences past three-is-a-law
+///
+/// Pre-lift each of five consumer sites — `run_cargo_check` (G1), `run_cargo_clippy`
+/// (G2), `run_cargo_fmt_check`'s auto-fix (G3 `cargo fmt`) and verify (G3
+/// `cargo fmt -- --check`) branches, and `run_cargo_test` (G4) — spelled the
+/// same seven-line stanza verbatim modulo the argv and per-site
+/// `.with_context` string:
+///
+/// ```text
+/// let cargo = cargo_bin();
+/// let output = Command::new(&cargo)
+///     .args([...])
+///     .current_dir(backend_dir)
+///     .output()
+///     .await
+///     .with_context(|| "Failed to run cargo <op>")?;
+/// // caller then inspects `output.status.success()` to decide next step
+/// ```
+///
+/// Five occurrences past THEORY.md §VI.1's three-times threshold ("two
+/// occurrences is a coincidence; three is a law"). Each pre-lift site was one
+/// place a future consumer could drift: forget the `.current_dir(backend_dir)`
+/// and spawn `cargo` in the caller's cwd (silently discovering the wrong
+/// `Cargo.toml` if `forge prerelease` were ever invoked with a working
+/// directory that happened to contain a stray manifest), forget the
+/// `.with_context(...)` and lose the operator's ability to tell WHICH cargo
+/// invocation failed, or spell the context string inconsistently across sites
+/// and hide the site from a fleet-wide grep on a canonical envelope. Post-lift
+/// each site collapses to a `cargo_output_at(&[...], backend_dir, "cargo <op>")
+/// .await?` delegation and both disciplines (`CARGO` routing via `cargo_bin()`,
+/// canonical `"Failed to spawn {op}: {io_error}"` envelope via
+/// [`crate::retry::classify_spawn_anyhow`]) are inherited by construction.
+///
+/// # Envelope shape by construction
+///
+/// - Spawn `Err` (e.g., `CARGO` resolves to an absent path on a Nix-hermetic
+///   runner) → `"Failed to spawn {op}: {io_error}"` via the shared
+///   [`crate::retry::classify_spawn_anyhow`] classifier, the same envelope the
+///   sibling [`frontend_validation::bun_output_at`] emits on the bun frontier
+///   and [`crate::infrastructure::kubectl::kubectl_output_spawn_anyhow`] emits
+///   on the kubectl frontier. This intentionally shifts the pre-lift
+///   per-site `"Failed to run cargo <op>"` phrasing (a source-chained
+///   `.with_context`) onto the fleet-wide `"Failed to spawn {op}: {io_error}"`
+///   envelope so a `grep 'Failed to spawn'` reaches every captured-output
+///   spawn failure across every frontier from one query.
+/// - Spawn `Ok(output)` → `Ok(output)`, byte-verbatim on stdout AND stderr,
+///   with `output.status` (success OR non-zero exit OR signal termination)
+///   preserved for the caller. The five G1-G4 callers drive downstream verdict
+///   parsing off `output.status.success()` and per-tool stdout/stderr
+///   heuristics (`error` counting, `warning:` counting, `test result:` line
+///   parsing, `Diff in` file collection), so the pass-through semantic is
+///   load-bearing — a bail-on-non-zero primitive would collapse every gate
+///   failure into the canonical envelope and discard the per-tool details the
+///   gate report depends on. The two `.output()` sites that remain in this
+///   module (G13 `run_integration_gate` and G14 `run_e2e_gate`) each nest the
+///   spawn inside `tokio::time::timeout(...)` for gate-level timeout
+///   enforcement and cannot ride this primitive without dropping the timeout
+///   — they are intentionally left inline.
+async fn cargo_output_at(args: &[&str], cwd: &Path, op: &str) -> Result<std::process::Output> {
+    crate::retry::classify_spawn_anyhow(
+        Command::new(cargo_bin())
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .await,
+        op,
+    )
 }
 
 /// Configuration for the pre-release validation
@@ -1136,13 +1212,7 @@ async fn run_cargo_check(backend_dir: &Path) -> Result<bool> {
 
     // Check lib and bins only (not tests) - consistent with clippy
     // Test targets require test-helpers feature and are validated separately
-    let cargo = cargo_bin();
-    let output = Command::new(&cargo)
-        .args(["check", "--lib", "--bins"])
-        .current_dir(backend_dir)
-        .output()
-        .await
-        .with_context(|| "Failed to run cargo check")?;
+    let output = cargo_output_at(&["check", "--lib", "--bins"], backend_dir, "cargo check").await?;
 
     let duration = start.elapsed();
 
@@ -1175,13 +1245,12 @@ async fn run_cargo_clippy(backend_dir: &Path) -> Result<bool> {
 
     // Check lib and bins only (not tests) - test dead code warnings are expected
     // since GraphQL types aren't constructed directly in test code
-    let cargo = cargo_bin();
-    let output = Command::new(&cargo)
-        .args(["clippy", "--lib", "--bins", "--", "-D", "warnings"])
-        .current_dir(backend_dir)
-        .output()
-        .await
-        .with_context(|| "Failed to run cargo clippy")?;
+    let output = cargo_output_at(
+        &["clippy", "--lib", "--bins", "--", "-D", "warnings"],
+        backend_dir,
+        "cargo clippy",
+    )
+    .await?;
 
     let duration = start.elapsed();
 
@@ -1219,13 +1288,7 @@ async fn run_cargo_fmt_check(backend_dir: &Path) -> Result<bool> {
     let start = Instant::now();
 
     // First, auto-fix formatting
-    let cargo = cargo_bin();
-    let fix_output = Command::new(&cargo)
-        .args(["fmt"])
-        .current_dir(backend_dir)
-        .output()
-        .await
-        .with_context(|| "Failed to run cargo fmt")?;
+    let fix_output = cargo_output_at(&["fmt"], backend_dir, "cargo fmt").await?;
 
     if !fix_output.status.success() {
         let stderr = crate::repo::utf8_lossy_borrow(&fix_output.stderr);
@@ -1240,12 +1303,8 @@ async fn run_cargo_fmt_check(backend_dir: &Path) -> Result<bool> {
     }
 
     // Then verify with --check (should always pass after auto-fix)
-    let check_output = Command::new(&cargo)
-        .args(["fmt", "--", "--check"])
-        .current_dir(backend_dir)
-        .output()
-        .await
-        .with_context(|| "Failed to run cargo fmt --check")?;
+    let check_output =
+        cargo_output_at(&["fmt", "--", "--check"], backend_dir, "cargo fmt --check").await?;
 
     let duration = start.elapsed();
 
@@ -1281,13 +1340,7 @@ async fn run_cargo_test(backend_dir: &Path) -> Result<bool> {
     crate::ui::print_step_heading("G4: cargo test");
     let start = Instant::now();
 
-    let cargo = cargo_bin();
-    let output = Command::new(&cargo)
-        .args(["test", "--lib", "--bins"])
-        .current_dir(backend_dir)
-        .output()
-        .await
-        .with_context(|| "Failed to run cargo test")?;
+    let output = cargo_output_at(&["test", "--lib", "--bins"], backend_dir, "cargo test").await?;
 
     let duration = start.elapsed();
     let stdout = crate::repo::utf8_lossy_borrow(&output.stdout);
@@ -1876,5 +1929,91 @@ mod tests {
                  (case-insensitive) sigil. Found no delegation call site.",
             );
         }
+    }
+
+    /// Whole-module shield: every captured-output `cargo` spawn on the fast-
+    /// gate frontier (G1–G4) in this module MUST route through the
+    /// [`cargo_output_at`] fusion primitive — the cargo-frontier sibling of
+    /// [`frontend_validation::bun_output_at`] on the bun frontier and
+    /// [`crate::infrastructure::kubectl::kubectl_output_spawn_anyhow`] on the
+    /// kubectl frontier. The shield closes the composition discipline the
+    /// sibling `cargo_bin`-routing shield above (CARGO routing at the sigil)
+    /// leaves open: even after the sigil ensures every spawn resolves the
+    /// substrate-pinned `cargo` derivation, a call site could still (a) forget
+    /// the `.current_dir(backend_dir)` and spawn `cargo` in the caller's cwd,
+    /// (b) forget the `.with_context(...)` and lose the operator's ability to
+    /// tell WHICH cargo invocation spawn-failed, or (c) spell the context
+    /// string inconsistently across sites and hide the site from a fleet-wide
+    /// grep on the canonical `"Failed to spawn {op}: {io_error}"` envelope.
+    ///
+    /// # Two-arm pin
+    ///
+    /// Negative side pins that the pre-lift envelope string
+    /// `"Failed to run cargo` NEVER appears in the module body — the
+    /// distinguishing feature of the pre-lift shape (a per-site
+    /// `.with_context(|| "Failed to run cargo <op>")?` chained onto a bare
+    /// `Command::new(&cargo).args(...).current_dir(backend_dir).output().await`).
+    /// Re-adding that envelope re-forks the canonical
+    /// `"Failed to spawn {op}: {io_error}"` shape the fusion delivers.
+    /// Positive side pins ≥5 `cargo_output_at(` delegation calls — a
+    /// regression that dropped every delegation could not leave the negative
+    /// scan trivially satisfied by absence. Both hits route through
+    /// [`crate::test_support::code_line_hits`] so this shield's own docstring
+    /// mentions of the needles (living in `///`-prefixed comment lines) never
+    /// self-match.
+    ///
+    /// # Why not a bare `Command::new(&cargo)` count pin
+    ///
+    /// Unlike the sibling `bun_output_at` shield in
+    /// `commands/frontend_validation.rs`, which pins `.output()` count == 1,
+    /// this module intentionally keeps two `Command::new(&cargo)` +
+    /// `.output()` sites past the fusion: `run_integration_gate` (G13) and
+    /// `run_e2e_gate` (G14) each nest the cargo spawn inside
+    /// `tokio::time::timeout(...)` for gate-level timeout enforcement and
+    /// cannot ride this primitive without dropping the timeout. Pinning the
+    /// envelope string instead targets exactly the pre-lift stanza this
+    /// primitive replaces — the timeout-wrapped G13/G14 sites do NOT spell
+    /// `.with_context(|| "Failed to run cargo …")` on the spawn future and so
+    /// cannot false-trip this shield.
+    ///
+    /// # Fail-before-pass-after
+    ///
+    /// Pre-lift the five consumer sites (`run_cargo_check` G1,
+    /// `run_cargo_clippy` G2, `run_cargo_fmt_check`'s auto-fix + verify arms
+    /// G3, `run_cargo_test` G4) each spelled `Command::new(&cargo)…
+    /// .with_context(|| "Failed to run cargo <op>")?` verbatim — the
+    /// shield's `Failed to run cargo` count-eq-0 assertion fails-before at 5
+    /// and passes-after at 0. Mirrors the sibling shield discipline
+    /// `test_frontend_validation_bun_captured_spawns_route_through_bun_output_at`
+    /// carries on the bun frontier.
+    #[test]
+    fn cargo_fast_gate_captured_spawns_route_through_cargo_output_at() {
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("prerelease.rs"),
+            "commands/prerelease.rs",
+        );
+        let raw_context_hits = crate::test_support::code_line_hits(body, "\"Failed to run cargo");
+        assert!(
+            raw_context_hits.is_empty(),
+            "commands/prerelease.rs must NOT spell the per-site \
+             `.with_context(|| \"Failed to run cargo <op>\")?` envelope — \
+             the canonical envelope is `\"Failed to spawn {{op}}: \
+             {{io_error}}\"` via `crate::retry::classify_spawn_anyhow`, \
+             delivered by the `cargo_output_at` fusion. Re-adding a \
+             `\"Failed to run cargo …\"` context string re-forks the \
+             envelope this shield closes across the whole spawn frontier. \
+             Offending hits: {raw_context_hits:?}",
+        );
+        let delegations = crate::test_support::code_line_hits(body, "cargo_output_at(").len();
+        assert!(
+            delegations >= 5,
+            "commands/prerelease.rs must route captured-output `cargo` \
+             spawns on the fast-gate frontier through the `cargo_output_at` \
+             fusion — found only {delegations} delegation call(s); a dropped \
+             call would leave the negative-side scan trivially satisfied by \
+             absence. The five load-bearing sites are G1 `run_cargo_check`, \
+             G2 `run_cargo_clippy`, G3 `run_cargo_fmt_check` (fix + check \
+             arms), and G4 `run_cargo_test`.",
+        );
     }
 }
