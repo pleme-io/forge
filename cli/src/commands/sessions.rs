@@ -154,8 +154,8 @@ pub async fn flush(product: String, environment: String, force: bool, dry_run: b
     let namespace = format!("{}-{}", product, environment);
 
     println!("🔄 Session Flush for {} ({})", product, environment);
-    println!("   Namespace: {}", namespace);
-    println!("   Valkey Pod: {}", config.valkey_pod);
+    crate::ui::print_field("Namespace", &namespace);
+    crate::ui::print_field("Valkey Pod", &config.valkey_pod);
     println!();
 
     // Get Valkey password

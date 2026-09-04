@@ -3207,6 +3207,112 @@ pub fn write_diagnostic_error_line<W: std::io::Write>(
     writeln!(w, "   {}", line.red())
 }
 
+/// Prints the one-line `"   {}: {}"` (three-space indent +
+/// caller-supplied label + literal colon + one space + Display-
+/// interpolated value) labeled field-display grammar 22 pre-lift
+/// consumer sites spelled inline as `println!("   <Label>: {}",
+/// <expr>)` across 8 command modules (`commands/{federation (×10),
+/// rust_service (×4), federation_tests (×2), sessions (×2),
+/// migrations, flux, integration_tests, schema_validation}.rs`).
+/// Marks a single labeled readout row inside a printed configuration
+/// / metadata block — one row of a "Configuration loaded:" /
+/// "Metadata saved:" / "Session Flush" operator readout that names a
+/// single field on the loaded config (`Product`, `Environment`,
+/// `Hash`, `Namespace`, ...) with the value painted verbatim.
+///
+/// # Distinct from every peer `ui::print_*` primitive
+///
+/// [`print_step_info`] is a `ℹ️  <msg>` uncolored zero-indent step-info
+/// line at a different scope entirely; this primitive shares the
+/// three-space in-body indent but carries no leading glyph and always
+/// names a labeled field. [`print_step_check`] / [`print_step_ok`] /
+/// [`print_step_pass`] all wear a leading `✓` / `OK` / `✅` glyph
+/// before the message under the same three-space indent — this
+/// primitive carries NO glyph and follows the strict `<Label>:
+/// <value>` shape a configuration or metadata block prints.
+/// [`print_arrow_hint`] and [`print_arrow_item`] wear a `→` marker
+/// glyph inside their body; this primitive carries no glyph. Every
+/// pre-lift consumer emitted this shape as a plain field-display line
+/// deliberately unadorned so an operator reading the block sees
+/// exactly one label-value pair per row.
+///
+/// # `impl Display` value, format-string-driven
+///
+/// Pre-lift every consumer spelled the value interpolation as `{}` —
+/// the [`std::fmt::Display`] formatter, which every consumer arg
+/// (`String`, `&str`, `usize`, [`std::path::Display`],
+/// [`colored::ColoredString`], `[..16]` slice, `format!(...)` output)
+/// implements. The primitive accepts `impl std::fmt::Display` to
+/// preserve that contract byte-for-byte: a caller passes any
+/// `Display`-implementing type by value or by reference, and the
+/// rendered output matches the pre-lift inline `println!` unchanged.
+/// No structural template between the label and the value beyond
+/// `": "` (colon + one space) — the trailing colon and single space
+/// are load-bearing signal, and a fusion that dropped the colon or
+/// the space would silently drift every consumer's visual grammar.
+///
+/// # Label-side plain, value-side coloring preserved
+///
+/// The primitive body itself paints NO ANSI on the label — every
+/// pre-lift consumer left the label uncolored, and a fusion that
+/// promoted the label to `.bold()` or `.cyan()` under a themed-readout
+/// grammar would drift the visual shape across 22 sites in lockstep.
+/// The value slot, by contrast, transparently renders whatever
+/// `Display`-carried ANSI the caller supplies: two pre-lift consumers
+/// pass a `.cyan()`- or `.dimmed()`-wrapped [`colored::ColoredString`]
+/// (`commands/federation_tests.rs:272` — `test_suite.cyan()`,
+/// `commands/integration_tests.rs:1326` — `suite.command.dimmed()`),
+/// and the caller-supplied ANSI sequence reaches the writer verbatim.
+///
+/// # stdout, not stderr
+///
+/// Every pre-lift consumer routed through `println!` (stdout), not
+/// `eprintln!` (stderr). The primitive preserves that routing: an
+/// operator running a `forge <cmd>` invocation and redirecting only
+/// stdout to a runbook capture sees the labeled readout block; an
+/// operator watching stderr for warnings sees only warnings. A future
+/// `eprint_field` peer can lift a stderr-routed sibling class if one
+/// grows past two sites.
+///
+/// # Compounding
+///
+/// Pre-lift 22 sibling sites each restated the `println!("   <Label>:
+/// {}", <expr>)` grammar verbatim, with the three-space indent, the
+/// literal colon-space connective, and the `Display` interpolation
+/// all spelled inline. A future palette adjustment (a shift of the
+/// three-space indent to four-space under a leaner readout grammar,
+/// a promotion of the label to `.bold()` under CI-log readability
+/// pressure, a swap of the colon connective for `=` under a
+/// `KEY=value` env-style grammar, an OTLP `config_field_emitted`
+/// observability event wired alongside the print, a fusion with the
+/// preceding `<CATEGORY>:` header under a nested readout grammar)
+/// had to hit 22 sites in lockstep or drift the visual grammar;
+/// post-lift it hits ONE typed body. Delegates to [`write_field`]
+/// against [`std::io::stdout()`]; the writer split exists so the
+/// fail-before-pass test can pin the one-line body, the three-space
+/// indent, the label-colon-space-value shape, and the absence of any
+/// ANSI escape on the label side by inspecting emitted bytes rather
+/// than shelling out and grepping stdout.
+pub fn print_field(label: &str, value: impl std::fmt::Display) {
+    let _ = write_field(&mut std::io::stdout().lock(), label, &value);
+}
+
+/// Writer-taking sibling to [`print_field`]. Emits the single
+/// `   <label>: <value>` line via [`writeln!`] against the supplied
+/// writer. [`print_field`] is the stdout adapter; this variant exists
+/// so tests can pin the one-line body, the three-space indent, the
+/// literal colon-space connective, and the caller-supplied
+/// `Display`-formatted value's byte-for-byte reproduction (including
+/// any `.cyan()` / `.dimmed()` ANSI from the value side) without
+/// capturing stdout.
+pub fn write_field<W: std::io::Write>(
+    w: &mut W,
+    label: &str,
+    value: &dyn std::fmt::Display,
+) -> std::io::Result<()> {
+    writeln!(w, "   {}: {}", label, value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{styled_spinner, SpinnerStyle, SPINNER_TICK};
@@ -10503,6 +10609,259 @@ mod tests {
                  folded two consumer sites into one call or dropped \
                  one of the highlighted lines silently fails here. \
                  Found {forward_hits} forwarding hits."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_field`]. Pins the
+    /// primitive's one-line body, the three-space indent, the literal
+    /// colon-space connective between label and value, the plain
+    /// (uncolored) label-side ANSI palette, and the trailing newline
+    /// — every observable shape 22 pre-lift consumers depended on.
+    /// A regression that hoisted the label into a `.bold()`/.`cyan()`
+    /// span, swapped `: ` for `=`, dropped the trailing newline, or
+    /// slipped a leading/trailing blank around the body silently
+    /// drifts every consumer's readout; each such regression trips
+    /// exactly one assertion here.
+    #[test]
+    fn write_field_emits_exactly_one_indented_label_colon_value_line() {
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_field(&mut buf, "Product", &"kraken")
+            .expect("write_field against a Vec<u8> writer must succeed");
+        let out = String::from_utf8(buf)
+            .expect("write_field must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — the pre-lift stanza is one `println!`,
+        // not two, and carries no framing blank.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_field must emit exactly one line — the pre-lift \
+             stanza is one `println!` carrying no framing blank; \
+             got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // Byte-for-byte reproduction of the pre-lift inline
+        // `println!("   Product: {}", "kraken")` output — the
+        // three-space indent, the label, the colon-space connective,
+        // and the value all reach the writer in the exact pre-lift
+        // arrangement.
+        assert_eq!(
+            lines[0], "   Product: kraken",
+            "write_field must render the label, colon-space \
+             connective, and value byte-for-byte matching the \
+             pre-lift inline `println!(\"   Product: {{}}\", \
+             \"kraken\")` output; got {:?}",
+            lines[0]
+        );
+
+        // The label side carries NO ANSI escape at pin baseline —
+        // every pre-lift consumer left the label uncolored. A future
+        // regression that promoted the label to `.bold()` or `.cyan()`
+        // under a themed-readout grammar would leak an ANSI sequence
+        // into the label span and fail here.
+        assert!(
+            !lines[0].contains("\x1b["),
+            "write_field must emit NO ANSI escape at pin baseline \
+             (label side plain, value side plain) — every pre-lift \
+             consumer left the label uncolored and passed a plain \
+             `Display` value; got {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza
+        // used `println!` (not `print!`), so the newline is part of
+        // the contract. A fusion that swapped `writeln!` for
+        // `write!` fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_field must emit a trailing `\\n` (the pre-lift \
+             `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Pin the value-side ANSI passthrough — two pre-lift consumers
+    /// (`commands/federation_tests.rs:272` — `test_suite.cyan()`,
+    /// `commands/integration_tests.rs:1326` — `suite.command.dimmed()`)
+    /// hand the primitive a `.cyan()`- or `.dimmed()`-wrapped
+    /// [`colored::ColoredString`] value; the primitive must
+    /// transparently render its `Display`-encoded ANSI sequences
+    /// verbatim rather than strip them or double-wrap them. A
+    /// regression that inserted a `.to_string()` bridge (which
+    /// strips ANSI when `colored`'s auto-detection is off) or a
+    /// `strip_ansi_escapes` filter would erase the value's coloring
+    /// and drift both consumers' visual grammar silently.
+    #[test]
+    fn write_field_preserves_caller_supplied_ansi_on_value_side() {
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_field(&mut buf, "Suite", &"webhook".cyan())
+            .expect("write_field against a Vec<u8> writer must succeed");
+        let out = String::from_utf8(buf).expect("valid utf-8");
+
+        // The three-space indent, label, and colon-space connective
+        // all reach the writer OUTSIDE the value's ANSI span — a
+        // regression that hoisted the coloring onto the composed line
+        // (`format!("   {}: {}", label, value).cyan()`) would paint
+        // the label span too and fail this prefix assertion.
+        assert!(
+            out.starts_with("   Suite: "),
+            "prefix must be three-space indent + label + \
+             colon-space connective, all uncolored; got {:?}",
+            out
+        );
+
+        // The cyan ANSI sequence (`\x1b[36m`) from the value reaches
+        // the writer verbatim. A regression that stripped ANSI (a
+        // `.to_string()` bridge on the value under colored's auto-
+        // detection off) fails here.
+        assert!(
+            out.contains("\x1b[36m"),
+            "cyan ANSI sequence (`\\x1b[36m`) from the caller's \
+             `.cyan()`-wrapped value must reach the writer verbatim; \
+             got {:?}",
+            out
+        );
+
+        // The value's own end-span (`\x1b[0m`) reaches the writer too
+        // — a regression that trimmed the closing ANSI reset would
+        // paint every subsequent line's output cyan by accident.
+        assert!(
+            out.contains("\x1b[0m"),
+            "the value's own ANSI reset (`\\x1b[0m`) must reach the \
+             writer so subsequent output is not painted cyan; got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto [`super::print_field`] no
+    /// longer spell the `println!("   <Label>: {}", <expr>)` shape
+    /// inline across the 8 pre-lift command modules. Structural
+    /// regression shield — without it, a future refactor could
+    /// silently re-inline the one-liner (e.g. a "just call `println!`
+    /// directly, it's shorter" cleanup) and reopen the 22-site
+    /// duplication class this lift closed. Enforced against each
+    /// module body BEFORE its first `#[cfg(test)]` region so a
+    /// test-support mention of the raw shape does not defeat the
+    /// shield.
+    ///
+    /// The exact-shape needle is `println!("   <Label>: {}",` where
+    /// `<Label>` is a `[A-Z][A-Za-z0-9_ ]*` literal (starts with an
+    /// uppercase ASCII letter, then letters/digits/underscores/single
+    /// spaces) and the format string is IMMEDIATELY `: {}` followed
+    /// by the closing quote and `, ` — the macro invocation with the
+    /// exact three-space indent, literal-label prefix, colon-space
+    /// connective, and lone `{}` value slot on the same source line.
+    /// Sibling shapes carrying a unit suffix (`: {} bytes"`, `: {}s"`,
+    /// `: {}%"`) or a runtime-labeled `println!("   {}: {}", label,
+    /// value)` shape are OUT of scope by construction — the needle's
+    /// label-slice character-class check rejects both.
+    ///
+    /// The positive count is pinned per-module at the pre-lift site
+    /// count (`federation.rs` ×10, `rust_service.rs` ×4,
+    /// `federation_tests.rs` ×2, `sessions.rs` ×2, `migrations.rs` ×1,
+    /// `flux.rs` ×1, `integration_tests.rs` ×1,
+    /// `schema_validation.rs` ×1). A fusion that folded two consumer
+    /// sites into one call or dropped one of the labeled readout
+    /// lines silently fails here — the negative half above would
+    /// still pass, but the positive count would fall below the
+    /// pre-lift census.
+    #[test]
+    fn print_field_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str, usize)] = &[
+            (
+                include_str!("commands/federation.rs"),
+                "commands/federation.rs",
+                10,
+            ),
+            (
+                include_str!("commands/rust_service.rs"),
+                "commands/rust_service.rs",
+                4,
+            ),
+            (
+                include_str!("commands/federation_tests.rs"),
+                "commands/federation_tests.rs",
+                2,
+            ),
+            (
+                include_str!("commands/sessions.rs"),
+                "commands/sessions.rs",
+                2,
+            ),
+            (
+                include_str!("commands/migrations.rs"),
+                "commands/migrations.rs",
+                1,
+            ),
+            (include_str!("commands/flux.rs"), "commands/flux.rs", 1),
+            (
+                include_str!("commands/integration_tests.rs"),
+                "commands/integration_tests.rs",
+                1,
+            ),
+            (
+                include_str!("commands/schema_validation.rs"),
+                "commands/schema_validation.rs",
+                1,
+            ),
+        ];
+        for (source, module_path, expected_forwards) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                let trimmed = line.trim_start();
+                let Some(rest) = trimmed.strip_prefix("println!(\"   ") else {
+                    continue;
+                };
+                let Some(label_end) = rest.find(": {}\", ") else {
+                    continue;
+                };
+                let label_slice = &rest[..label_end];
+                // A literal label starts with an uppercase ASCII
+                // letter and contains only ASCII alphanumerics,
+                // underscores, or single spaces. A runtime-labeled
+                // shape (`"   {}: {}"`, first char `{`) fails the
+                // uppercase check and is filtered out; a sibling
+                // shape carrying a unit suffix
+                // (`"   Size: {} bytes"`, `"   Timeout: {}s"`) does
+                // not match the `": {}\", "` needle at all.
+                let is_literal_label = label_slice
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_uppercase())
+                    && label_slice
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ' ');
+                if !is_literal_label {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `println!(\"   <Label>: {{}}\", <expr>)` \
+                     three-space indented labeled field-display \
+                     stanza — that shape was lifted onto \
+                     `crate::ui::print_field`. A re-inline would \
+                     silently reopen the 22-site duplication class \
+                     this shield exists to close. Offending line: \
+                     {line:?}",
+                    lineno = i + 1
+                );
+            }
+            let forward_hits = body.matches("crate::ui::print_field(").count();
+            assert_eq!(
+                forward_hits, *expected_forwards,
+                "{module_path} body must forward to \
+                 `crate::ui::print_field(...)` at exactly \
+                 {expected_forwards} site(s) — one per pre-lift \
+                 consumer in this module. A fusion that folded two \
+                 consumer sites into one call or dropped one of the \
+                 labeled readout lines silently fails here. Found \
+                 {forward_hits} forwarding hits."
             );
         }
     }

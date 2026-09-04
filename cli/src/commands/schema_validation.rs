@@ -110,7 +110,7 @@ pub async fn extract_and_validate_schema(
             )
         })?;
 
-    println!("   Extractor: {}", extractor_binary.display());
+    crate::ui::print_field("Extractor", extractor_binary.display());
 
     // Get service directory to run cargo from the correct location
     let service_dir_path = service_path_from_env()?;

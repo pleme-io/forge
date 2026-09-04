@@ -2340,10 +2340,10 @@ pub async fn release_rust_service(
     let manifest = crate::repo::path_to_string_lossy(&manifest_path);
 
     println!("📋 Configuration loaded:");
-    println!("   Product: {}", deploy_config.product.name);
-    println!("   Environment: {}", deploy_config.product.environment);
-    println!("   Registry: {}", deploy_config.registry_url());
-    println!("   Namespace: {}", deploy_config.kubernetes_namespace());
+    crate::ui::print_field("Product", &deploy_config.product.name);
+    crate::ui::print_field("Environment", &deploy_config.product.environment);
+    crate::ui::print_field("Registry", deploy_config.registry_url());
+    crate::ui::print_field("Namespace", deploy_config.kubernetes_namespace());
     println!();
 
     // Tokens are set by Nix wrapper via environment variables
