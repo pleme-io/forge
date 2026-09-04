@@ -179,10 +179,11 @@ pub async fn run_type_check(web_dir: &Path) -> Result<(bool, Vec<String>)> {
         // Count errors
         let error_count = stdout.matches("error TS").count() + stderr.matches("error TS").count();
 
-        crate::ui::print_step_failure(&format!(
-            "Type check failed ({} errors, {:.1}s)",
+        crate::ui::print_step_failure(&crate::repo::msg_with_count_noun_secs_1(
+            "Type check failed",
             error_count,
-            duration.as_secs_f64()
+            "errors",
+            duration,
         ));
 
         // Collect error lines for summary details
@@ -379,10 +380,11 @@ pub async fn run_unit_tests(web_dir: &Path) -> Result<(bool, Option<usize>, Vec<
     let test_count = parse_test_count(&combined);
 
     if output.status.success() {
-        crate::ui::print_step_pass(&format!(
-            "Unit tests passed ({} tests, {:.1}s)",
+        crate::ui::print_step_pass(&crate::repo::msg_with_count_noun_secs_1(
+            "Unit tests passed",
             test_count.unwrap_or(0),
-            duration.as_secs_f64()
+            "tests",
+            duration,
         ));
         Ok((true, test_count, Vec::new()))
     } else {

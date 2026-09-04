@@ -85,10 +85,11 @@ pub async fn execute(backend_dir: &Path, web_dir: &Path) -> Result<CodegenResult
     // can be recovered with `err.downcast_ref::<SchemaExtractionError>()`.
     let schema_bytes = crate::graphql_schema::extract_graphql_schema(backend_dir).await?;
     let schema_size = schema_bytes.len();
-    crate::ui::print_step_check(&format!(
-        "Schema extracted ({} bytes, {:.1}s)",
+    crate::ui::print_step_check(&crate::repo::msg_with_count_noun_secs_1(
+        "Schema extracted",
         schema_size,
-        schema_start.elapsed().as_secs_f64()
+        "bytes",
+        schema_start.elapsed(),
     ));
 
     // Step 2: Write schema to web directory
