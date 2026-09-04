@@ -840,33 +840,33 @@ pub async fn execute(
     );
     println!();
     println!("Summary:");
-    println!(
-        "  • Unit tests: {}",
+    crate::ui::print_bullet_item(&format!(
+        "Unit tests: {}",
         if skip_unit_tests { "SKIPPED" } else { "PASSED" }
-    );
-    println!(
-        "  • Integration tests: {}",
+    ));
+    crate::ui::print_bullet_item(&format!(
+        "Integration tests: {}",
         if skip_integration_tests || compose_file.is_none() {
             "SKIPPED"
         } else {
             "PASSED"
         }
-    );
-    println!(
-        "  • Docker build: {}",
+    ));
+    crate::ui::print_bullet_item(&format!(
+        "Docker build: {}",
         if skip_build { "SKIPPED" } else { "SUCCESS" }
-    );
+    ));
 
     let push_status = if skip_push {
         "SKIPPED".to_string()
     } else {
         format!("SUCCESS (tag: {})", git_sha)
     };
-    println!("  • Registry push: {}", push_status);
-    println!(
-        "  • Kubernetes deploy: {}",
+    crate::ui::print_bullet_item(&format!("Registry push: {}", push_status));
+    crate::ui::print_bullet_item(&format!(
+        "Kubernetes deploy: {}",
         if skip_deploy { "SKIPPED" } else { "SUCCESS" }
-    );
+    ));
     println!();
     println!("Service {} is now deployed to {}", service_name, namespace);
     println!();
