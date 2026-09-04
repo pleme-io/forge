@@ -2261,25 +2261,25 @@ async fn print_deployment_report(
     );
     println!();
 
-    println!("  {} Pod fails to start", "□".dimmed());
+    crate::ui::print_watch_item("Pod fails to start");
     println!("    → Check logs for startup errors");
     println!("    → Verify database connection (check secrets/configmap)");
     println!("    → Check if migrations broke the schema");
     println!();
 
-    println!("  {} Pod is CrashLoopBackOff", "□".dimmed());
+    crate::ui::print_watch_item("Pod is CrashLoopBackOff");
     println!("    → Service is crashing on startup");
     println!("    → Check logs for panic/error messages");
     println!("    → Verify all environment variables are set");
     println!();
 
-    println!("  {} Hive Router fails after update", "□".dimmed());
+    crate::ui::print_watch_item("Hive Router fails after update");
     println!("    → Check router logs for schema composition errors");
     println!("    → Verify supergraph.graphql is valid");
     println!("    → Ensure all subgraph URLs are correct");
     println!();
 
-    println!("  {} GraphQL queries fail", "□".dimmed());
+    crate::ui::print_watch_item("GraphQL queries fail");
     println!("    → Hive Router may not have reloaded schema");
     println!("    → Wait 1-2 minutes for ConfigMap update and pod restart");
     println!("    → Try restarting hive-router pod manually if needed");

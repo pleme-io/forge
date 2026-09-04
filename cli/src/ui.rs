@@ -1620,6 +1620,87 @@ pub fn write_arrow_item<W: std::io::Write>(w: &mut W, message: &str) -> std::io:
     writeln!(w, "  {} {}", "→".cyan(), message)
 }
 
+/// Prints the one-line `"  {} <message>"` (two-space indent + dimmed
+/// `□` hollow-square glyph + plain message) wider-body watch-item
+/// grammar every pre-lift consumer spelled inline as
+/// `println!("  {} <literal>", "□".dimmed())`. Marks an unchecked
+/// checkbox in a "WATCH FOR THESE ISSUES" operator-troubleshooting
+/// checklist — a failure mode the operator has NOT yet observed but
+/// should mentally tick off if it appears (a pod that fails to start,
+/// a CrashLoopBackOff, a Hive Router that fails after a schema push, a
+/// GraphQL query that fails post-deploy) — the exact-shape peer of
+/// [`print_report_item`] on the two-space wider-body report-line
+/// grammar but carrying the opposite tense (a hypothetical failure yet
+/// to be inspected vs. a completed pass) and the opposite palette
+/// weight (`.dimmed()` deprioritized vs. `.green()` foregrounded).
+///
+/// # Distinct from the other `ui::print_*` primitives
+///
+/// [`print_report_item`] carries the two-space `✓.green()` completed-
+/// summary row — same indent width, DIFFERENT glyph (thin checkmark
+/// vs. hollow square), DIFFERENT palette (`\x1b[32m` green vs.
+/// `\x1b[2m` dim), and DIFFERENT semantic role (something already
+/// succeeded vs. something to keep an eye on).
+/// [`print_pending_item`] carries the two-space `⏳.yellow()` still-
+/// in-flight row — same indent width, DIFFERENT glyph (hourglass vs.
+/// hollow square), DIFFERENT palette (`\x1b[33m` yellow vs. `\x1b[2m`
+/// dim), and DIFFERENT semantic role (a background rollout the
+/// operator has to wait for vs. a failure mode the operator should
+/// watch for). [`print_arrow_item`] carries the two-space `→.cyan()`
+/// narrative-marker row — same indent width, DIFFERENT glyph
+/// (forward-arrow vs. hollow square), DIFFERENT palette (`\x1b[36m`
+/// cyan vs. `\x1b[2m` dim), and DIFFERENT semantic role (a forward-
+/// pointing "here is what happens next" narration vs. a passive
+/// "here is a failure mode to look out for" checklist entry). Folding
+/// this primitive into any of the three would collapse the watch-vs-
+/// passed, watch-vs-pending, or watch-vs-narrative visual distinction
+/// at every site the operator has been trained to read.
+///
+/// # `.dimmed()` on the glyph, plain on the message
+///
+/// Pre-lift every consumer spelled the coloring as `"□".dimmed()` on
+/// the GLYPH alone, never on the composed line (`format!("  □ {}",
+/// msg).dimmed()`). The primitive preserves that split: the `\x1b[2m`
+/// dim ANSI sequence wraps the glyph, the message reaches the writer
+/// uncolored, and the two-space indent is emitted OUTSIDE both spans
+/// — so a terminal without color renders `  □ <msg>` legibly.
+///
+/// # Compounding
+///
+/// Pre-lift 4 sibling sites in `commands/rust_service.rs` (the
+/// `verify_deployment_status` "WATCH FOR THESE ISSUES" checklist:
+/// Pod-fails-to-start, Pod-is-CrashLoopBackOff, Hive-Router-fails-
+/// after-update, GraphQL-queries-fail) each restated the
+/// `println!("  {} <literal>", "□".dimmed())` grammar verbatim, with
+/// the two-space indent, the `□` hollow-square glyph, and the
+/// `.dimmed()` coloring on the glyph all spelled inline. A future
+/// palette adjustment (a swap of `□ ` for `[ ] ` under a CI-log-
+/// friendly grammar, a promotion of `.dimmed()` to `.bright_black()`
+/// under a leaner deprioritization contrast, an OTLP
+/// `watch_item_emitted` observability event wired alongside the
+/// print, a shift of the two-space indent to zero or four spaces
+/// under a standardized report-indent) had to hit 4 sites in
+/// lockstep or drift the visual grammar; post-lift it hits ONE typed
+/// body. Delegates to [`write_watch_item`] against
+/// [`std::io::stdout()`]; the writer split exists so the fail-before-
+/// pass test can pin the one-line body, the two-space indent, the `□`
+/// glyph, and the `\x1b[2m` dim ANSI palette contract by inspecting
+/// emitted bytes rather than shelling out and grepping stdout.
+pub fn print_watch_item(message: &str) {
+    let _ = write_watch_item(&mut std::io::stdout().lock(), message);
+}
+
+/// Writer-taking sibling to [`print_watch_item`]. Emits the single
+/// `  <□.dimmed()> <message>` line via [`writeln!`] against the
+/// supplied writer. [`print_watch_item`] is the stdout adapter; this
+/// variant exists so tests can pin the one-line body, the two-space
+/// indent, the `□` hollow-square glyph, and the `\x1b[2m` dim ANSI
+/// sequence around the glyph (never the message) without capturing
+/// stdout.
+pub fn write_watch_item<W: std::io::Write>(w: &mut W, message: &str) -> std::io::Result<()> {
+    writeln!(w, "  {} {}", "□".dimmed(), message)
+}
+
 /// Prints the one-line `"   {} <message>"` (three-space indent + yellow
 /// `⚠️` glyph + plain message) in-body step-warning grammar 5 pre-lift
 /// consumer sites spelled inline as `println!("   {} <fmt>",
@@ -5604,6 +5685,240 @@ mod tests {
                  primitive body every two-space-indented `→.cyan()` \
                  arrow-item narrative marker in the crate now \
                  delegates through."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_watch_item`]. Pins
+    /// the one-line body every pre-lift consumer spelled verbatim
+    /// (`println!("  {} <literal>", "□".dimmed())`): a two-space
+    /// indent, a `.dimmed()`-colored `□` glyph, a single space, then
+    /// the plain (uncolored) message. A silent contract drift a future
+    /// rewrite might introduce — dropping the two-space indent (a
+    /// "tighter body spacing" cleanup), promoting the whole line's
+    /// coloring (`format!("  □ {}", msg).dimmed()`) so the message
+    /// text paints dim at every site, swapping `□` for `[ ]` under a
+    /// CI-log-friendly grammar, swapping `□` for `○` (would collide
+    /// with the sibling [`super::print_step_skip`] grammar), swapping
+    /// `□` for `✓` (would collide with the sibling
+    /// [`super::print_report_item`] completed-row grammar), promoting
+    /// `.dimmed()` to `.bright_black()` (`\x1b[90m`), slipping a
+    /// trailing blank line into the primitive body — flips this
+    /// assertion rather than compiling and silently diverging the 4
+    /// consumer sites' visual grammar.
+    #[test]
+    fn write_watch_item_emits_exactly_one_hollow_square_prefixed_two_indented_line() {
+        // Force ANSI emission (colored auto-drops sequences on a
+        // non-tty stdout) and serialize against peer banner tests via
+        // [`AnsiOverrideForTest`]; its Drop restores colored's
+        // auto-detection on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`], closing the set-write-unset window
+        // without a manual [`colored::control::unset_override`] call a
+        // future test author could omit.
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_watch_item(&mut buf, "Pod fails to start")
+            .expect("write_watch_item against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_watch_item must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — the pre-lift stanza is one `println!`
+        // carrying no framing blank.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_watch_item must emit exactly one line — the \
+             pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // Two-space indent, NOT three-space (which is the sibling
+        // in-body `print_step_*` grammar).
+        assert!(
+            lines[0].starts_with("  "),
+            "line 0 must begin with a two-space indent — every \
+             pre-lift consumer spelled `\"  {{}} <literal>\"` \
+             verbatim, so the indent must reach the writer OUTSIDE \
+             the coloring span; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].starts_with("   "),
+            "line 0 must NOT begin with a three-space indent — that \
+             indent belongs to the sibling in-body `print_step_*` \
+             grammar, not this wider-body watch-item grammar; \
+             got {:?}",
+            lines[0]
+        );
+
+        // The `□` hollow-square glyph reaches the rendered line — NOT
+        // `○` (the sibling `print_step_skip` grammar for elided
+        // steps), NOT `✓` (the sibling `print_report_item` grammar
+        // for completed rows), NOT `⏳` (the sibling
+        // `print_pending_item` grammar for in-flight rows), NOT `→`
+        // (the sibling `print_arrow_item` grammar for narration).
+        assert!(
+            lines[0].contains('□'),
+            "line 0 must contain the `□` hollow-square glyph; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('○'),
+            "line 0 must NOT contain the `○` glyph — that glyph \
+             belongs to the sibling `print_step_skip` primitive for \
+             elided steps, not this watch-item primitive; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('✓'),
+            "line 0 must NOT contain the `✓` glyph — that glyph \
+             belongs to the sibling `print_report_item` primitive for \
+             completed rows, not this watch-item primitive; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('⏳'),
+            "line 0 must NOT contain the `⏳` glyph — that glyph \
+             belongs to the sibling `print_pending_item` primitive \
+             for in-flight rows, not this watch-item primitive; \
+             got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('→'),
+            "line 0 must NOT contain the `→` glyph — that glyph \
+             belongs to the sibling `print_arrow_item` primitive for \
+             narration markers, not this watch-item primitive; \
+             got {:?}",
+            lines[0]
+        );
+
+        // The message text reaches the rendered line verbatim.
+        assert!(
+            lines[0].contains("Pod fails to start"),
+            "line 0 must carry the message verbatim; got {:?}",
+            lines[0]
+        );
+
+        // The `dim` ANSI sequence — NOT `bright_black` (which is the
+        // distinct `.bright_black()` palette a future refactor might
+        // slip in as a "friendlier deprioritization" cleanup).
+        assert!(
+            lines[0].contains("\x1b[2m"),
+            "line 0 must carry the `dim` ANSI sequence \
+             (`\\x1b[2m`); got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[90m"),
+            "line 0 must NOT carry the `bright_black` ANSI sequence \
+             (`\\x1b[90m`) — that palette is a distinct deprioritized \
+             shade the pre-lift consumers deliberately did not use; \
+             got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[32m"),
+            "line 0 must NOT carry the `green` ANSI sequence \
+             (`\\x1b[32m`) — that palette belongs to the sibling \
+             `print_report_item` completed-row grammar, not this \
+             watch-item grammar; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[33m"),
+            "line 0 must NOT carry the `yellow` ANSI sequence \
+             (`\\x1b[33m`) — that palette belongs to the sibling \
+             `print_pending_item` still-pending grammar, not this \
+             watch-item grammar; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[36m"),
+            "line 0 must NOT carry the `cyan` ANSI sequence \
+             (`\\x1b[36m`) — that palette belongs to the sibling \
+             `print_arrow_item` narrative grammar, not this \
+             watch-item grammar; got {:?}",
+            lines[0]
+        );
+
+        // The `.dimmed()` coloring wraps the GLYPH alone, never the
+        // message text — the `\x1b[0m` reset must close the dim span
+        // BEFORE the message begins.
+        let glyph_pos = lines[0].find('□').expect("glyph must be present");
+        let reset_pos = lines[0]
+            .find("\x1b[0m")
+            .expect("reset must be present after the glyph");
+        let msg_pos = lines[0]
+            .find("Pod fails to start")
+            .expect("message must be present");
+        assert!(
+            glyph_pos < reset_pos && reset_pos < msg_pos,
+            "the `\\x1b[0m` reset must close the dim span BEFORE the \
+             message begins — every pre-lift consumer spelled \
+             `.dimmed()` on the `□` glyph alone, never on the \
+             message. Got positions glyph={glyph_pos}, \
+             reset={reset_pos}, msg={msg_pos} in line {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `println!`, so the newline is part of the contract.
+        assert!(
+            out.ends_with('\n'),
+            "write_watch_item must emit a trailing `\\n` (the \
+             pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_watch_item`] no longer spell the
+    /// `println!("  {} <literal>", "□".dimmed())` shape inline.
+    /// Structural regression shield — without it a future refactor
+    /// could silently re-inline the one-liner (e.g. a "just call
+    /// `println!` directly, it's shorter" cleanup) and reopen the
+    /// 4-site duplication class this lift closed. Enforced at the
+    /// module body BEFORE its `#[cfg(test)]` region so a test-support
+    /// mention of the raw shape does not defeat the shield.
+    ///
+    /// The exact-shape needle is `"□".dimmed()` appearing anywhere in
+    /// the module body — no allowlist is required because every
+    /// pre-lift occurrence in the crate belonged to this class.
+    #[test]
+    fn print_watch_item_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[(
+            include_str!("commands/rust_service.rs"),
+            "commands/rust_service.rs",
+        )];
+        for (source, module_path) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("\"□\".dimmed()") {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `\"□\".dimmed()` two-space watch-item marker — \
+                     that shape was lifted onto \
+                     `crate::ui::print_watch_item`. A re-inline \
+                     would silently reopen the 4-site duplication \
+                     class this shield exists to close. Offending \
+                     line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            assert!(
+                body.contains("crate::ui::print_watch_item("),
+                "{module_path} body must forward to \
+                 `crate::ui::print_watch_item(\"<MSG>\")` — the \
+                 primitive body every two-space-indented `□.dimmed()` \
+                 watch-item in the crate now delegates through."
             );
         }
     }
