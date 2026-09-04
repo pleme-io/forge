@@ -3229,6 +3229,106 @@ pub fn msg_with_count_noun_secs_1<M: std::fmt::Display, C: std::fmt::Display>(
     format!("{} ({} {}, {:.1}s)", msg, count, noun, d.as_secs_f64())
 }
 
+/// Push each `line` of `lines` into `buf` prefixed with four ASCII spaces
+/// and terminated with `'\n'` — the diagnostic-buffer sub-list dialect the
+/// six sibling `for line in <iter> { diag.push_str(&format!("    {}\n",
+/// line)); }` stanzas in
+/// [`commands/flux.rs::gather_deployment_diagnostics`] spelled inline, one
+/// per kubectl probe section:
+///
+/// - `Deployment Conditions` — every condition row from
+///   `kubectl get deployment -o jsonpath='...conditions[*]'` (line 817).
+/// - `All Pods` — every pod row from `kubectl get pods -o wide` under the
+///   deployment's label selector (line 838).
+/// - `Container States` — the per-pod container state jsonpath tail
+///   (line 859).
+/// - `Container Wait/Termination Reasons` — the same probe filtered to
+///   rows that carry a non-empty `waiting=` or `terminated=` field
+///   (line 884).
+/// - `Deployment Events` — the last ten events from `kubectl get events
+///   --sort-by=.lastTimestamp` reversed to newest-first (line 907, which
+///   spelled the extra `.rev().take(10)` on the iterator surface).
+/// - `Related Pod Events (last 15)` — the pod-event bucket filtered to
+///   the deployment name, reversed, and capped at fifteen (line 934,
+///   which iterates a `Vec<&str>` via `.iter().rev().take(15)`).
+///
+/// All six sites push into the same [`String`] buffer that the
+/// enclosing function returns as a diagnostic message, and every site
+/// spelled the identical `format!("    {}\n", line)` shape. Past THEORY
+/// §VI.1's three-times-is-a-law threshold; PRIME DIRECTIVE: duplication
+/// budget is zero.
+///
+/// # The three grammar invariants this primitive pins at one place
+///
+/// 1. **Indent width.** Exactly four ASCII spaces, not a tab, not two
+///    (`error!("  {}", line)` in `commands/rollout.rs::wait_for_rollout`
+///    is the logging-channel dialect and lives on a distinct surface),
+///    not three (the `println!("   {}", line)` UI dialect around every
+///    real-time step-output stanza), not five. The diagnostic buffer is
+///    surfaced verbatim through an [`anyhow::Error`] display chain, and a
+///    subtle indent-width drift breaks the visual sub-list every operator
+///    reads at the same left margin under each heading. Pinned by
+///    [`tests::push_indented_lines_4sp_pins_four_space_indent`].
+/// 2. **Terminator.** Each line ends with a single `'\n'` — not
+///    `"\r\n"`, not `""`, not double newlines. Pinned by
+///    [`tests::push_indented_lines_4sp_pins_single_newline_terminator`].
+/// 3. **Append-only.** The primitive appends to the existing buffer
+///    without clearing or truncating. Every consumer site pushes into a
+///    diag buffer that already carries the section heading a preceding
+///    line wrote (`diag.push_str("\n  Container States:\n")`); a body
+///    that truncated the buffer would erase the heading. Pinned by
+///    [`tests::push_indented_lines_4sp_preserves_prior_buffer_content`].
+///
+/// # Typed input
+///
+/// The generic `I: IntoIterator<Item = S>` + `S: AsRef<str>` bounds
+/// absorb every pre-lift iterator shape without asking the caller to
+/// project to a specific concrete type:
+///
+/// - `stdout.trim().lines()` (four sites) yields `&str`.
+/// - `stdout.trim().lines().rev().take(10)` (Deployment Events) yields
+///   `&str` through the same chain.
+/// - `pod_events.iter().rev().take(15)` (Related Pod Events) yields
+///   `&&str` — the `AsRef<str>` bound satisfies `&str` and `&&str`
+///   alike, letting the same primitive absorb both consumers without a
+///   caller-side `.copied()` or `.map(|s| *s)` projection.
+///
+/// # Efficiency
+///
+/// The pre-lift `push_str(&format!("    {}\n", line))` allocates one
+/// intermediate [`String`] per line via the [`format!`] argument. This
+/// primitive splits the write into two [`String::push_str`] calls plus
+/// one [`String::push`] against the existing buffer, so each line writes
+/// directly onto the amortized-growth buffer with no per-line
+/// allocation.
+///
+/// # Non-goals
+///
+/// - **Non-four-space indent widths.** The `error!("  {}", line)` two-
+///   space stanza in `commands/rollout.rs::wait_for_rollout` targets the
+///   [`log::error`] logging channel (not a diagnostic buffer) and its
+///   indent is set by the logging framework's own margin. A future
+///   `push_indented_lines_2sp` sibling is the natural next lift if that
+///   dialect crosses the three-is-a-law threshold with a matching
+///   buffer-write shape.
+/// - **`println!`-routed indent-and-emit stanzas** in
+///   `commands/prerelease.rs::run_e2e_gate` (`println!("   {}", line)`
+///   under `── cargo test stdout ──` etc.) — those emit to stdout in
+///   real-time via [`println!`], not into a buffered [`String`]. A
+///   future `ui::print_indented_lines_3sp` peer on the ui-writer surface
+///   is the right home for that dialect.
+pub fn push_indented_lines_4sp<I, S>(buf: &mut String, lines: I)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    for line in lines {
+        buf.push_str("    ");
+        buf.push_str(line.as_ref());
+        buf.push('\n');
+    }
+}
+
 /// Run a command in a specific directory, restoring the original directory afterward
 ///
 /// # Arguments
@@ -9939,6 +10039,118 @@ mod tests {
              Duration::as_secs_f64 with the `s` unit suffix — a \
              1500ms input must render `1.5s`, NOT `1500ms`, NOT `1.5ms`. \
              Got: {rendered:?}"
+        );
+    }
+
+    /// [`push_indented_lines_4sp`] prefixes every line with exactly four
+    /// ASCII spaces, not a tab, not two spaces, not three (the terminal-
+    /// UI dialect), not five. The six sibling sites in
+    /// `commands/flux.rs::gather_deployment_diagnostics` all read at the
+    /// same left margin under each heading; a subtle drift breaks the
+    /// visual sub-list every operator has been coached to scan.
+    #[test]
+    fn push_indented_lines_4sp_pins_four_space_indent() {
+        let mut buf = String::new();
+        push_indented_lines_4sp(&mut buf, ["alpha", "beta"]);
+        assert_eq!(
+            buf, "    alpha\n    beta\n",
+            "push_indented_lines_4sp() must prefix every line with \
+             exactly four ASCII spaces — a drift to a tab, two, three, \
+             or five would break the visual sub-list surfaced through \
+             the diagnostic buffer's Display chain. Got: {buf:?}"
+        );
+    }
+
+    /// [`push_indented_lines_4sp`] terminates every line with a single
+    /// `'\n'`, not `"\r\n"` and not `""`. A CRLF terminator would ship
+    /// stray `\r` bytes into an [`anyhow::Error`] display chain read by
+    /// operator terminals that render them as visible `^M`. An omitted
+    /// terminator would run consecutive lines together on one physical
+    /// row.
+    #[test]
+    fn push_indented_lines_4sp_pins_single_newline_terminator() {
+        let mut buf = String::new();
+        push_indented_lines_4sp(&mut buf, ["one", "two", "three"]);
+        assert_eq!(buf.matches('\n').count(), 3);
+        assert!(
+            !buf.contains('\r'),
+            "push_indented_lines_4sp() must terminate every line with a \
+             single `\\n`, NOT `\\r\\n`. Got: {buf:?}"
+        );
+        assert!(
+            buf.ends_with("three\n"),
+            "push_indented_lines_4sp() must terminate the final line \
+             with `\\n` — an omitted terminator would run the next \
+             heading onto the last body row. Got: {buf:?}"
+        );
+    }
+
+    /// [`push_indented_lines_4sp`] appends to the existing buffer
+    /// without clearing or truncating. Every consumer site in
+    /// [`commands/flux.rs::gather_deployment_diagnostics`] pushes into a
+    /// diag buffer that already carries the section heading a preceding
+    /// `push_str("\n  <Section>:\n")` wrote; a body that truncated the
+    /// buffer would erase the heading and orphan the sub-list.
+    #[test]
+    fn push_indented_lines_4sp_preserves_prior_buffer_content() {
+        let mut buf = String::from("\n  Deployment Conditions:\n");
+        let before = buf.clone();
+        push_indented_lines_4sp(&mut buf, ["Available=True", "Progressing=True"]);
+        assert!(
+            buf.starts_with(&before),
+            "push_indented_lines_4sp() must preserve the buffer's prior \
+             content — the section heading a preceding push_str() wrote \
+             must survive the body write. Got: {buf:?}"
+        );
+        assert_eq!(
+            buf,
+            "\n  Deployment Conditions:\n    Available=True\n    Progressing=True\n"
+        );
+    }
+
+    /// [`push_indented_lines_4sp`] accepts both `&str` (yielded by
+    /// `stdout.trim().lines()` at the four unfiltered sites and by
+    /// `stdout.trim().lines().rev().take(10)` at the Deployment Events
+    /// site) and `&&str` (yielded by `pod_events.iter().rev().take(15)`
+    /// on a `Vec<&str>` at the Related Pod Events site) without asking
+    /// the caller for a `.copied()` or `.map(|s| *s)` projection. Both
+    /// pre-lift iterator shapes must land on the same primitive body.
+    #[test]
+    fn push_indented_lines_4sp_absorbs_both_str_and_ref_str_iterators() {
+        let mut from_lines = String::new();
+        push_indented_lines_4sp(&mut from_lines, "a\nb".lines());
+
+        let mut from_ref_str_vec = String::new();
+        let owned: Vec<&str> = vec!["a", "b"];
+        push_indented_lines_4sp(&mut from_ref_str_vec, owned.iter());
+
+        assert_eq!(from_lines, "    a\n    b\n");
+        assert_eq!(
+            from_lines, from_ref_str_vec,
+            "push_indented_lines_4sp() must render `&str` and `&&str` \
+             iterators identically — the six pre-lift consumers split \
+             across both shapes, and a projection asymmetry would ask \
+             one class of caller to adapt. Got &str: {from_lines:?}; \
+             &&str: {from_ref_str_vec:?}"
+        );
+    }
+
+    /// [`push_indented_lines_4sp`] renders an empty iterator as a no-op:
+    /// no bytes appended, and no spurious indent-only line inserted. A
+    /// primitive that eagerly wrote `"    \n"` on empty input would ship
+    /// a phantom sub-list row under headings whose probe returned no
+    /// rows (e.g., a healthy deployment with no waiting/terminated
+    /// reasons).
+    #[test]
+    fn push_indented_lines_4sp_empty_iterator_is_a_no_op() {
+        let mut buf = String::from("prior");
+        push_indented_lines_4sp(&mut buf, std::iter::empty::<&str>());
+        assert_eq!(
+            buf, "prior",
+            "push_indented_lines_4sp() must render an empty iterator as \
+             a no-op — a spurious `    \\n` on empty input would ship a \
+             phantom sub-list row under a probe that returned no data. \
+             Got: {buf:?}"
         );
     }
 }
