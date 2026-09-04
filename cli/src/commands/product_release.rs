@@ -118,11 +118,7 @@ pub(crate) async fn run_health_check(
         );
     }
 
-    println!(
-        "   {} {} healthy (pods Running)",
-        "OK".green(),
-        deployment.cyan()
-    );
+    crate::ui::print_step_ok(&format!("{} healthy (pods Running)", deployment.cyan()));
     Ok(())
 }
 
@@ -233,24 +229,22 @@ async fn write_artifact_tags(
         let json_path = crate::config::write_artifact_info(&product_dir, &svc.name, &artifact)?;
 
         modified_files.push(crate::repo::path_to_string_lossy(&json_path));
-        println!(
-            "   {} Updated artifact tag in deploy/{}.artifact.json",
-            "OK".green(),
+        crate::ui::print_step_ok(&format!(
+            "Updated artifact tag in deploy/{}.artifact.json",
             svc.name
-        );
+        ));
     }
 
     if !modified_files.is_empty() {
         match commit_artifact_tags(None, &modified_files, git_sha).await? {
             CommitPushOutcome::Pushed => {
-                println!("   {} Artifact tags committed and pushed", "OK".green());
+                crate::ui::print_step_ok("Artifact tags committed and pushed");
             }
             CommitPushOutcome::NoChangesStaged => {
-                println!(
-                    "   {} Artifact tags already at SHA {} — nothing to commit",
-                    "OK".green(),
+                crate::ui::print_step_ok(&format!(
+                    "Artifact tags already at SHA {} — nothing to commit",
                     git_sha
-                );
+                ));
             }
         }
     }
@@ -454,7 +448,7 @@ pub async fn product_release(
                 }
                 run_nix_release_app(&product, &svc.name, is_standalone, &["--push-only"]).await?;
             }
-            println!("   {} {} pushed", "OK".green(), svc.name.cyan());
+            crate::ui::print_step_ok(&format!("{} pushed", svc.name.cyan()));
         } else {
             // Deploy-only: verify artifact tag exists
             let tag = svc_release
@@ -509,7 +503,7 @@ pub async fn product_release(
                     false,
                 )
             });
-        println!("   {} Source attestation computed", "OK".green());
+        crate::ui::print_step_ok("Source attestation computed");
 
         let mut build_atts = Vec::new();
         let mut image_atts = Vec::new();
@@ -517,7 +511,7 @@ pub async fn product_release(
             match attestation::compute_build_attestation(&svc.name, repo_path).await {
                 Ok(att) => {
                     build_atts.push(att);
-                    println!("   {} Build attestation: {}", "OK".green(), svc.name.cyan());
+                    crate::ui::print_step_ok(&format!("Build attestation: {}", svc.name.cyan()));
                 }
                 Err(e) => {
                     crate::ui::print_nonfatal_warn(
@@ -533,7 +527,7 @@ pub async fn product_release(
             match attestation::compute_image_attestation(&registry_url, &image_tag).await {
                 Ok(att) => {
                     image_atts.push(att);
-                    println!("   {} Image attestation: {}", "OK".green(), svc.name.cyan());
+                    crate::ui::print_step_ok(&format!("Image attestation: {}", svc.name.cyan()));
                 }
                 Err(e) => {
                     crate::ui::print_nonfatal_warn(
@@ -558,16 +552,15 @@ pub async fn product_release(
             Ok(cert) => {
                 let values = attestation::generate_attestation_values(cert);
                 let info = attestation::generate_attestation_info(cert);
-                println!(
-                    "   {} Product certification: {} (certified: {})",
-                    "OK".green(),
+                crate::ui::print_step_ok(&format!(
+                    "Product certification: {} (certified: {})",
                     if cert.certified {
                         "PASSED".green().to_string()
                     } else {
                         "FAILED".yellow().to_string()
                     },
                     cert.certified
-                );
+                ));
                 println!(
                     "   {} Signature: {}",
                     ">>".dimmed(),
@@ -709,12 +702,11 @@ pub async fn product_release(
             ])
             .await?;
 
-            println!(
-                "   {} {} deployed to {}",
-                "OK".green(),
+            crate::ui::print_step_ok(&format!(
+                "{} deployed to {}",
                 svc.name.cyan(),
                 env_name.dimmed()
-            );
+            ));
 
             // Health check after deploying each service
             if let Some(hc) = &svc.health_check {
@@ -770,7 +762,7 @@ pub async fn product_release(
         ])
         .await
         {
-            Ok(_) => println!("   {} Post-deploy checks passed", "OK".green()),
+            Ok(_) => crate::ui::print_step_ok("Post-deploy checks passed"),
             Err(e) => {
                 crate::ui::print_nonfatal_warn("Post-deploy verification", &e);
             }

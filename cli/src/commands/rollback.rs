@@ -91,13 +91,12 @@ pub async fn execute(
             .await
         {
             Ok(digest) => {
-                println!(
-                    "   {} {} ({})",
-                    "OK".green(),
+                crate::ui::print_step_ok(&format!(
+                    "{} ({})",
                     crate::oci_manifest::image_reference(&entry.registry_url, &rollback_tag)
                         .dimmed(),
                     &digest[..std::cmp::min(19, digest.len())]
-                );
+                ));
             }
             Err(_) => {
                 bail!(
@@ -255,13 +254,12 @@ pub async fn execute(
             ])
             .await?;
 
-            println!(
-                "   {} {} rolled back to {} in {}",
-                "OK".green(),
+            crate::ui::print_step_ok(&format!(
+                "{} rolled back to {} in {}",
                 entry.name.cyan(),
                 entry.previous_tag.yellow(),
                 env_name.dimmed()
-            );
+            ));
 
             // Health check (unless skipped or last service)
             if !skip_health_check {
@@ -303,11 +301,10 @@ pub async fn execute(
         let json_path = crate::config::write_artifact_info(&product_dir, &entry.name, &artifact)?;
 
         modified_files.push(crate::repo::path_to_string_lossy(&json_path));
-        println!(
-            "   {} Swapped tags in deploy/{}.artifact.json",
-            "OK".green(),
+        crate::ui::print_step_ok(&format!(
+            "Swapped tags in deploy/{}.artifact.json",
             entry.name
-        );
+        ));
     }
 
     // ─── Git commit + push ──────────────────────────────────────────────────
@@ -366,7 +363,7 @@ pub async fn execute(
             .await
             .context("Failed to push rollback tags")?;
 
-        println!("   {} Rollback tags committed and pushed", "OK".green());
+        crate::ui::print_step_ok("Rollback tags committed and pushed");
     }
 
     // ─── Done ───────────────────────────────────────────────────────────────
