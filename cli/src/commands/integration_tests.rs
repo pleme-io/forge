@@ -1323,7 +1323,7 @@ pub async fn execute_pre_deployment_tests(
 
     for suite in &config.test_suites {
         println!("━━━ Running: {} ━━━", suite.name.bright_white().bold());
-        println!("   Command: {}", suite.command.dimmed());
+        crate::ui::print_field("Command", suite.command.dimmed());
 
         let suite_working_dir = working_dir.join(&suite.working_dir);
         // Malformed `timeout: "5min"` etc. was previously silently

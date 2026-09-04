@@ -269,8 +269,8 @@ pub async fn run_federation_tests(
         )
         .bold()
     );
-    println!("   Suite: {}", test_suite.cyan());
-    println!("   Router: {}", router_url);
+    crate::ui::print_field("Suite", test_suite.cyan());
+    crate::ui::print_field("Router", router_url);
     println!("   Timeout: {}s", timeout_seconds);
 
     // Generate unique job name with timestamp

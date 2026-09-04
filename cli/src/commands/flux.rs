@@ -581,7 +581,7 @@ pub async fn wait_for_deployment(
     );
 
     let expected_sha = expected_tag_suffix;
-    println!("   Expected git SHA in image tag: {}", expected_sha);
+    crate::ui::print_field("Expected git SHA in image tag", &expected_sha);
 
     let start = std::time::Instant::now();
     let mut backoff_attempt: u32 = 0;

@@ -859,7 +859,7 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
         );
     }
 
-    println!("   Current phase: {}", current_phase.trim());
+    crate::ui::print_field("Current phase", current_phase.trim());
 
     // Reset the status to Pending with retry count 0
     let patch_result = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(

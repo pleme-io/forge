@@ -85,9 +85,9 @@ pub async fn extract_schema(_service: String, deploy_config: &DeployConfig) -> R
         Some(extraction_result) => {
             println!();
             crate::ui::print_step_success("Schema extraction complete");
-            println!("   Path: {}", extraction_result.schema_path.display());
+            crate::ui::print_field("Path", extraction_result.schema_path.display());
             println!("   Size: {} bytes", extraction_result.schema_size);
-            println!("   Types: {}", extraction_result.type_count);
+            crate::ui::print_field("Types", extraction_result.type_count);
             Ok(())
         }
         None => {
@@ -243,7 +243,7 @@ pub async fn update_federation(
     crate::repo::write_text_async(&supergraph_path, &output.stdout).await?;
 
     crate::ui::print_step_success("Supergraph composed successfully");
-    println!("   Schema: {}", supergraph_path.display());
+    crate::ui::print_field("Schema", supergraph_path.display());
     println!();
 
     // POST-COMPOSITION VALIDATION
@@ -271,7 +271,7 @@ pub async fn update_federation(
         "   Supergraph size: {} KB",
         post_check.supergraph_size / 1024
     );
-    println!("   Services included: {}", post_check.service_count);
+    crate::ui::print_field("Services included", post_check.service_count);
     println!();
 
     // Get git SHA for metadata tracking — routed through the
@@ -294,9 +294,9 @@ pub async fn update_federation(
     metadata.save(&federation_dir).await?;
 
     println!("✅ Metadata saved:");
-    println!("   Hash: {}", &metadata.supergraph_hash[..16]);
-    println!("   Services: {}", metadata.services.len());
-    println!("   Rover: {}", metadata.rover_version);
+    crate::ui::print_field("Hash", &metadata.supergraph_hash[..16]);
+    crate::ui::print_field("Services", metadata.services.len());
+    crate::ui::print_field("Rover", &metadata.rover_version);
 
     // Copy supergraph.graphql to hive-router kustomization directory for FluxCD
     // FluxCD/kustomize cannot load files from outside the kustomization directory
@@ -349,7 +349,7 @@ pub async fn update_federation(
     let supergraph_hash = format!("{:x}", hash_bytes);
     let supergraph_hash_short = &supergraph_hash[..16]; // First 16 chars
 
-    println!("   Hash: {}", supergraph_hash_short);
+    crate::ui::print_field("Hash", supergraph_hash_short);
 
     // Update hive-router deployment with supergraph hash annotation
     // This forces pod restart and provides undeniable proof of supergraph version
@@ -559,8 +559,8 @@ pub async fn update_federation(
         match notify_bff_supergraph_reload(bff_url).await {
             Ok(result) => {
                 println!("✅ BFF supergraph reloaded successfully");
-                println!("   Hash: {}", result.hash);
-                println!("   Subgraphs: {}", result.subgraph_count);
+                crate::ui::print_field("Hash", &result.hash);
+                crate::ui::print_field("Subgraphs", result.subgraph_count);
             }
             Err(e) => {
                 // Don't fail the release, just warn - file watcher will pick up changes eventually
