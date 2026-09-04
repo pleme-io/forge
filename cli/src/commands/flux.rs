@@ -813,8 +813,11 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
     .await
     {
         if !stdout.trim().is_empty() {
-            diag.push_str("\n  Deployment Conditions:\n");
-            crate::repo::push_indented_lines_4sp(&mut diag, stdout.trim().lines());
+            crate::repo::push_section_indented_lines_4sp(
+                &mut diag,
+                "Deployment Conditions",
+                stdout.trim().lines(),
+            );
         }
     }
 
@@ -832,8 +835,11 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
     .await
     {
         if !stdout.trim().is_empty() {
-            diag.push_str("\n  All Pods:\n");
-            crate::repo::push_indented_lines_4sp(&mut diag, stdout.trim().lines());
+            crate::repo::push_section_indented_lines_4sp(
+                &mut diag,
+                "All Pods",
+                stdout.trim().lines(),
+            );
         }
     }
 
@@ -851,8 +857,11 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
     .await
     {
         if !stdout.trim().is_empty() {
-            diag.push_str("\n  Container States:\n");
-            crate::repo::push_indented_lines_4sp(&mut diag, stdout.trim().lines());
+            crate::repo::push_section_indented_lines_4sp(
+                &mut diag,
+                "Container States",
+                stdout.trim().lines(),
+            );
         }
     }
 
@@ -874,8 +883,11 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
                 || l.contains("terminated=") && !l.contains("terminated=:")
         });
         if has_reasons {
-            diag.push_str("\n  Container Wait/Termination Reasons:\n");
-            crate::repo::push_indented_lines_4sp(&mut diag, stdout.trim().lines());
+            crate::repo::push_section_indented_lines_4sp(
+                &mut diag,
+                "Container Wait/Termination Reasons",
+                stdout.trim().lines(),
+            );
         }
     }
 
@@ -895,8 +907,11 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
     .await
     {
         if !stdout.trim().is_empty() {
-            diag.push_str("\n  Deployment Events:\n");
-            crate::repo::push_indented_lines_4sp(&mut diag, stdout.trim().lines().rev().take(10));
+            crate::repo::push_section_indented_lines_4sp(
+                &mut diag,
+                "Deployment Events",
+                stdout.trim().lines().rev().take(10),
+            );
         }
     }
 
@@ -920,8 +935,11 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
             .filter(|l| l.contains(deployment_name))
             .collect();
         if !pod_events.is_empty() {
-            diag.push_str("\n  Related Pod Events (last 15):\n");
-            crate::repo::push_indented_lines_4sp(&mut diag, pod_events.iter().rev().take(15));
+            crate::repo::push_section_indented_lines_4sp(
+                &mut diag,
+                "Related Pod Events (last 15)",
+                pod_events.iter().rev().take(15),
+            );
         }
     }
 

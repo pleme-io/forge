@@ -3399,6 +3399,100 @@ where
     }
 }
 
+/// Push a diagnostic sub-section into `buf` as the two-line preamble
+/// `"\n  <heading>:\n"` followed by every `line` of `lines` rendered
+/// through [`push_indented_lines_4sp`] — the fused sub-section dialect
+/// six sibling stanzas in
+/// [`commands/flux.rs::gather_deployment_diagnostics`] spelled inline
+/// as
+///
+/// ```text
+/// diag.push_str("\n  <SECTION>:\n");
+/// crate::repo::push_indented_lines_4sp(&mut diag, <iter>);
+/// ```
+///
+/// one per kubectl probe section:
+///
+/// - `Deployment Conditions` — every condition row from `kubectl get
+///   deployment -o jsonpath='...conditions[*]'` (stanza at line
+///   816–817 pre-lift).
+/// - `All Pods` — every pod row from `kubectl get pods -o wide` under
+///   the deployment's label selector (stanza at line 835–836 pre-lift).
+/// - `Container States` — the per-pod container state jsonpath tail
+///   (stanza at line 854–855 pre-lift).
+/// - `Container Wait/Termination Reasons` — the same probe filtered to
+///   rows that carry a non-empty `waiting=` or `terminated=` field
+///   (stanza at line 877–878 pre-lift).
+/// - `Deployment Events` — the last ten events from `kubectl get
+///   events --sort-by=.lastTimestamp` reversed to newest-first (stanza
+///   at line 898–899 pre-lift; spelled the extra `.rev().take(10)` on
+///   the iterator surface).
+/// - `Related Pod Events (last 15)` — the pod-event bucket filtered to
+///   the deployment name, reversed, and capped at fifteen (stanza at
+///   line 923–924 pre-lift; iterates a `Vec<&str>` via
+///   `.iter().rev().take(15)`).
+///
+/// All six sites push into the same [`String`] buffer that the
+/// enclosing function returns as a diagnostic message, and every site
+/// spelled the identical two-call fused shape modulo the per-site
+/// heading and iterator. Past THEORY §VI.1's three-times-is-a-law
+/// threshold; PRIME DIRECTIVE: duplication budget is zero.
+///
+/// # The two grammar invariants this primitive pins at one place
+///
+/// 1. **Heading dialect.** Exactly `"\n  "` (leading newline, then two
+///    ASCII spaces of indent) + `heading` + `":\n"` — the sub-section
+///    dialect every operator has been coached to scan under the top-
+///    level `━`-ruled banner. The leading newline separates one
+///    sub-section from the previous one; the two-space indent nests
+///    the heading under the top-level banner; the trailing colon
+///    marks the heading as a label rather than a data row. Pinned by
+///    [`tests::push_section_indented_lines_4sp_pins_heading_dialect`].
+/// 2. **Body delegation.** The line body delegates to
+///    [`push_indented_lines_4sp`] verbatim — the four-space indent,
+///    the single `'\n'` terminator, and the append-only discipline
+///    are the same invariants the body-only primitive already pins.
+///    A future refinement of the body dialect (a swap to
+///    `push_indented_lines_2sp` for a leaner readout, a promotion to
+///    ANSI-colored lines) lands at the delegate and reaches this
+///    primitive by construction rather than by convention at each
+///    site. Pinned by
+///    [`tests::push_section_indented_lines_4sp_delegates_body_to_push_indented_lines_4sp`].
+///
+/// # Typed input
+///
+/// The generic `I: IntoIterator<Item = S>` + `S: AsRef<str>` bounds
+/// absorb every pre-lift iterator shape without asking the caller to
+/// project to a specific concrete type — matching the delegate's
+/// generic surface exactly:
+///
+/// - `stdout.trim().lines()` (four sites) yields `&str`.
+/// - `stdout.trim().lines().rev().take(10)` (Deployment Events) yields
+///   `&str` through the same chain.
+/// - `pod_events.iter().rev().take(15)` (Related Pod Events) yields
+///   `&&str` — the `AsRef<str>` bound satisfies `&str` and `&&str`
+///   alike.
+///
+/// # Non-goals
+///
+/// - **Deployment Replicas** (section 1) writes a scalar tuple rendered
+///   from a `/`-split single line, not a sub-list; the fused primitive
+///   would ship a spurious sub-list body for a scalar-shaped payload.
+/// - **Flux Kustomizations** (section 8) writes a hand-rolled tabular
+///   body over typed `KustomizationRow`s with a `"NAME  REVISION …"`
+///   column header before the rows; the fused primitive would erase
+///   the column-header line.
+pub fn push_section_indented_lines_4sp<I, S>(buf: &mut String, heading: &str, lines: I)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    buf.push_str("\n  ");
+    buf.push_str(heading);
+    buf.push_str(":\n");
+    push_indented_lines_4sp(buf, lines);
+}
+
 /// Run a command in a specific directory, restoring the original directory afterward
 ///
 /// # Arguments
@@ -10392,6 +10486,137 @@ mod tests {
              a no-op — a spurious `    \\n` on empty input would ship a \
              phantom sub-list row under a probe that returned no data. \
              Got: {buf:?}"
+        );
+    }
+
+    /// [`push_section_indented_lines_4sp`] writes the exact heading
+    /// dialect `"\n  <heading>:\n"` every six pre-lift consumer sites
+    /// in [`commands/flux.rs::gather_deployment_diagnostics`] spelled
+    /// verbatim — leading newline (separates one sub-section from the
+    /// previous), two ASCII spaces (nests the heading under the top-
+    /// level `━`-ruled banner), the heading text, colon, and a
+    /// terminating newline before the body lines. A drift in any of
+    /// the four boundary tokens breaks the operator's visual scan of
+    /// the diagnostic buffer.
+    #[test]
+    fn push_section_indented_lines_4sp_pins_heading_dialect() {
+        let mut buf = String::new();
+        push_section_indented_lines_4sp(&mut buf, "All Pods", ["row"]);
+        assert_eq!(
+            buf, "\n  All Pods:\n    row\n",
+            "push_section_indented_lines_4sp() must open with `\\n  \
+             <heading>:\\n` — leading newline, two-space indent, \
+             heading, colon, terminating newline — before the body \
+             delegates to push_indented_lines_4sp. Got: {buf:?}"
+        );
+    }
+
+    /// [`push_section_indented_lines_4sp`] delegates its body write to
+    /// [`push_indented_lines_4sp`] verbatim: every line body must
+    /// carry the same four-space indent and single-`'\n'` terminator
+    /// the body-only primitive already pins. Test asserts by
+    /// composing the two primitives against the same input and
+    /// requiring byte-identical body suffixes — so a future refinement
+    /// of the body dialect (indent width, terminator, coloring) lands
+    /// at the delegate rather than fragmenting across two primitives.
+    #[test]
+    fn push_section_indented_lines_4sp_delegates_body_to_push_indented_lines_4sp() {
+        let mut fused = String::new();
+        push_section_indented_lines_4sp(&mut fused, "Deployment Events", ["a", "b", "c"]);
+
+        let mut body_only = String::new();
+        push_indented_lines_4sp(&mut body_only, ["a", "b", "c"]);
+
+        assert!(
+            fused.ends_with(&body_only),
+            "push_section_indented_lines_4sp() must delegate its body \
+             write to push_indented_lines_4sp verbatim — a body \
+             divergence would fragment the four-space indent and \
+             single-`\\n` terminator invariants across two \
+             primitives. fused: {fused:?}; body_only: {body_only:?}"
+        );
+        assert_eq!(
+            fused, "\n  Deployment Events:\n    a\n    b\n    c\n",
+            "push_section_indented_lines_4sp() must render the fused \
+             heading-plus-body payload as `\\n  <heading>:\\n` + the \
+             body-only primitive's output. Got: {fused:?}"
+        );
+    }
+
+    /// [`push_section_indented_lines_4sp`] appends to the existing
+    /// buffer without clearing or truncating — the pre-lift
+    /// [`commands/flux.rs::gather_deployment_diagnostics`] consumers
+    /// push into a diag buffer that already carries the top-level
+    /// `━`-ruled banner and every previous sub-section's payload; a
+    /// body that truncated the buffer would erase the accumulated
+    /// diagnostic and orphan every prior sub-section.
+    #[test]
+    fn push_section_indented_lines_4sp_preserves_prior_buffer_content() {
+        let mut buf = String::from("prior-banner\n");
+        let before = buf.clone();
+        push_section_indented_lines_4sp(&mut buf, "Container States", ["state=Ready"]);
+        assert!(
+            buf.starts_with(&before),
+            "push_section_indented_lines_4sp() must preserve the \
+             buffer's prior content — every previous sub-section's \
+             payload must survive the next section write. Got: {buf:?}"
+        );
+        assert_eq!(
+            buf, "prior-banner\n\n  Container States:\n    state=Ready\n",
+            "push_section_indented_lines_4sp() must render as \
+             `<prior>\\n  <heading>:\\n<body>`. Got: {buf:?}"
+        );
+    }
+
+    /// [`push_section_indented_lines_4sp`] absorbs both `&str`
+    /// (yielded by `stdout.trim().lines()` at the four unfiltered
+    /// sites and `stdout.trim().lines().rev().take(10)` at the
+    /// Deployment Events site) and `&&str` (yielded by
+    /// `pod_events.iter().rev().take(15)` on a `Vec<&str>` at the
+    /// Related Pod Events site) without asking the caller for a
+    /// `.copied()` or `.map(|s| *s)` projection. Both pre-lift
+    /// iterator shapes must land on the same primitive body.
+    #[test]
+    fn push_section_indented_lines_4sp_absorbs_both_str_and_ref_str_iterators() {
+        let mut from_lines = String::new();
+        push_section_indented_lines_4sp(&mut from_lines, "Events", "a\nb".lines());
+
+        let mut from_ref_str_vec = String::new();
+        let owned: Vec<&str> = vec!["a", "b"];
+        push_section_indented_lines_4sp(&mut from_ref_str_vec, "Events", owned.iter());
+
+        assert_eq!(from_lines, "\n  Events:\n    a\n    b\n");
+        assert_eq!(
+            from_lines, from_ref_str_vec,
+            "push_section_indented_lines_4sp() must render `&str` and \
+             `&&str` iterators identically — the six pre-lift \
+             consumers split across both shapes, and a projection \
+             asymmetry would ask one class of caller to adapt. Got \
+             &str: {from_lines:?}; &&str: {from_ref_str_vec:?}"
+        );
+    }
+
+    /// [`push_section_indented_lines_4sp`] writes the heading even
+    /// when `lines` is empty — the pre-lift guard `if
+    /// !stdout.trim().is_empty()` (or `if has_reasons`, or `if
+    /// !pod_events.is_empty()`) at every consumer site sits OUTSIDE
+    /// the fused primitive, so a caller who invokes it MUST have
+    /// already decided the sub-section is worth writing. The primitive
+    /// does NOT silently swallow the heading on empty input — that
+    /// would swap the pre-lift `if guard { push_str(heading);
+    /// push_indented_lines_4sp(iter); }` shape for a body that
+    /// silently dropped headings whose iterator turned out empty at
+    /// runtime, drifting the semantic.
+    #[test]
+    fn push_section_indented_lines_4sp_writes_heading_on_empty_iterator() {
+        let mut buf = String::new();
+        push_section_indented_lines_4sp(&mut buf, "Empty Section", std::iter::empty::<&str>());
+        assert_eq!(
+            buf, "\n  Empty Section:\n",
+            "push_section_indented_lines_4sp() must still write the \
+             heading when the body iterator is empty — the pre-lift \
+             `if !stdout.trim().is_empty()` guard is the caller's \
+             responsibility, not the primitive's. Got: {buf:?}"
         );
     }
 }
