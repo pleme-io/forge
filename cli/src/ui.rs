@@ -1375,6 +1375,81 @@ pub fn write_step_check<W: std::io::Write>(w: &mut W, message: &str) -> std::io:
     writeln!(w, "   {} {}", "✓".green(), message)
 }
 
+/// Prints the one-line `"   {} <message>"` (three-space indent + red
+/// `✗` thin-cross glyph + plain message) in-body sub-check failure
+/// grammar 5 pre-lift consumer sites spelled inline as
+/// `println!("   {} <fmt>", "✗".red(), <args>)` across three command
+/// modules (`commands/{prerelease, sync (×3), rebac_validation}.rs`).
+/// Marks the failing counterpart of an in-body sub-check within a
+/// command's readout — the exact-shape `✗.red()` thin-glyph twin of
+/// [`print_step_check`]'s `✓.green()` sub-check pass grammar, one
+/// register below [`print_step_failure`]'s heavier `❌.red()` full
+/// step-failure marker.
+///
+/// # Distinct from [`print_step_failure`]
+///
+/// Both wear the `.red()` palette (same `\x1b[31m` ANSI sequence) on
+/// the leading marker under a shared three-space in-body indent, but
+/// they carry different markers and different semantic registers:
+/// [`print_step_failure`] paints the heavy `❌` glyph for a full
+/// step-failure line (a gate that failed, a command that could not
+/// proceed); this primitive paints the thin `✗` glyph for a
+/// finer-grained per-item negative check inside a listing (a listed
+/// gate name inside a "Failed (N):" batch summary, a missing schema
+/// file, a missing `src/gql/` directory, a rebac-validation error
+/// item). The glyph split preserves the visual grammar every pre-lift
+/// consumer relied on — a re-lift that collapsed both onto `❌ ` (or
+/// both onto `✗ `) would erase the sub-check-vs-step-failure register
+/// the terminal readout carries.
+///
+/// # `.red()` on the glyph, plain on the message
+///
+/// Pre-lift every consumer spelled the coloring as `"✗".red()` on the
+/// GLYPH alone, never on the composed line (`format!("   ✗ {}",
+/// msg).red()`). The primitive preserves that split: the `\x1b[31m`
+/// red ANSI sequence wraps the glyph, the message reaches the writer
+/// uncolored, and the three-space indent is emitted OUTSIDE both
+/// spans — so a terminal without color renders `   ✗ <msg>` legibly.
+/// A re-lift that hoisted the color onto the whole line would paint
+/// the message text red at every site (including sibling sites that
+/// already color a sub-field of the message via `.yellow()`),
+/// changing the visual grammar silently.
+///
+/// # Compounding
+///
+/// Pre-lift 5 sibling sites each restated the `println!("   {}
+/// <fmt>", "✗".red(), <args>)` grammar verbatim, with the three-space
+/// indent, the `✗` thin-cross glyph, the `.red()` coloring on the
+/// glyph, and the plain-message tail all spelled inline. A future
+/// palette adjustment (a swap of `✗ ` for `[FAIL] ` under a
+/// CI-log-friendly grammar, a promotion of `.red()` to `.bright_red()`
+/// collapsing the sub-check-failure vs step-failure distinction, an
+/// OTLP `sub_check_failed` observability event wired alongside the
+/// print, a shift of the three-space indent to two- or four-space
+/// under a standardized body-indent, a promotion of the whole thing
+/// to `eprintln!` so failure lines route to stderr) had to hit 5
+/// sites in lockstep or drift the visual grammar; post-lift it hits
+/// ONE typed body. Delegates to [`write_step_uncheck`] against
+/// [`std::io::stdout()`]; the writer split exists so the fail-before-
+/// pass test can pin the one-line body, the three-space indent, the
+/// `✗` glyph, and the `\x1b[31m` red ANSI palette contract by
+/// inspecting emitted bytes rather than shelling out and grepping
+/// stdout.
+pub fn print_step_uncheck(message: &str) {
+    let _ = write_step_uncheck(&mut std::io::stdout().lock(), message);
+}
+
+/// Writer-taking sibling to [`print_step_uncheck`]. Emits the single
+/// `   <✗.red()> <message>` line via [`writeln!`] against the
+/// supplied writer. [`print_step_uncheck`] is the stdout adapter;
+/// this variant exists so tests can pin the one-line body, the
+/// three-space indent, the `✗` thin-cross glyph, and the `\x1b[31m`
+/// red ANSI sequence around the glyph (never the message) without
+/// capturing stdout.
+pub fn write_step_uncheck<W: std::io::Write>(w: &mut W, message: &str) -> std::io::Result<()> {
+    writeln!(w, "   {} {}", "✗".red(), message)
+}
+
 /// Prints the one-line `"   {} <message>"` (three-space indent + green
 /// `"OK"` text label + plain message) in-body step-report grammar 15
 /// pre-lift consumer sites spelled inline as `println!("   {} <fmt>",
@@ -5966,6 +6041,208 @@ mod tests {
                  `crate::ui::print_step_check(\"<MSG>\")` — the \
                  primitive body every three-space-indented `✓.green()` \
                  in-body step-check in the crate now delegates \
+                 through."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_step_uncheck`].
+    /// Pins the one-line body every pre-lift consumer spelled
+    /// verbatim (`println!("   {} <fmt>", "✗".red(), <args>)`): a
+    /// three-space indent, a `.red()`-colored `✗` thin-cross glyph, a
+    /// single space, then the plain (uncolored) message. A silent
+    /// contract drift a future rewrite might introduce — dropping the
+    /// three-space indent, promoting the whole line's coloring
+    /// (`format!("   ✗ {}", msg).red()`) so the message text paints
+    /// red at every site (colliding with sibling sites that color a
+    /// sub-field of the message via `.yellow()`), swapping `✗ ` for
+    /// `[FAIL] ` under a CI-log-friendly grammar, promoting `.red()`
+    /// to `.bright_red()` (`\x1b[91m` — the milestone-level
+    /// [`super::print_error`] palette), swapping `✗` for the heavier
+    /// `❌` glyph (collapsing the distinction between this sub-check
+    /// failure primitive and its sibling [`super::print_step_failure`]),
+    /// slipping a trailing blank line into the primitive body —
+    /// flips this assertion rather than compiling and silently
+    /// diverging the 5 consumer sites' visual grammar.
+    #[test]
+    fn write_step_uncheck_emits_exactly_one_cross_prefixed_indented_line() {
+        // Force ANSI emission (colored auto-drops sequences on a
+        // non-tty stdout) and serialize against peer banner tests via
+        // [`AnsiOverrideForTest`]; its Drop restores colored's
+        // auto-detection on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`], closing the set-write-unset window
+        // without a manual [`colored::control::unset_override`] call
+        // that a future test author could omit.
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_step_uncheck(&mut buf, "schema.graphql missing")
+            .expect("write_step_uncheck against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_step_uncheck must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — the pre-lift stanza is one `println!`,
+        // not two, and carries no framing blank. A refactor that
+        // slips a leading or trailing blank into the primitive body
+        // fails here.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_step_uncheck must emit exactly one line — the \
+             pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The three-space indent reaches the rendered line before
+        // any ANSI escape — a fusion that hoisted the indent inside
+        // the coloring span (`"   ✗".red()`) or dropped it altogether
+        // (`println!("{} <msg>", "✗".red())`) fails here.
+        assert!(
+            lines[0].starts_with("   "),
+            "line 0 must begin with a three-space indent — every \
+             pre-lift consumer spelled `\"   {{}} <fmt>\"` verbatim, \
+             so the indent must reach the writer OUTSIDE the coloring \
+             span; got {:?}",
+            lines[0]
+        );
+
+        // The `✗` thin-cross glyph reaches the rendered line — a
+        // fusion that swapped `✗` for the heavier `❌` (collapsing
+        // the sub-check-failure vs step-failure distinction) or for
+        // `[FAIL]` under a "CI-log-friendly" cleanup fails here.
+        assert!(
+            lines[0].contains('✗'),
+            "line 0 must contain the `✗` thin-cross glyph — every \
+             pre-lift consumer spelled `\"✗\".red()` on the marker \
+             (NEVER the heavier `\"❌\".red()` — that is the sibling \
+             `print_step_failure` grammar for full step failures); \
+             got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('❌'),
+            "line 0 must NOT contain the heavier `❌` glyph — that \
+             glyph belongs to the sibling `print_step_failure` \
+             primitive for full step failures, not this sub-check \
+             failure primitive; got {:?}",
+            lines[0]
+        );
+
+        // The message text reaches the rendered line verbatim; a
+        // fusion that hoists the message off the parameter and pins
+        // it to a constant fails here.
+        assert!(
+            lines[0].contains("schema.graphql missing"),
+            "line 0 must carry the message verbatim; got {:?}",
+            lines[0]
+        );
+
+        // The `red` ANSI sequence (`\x1b[31m`) reaches the rendered
+        // line; a fusion that dropped `.red()` (a "just print the
+        // string, it's shorter" cleanup) or promoted the palette to
+        // `.bright_red()` (`\x1b[91m` — the [`super::print_error`]
+        // milestone palette) fails here.
+        assert!(
+            lines[0].contains("\x1b[31m"),
+            "line 0 must carry the `red` ANSI sequence (`\\x1b[31m`) \
+             — every pre-lift consumer spelled `.red()` (never \
+             `.bright_red()`) on the glyph; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[91m"),
+            "line 0 must NOT carry the `bright_red` ANSI sequence \
+             (`\\x1b[91m`) — that palette belongs to the heavier \
+             milestone-level `print_error`, not this in-body \
+             sub-check failure primitive; got {:?}",
+            lines[0]
+        );
+
+        // The `.red()` coloring wraps the GLYPH alone, never the
+        // message text — a fusion that hoisted the color onto the
+        // composed line (`format!("   ✗ {}", msg).red()`) would paint
+        // the message red at every site. Pin that the message text is
+        // NOT bracketed by a red-open + reset pair: the red span must
+        // close (`\x1b[0m`) BEFORE the space that precedes the
+        // message.
+        let glyph_pos = lines[0].find('✗').expect("glyph must be present");
+        let reset_pos = lines[0]
+            .find("\x1b[0m")
+            .expect("reset must be present after the glyph");
+        let msg_pos = lines[0]
+            .find("schema.graphql missing")
+            .expect("message must be present");
+        assert!(
+            glyph_pos < reset_pos && reset_pos < msg_pos,
+            "the `\\x1b[0m` reset must close the red span BEFORE the \
+             message begins — every pre-lift consumer spelled \
+             `.red()` on the `✗` glyph alone, never on the message. \
+             Got positions glyph={glyph_pos}, reset={reset_pos}, \
+             msg={msg_pos} in line {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza
+        // used `println!` (not `print!`), so the newline is part of
+        // the contract. A fusion that swapped `writeln!` for
+        // `write!` fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_step_uncheck must emit a trailing `\\n` (the \
+             pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_step_uncheck`] no longer spell the
+    /// `println!("   {} <fmt>", "✗".red(), <args>)` shape inline.
+    /// Structural regression shield — without it, a future refactor
+    /// could silently re-inline the one-liner (e.g. a "just call
+    /// `println!` directly, it's shorter" cleanup) and reopen the
+    /// 5-site duplication class this lift closed. Enforced at the
+    /// module bodies before their `#[cfg(test)]` regions so a
+    /// test-support mention of the raw shape does not defeat the
+    /// shield.
+    #[test]
+    fn print_step_uncheck_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[
+            (
+                include_str!("commands/prerelease.rs"),
+                "commands/prerelease.rs",
+            ),
+            (include_str!("commands/sync.rs"), "commands/sync.rs"),
+            (
+                include_str!("commands/rebac_validation.rs"),
+                "commands/rebac_validation.rs",
+            ),
+        ];
+        for (source, module_path) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("\"✗\".red()") {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `\"✗\".red()` sub-check failure marker — that \
+                     shape was lifted onto \
+                     `crate::ui::print_step_uncheck`. A re-inline would \
+                     silently reopen the 5-site duplication class this \
+                     shield exists to close. Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            assert!(
+                body.contains("crate::ui::print_step_uncheck("),
+                "{module_path} body must forward to \
+                 `crate::ui::print_step_uncheck(\"<MSG>\")` — the \
+                 primitive body every three-space-indented `✗.red()` \
+                 in-body sub-check failure in the crate now delegates \
                  through."
             );
         }
