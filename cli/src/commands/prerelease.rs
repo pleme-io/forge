@@ -941,7 +941,7 @@ async fn run_integration_gate(config: &PreReleaseConfig) -> Result<bool> {
                 ));
                 for line in stderr.lines().chain(stdout.lines()).take(15) {
                     if line.contains("FAILED") || line.contains("panicked") {
-                        println!("   {}", line.red());
+                        crate::ui::print_diagnostic_error_line(line);
                     }
                 }
                 Ok(false)
@@ -1137,7 +1137,7 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
                         || line.contains("panicked")
                         || line.contains("error")
                     {
-                        println!("   {}", line.red());
+                        crate::ui::print_diagnostic_error_line(line);
                     } else {
                         println!("   {}", line);
                     }
@@ -1231,7 +1231,7 @@ async fn run_cargo_check(backend_dir: &Path) -> Result<bool> {
         // Show first few errors
         for line in stderr.lines().take(10) {
             if line.contains("error") {
-                println!("   {}", line.red());
+                crate::ui::print_diagnostic_error_line(line);
             }
         }
         Ok(false)
@@ -1373,7 +1373,7 @@ async fn run_cargo_test(backend_dir: &Path) -> Result<bool> {
             crate::ui::print_dimmed_dashed_marker("cargo test output");
             for line in stdout.lines() {
                 if line.contains("FAILED") || line.contains("panicked") || line.contains("error[") {
-                    println!("   {}", line.red());
+                    crate::ui::print_diagnostic_error_line(line);
                 } else {
                     println!("   {}", line);
                 }
@@ -1384,9 +1384,9 @@ async fn run_cargo_test(backend_dir: &Path) -> Result<bool> {
         if !stderr_lines.is_empty() {
             crate::ui::print_dimmed_dashed_marker("stderr (last 40 lines)");
             let start = stderr_lines.len().saturating_sub(40);
-            for line in &stderr_lines[start..] {
+            for &line in &stderr_lines[start..] {
                 if line.contains("error") || line.contains("FAILED") || line.contains("panicked") {
-                    println!("   {}", line.red());
+                    crate::ui::print_diagnostic_error_line(line);
                 } else {
                     println!("   {}", line);
                 }
