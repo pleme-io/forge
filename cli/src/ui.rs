@@ -1537,6 +1537,89 @@ pub fn write_pending_item<W: std::io::Write>(w: &mut W, message: &str) -> std::i
     writeln!(w, "  {} {}", "⏳".yellow(), message)
 }
 
+/// Prints the one-line `"  {} <message>"` (two-space indent + cyan `→`
+/// glyph + plain message) wider-body arrow-item grammar every pre-lift
+/// consumer spelled inline as `println!("  {} <fmt>", "→".cyan(), <args>)`.
+/// Marks a narrative anchor in the operator log — a command about to be
+/// invoked, a subordinate step being narrated ("Using kubectl to run
+/// sync inside search service pod"), a discovery reported back ("Found
+/// pod: X"), an imperative next-step instruction to the operator
+/// ("Monitor the rollout using the commands above") — the exact-shape
+/// per-narration peer of [`print_report_item`]'s two-space `✓.green()`
+/// completed-row grammar and [`print_pending_item`]'s two-space
+/// `⏳.yellow()` still-pending grammar. Sibling on the same wider-body
+/// report-line indent but marking a DIFFERENT semantic layer: neither
+/// completion (green ✓) nor still-in-flight wait (yellow ⏳), but a
+/// forward-pointing narrative marker (cyan →) for what the operator is
+/// about to see or should do next.
+///
+/// # Distinct from the other `ui::print_*` primitives
+///
+/// [`print_report_item`] carries the two-space `✓.green()` completed
+/// summary row — same indent width, DIFFERENT glyph (thin checkmark vs.
+/// forward arrow), DIFFERENT palette (`\x1b[32m` green vs. `\x1b[36m`
+/// cyan), and DIFFERENT semantic layer (something already succeeded vs.
+/// something about to happen or being narrated). [`print_pending_item`]
+/// carries the two-space `⏳.yellow()` still-pending row — same indent
+/// width, DIFFERENT glyph (hourglass vs. arrow), DIFFERENT palette
+/// (`\x1b[33m` yellow vs. `\x1b[36m` cyan), and DIFFERENT semantic layer
+/// (a background rollout the operator has to wait for vs. an operator-
+/// log narration entry). Folding this primitive into either would
+/// collapse the narrative-vs-completion or narrative-vs-in-flight
+/// distinction at every site the operator has been trained to read.
+///
+/// # Distinct from the `.yellow()` three-space sibling grammar
+///
+/// `commands/codegen_validation.rs` carries one `"→".yellow()` site
+/// under a THREE-space indent (`"   {} Codegen changes detected,
+/// auto-committing..."`) that this primitive deliberately does NOT
+/// enroll: the `\x1b[33m` yellow palette AND the three-space in-body
+/// indent AND the "irregularity/attention" semantic together form a
+/// distinct grammar (closer to an in-body [`print_step_warn`] variant
+/// with an arrow glyph) than this wider-body cyan narrative marker. That
+/// site stays unlifted by design.
+///
+/// # `.cyan()` on the glyph, plain on the message
+///
+/// Pre-lift every consumer spelled the coloring as `"→".cyan()` on the
+/// GLYPH alone, never on the composed line (`format!("  → {}",
+/// msg).cyan()`). The primitive preserves that split: the `\x1b[36m`
+/// cyan ANSI sequence wraps the glyph, the message reaches the writer
+/// uncolored, and the two-space indent is emitted OUTSIDE both spans —
+/// so a terminal without color renders `  → <msg>` legibly.
+///
+/// # Compounding
+///
+/// Pre-lift 5 sibling sites across `commands/{rust_service (×1),
+/// search_sync (×4)}.rs` each restated the `println!("  {} <fmt>",
+/// "→".cyan(), <args>)` grammar verbatim, with the two-space indent,
+/// the `→` forward-arrow glyph, and the `.cyan()` coloring on the
+/// glyph all spelled inline. A future palette adjustment (a swap of
+/// `→ ` for `[>] ` under a CI-log-friendly grammar, a promotion of
+/// `.cyan()` to `.bright_cyan()` under a leaner narrative-vs-milestone
+/// distinction, an OTLP `narration_emitted` observability event wired
+/// alongside the print, a shift of the two-space indent to zero or
+/// four spaces under a standardized report-indent) had to hit 5 sites
+/// in lockstep or drift the visual grammar; post-lift it hits ONE
+/// typed body. Delegates to [`write_arrow_item`] against
+/// [`std::io::stdout()`]; the writer split exists so the fail-before-
+/// pass test can pin the one-line body, the two-space indent, the `→`
+/// glyph, and the `\x1b[36m` cyan ANSI palette contract by inspecting
+/// emitted bytes rather than shelling out and grepping stdout.
+pub fn print_arrow_item(message: &str) {
+    let _ = write_arrow_item(&mut std::io::stdout().lock(), message);
+}
+
+/// Writer-taking sibling to [`print_arrow_item`]. Emits the single
+/// `  <→.cyan()> <message>` line via [`writeln!`] against the supplied
+/// writer. [`print_arrow_item`] is the stdout adapter; this variant
+/// exists so tests can pin the one-line body, the two-space indent,
+/// the `→` forward-arrow glyph, and the `\x1b[36m` cyan ANSI sequence
+/// around the glyph (never the message) without capturing stdout.
+pub fn write_arrow_item<W: std::io::Write>(w: &mut W, message: &str) -> std::io::Result<()> {
+    writeln!(w, "  {} {}", "→".cyan(), message)
+}
+
 /// Prints the one-line `"   {} <message>"` (three-space indent + yellow
 /// `⚠️` glyph + plain message) in-body step-warning grammar 5 pre-lift
 /// consumer sites spelled inline as `println!("   {} <fmt>",
@@ -5308,6 +5391,219 @@ mod tests {
                  `crate::ui::print_pending_item(\"<MSG>\")` — the \
                  primitive body every two-space-indented `⏳.yellow()` \
                  pending-item in the crate now delegates through."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_arrow_item`]. Pins
+    /// the one-line body every pre-lift consumer spelled verbatim
+    /// (`println!("  {} <fmt>", "→".cyan(), <args>)`): a two-space
+    /// indent, a `.cyan()`-colored `→` forward-arrow glyph, a single
+    /// space, then the plain (uncolored) message. A silent contract
+    /// drift a future rewrite might introduce — widening the indent to
+    /// three-space (collapsing the wider-body narrative grammar into
+    /// the sibling in-body `print_step_*` grammar), promoting the whole
+    /// line's coloring (`format!("  → {}", msg).cyan()`) so the message
+    /// text paints cyan at every site, swapping `→ ` for `-> ` or `[>]
+    /// ` under a CI-log-friendly grammar, swapping `→` for `✓` (would
+    /// collide with the sibling [`super::print_report_item`] completed-
+    /// row grammar) or `⏳` (would collide with the sibling
+    /// [`super::print_pending_item`] still-pending grammar), promoting
+    /// `.cyan()` to `.bright_cyan()` (`\x1b[96m`), slipping a trailing
+    /// blank line into the primitive body — flips this assertion rather
+    /// than compiling and silently diverging the 5 consumer sites'
+    /// visual grammar.
+    #[test]
+    fn write_arrow_item_emits_exactly_one_arrow_prefixed_two_indented_line() {
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_arrow_item(&mut buf, "Found pod: search-0")
+            .expect("write_arrow_item against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_arrow_item must emit valid UTF-8 (the pre-lift println!s did)");
+
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_arrow_item must emit exactly one line — the pre-lift \
+             stanza is one `println!` carrying no framing blank; got \
+             {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // Two-space indent, NOT three-space (which is the sibling
+        // in-body `print_step_*` grammar and the
+        // `commands/codegen_validation.rs` `"→".yellow()` sibling).
+        assert!(
+            lines[0].starts_with("  "),
+            "line 0 must begin with a two-space indent — every pre-lift \
+             consumer spelled `\"  {{}} <fmt>\"` verbatim, so the \
+             indent must reach the writer OUTSIDE the coloring span; \
+             got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].starts_with("   "),
+            "line 0 must NOT begin with a three-space indent — that \
+             indent belongs to the sibling in-body `print_step_*` \
+             grammar and the `commands/codegen_validation.rs` \
+             `\"→\".yellow()` sibling, not this wider-body arrow-item \
+             grammar; got {:?}",
+            lines[0]
+        );
+
+        // The `→` forward-arrow glyph reaches the rendered line — NOT
+        // `✓` (the sibling `print_report_item` completed-row grammar)
+        // and NOT `⏳` (the sibling `print_pending_item` still-pending
+        // grammar).
+        assert!(
+            lines[0].contains('→'),
+            "line 0 must contain the `→` forward-arrow glyph; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('✓'),
+            "line 0 must NOT contain the `✓` glyph — that glyph \
+             belongs to the sibling `print_report_item` primitive for \
+             completed rows, not this arrow-item narrative primitive; \
+             got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('⏳'),
+            "line 0 must NOT contain the `⏳` glyph — that glyph \
+             belongs to the sibling `print_pending_item` primitive for \
+             still-pending rows, not this arrow-item narrative \
+             primitive; got {:?}",
+            lines[0]
+        );
+
+        // The message text reaches the rendered line verbatim.
+        assert!(
+            lines[0].contains("Found pod: search-0"),
+            "line 0 must carry the message verbatim; got {:?}",
+            lines[0]
+        );
+
+        // The `cyan` ANSI sequence — NOT `bright_cyan` (`\x1b[96m`),
+        // NOT `green` (`\x1b[32m`, the sibling `print_report_item`
+        // palette), NOT `yellow` (`\x1b[33m`, the sibling
+        // `print_pending_item` palette).
+        assert!(
+            lines[0].contains("\x1b[36m"),
+            "line 0 must carry the `cyan` ANSI sequence (`\\x1b[36m`); \
+             got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[96m"),
+            "line 0 must NOT carry the `bright_cyan` ANSI sequence \
+             (`\\x1b[96m`); got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[32m"),
+            "line 0 must NOT carry the `green` ANSI sequence \
+             (`\\x1b[32m`) — that palette belongs to the sibling \
+             `print_report_item` completed-row grammar, not this \
+             arrow-item narrative grammar; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[33m"),
+            "line 0 must NOT carry the `yellow` ANSI sequence \
+             (`\\x1b[33m`) — that palette belongs to the sibling \
+             `print_pending_item` still-pending grammar, not this \
+             arrow-item narrative grammar; got {:?}",
+            lines[0]
+        );
+
+        // The `.cyan()` coloring wraps the GLYPH alone, never the
+        // message text — the `\x1b[0m` reset must close the cyan span
+        // BEFORE the message begins.
+        let glyph_pos = lines[0].find('→').expect("glyph must be present");
+        let reset_pos = lines[0]
+            .find("\x1b[0m")
+            .expect("reset must be present after the glyph");
+        let msg_pos = lines[0]
+            .find("Found pod: search-0")
+            .expect("message must be present");
+        assert!(
+            glyph_pos < reset_pos && reset_pos < msg_pos,
+            "the `\\x1b[0m` reset must close the cyan span BEFORE the \
+             message begins — every pre-lift consumer spelled \
+             `.cyan()` on the `→` glyph alone, never on the message. \
+             Got positions glyph={glyph_pos}, reset={reset_pos}, \
+             msg={msg_pos} in line {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `println!`, so the newline is part of the contract.
+        assert!(
+            out.ends_with('\n'),
+            "write_arrow_item must emit a trailing `\\n` (the pre-lift \
+             `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_arrow_item`] no longer spell the
+    /// `println!("  {} <fmt>", "→".cyan(), <args>)` shape inline.
+    /// Structural regression shield — without it a future refactor
+    /// could silently re-inline the one-liner (e.g. a "just call
+    /// `println!` directly, it's shorter" cleanup) and reopen the
+    /// 5-site duplication class this lift closed. Enforced at the
+    /// module bodies BEFORE their `#[cfg(test)]` regions so a
+    /// test-support mention of the raw shape does not defeat the
+    /// shield.
+    ///
+    /// The exact-shape needle is `"→".cyan()` appearing anywhere in the
+    /// module body — no allowlist is required because every pre-lift
+    /// occurrence in the crate belonged to this class. The
+    /// `commands/codegen_validation.rs` `"→".yellow()` sibling (three-
+    /// space in-body irregularity grammar) does NOT match the `.cyan()`
+    /// needle, so it is not swept in and stays unlifted by design.
+    #[test]
+    fn print_arrow_item_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[
+            (
+                include_str!("commands/rust_service.rs"),
+                "commands/rust_service.rs",
+            ),
+            (
+                include_str!("commands/search_sync.rs"),
+                "commands/search_sync.rs",
+            ),
+        ];
+        for (source, module_path) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("\"→\".cyan()") {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `\"→\".cyan()` two-space arrow-item marker — that \
+                     shape was lifted onto \
+                     `crate::ui::print_arrow_item`. A re-inline would \
+                     silently reopen the 5-site duplication class this \
+                     shield exists to close. Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            assert!(
+                body.contains("crate::ui::print_arrow_item("),
+                "{module_path} body must forward to \
+                 `crate::ui::print_arrow_item(\"<MSG>\")` — the \
+                 primitive body every two-space-indented `→.cyan()` \
+                 arrow-item narrative marker in the crate now \
+                 delegates through."
             );
         }
     }
