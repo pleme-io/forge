@@ -1081,10 +1081,12 @@ async fn probe_chart_provenance(
         return crate::helm_provenance::HelmProvenanceOutcome::ProbeAbsent;
     };
     let prov_path = dir.join(format!("{}.prov", tarball_name));
-    match tokio::fs::read_to_string(&prov_path).await {
-        Ok(contents) => crate::helm_provenance::parse_provenance(&contents, &tarball_name),
-        Err(_) => crate::helm_provenance::HelmProvenanceOutcome::ProbeAbsent,
-    }
+    crate::repo::probe_text_async(
+        &prov_path,
+        crate::helm_provenance::HelmProvenanceOutcome::ProbeAbsent,
+        |contents| crate::helm_provenance::parse_provenance(contents, &tarball_name),
+    )
+    .await
 }
 
 /// Derive the product-level SLSA-provenance compliance dimension from the
@@ -1904,10 +1906,9 @@ async fn analyze_flake_lock(path: &Path) -> (usize, bool) {
     if !path.exists() {
         return (0, false);
     }
-    let summary = match tokio::fs::read_to_string(path).await {
-        Ok(content) => summarize_flake_lock(&content),
-        Err(_) => FlakeLockSummary::UNPINNED_EMPTY,
-    };
+    let summary =
+        crate::repo::probe_text_async(path, FlakeLockSummary::UNPINNED_EMPTY, summarize_flake_lock)
+            .await;
     (summary.input_count, summary.all_inputs_pinned)
 }
 

@@ -370,10 +370,12 @@ pub fn parse_chart_yaml_dependencies(yaml: &str) -> ChartDependenciesOutcome {
 /// well-formed Chart.yaml and `ProbeAbsent` on a malformed one.
 pub async fn probe_chart_dependencies(chart_path: &Path) -> ChartDependenciesOutcome {
     let chart_yaml = chart_path.join("Chart.yaml");
-    match tokio::fs::read_to_string(&chart_yaml).await {
-        Ok(content) => parse_chart_yaml_dependencies(&content),
-        Err(_) => ChartDependenciesOutcome::ProbeAbsent,
-    }
+    crate::repo::probe_text_async(
+        &chart_yaml,
+        ChartDependenciesOutcome::ProbeAbsent,
+        parse_chart_yaml_dependencies,
+    )
+    .await
 }
 
 #[cfg(test)]

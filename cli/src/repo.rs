@@ -321,6 +321,76 @@ pub async fn read_text_async(path: &Path) -> Result<String> {
         .with_context(|| format!("Failed to read {}", path.display()))
 }
 
+/// Probe-read a file at `path` on the async surface: hand the bytes to
+/// `parse` on success, return `absent` on any read failure.
+///
+/// The absence-tolerant sibling of [`read_text_async`]: where the canonical
+/// form propagates the read error with a `"Failed to read {path}"` envelope,
+/// this form collapses every read failure (`ENOENT`, `EACCES`, `EIO`) into
+/// the caller-designated typed `absent` value — the shape a probe consumer
+/// with a typed `*Outcome` enum (`ProbeAbsent` / `Absent` / `UNPINNED_EMPTY`
+/// on the sixteen sibling probe modules enumerated at
+/// [`crate::probe_outcome`]) reaches for when "no file on disk" is a
+/// meaningful world, not an error.
+///
+/// # Absence semantics
+///
+/// A probe read returns evidence when it can, or the typed absent value
+/// when it cannot; the caller never needs to distinguish "file absent"
+/// from "read error" because both worlds collapse to the same evidence-
+/// less outcome — no downstream verifier can substantiate a claim from a
+/// byte stream that did not reach the parser. Pre-lift three sibling
+/// consumer sites spelled the primitive's OWN shape one level down from
+/// this body: a
+/// `match tokio::fs::read_to_string(path).await { Ok(c) => parse(...&c...),
+/// Err(_) => AbsentValue }` composition at
+/// [`crate::commands::attestation::probe_chart_provenance`] (Helm
+/// `.prov` file → [`crate::helm_provenance::HelmProvenanceOutcome::
+/// ProbeAbsent`]),
+/// [`crate::commands::attestation::analyze_flake_lock`] (`flake.lock`
+/// JSON → `FlakeLockSummary::UNPINNED_EMPTY`), and
+/// [`crate::chart_dependencies::probe_chart_dependencies`] (`Chart.yaml`
+/// → [`crate::chart_dependencies::ChartDependenciesOutcome::ProbeAbsent`]).
+/// Post-lift the primitive's canonical `match Ok/Err_ => absent` frontier
+/// reaches every consumer by construction; the typed absent variant is
+/// designated at the call site, and the parser stays pure (byte-slice in,
+/// typed outcome out) so the read arm is the ONLY I/O in the composition.
+///
+/// # Sibling primitives
+///
+/// - Error-propagating read arm: [`read_text_async`] surfaces read
+///   failures with a `"Failed to read {path}"` envelope; this primitive
+///   collapses them to a typed absent value instead.
+/// - Sync silent-probe YAML parse: [`try_read_yaml_sync`] collapses BOTH
+///   read AND parse failures to `None`; this primitive collapses only
+///   the read arm — the caller's `parse` function is total (returns `T`,
+///   not `Result<T>`) and owns any parse-failure → absent-variant
+///   collapse internally, keeping the two failure axes separate on the
+///   async surface for probe consumers whose parsers already carry a
+///   typed absent variant.
+///
+/// # Type parameters
+///
+/// - `T` — the typed outcome the caller collapses both branches onto.
+///   Every consumer site's `T` is a typed probe outcome (a `*Outcome`
+///   enum whose variants distinguish evidence-present from evidence-
+///   absent worlds), but the primitive is generic so any `T` the caller
+///   holds a designated absent value for composes here.
+/// - `F: FnOnce(&str) -> T` — the pure parser; called at most once, on
+///   the read-success bytes. Total, not fallible: any parse-failure →
+///   absent-variant collapse lives inside `F`'s body so the read arm and
+///   the parse arm share ONE codepoint of collapse per probe module,
+///   matching the [`crate::probe_outcome`] surface's discipline.
+pub async fn probe_text_async<T, F>(path: &Path, absent: T, parse: F) -> T
+where
+    F: FnOnce(&str) -> T,
+{
+    match tokio::fs::read_to_string(path).await {
+        Ok(content) => parse(&content),
+        Err(_) => absent,
+    }
+}
+
 /// Read the entire contents of a file at `path` into a `String`, on the
 /// sync fs-read surface.
 ///
@@ -5420,6 +5490,177 @@ mod tests {
                  additional lift that changes the count without \
                  updating this shield fails here. Found {forward_hits} \
                  forwarding hits."
+            );
+        }
+    }
+
+    /// [`probe_text_async`]'s read-success arm hands the file bytes to
+    /// `parse` verbatim (no trim, no re-encode), so the three consumer
+    /// probes ([`crate::commands::attestation::probe_chart_provenance`]
+    /// on the Helm `.prov` file,
+    /// [`crate::commands::attestation::analyze_flake_lock`] on
+    /// `flake.lock`, [`crate::chart_dependencies::probe_chart_dependencies`]
+    /// on `Chart.yaml`) receive the same byte-for-byte payload each
+    /// pre-lift inline `match tokio::fs::read_to_string(path).await { Ok(c) =>
+    /// parse(&c), Err(_) => AbsentValue }` did.
+    #[tokio::test]
+    async fn probe_text_async_success_forwards_bytes_to_parser_verbatim() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("probe.txt");
+        let payload = "# preserved comment\n\
+                       key: value\n\
+                       trailing-newline: yes\n";
+        tokio::fs::write(&path, payload).await.expect("seed write");
+
+        let observed = probe_text_async(&path, String::from("ABSENT"), |c| c.to_string()).await;
+
+        assert_eq!(
+            observed, payload,
+            "probe_text_async() must hand the file bytes to `parse` \
+             verbatim on the read-success arm — no trim, no re-encode, no \
+             filter — so every consumer's parser sees the same payload it \
+             did pre-lift"
+        );
+    }
+
+    /// [`probe_text_async`]'s read-failure arm returns the caller-
+    /// designated `absent` value on EVERY read error (missing file,
+    /// permission denied, EIO), so the three probe consumers collapse
+    /// "no evidence collected" into their typed absent variant at ONE
+    /// codepoint. Pins that a missing path yields `absent` without
+    /// invoking `parse` — the shield the pre-lift `Err(_) => AbsentValue`
+    /// arm carried at each of the three sites.
+    #[tokio::test]
+    async fn probe_text_async_missing_file_returns_absent_without_invoking_parser() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("does-not-exist.txt");
+        let parse_called = std::sync::atomic::AtomicBool::new(false);
+
+        let observed = probe_text_async(&path, String::from("ABSENT-SENTINEL"), |c| {
+            parse_called.store(true, std::sync::atomic::Ordering::SeqCst);
+            c.to_string()
+        })
+        .await;
+
+        assert_eq!(
+            observed, "ABSENT-SENTINEL",
+            "probe_text_async() must return the caller-designated \
+             `absent` value on a missing-file read — every consumer \
+             (Helm .prov, flake.lock, Chart.yaml) collapses `Err(_)` \
+             to its typed absent variant at this ONE codepoint"
+        );
+        assert!(
+            !parse_called.load(std::sync::atomic::Ordering::SeqCst),
+            "probe_text_async() must NOT invoke `parse` on the read- \
+             failure arm — the read is the ONLY I/O in the composition, \
+             and a failed read hands the parser NO bytes to inspect"
+        );
+    }
+
+    /// [`probe_text_async`] must forward its `parse` closure's return
+    /// value verbatim when the parser itself decides the bytes are
+    /// evidence-less (a malformed `Chart.yaml`, a malformed `.prov`, a
+    /// `flake.lock` with no `nodes` object). Every consumer's parser is
+    /// total (`&str -> T`, not `&str -> Result<T>`) and owns its own
+    /// parse-failure → absent-variant collapse; this shield pins that the
+    /// primitive does not double-map that collapse or short-circuit it.
+    #[tokio::test]
+    async fn probe_text_async_parser_owned_absent_return_forwards_verbatim() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("malformed.txt");
+        tokio::fs::write(&path, b"unparseable bytes")
+            .await
+            .expect("seed write");
+
+        let observed = probe_text_async(&path, "READ-ABSENT", |_| "PARSER-ABSENT").await;
+
+        assert_eq!(
+            observed, "PARSER-ABSENT",
+            "probe_text_async() must forward the parser's return value \
+             verbatim on the read-success arm — a parser that decides \
+             the bytes are evidence-less returns its OWN absent variant, \
+             and the primitive does not re-map it onto the caller's \
+             `absent` value (which only fires on the read-failure arm)"
+        );
+    }
+
+    /// Post-lift the three sibling
+    /// `match tokio::fs::read_to_string(<path>).await { Ok(c) =>
+    /// <parse>(&c ...), Err(_) => <AbsentValue> }` async probe-read
+    /// stanzas across `commands/attestation.rs` (×2 — the Helm `.prov`
+    /// probe at `probe_chart_provenance` and the `flake.lock` summary
+    /// at `analyze_flake_lock`) and `chart_dependencies.rs` (×1 — the
+    /// `Chart.yaml` dep probe at `probe_chart_dependencies`) migrated
+    /// onto [`probe_text_async`], gaining by construction the canonical
+    /// `match Ok/Err_ => absent` frontier every peer on the absence-
+    /// tolerant async read arm now shares.
+    ///
+    /// Structural regression shield — negative half asserts the pre-lift
+    /// bounded shape (`tokio::fs::read_to_string(...).await { Ok(...)
+    /// => ..., Err(_) => ... }` within a 400-byte window) reappears in
+    /// NONE of the two files; positive half asserts each file forwards
+    /// through the primitive at exactly the per-file count the lift
+    /// landed (2 / 1). Without this shield a future refactor could
+    /// silently re-inline the pre-lift shape (e.g. a helpful "just
+    /// inline the match, it's only four lines" cleanup) and reopen the
+    /// three-site duplication class this lift closed, leaving each
+    /// probe's `Err(_) => AbsentValue` collapse diverged from the other
+    /// two.
+    #[test]
+    fn probe_text_async_pre_lift_sibling_class_closed() {
+        const CONSUMERS: &[(&str, &str, usize)] = &[
+            (
+                "commands/attestation.rs",
+                include_str!("commands/attestation.rs"),
+                2,
+            ),
+            (
+                "chart_dependencies.rs",
+                include_str!("chart_dependencies.rs"),
+                1,
+            ),
+        ];
+        let pattern = concat!(
+            r#"tokio::fs::read_to_string\([\s\S]{0,80}?\)\.await\s*\{\s*"#,
+            r#"Ok\([\s\S]{0,200}?Err\(_\)\s*=>\s*"#,
+        );
+        let re = regex::Regex::new(pattern).expect("pre-lift stanza regex must compile");
+        for (path, raw_src, expected_forwards) in CONSUMERS {
+            let stripped: String = raw_src
+                .lines()
+                .map(|l| {
+                    let t = l.trim_start();
+                    if t.starts_with("///") || t.starts_with("//!") || t.starts_with("//") {
+                        ""
+                    } else {
+                        l
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let inline_hits = re.find_iter(&stripped).count();
+            assert_eq!(
+                inline_hits, 0,
+                "{path} must NOT spell the pre-lift `match \
+                 tokio::fs::read_to_string(...).await {{ Ok(...) => \
+                 <parse>, Err(_) => <AbsentValue> }}` probe-read stanza \
+                 — that three-site duplication class was lifted onto \
+                 `crate::repo::probe_text_async` so every consumer's \
+                 read-failure arm collapses onto the caller-designated \
+                 typed absent variant at ONE codepoint. A re-inline \
+                 would silently reopen the class this shield closes. \
+                 Found {inline_hits} inline occurrences."
+            );
+            let forward_hits = stripped.matches("crate::repo::probe_text_async(").count();
+            assert_eq!(
+                forward_hits, *expected_forwards,
+                "{path} must forward through \
+                 `crate::repo::probe_text_async(<path>, <absent>, \
+                 <parse>).await` at exactly {expected_forwards} sites — \
+                 one per pre-lift probe-read stanza this shield replaces. \
+                 A fusion or an additional lift that changes the count \
+                 without updating this shield fails here. Found \
+                 {forward_hits} forwarding hits."
             );
         }
     }
