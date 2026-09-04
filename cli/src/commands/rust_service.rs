@@ -302,13 +302,12 @@ pub async fn build_rust_service(
     _attic_token: String,
     deploy_config: &DeployConfig,
 ) -> Result<()> {
-    println!(
-        "🔨 {} {} {}",
-        "Building".bold(),
-        service.cyan(),
-        "with crate2nix (per-crate caching enabled)".dimmed()
+    crate::ui::print_command_intro_banner(
+        "🔨",
+        "Building",
+        &service,
+        "with crate2nix (per-crate caching enabled)",
     );
-    crate::ui::print_ascii_title_underline(50);
 
     // Pre-flight checks
     println!("🔍 {}", "Pre-flight checks...".bold());
@@ -878,13 +877,7 @@ pub async fn push_rust_service_with_tag(
         bail!("❌ Error: Build results not found\n   Run: nix run .#build");
     }
 
-    println!(
-        "📤 {} {} {}",
-        "Pushing".bold(),
-        service.cyan(),
-        "images to registries".dimmed()
-    );
-    crate::ui::print_ascii_title_underline(50);
+    crate::ui::print_command_intro_banner("📤", "Pushing", &service, "images to registries");
     println!("Registry: {}", registry);
     println!("Tag suffix: {}", tag_suffix);
     println!();
@@ -1871,13 +1864,7 @@ pub async fn deploy_rust_service_with_tag(
     // compositional inverse of `image_repository_and_tag`.
     let image_tag = crate::oci_manifest::image_reference(&registry, &tag_suffix);
 
-    println!(
-        "🎯 {} {} {}",
-        "Deploying".bold(),
-        service.cyan(),
-        "to Kubernetes".dimmed()
-    );
-    crate::ui::print_ascii_title_underline(50);
+    crate::ui::print_command_intro_banner("🎯", "Deploying", &service, "to Kubernetes");
     println!("Namespace: {}", namespace);
     println!("Image: {}", image_tag);
     println!("Manifest: {}", manifest);
