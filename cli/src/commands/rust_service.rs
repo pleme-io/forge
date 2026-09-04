@@ -2001,24 +2001,24 @@ async fn print_deployment_report(
     );
     println!();
 
-    println!("  {} Docker Image", "✓".green());
+    crate::ui::print_report_item("Docker Image");
     println!("    • Built with crate2nix (per-crate Attic caching)");
     println!("    • Pushed to GHCR: {}", deploy_config.registry_url());
     println!("    • Tag: {}", tag_suffix);
     println!();
 
-    println!("  {} GitOps Deployment", "✓".green());
+    crate::ui::print_report_item("GitOps Deployment");
     println!("    • Manifest updated with new image tag");
     println!("    • Changes committed to git (main branch)");
     println!("    • Pushed to remote repository");
     println!();
 
-    println!("  {} Database Migrations", "✓".green());
+    crate::ui::print_report_item("Database Migrations");
     println!("    • Migration job completed successfully");
     println!("    • Schema is up to date");
     println!();
 
-    println!("  {} GraphQL Federation", "✓".green());
+    crate::ui::print_report_item("GraphQL Federation");
     println!("    • Schema extracted from Rust code");
     println!("    • Supergraph composed with Rover (Federation v2.11.3)");
     println!("    • Hive Router deployment updated with hash");
@@ -2289,10 +2289,7 @@ async fn print_deployment_report(
     println!("{}", "━".repeat(80).bright_blue());
     println!();
 
-    println!(
-        "  {} All build and GitOps operations completed successfully",
-        "✓".green()
-    );
+    crate::ui::print_report_item("All build and GitOps operations completed successfully");
     println!(
         "  {} Flux will deploy the new pod in 30-60 seconds",
         "⏳".yellow()
