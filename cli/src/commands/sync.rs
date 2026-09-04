@@ -348,11 +348,11 @@ pub async fn execute(working_dir: &Path, skip_entities: bool) -> Result<SyncResu
         if metadata.len() > 0 {
             crate::ui::print_step_check(&format!("schema.graphql ({} bytes)", metadata.len()));
         } else {
-            println!("   {} schema.graphql missing or empty", "✗".red());
+            crate::ui::print_step_uncheck("schema.graphql missing or empty");
             errors.push("schema.graphql missing or empty".to_string());
         }
     } else {
-        println!("   {} schema.graphql missing", "✗".red());
+        crate::ui::print_step_uncheck("schema.graphql missing");
         errors.push("schema.graphql missing".to_string());
     }
 
@@ -362,7 +362,7 @@ pub async fn execute(working_dir: &Path, skip_entities: bool) -> Result<SyncResu
         let file_count = count_ts_files(&gql_dir).await;
         crate::ui::print_step_check(&format!("src/gql/ ({} TypeScript files)", file_count));
     } else {
-        println!("   {} src/gql/ directory missing", "✗".red());
+        crate::ui::print_step_uncheck("src/gql/ directory missing");
         errors.push("src/gql/ directory missing".to_string());
     }
 

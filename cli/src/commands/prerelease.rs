@@ -273,7 +273,7 @@ impl GateSummary {
             println!();
             println!("{} Failed ({}):", "❌".red(), self.failed.len());
             for gate in &self.failed {
-                println!("   {} {}", "✗".red(), gate);
+                crate::ui::print_step_uncheck(gate);
                 // Print detailed issues for this gate if available
                 for (detail_gate, details) in &self.failed_details {
                     if gate.starts_with(detail_gate.as_str()) {

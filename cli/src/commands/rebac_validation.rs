@@ -678,7 +678,7 @@ fn log_error(
     check: &str,
     message: &str,
 ) {
-    println!("   {} {}", "✗".red(), message);
+    crate::ui::print_step_uncheck(message);
     result.errors += 1;
     result.messages.push(ValidationMessage {
         level: ValidationLevel::Error,
