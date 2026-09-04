@@ -1688,6 +1688,135 @@ pub fn write_nonfatal_warn<W: std::io::Write>(
     )
 }
 
+/// Prints the single `   ⚠️  <msg>: <err>` (three-space indent + UNCOLORED
+/// `⚠️` emoji glyph + two spaces + caller-supplied message + literal `: `
+/// connective + [`std::fmt::Display`]-formatted error tail) stderr-routed
+/// step-warn-with-error grammar 6 pre-lift consumer sites spelled inline
+/// as `eprintln!("   ⚠️  <msg>: {}", <err>)` across
+/// `commands/rust_service.rs` (×4 non-fatal Attic closure-push /
+/// `path-info-recursive` branches inside the crate2nix build orchestrator
+/// where a cache miss must NOT abort the release) and
+/// `commands/federation_tests.rs` (×2 could-not-fetch-job-logs branches
+/// on the Kubernetes-side diagnostic gather-up path).
+///
+/// # Distinct from every peer `ui::*` primitive
+///
+/// [`print_step_warn`] shares the three-space indent and the `⚠️` glyph
+/// but wears a `.yellow()`-COLORED glyph, routes through STDOUT (not
+/// stderr), carries a plain message with NO error tail and NO fixed `: `
+/// connective — its consumer sites mark an in-body irregularity mid-
+/// pipeline drawn to attention with a self-contained sentence, NOT a
+/// non-fatal caught-error with an interpolated `Display` cause. This
+/// primitive is the stderr sibling with a mandatory error tail.
+///
+/// [`print_nonfatal_warn`] shares the stderr routing and the mandatory
+/// error tail but wears the `"WARN".yellow()` ASCII TEXT prefix
+/// (specifically NOT the `⚠️` emoji glyph), enforces the fixed
+/// `<label> failed (non-fatal): <err>` template with the ` failed
+/// (non-fatal): ` connective spelled once inside the primitive, and
+/// consumer sites carry only a static verb-phrase label — not a full
+/// caller-composed sentence that may or may not carry a `(non-fatal)`
+/// annotation of its own. This primitive is the emoji-glyph sibling
+/// with a caller-composed message body: the ` failed (non-fatal): `
+/// grammar is not part of its contract; when a caller wants that
+/// connective it spells it inside the message.
+///
+/// # UNCOLORED `⚠️` glyph, not `.yellow()`
+///
+/// Pre-lift every consumer spelled the marker as the bare `⚠️` glyph
+/// inside the format string literal, with NO `.yellow()` styling applied
+/// — distinct from [`print_step_warn`]'s `.yellow()`-colored `⚠️`. A
+/// terminal-log inspector, a downstream `grep`-in-logs pipeline, or a
+/// CI-log renderer without `\x1b[33m` interpretation renders the pre-lift
+/// bytes verbatim; the primitive preserves that byte contract. A future
+/// palette adjustment (promoting to `.yellow()` for visual consistency
+/// with the [`print_step_warn`] sibling, promoting to `.bright_yellow()`
+/// under a milestone grammar, or switching to `"WARN".yellow()` to fold
+/// into the [`print_nonfatal_warn`] template) hits ONE typed body rather
+/// than 6 sites.
+///
+/// # stderr, not stdout
+///
+/// Every pre-lift consumer routed through `eprintln!` (stderr), not
+/// `println!` (stdout). The primitive preserves that routing: the
+/// stdout/stderr stream is an observable behavior contract (a downstream
+/// consumer piping stdout while leaving stderr on the terminal, a
+/// log-shipper tagging streams differently) and folding this class into
+/// a stdout primitive would silently shift these in-body non-fatal
+/// caught-error warnings out of the stderr channel operators pipe
+/// separately to alerts.
+///
+/// # Mandatory error tail
+///
+/// The signature takes `err: &dyn std::fmt::Display` rather than folding
+/// it into `msg` — every pre-lift consumer bound its `e` (an
+/// [`anyhow::Error`] at the closure-push failure boundary) or a
+/// [`std::borrow::Cow`] over the pod's stderr bytes (rendered through
+/// [`crate::repo::utf8_lossy_borrow`]) at the failure boundary and
+/// interpolated it after a literal `: ` connective. The primitive
+/// splits the message (the caller's composed sentence, which may itself
+/// carry a `(non-fatal)` parenthetical) from the runtime error state so
+/// the `: ` connective lives ONCE in the primitive body rather than
+/// being spelled by each caller.
+///
+/// # Compounding
+///
+/// Pre-lift 6 sibling sites each restated the `eprintln!("   ⚠️  <msg>:
+/// {}", <err>)` grammar verbatim, with the three-space indent, the `⚠️`
+/// emoji glyph, the two spaces after the glyph, the `: ` connective, the
+/// stderr routing, and the `Display`-formatted error tail all spelled
+/// inline. A future adjustment — routing them through
+/// `tracing::warn!(target: "forge::pipeline", ...)` for structured
+/// observability so a downstream OTLP subscriber can count in-body
+/// non-fatal caught-errors per pipeline stage, promoting the glyph to
+/// `.yellow()` under a palette-consistency grammar, shifting the `: `
+/// connective to `" — "`, promoting to `.yellow().bold()` under a
+/// lower-contrast-terminal grammar — had to hit 6 sites in lockstep or
+/// drift the surface. Post-lift the glyph, connective, and destination
+/// stream live in ONE writer body; the sites carry only the (msg, err)
+/// pair. Delegates to [`write_eprint_step_warn`] against
+/// [`std::io::stderr`]; the writer split exists so the fail-before-pass
+/// test can pin the one-line body, the three-space indent, the `⚠️`
+/// glyph (never `WARN` text — that grammar belongs to
+/// [`write_nonfatal_warn`]), the two-space post-glyph gap, the `: `
+/// connective, and the trailing error interpolation by inspecting
+/// emitted bytes rather than shelling out and grepping stderr.
+///
+/// `#[allow(dead_code)]` mirrors the pre-existing baseline flags on
+/// every consumer function that carries a call site — `build_rust_service`
+/// (holds ×4 sites) and `wait_for_job_completion` /
+/// `run_federation_tests` (hold ×2 sites) are all dead-code-flagged
+/// under `cargo clippy --all-targets` on the main `forge` bin target
+/// because clippy's cross-module reachability does not trace the CLI
+/// dispatch table, so a primitive called ONLY from dead-flagged
+/// consumers is itself flagged; the allowance closes that
+/// baseline-inherited noise without hiding a real dead-code find.
+#[allow(dead_code)]
+pub fn eprint_step_warn(msg: &str, err: &dyn std::fmt::Display) {
+    let _ = write_eprint_step_warn(&mut std::io::stderr().lock(), msg, err);
+}
+
+/// Writer-taking sibling to [`eprint_step_warn`]. Emits the single
+/// `   ⚠️  <msg>: <err>` line via [`writeln!`] against the supplied
+/// writer. [`eprint_step_warn`] is the stderr adapter; this variant
+/// exists so tests can pin the one-line body, the three-space indent,
+/// the UNCOLORED `⚠️` emoji glyph, the two-space post-glyph gap, the
+/// `: ` connective, and the trailing error interpolation without
+/// capturing stderr.
+///
+/// `#[allow(dead_code)]` mirrors the sibling on [`eprint_step_warn`]:
+/// this writer's only production caller is the [`eprint_step_warn`]
+/// stdout adapter, whose own dead-code-flagged consumers propagate the
+/// flag transitively through the delegation chain.
+#[allow(dead_code)]
+pub fn write_eprint_step_warn<W: std::io::Write>(
+    w: &mut W,
+    msg: &str,
+    err: &dyn std::fmt::Display,
+) -> std::io::Result<()> {
+    writeln!(w, "   ⚠️  {}: {}", msg, err)
+}
+
 /// Prints the single `   <○.yellow()> <message>` line 5 pre-lift
 /// consumer sites spelled inline as `println!("   {} <fmt>",
 /// "○".yellow(), <args>)`. Peer to [`print_step_pass`] (`✅.green()` /
@@ -6602,6 +6731,239 @@ mod tests {
                  back to inline `println!`s or that adds a caller \
                  without extending this shield's expected count fails \
                  here. Found {forward_hits} forwarding hits."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_eprint_step_warn`].
+    /// Pins the one-line body every pre-lift consumer spelled verbatim
+    /// (`eprintln!("   ⚠️  <msg>: {}", <err>)`): a three-space indent,
+    /// the UNCOLORED `⚠️` emoji glyph (NOT the `.yellow()`-colored
+    /// variant the [`super::print_step_warn`] sibling wears, NOT the
+    /// `WARN` ASCII text prefix the [`super::print_nonfatal_warn`]
+    /// sibling wears), a two-space post-glyph gap, the caller's message
+    /// interpolated verbatim, the literal `: ` connective, and the
+    /// [`std::fmt::Display`]-formatted error tail. A silent contract
+    /// drift a future rewrite might introduce — dropping the
+    /// three-space indent, collapsing the two-space post-glyph gap to a
+    /// single space (which crashes the glyph into the message on
+    /// emoji-width-1 terminals), promoting the glyph to `.yellow()`
+    /// (which slips `\x1b[33m` into the byte stream the pre-lift
+    /// `eprintln!`s did not emit and collapses the visual distinction
+    /// from the [`super::print_step_warn`] sibling), swapping the `⚠️`
+    /// glyph for `WARN` (which collapses the visual distinction from
+    /// the [`super::print_nonfatal_warn`] sibling), reflowing the `: `
+    /// connective to `" - "` or `" — "`, slipping a trailing blank
+    /// line into the primitive body — flips this assertion rather than
+    /// compiling and silently diverging the 6 consumer sites' visual
+    /// grammar.
+    #[test]
+    fn write_eprint_step_warn_emits_exactly_one_warn_glyph_prefixed_line_with_error_tail() {
+        // Force ANSI emission (colored auto-drops sequences on a
+        // non-tty writer) and serialize against peer banner tests via
+        // [`AnsiOverrideForTest`]; its Drop restores colored's
+        // auto-detection on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`]. The override being ON is what pins
+        // the "NO `\x1b[33m` present" assertion below as meaningful —
+        // if coloring were applied to the glyph, colored WOULD emit
+        // `\x1b[33m` under the override.
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        // A plain `&str` witnesses the `&dyn Display` — `anyhow::Error`,
+        // [`std::borrow::Cow<str>`], and every other pre-lift
+        // consumer's `Display` type reach the writer through the same
+        // trait object.
+        super::write_eprint_step_warn(&mut buf, "Could not fetch logs", &"connection refused")
+            .expect("write_eprint_step_warn against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_eprint_step_warn must emit valid UTF-8 (the pre-lift eprintln!s did)");
+
+        // Exactly one line — the pre-lift stanza is one `eprintln!`,
+        // not two, and carries no framing blank. A refactor that slips
+        // a leading or trailing blank into the primitive body fails
+        // here.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_eprint_step_warn must emit exactly one line — the \
+             pre-lift stanza is one `eprintln!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The three-space indent reaches the rendered line before the
+        // glyph — a fusion that dropped the indent (a "tighter body
+        // spacing" cleanup) or shifted to four spaces (to match the
+        // `commands/rust_service.rs` four-space bullet-decorated
+        // sibling grammar) fails here.
+        assert!(
+            lines[0].starts_with("   \u{26a0}"),
+            "line 0 must begin with a three-space indent followed by \
+             the `⚠️` glyph (U+26A0) — every pre-lift consumer spelled \
+             `\"   ⚠️  <msg>: {{}}\"` verbatim; got {:?}",
+            lines[0]
+        );
+
+        // The `⚠️` grapheme is the base warning-sign codepoint U+26A0
+        // FOLLOWED by the U+FE0F emoji variation selector — pre-lift
+        // consumers spelled the full six-byte UTF-8 sequence
+        // (`\xE2\x9A\xA0\xEF\xB8\x8F`) in the format string literal. A
+        // fusion that dropped the variation selector (which some
+        // terminals need to render the emoji form rather than the
+        // text-presentation dingbat) fails here.
+        assert!(
+            lines[0].contains("\u{26a0}\u{fe0f}"),
+            "line 0 must carry the `⚠️` grapheme with its U+FE0F emoji \
+             variation selector — every pre-lift `eprintln!` literal \
+             carried both codepoints; dropping the VS15/VS16 selector \
+             flips the rendered grapheme from an emoji to a \
+             text-presentation dingbat on emoji-capable terminals; got \
+             {:?}",
+            lines[0]
+        );
+
+        // The two-space post-glyph gap — pre-lift consumers spelled
+        // `⚠️` + two literal spaces (the `⚠️` glyph is a wide
+        // combining sequence on some terminals but narrow on others;
+        // two spaces guarantees a visible gap in both). A fusion that
+        // collapsed to one space fails here.
+        assert!(
+            lines[0].contains("\u{26a0}\u{fe0f}  Could not fetch logs"),
+            "line 0 must carry the two-space post-glyph gap between \
+             `⚠️` and the message — every pre-lift consumer spelled it \
+             verbatim; got {:?}",
+            lines[0]
+        );
+
+        // The `⚠️` emoji glyph is present and the `WARN` ASCII text is
+        // NOT — a fusion that swapped the glyph for `WARN` (which
+        // would collapse this primitive into the sibling
+        // `write_nonfatal_warn`) fails here.
+        assert!(
+            !lines[0].contains("WARN"),
+            "line 0 must NOT contain the `WARN` ASCII text prefix — \
+             that prefix belongs to the sibling `write_nonfatal_warn` \
+             primitive (stderr + `\"WARN\".yellow()` prefix + `<label> \
+             failed (non-fatal): <err>` template); this primitive \
+             wears the emoji-glyph grammar with a caller-composed \
+             message body; got {:?}",
+            lines[0]
+        );
+
+        // The literal `: ` connective reaches the rendered line — a
+        // fusion that reflowed it to `" — "` or dropped the space
+        // after the colon fails here.
+        assert!(
+            lines[0].contains("Could not fetch logs: connection refused"),
+            "line 0 must carry the literal `: ` connective between the \
+             message and the error tail — every pre-lift consumer \
+             spelled it verbatim; got {:?}",
+            lines[0]
+        );
+
+        // NO `\x1b[33m` yellow ANSI sequence — pre-lift consumers
+        // spelled the `⚠️` glyph as a bare literal in the format
+        // string, never `.yellow()`-wrapped. A fusion that promoted
+        // the glyph to `.yellow()` (a "match the print_step_warn
+        // sibling's palette" cleanup) fails here. The colored override
+        // is forced ON for this test — colored coloring, when applied,
+        // WOULD emit `\x1b[33m` under the override — so the absence of
+        // that sequence pins the uncolored contract.
+        assert!(
+            !lines[0].contains("\x1b[33m"),
+            "line 0 must NOT carry the `yellow` ANSI sequence \
+             (`\\x1b[33m`) — every pre-lift consumer spelled the `⚠️` \
+             glyph as a bare literal, never `.yellow()`-wrapped; a \
+             promotion to `.yellow()` would collapse the visual \
+             distinction from the sibling `print_step_warn` primitive \
+             whose ONLY difference here is the coloring; got {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `eprintln!` (not `eprint!`), so the newline is part of the
+        // contract. A fusion that swapped `writeln!` for `write!`
+        // fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_eprint_step_warn must emit a trailing `\\n` (the \
+             pre-lift `eprintln!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::eprint_step_warn`] no longer spell the
+    /// `eprintln!("   ⚠️  <msg>: {}", <err>)` shape inline. Structural
+    /// regression shield — without it, a future refactor could
+    /// silently re-inline the stanza (a "just call `eprintln!`
+    /// directly, it's shorter" cleanup) and reopen the 6-site
+    /// duplication class this lift closed. Enforced on the module body
+    /// before its `#[cfg(test)]` region so a test-support mention of
+    /// the raw shape does not defeat the shield.
+    ///
+    /// The exact-shape needle is the pre-lift prefix `eprintln!("   ⚠`
+    /// (three-space-indented stderr `eprintln!` opening the format
+    /// string with the `⚠` warning-sign codepoint). The
+    /// `commands/rust_service.rs:1653` sibling that spells
+    /// `eprintln!("⚠️  Failed to clean up temp k8s repo: {}", e)` with
+    /// NO leading indent is a distinct visual grammar (top-level
+    /// warning, not in-body pipeline step) and is not in scope for
+    /// this lift; its zero-indent shape does not match the needle.
+    #[test]
+    fn eprint_step_warn_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[
+            (
+                include_str!("commands/rust_service.rs"),
+                "commands/rust_service.rs",
+            ),
+            (
+                include_str!("commands/federation_tests.rs"),
+                "commands/federation_tests.rs",
+            ),
+        ];
+        // No known non-`eprint_step_warn` sites carry the three-space-
+        // indented `⚠️` stderr shape under a different grammar: the
+        // source-wide grep before the lift returned exactly 6 hits (4
+        // in rust_service.rs, 2 in federation_tests.rs) and every one
+        // migrated onto the primitive. Kept as an allowlist for
+        // future-proofing — a peer stderr-routed `⚠️`-prefixed sibling
+        // on a distinct grammar (e.g. a diagnostic-block header with
+        // no error tail) would land here, be flagged by the shield,
+        // and either enroll in a new peer primitive or add an
+        // anchoring substring to this list.
+        const ALLOWLIST_SUBSTRINGS: &[&str] = &[];
+        for (source, module_path) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("eprintln!(\"   \u{26a0}") {
+                    continue;
+                }
+                if ALLOWLIST_SUBSTRINGS.iter().any(|s| line.contains(s)) {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `eprintln!(\"   ⚠️  <msg>: {{}}\", <err>)` \
+                     stderr-routed step-warn stanza — that shape was \
+                     lifted onto `crate::ui::eprint_step_warn`. A \
+                     re-inline would silently reopen the 6-site \
+                     duplication class this shield exists to close. \
+                     Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            assert!(
+                body.contains("crate::ui::eprint_step_warn("),
+                "{module_path} body must forward to \
+                 `crate::ui::eprint_step_warn(<msg>, &<err>)` — the \
+                 primitive body every three-space-indented `⚠️` \
+                 stderr-routed step-warn-with-error in the crate now \
+                 delegates through."
             );
         }
     }
