@@ -131,7 +131,7 @@ async fn run_sync_direct(config_path: &Path, config: &NovaSearchConfig) -> Resul
 
     match result {
         Ok(Ok(())) => {
-            println!("  {} Search sync completed successfully", "✓".green());
+            crate::ui::print_report_item("Search sync completed successfully");
             Ok(())
         }
         Ok(Err(e)) => Err(e),
@@ -259,7 +259,7 @@ async fn run_sync_via_kubectl(
 
     match result {
         Ok(Ok(())) => {
-            println!("  {} Search sync completed successfully", "✓".green());
+            crate::ui::print_report_item("Search sync completed successfully");
             Ok(())
         }
         Ok(Err(e)) => Err(e),

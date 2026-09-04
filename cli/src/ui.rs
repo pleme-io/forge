@@ -1375,6 +1375,92 @@ pub fn write_step_check<W: std::io::Write>(w: &mut W, message: &str) -> std::io:
     writeln!(w, "   {} {}", "✓".green(), message)
 }
 
+/// Prints the one-line `"  {} <message>"` (two-space indent + green
+/// `✓` thin-checkmark glyph + plain message) wider-body
+/// summary-check grammar 7 pre-lift consumer sites spelled inline as
+/// `println!("  {} <fmt>", "✓".green())` across 2 command modules
+/// (`commands/{rust_service (×5), search_sync (×2)}.rs`). Marks a
+/// summary-level completion tick inside a `📋 SUMMARY` /
+/// `📊 DEPLOYMENT REPORT` report block, or the terminal "operation
+/// completed successfully" line of a self-contained sync task — the
+/// exact-shape wider-body sibling to [`print_step_check`]'s
+/// three-space in-body sub-check grammar.
+///
+/// # Distinct from [`print_step_check`]
+///
+/// Both wear the `.green()` palette (same `\x1b[32m` ANSI sequence)
+/// on a `.green()`-colored `✓` glyph followed by a plain message, but
+/// they carry DIFFERENT indent widths (two-space vs three-space) and
+/// different semantic layers: a step-check marks a sub-item inside a
+/// step's readout (one entry in a per-file list, one row in a batch
+/// summary) under the three-space in-body grammar every step-level
+/// primitive in this module shares; a report-item marks a
+/// summary-level completion tick one indent scope OUTSIDE the in-body
+/// step grammar — the wider two-space indent puts it at the same
+/// visual level as [`print_report_section_subheader`] rows. The two
+/// primitives coexist rather than one subsuming the other because the
+/// visual grammars an operator has been trained to read differ —
+/// three-space `✓` marks one item in a list under an in-body step,
+/// two-space `✓` marks one row in a report or summary block one scope
+/// up. `commands/rust_service.rs::print_deployment_report` spells the
+/// two-space `✓.green()` REPORT-ITEM grammar for four completed
+/// milestones inside the same function that later spells other
+/// in-body step primitives deliberately.
+///
+/// # Distinct from the `.bright_green()` sibling grammar
+///
+/// `commands/workspace_deps.rs` carries two `"✓".bright_green()` sites
+/// under a THREE-space indent (`"   {} {} - dist/ up-to-date"` /
+/// `"   {} {} built successfully"`) that this primitive deliberately
+/// does NOT enroll: the `\x1b[92m` bright-green palette and the
+/// three-space indent together form a distinct per-workspace-package
+/// build-tick grammar, and folding those two sites into this
+/// primitive's `\x1b[32m` two-space body would drift their visual
+/// grammar. Those sites stay unlifted by design.
+///
+/// # `.green()` on the glyph, plain on the message
+///
+/// Pre-lift every consumer spelled the coloring as `"✓".green()` on
+/// the GLYPH alone, never on the composed line (`format!("  ✓ {}",
+/// msg).green()`). The primitive preserves that split: the
+/// `\x1b[32m` green ANSI sequence wraps the glyph, the message
+/// reaches the writer uncolored, and the two-space indent is emitted
+/// OUTSIDE both spans — so a terminal without color renders
+/// `  ✓ <msg>` legibly.
+///
+/// # Compounding
+///
+/// Pre-lift 7 sibling sites each restated the `println!("  {} <fmt>",
+/// "✓".green())` grammar verbatim, with the two-space indent, the
+/// `✓` thin-checkmark glyph, the `.green()` coloring on the glyph,
+/// and the plain-message tail all spelled inline. A future palette
+/// adjustment (a swap of `✓ ` for `[OK] ` under a CI-log-friendly
+/// grammar, a promotion of `.green()` to `.bright_green()` collapsing
+/// the report-item vs `workspace_deps.rs` sibling distinction, an
+/// OTLP `report_item_completed` observability event wired alongside
+/// the print, a shift of the two-space indent to zero or four spaces
+/// under a standardized report-indent) had to hit 7 sites in lockstep
+/// or drift the visual grammar; post-lift it hits ONE typed body.
+/// Delegates to [`write_report_item`] against [`std::io::stdout()`];
+/// the writer split exists so the fail-before-pass test can pin the
+/// one-line body, the two-space indent, the `✓` glyph, and the
+/// `\x1b[32m` green ANSI palette contract by inspecting emitted bytes
+/// rather than shelling out and grepping stdout.
+pub fn print_report_item(message: &str) {
+    let _ = write_report_item(&mut std::io::stdout().lock(), message);
+}
+
+/// Writer-taking sibling to [`print_report_item`]. Emits the single
+/// `  <✓.green()> <message>` line via [`writeln!`] against the
+/// supplied writer. [`print_report_item`] is the stdout adapter; this
+/// variant exists so tests can pin the one-line body, the two-space
+/// indent, the `✓` thin-checkmark glyph, and the `\x1b[32m` green
+/// ANSI sequence around the glyph (never the message) without
+/// capturing stdout.
+pub fn write_report_item<W: std::io::Write>(w: &mut W, message: &str) -> std::io::Result<()> {
+    writeln!(w, "  {} {}", "✓".green(), message)
+}
+
 /// Prints the one-line `"   {} <message>"` (three-space indent + yellow
 /// `⚠️` glyph + plain message) in-body step-warning grammar 5 pre-lift
 /// consumer sites spelled inline as `println!("   {} <fmt>",
@@ -4558,12 +4644,16 @@ mod tests {
     /// under DIFFERENT grammars are left in place and NOT enrolled
     /// below (the needle would still match them, so the file is
     /// excluded from `CALLERS` rather than allowlisted): the two-space
-    /// indent siblings in `commands/rust_service.rs:1999,2005,2011,2016,2074`
-    /// (`"  {}"` — a distinct wider-body summary grammar, not the
-    /// three-space in-body sub-check this primitive lifts) and
-    /// `commands/rust_service.rs:2281` (a two-space indent inside a
-    /// wider summary block); the two-space-indent siblings in
-    /// `commands/search_sync.rs:134,262` (`"  {}"`). The
+    /// indent wider-body summary sites in `commands/rust_service.rs`
+    /// and `commands/search_sync.rs` (`"  {}"` — a distinct
+    /// wider-body summary grammar, not the three-space in-body
+    /// sub-check this primitive lifts) now delegate through the
+    /// sibling [`super::print_report_item`] primitive, and their own
+    /// shield ([`print_report_item_callers_delegate_through_primitive`])
+    /// pins that migration; the four-space bullet-decorated
+    /// `commands/rust_service.rs` `"    • {} New image is already
+    /// deployed!"` waiting-marker sibling wears its own grammar and
+    /// is allowlisted inside the report-item shield. The
     /// `commands/workspace_deps.rs:102,289` `"✓".bright_green()` sites
     /// carry a different palette so the exact-shape needle does not
     /// match them at all — no exclusion needed for that file. This
@@ -4626,6 +4716,208 @@ mod tests {
                  `crate::ui::print_step_check(\"<MSG>\")` — the \
                  primitive body every three-space-indented `✓.green()` \
                  in-body step-check in the crate now delegates \
+                 through."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_report_item`].
+    /// Pins the one-line body every pre-lift consumer spelled
+    /// verbatim (`println!("  {} <fmt>", "✓".green())`): a two-space
+    /// indent, a `.green()`-colored `✓` thin-checkmark glyph, a
+    /// single space, then the plain (uncolored) message. A silent
+    /// contract drift a future rewrite might introduce — widening
+    /// the indent to three-space (collapsing the wider-body summary
+    /// grammar into the sibling [`super::print_step_check`] in-body
+    /// sub-check grammar), promoting the whole line's coloring
+    /// (`format!("  ✓ {}", msg).green()`) so the message text paints
+    /// green at every site, swapping `✓ ` for `[OK] ` under a
+    /// CI-log-friendly grammar, promoting `.green()` to
+    /// `.bright_green()` (`\x1b[92m` — colliding with the
+    /// `commands/workspace_deps.rs` sibling grammar this primitive
+    /// deliberately does NOT enroll), swapping `✓` for `✅`
+    /// (collapsing this two-space report-item primitive into a
+    /// wider-body variant of [`super::print_step_pass`]), slipping a
+    /// trailing blank line into the primitive body — flips this
+    /// assertion rather than compiling and silently diverging the 7
+    /// consumer sites' visual grammar.
+    #[test]
+    fn write_report_item_emits_exactly_one_check_prefixed_two_indented_line() {
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_report_item(&mut buf, "Docker Image")
+            .expect("write_report_item against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_report_item must emit valid UTF-8 (the pre-lift println!s did)");
+
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_report_item must emit exactly one line — the \
+             pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // Two-space indent, NOT three-space (which is the sibling
+        // `print_step_check` in-body sub-check grammar).
+        assert!(
+            lines[0].starts_with("  "),
+            "line 0 must begin with a two-space indent — every \
+             pre-lift consumer spelled `\"  {{}} <fmt>\"` verbatim, \
+             so the indent must reach the writer OUTSIDE the coloring \
+             span; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].starts_with("   "),
+            "line 0 must NOT begin with a three-space indent — that \
+             indent belongs to the sibling `print_step_check` in-body \
+             sub-check grammar, not this wider-body report-item \
+             grammar; got {:?}",
+            lines[0]
+        );
+
+        // The `✓` thin-checkmark glyph reaches the rendered line —
+        // NOT the heavier `✅` (which is the sibling
+        // `print_step_pass` grammar for full step results).
+        assert!(
+            lines[0].contains('✓'),
+            "line 0 must contain the `✓` thin-checkmark glyph; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('✅'),
+            "line 0 must NOT contain the heavier `✅` glyph — that \
+             glyph belongs to the sibling `print_step_pass` \
+             primitive for full step results, not this report-item \
+             primitive; got {:?}",
+            lines[0]
+        );
+
+        // The message text reaches the rendered line verbatim.
+        assert!(
+            lines[0].contains("Docker Image"),
+            "line 0 must carry the message verbatim; got {:?}",
+            lines[0]
+        );
+
+        // The `green` ANSI sequence — NOT `bright_green` (which is
+        // the distinct `commands/workspace_deps.rs` sibling grammar).
+        assert!(
+            lines[0].contains("\x1b[32m"),
+            "line 0 must carry the `green` ANSI sequence (`\\x1b[32m`); \
+             got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[92m"),
+            "line 0 must NOT carry the `bright_green` ANSI sequence \
+             (`\\x1b[92m`) — that palette belongs to the distinct \
+             `commands/workspace_deps.rs` sibling grammar, not this \
+             report-item primitive; got {:?}",
+            lines[0]
+        );
+
+        // The `.green()` coloring wraps the GLYPH alone, never the
+        // message text — the `\x1b[0m` reset must close the green
+        // span BEFORE the message begins.
+        let glyph_pos = lines[0].find('✓').expect("glyph must be present");
+        let reset_pos = lines[0]
+            .find("\x1b[0m")
+            .expect("reset must be present after the glyph");
+        let msg_pos = lines[0]
+            .find("Docker Image")
+            .expect("message must be present");
+        assert!(
+            glyph_pos < reset_pos && reset_pos < msg_pos,
+            "the `\\x1b[0m` reset must close the green span BEFORE the \
+             message begins — every pre-lift consumer spelled \
+             `.green()` on the `✓` glyph alone, never on the message. \
+             Got positions glyph={glyph_pos}, reset={reset_pos}, \
+             msg={msg_pos} in line {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza
+        // used `println!`, so the newline is part of the contract.
+        assert!(
+            out.ends_with('\n'),
+            "write_report_item must emit a trailing `\\n` (the \
+             pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_report_item`] no longer spell the
+    /// `println!("  {} <fmt>", "✓".green())` shape inline. Structural
+    /// regression shield — without it, a future refactor could
+    /// silently re-inline the one-liner (e.g. a "just call `println!`
+    /// directly, it's shorter" cleanup) and reopen the 7-site
+    /// duplication class this lift closed. Enforced at the module
+    /// bodies before their `#[cfg(test)]` regions so a test-support
+    /// mention of the raw shape does not defeat the shield.
+    ///
+    /// The exact-shape needle is `"✓".green()` appearing anywhere in
+    /// the module body. Non-report-item `"✓".green()` sites that live
+    /// under DIFFERENT grammars are allowlisted below: the four-space
+    /// bullet-decorated `commands/rust_service.rs` `"    • {} New
+    /// image is already deployed!"` line wears a distinct
+    /// waiting-marker grammar (four-space indent + bullet ornament +
+    /// baked-in message), not the two-space report-item this
+    /// primitive lifts. The `commands/workspace_deps.rs` two
+    /// `"✓".bright_green()` sites carry a different palette so the
+    /// exact-shape needle does not match them at all — no exclusion
+    /// needed for that file, and it is NOT enrolled here.
+    #[test]
+    fn print_report_item_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[
+            (
+                include_str!("commands/rust_service.rs"),
+                "commands/rust_service.rs",
+            ),
+            (
+                include_str!("commands/search_sync.rs"),
+                "commands/search_sync.rs",
+            ),
+        ];
+        // Four-space bullet-decorated `"    • {} New image is
+        // already deployed!"` in `commands/rust_service.rs` —
+        // distinct waiting-marker grammar with a four-space indent
+        // and a bullet ornament, not this primitive's two-space
+        // report-item shape.
+        const ALLOWLIST_SUBSTRINGS: &[&str] = &["• {} New image is already deployed!"];
+        for (source, module_path) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("\"✓\".green()") {
+                    continue;
+                }
+                if ALLOWLIST_SUBSTRINGS.iter().any(|s| line.contains(s)) {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `\"✓\".green()` two-space report-item marker — \
+                     that shape was lifted onto \
+                     `crate::ui::print_report_item`. A re-inline \
+                     would silently reopen the 7-site duplication \
+                     class this shield exists to close. Offending \
+                     line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            assert!(
+                body.contains("crate::ui::print_report_item("),
+                "{module_path} body must forward to \
+                 `crate::ui::print_report_item(\"<MSG>\")` — the \
+                 primitive body every two-space-indented `✓.green()` \
+                 wider-body report-item in the crate now delegates \
                  through."
             );
         }
