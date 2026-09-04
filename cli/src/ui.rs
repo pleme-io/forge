@@ -1461,6 +1461,82 @@ pub fn write_report_item<W: std::io::Write>(w: &mut W, message: &str) -> std::io
     writeln!(w, "  {} {}", "✓".green(), message)
 }
 
+/// Prints the one-line `"  {} <message>"` (two-space indent + yellow
+/// `⏳` hourglass glyph + plain message) wider-body pending-item
+/// grammar every pre-lift consumer spelled inline as
+/// `println!("  {} <literal>", "⏳".yellow())`. Marks a step that has
+/// been launched but has not yet observably completed — a pod rollout
+/// Flux is about to reconcile, a Hive Router restart the operator has
+/// to wait 30-60s for — the exact-shape peer of
+/// [`print_report_item`] on the two-space wider-body report-line
+/// grammar, one indent scope up from the three-space in-body
+/// [`print_step_pass`] / [`print_step_warn`] / [`print_step_failure`]
+/// step primitives.
+///
+/// # Distinct from the other `ui::print_*` primitives
+///
+/// [`print_report_item`] carries the two-space `✓.green()` completed-
+/// item row of a summary block — the peer this primitive lives beside
+/// on the same wider-body grammar but marking the OPPOSITE status
+/// (completed vs. still-pending). [`print_step_warn`] carries a
+/// three-space `⚠️.yellow()` in-body irregularity warning — one indent
+/// scope deeper AND a distinct glyph (warning triangle, not hourglass)
+/// AND a distinct semantic role (something went sideways, not
+/// something is still in flight). [`print_step_skip`] carries a
+/// three-space `○.yellow()` in-body skip marker — the same yellow
+/// palette but a distinct hollow-circle glyph, a distinct three-space
+/// indent, and a distinct semantic role (step was elided by config,
+/// not step is still in flight). Folding this primitive into any of
+/// the three would collapse the pending-vs-passed, pending-vs-warned,
+/// or pending-vs-skipped visual distinction at every site the
+/// operator has been trained to read.
+///
+/// # `.yellow()` on the glyph, plain on the message
+///
+/// Pre-lift every consumer spelled the coloring as `"⏳".yellow()` on
+/// the GLYPH alone, never on the composed line (`format!("  ⏳ {}",
+/// msg).yellow()`). The primitive preserves that split: the
+/// `\x1b[33m` yellow ANSI sequence wraps the glyph, the message
+/// reaches the writer uncolored, and the two-space indent is emitted
+/// OUTSIDE both spans — so a terminal without color renders
+/// `  ⏳ <msg>` legibly.
+///
+/// # Compounding
+///
+/// Pre-lift 6 sibling sites across `commands/rust_service.rs` (the
+/// `verify_deployment_status` waiting-block ×4 and the deployment-
+/// summary "Flux will deploy… / Hive Router will update…" tail ×2)
+/// each restated the `println!("  {} <literal>", "⏳".yellow())`
+/// grammar verbatim, with the two-space indent, the `⏳` hourglass
+/// glyph, and the `.yellow()` coloring on the glyph all spelled
+/// inline. A future palette adjustment (a swap of `⏳ ` for `[..] `
+/// under a CI-log-friendly grammar, a promotion of `.yellow()` to
+/// `.bright_yellow()` under a leaner step-vs-milestone distinction,
+/// an OTLP `step_pending` observability event wired alongside the
+/// print, a shift of the two-space indent to zero or four spaces
+/// under a standardized report-indent) had to hit 6 sites in
+/// lockstep or drift the visual grammar; post-lift it hits ONE typed
+/// body. Delegates to [`write_pending_item`] against
+/// [`std::io::stdout()`]; the writer split exists so the
+/// fail-before-pass test can pin the one-line body, the two-space
+/// indent, the `⏳` glyph, and the `\x1b[33m` yellow ANSI palette
+/// contract by inspecting emitted bytes rather than shelling out and
+/// grepping stdout.
+pub fn print_pending_item(message: &str) {
+    let _ = write_pending_item(&mut std::io::stdout().lock(), message);
+}
+
+/// Writer-taking sibling to [`print_pending_item`]. Emits the single
+/// `  <⏳.yellow()> <message>` line via [`writeln!`] against the
+/// supplied writer. [`print_pending_item`] is the stdout adapter;
+/// this variant exists so tests can pin the one-line body, the
+/// two-space indent, the `⏳` hourglass glyph, and the `\x1b[33m`
+/// yellow ANSI sequence around the glyph (never the message) without
+/// capturing stdout.
+pub fn write_pending_item<W: std::io::Write>(w: &mut W, message: &str) -> std::io::Result<()> {
+    writeln!(w, "  {} {}", "⏳".yellow(), message)
+}
+
 /// Prints the one-line `"   {} <message>"` (three-space indent + yellow
 /// `⚠️` glyph + plain message) in-body step-warning grammar 5 pre-lift
 /// consumer sites spelled inline as `println!("   {} <fmt>",
@@ -5048,6 +5124,190 @@ mod tests {
                  primitive body every two-space-indented `✓.green()` \
                  wider-body report-item in the crate now delegates \
                  through."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_pending_item`].
+    /// Pins the one-line body every pre-lift consumer spelled verbatim
+    /// (`println!("  {} <literal>", "⏳".yellow())`): a two-space
+    /// indent, a `.yellow()`-colored `⏳` glyph, a single space, then
+    /// the plain (uncolored) message. A silent contract drift a future
+    /// rewrite might introduce — dropping the two-space indent (a
+    /// "tighter body spacing" cleanup), promoting the whole line's
+    /// coloring (`format!("  ⏳ {}", msg).yellow()`) so the message
+    /// text paints yellow at every site, swapping `⏳` for `[..]`
+    /// under a CI-log-friendly grammar, swapping `⏳` for `○` under a
+    /// collapse with the sibling [`super::print_step_skip`] grammar,
+    /// promoting `.yellow()` to `.bright_yellow()` (`\x1b[93m` — the
+    /// milestone-level [`super::print_warning`] palette), slipping a
+    /// trailing blank line into the primitive body — flips this
+    /// assertion rather than compiling and silently diverging the 6
+    /// consumer sites' visual grammar.
+    #[test]
+    fn write_pending_item_emits_exactly_one_hourglass_prefixed_two_indented_line() {
+        // Force ANSI emission (colored auto-drops sequences on a
+        // non-tty stdout) and serialize against peer banner tests via
+        // [`AnsiOverrideForTest`]; its Drop restores colored's
+        // auto-detection on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`], closing the set-write-unset window
+        // without a manual [`colored::control::unset_override`] call a
+        // future test author could omit.
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_pending_item(&mut buf, "Service Pod Rollout")
+            .expect("write_pending_item against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_pending_item must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — the pre-lift stanza is one `println!`
+        // carrying no framing blank.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_pending_item must emit exactly one line — the \
+             pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // Two-space indent, NOT three-space (which is the sibling
+        // `print_step_skip` / `print_step_warn` in-body-step grammar).
+        assert!(
+            lines[0].starts_with("  "),
+            "line 0 must begin with a two-space indent — every \
+             pre-lift consumer spelled `\"  {{}} <literal>\"` \
+             verbatim, so the indent must reach the writer OUTSIDE \
+             the coloring span; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].starts_with("   "),
+            "line 0 must NOT begin with a three-space indent — that \
+             indent belongs to the sibling in-body `print_step_*` \
+             grammar, not this wider-body pending-item grammar; \
+             got {:?}",
+            lines[0]
+        );
+
+        // The `⏳` hourglass glyph reaches the rendered line — NOT
+        // `○` (the sibling `print_step_skip` grammar for elided
+        // steps) and NOT `⚠️` (the sibling `print_step_warn` grammar
+        // for non-fatal irregularities).
+        assert!(
+            lines[0].contains('⏳'),
+            "line 0 must contain the `⏳` hourglass glyph; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('○'),
+            "line 0 must NOT contain the `○` glyph — that glyph \
+             belongs to the sibling `print_step_skip` primitive for \
+             elided steps, not this in-flight pending-item primitive; \
+             got {:?}",
+            lines[0]
+        );
+
+        // The message text reaches the rendered line verbatim.
+        assert!(
+            lines[0].contains("Service Pod Rollout"),
+            "line 0 must carry the message verbatim; got {:?}",
+            lines[0]
+        );
+
+        // The `yellow` ANSI sequence — NOT `bright_yellow` (which is
+        // the distinct milestone-level `print_warning` palette).
+        assert!(
+            lines[0].contains("\x1b[33m"),
+            "line 0 must carry the `yellow` ANSI sequence \
+             (`\\x1b[33m`); got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[93m"),
+            "line 0 must NOT carry the `bright_yellow` ANSI sequence \
+             (`\\x1b[93m`) — that palette belongs to the distinct \
+             milestone-level `print_warning` grammar, not this \
+             pending-item primitive; got {:?}",
+            lines[0]
+        );
+
+        // The `.yellow()` coloring wraps the GLYPH alone, never the
+        // message text — the `\x1b[0m` reset must close the yellow
+        // span BEFORE the message begins.
+        let glyph_pos = lines[0].find('⏳').expect("glyph must be present");
+        let reset_pos = lines[0]
+            .find("\x1b[0m")
+            .expect("reset must be present after the glyph");
+        let msg_pos = lines[0]
+            .find("Service Pod Rollout")
+            .expect("message must be present");
+        assert!(
+            glyph_pos < reset_pos && reset_pos < msg_pos,
+            "the `\\x1b[0m` reset must close the yellow span BEFORE \
+             the message begins — every pre-lift consumer spelled \
+             `.yellow()` on the `⏳` glyph alone, never on the \
+             message. Got positions glyph={glyph_pos}, \
+             reset={reset_pos}, msg={msg_pos} in line {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `println!`, so the newline is part of the contract.
+        assert!(
+            out.ends_with('\n'),
+            "write_pending_item must emit a trailing `\\n` (the \
+             pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_pending_item`] no longer spell the
+    /// `println!("  {} <literal>", "⏳".yellow())` shape inline.
+    /// Structural regression shield — without it a future refactor
+    /// could silently re-inline the one-liner (e.g. a "just call
+    /// `println!` directly, it's shorter" cleanup) and reopen the
+    /// 6-site duplication class this lift closed. Enforced at the
+    /// module body BEFORE its `#[cfg(test)]` region so a test-support
+    /// mention of the raw shape does not defeat the shield.
+    ///
+    /// The exact-shape needle is `"⏳".yellow()` appearing anywhere in
+    /// the module body — no allowlist is required because every
+    /// pre-lift occurrence in the crate belonged to this class.
+    #[test]
+    fn print_pending_item_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[(
+            include_str!("commands/rust_service.rs"),
+            "commands/rust_service.rs",
+        )];
+        for (source, module_path) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("\"⏳\".yellow()") {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `\"⏳\".yellow()` two-space pending-item marker — \
+                     that shape was lifted onto \
+                     `crate::ui::print_pending_item`. A re-inline \
+                     would silently reopen the 6-site duplication \
+                     class this shield exists to close. Offending \
+                     line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            assert!(
+                body.contains("crate::ui::print_pending_item("),
+                "{module_path} body must forward to \
+                 `crate::ui::print_pending_item(\"<MSG>\")` — the \
+                 primitive body every two-space-indented `⏳.yellow()` \
+                 pending-item in the crate now delegates through."
             );
         }
     }
