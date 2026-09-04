@@ -1186,19 +1186,22 @@ async fn run_cargo_clippy(backend_dir: &Path) -> Result<bool> {
     let duration = start.elapsed();
 
     if output.status.success() {
-        crate::ui::print_step_pass(&format!(
-            "Clippy passed (0 warnings, {:.1}s)",
-            duration.as_secs_f64()
+        crate::ui::print_step_pass(&crate::repo::msg_with_count_noun_secs_1(
+            "Clippy passed",
+            0_usize,
+            "warnings",
+            duration,
         ));
         Ok(true)
     } else {
         let stderr = crate::repo::utf8_lossy_borrow(&output.stderr);
         let warning_count = stderr.matches("warning:").count();
 
-        crate::ui::print_step_failure(&format!(
-            "Clippy failed ({} warnings, {:.1}s)",
+        crate::ui::print_step_failure(&crate::repo::msg_with_count_noun_secs_1(
+            "Clippy failed",
             warning_count,
-            duration.as_secs_f64()
+            "warnings",
+            duration,
         ));
         // Show first few warnings
         for line in stderr.lines().take(10) {
@@ -1260,10 +1263,11 @@ async fn run_cargo_fmt_check(backend_dir: &Path) -> Result<bool> {
             .filter(|l| l.starts_with("Diff in"))
             .collect();
 
-        crate::ui::print_step_failure(&format!(
-            "Code formatting check failed after auto-fix ({} files, {:.1}s)",
+        crate::ui::print_step_failure(&crate::repo::msg_with_count_noun_secs_1(
+            "Code formatting check failed after auto-fix",
             unformatted_files.len(),
-            duration.as_secs_f64()
+            "files",
+            duration,
         ));
         for file in unformatted_files.iter().take(5) {
             println!("   {}", file);
@@ -1300,10 +1304,11 @@ async fn run_cargo_test(backend_dir: &Path) -> Result<bool> {
         });
 
     if output.status.success() {
-        crate::ui::print_step_pass(&format!(
-            "Tests passed ({} tests, {:.1}s)",
+        crate::ui::print_step_pass(&crate::repo::msg_with_count_noun_secs_1(
+            "Tests passed",
             test_count.unwrap_or(0),
-            duration.as_secs_f64()
+            "tests",
+            duration,
         ));
         Ok(true)
     } else {

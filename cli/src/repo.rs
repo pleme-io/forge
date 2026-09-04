@@ -3115,6 +3115,120 @@ pub fn msg_took_secs_1<M: std::fmt::Display>(msg: M, d: std::time::Duration) -> 
     format!("{} (took {:.1}s)", msg, d.as_secs_f64())
 }
 
+/// Interleaved-arg step-outcome peer of [`msg_with_secs_1`]: suffix a
+/// `msg` with the fleet-standard elapsed-time tag on the DISTINCT
+/// `<msg> ({count} {noun}, {:.1}s)` grammar — count / noun / seconds
+/// tuple in one parenthesized suffix, one decimal-place seconds,
+/// single-comma-single-space separators, no trailing content — and
+/// return the composed owned [`String`].
+///
+/// # What this closes
+///
+/// [`msg_with_secs_1`]'s "Non-goals" section (§2) explicitly deferred
+/// the interleaved-arg
+/// `format!("<msg> ({} <noun>, {:.1}s)", <count>, <duration>.as_secs_f64())`
+/// shape until it crossed THEORY §VI.1's three-times-is-a-law
+/// threshold. Six sibling sites cross it now:
+///
+/// - `commands/codegen.rs::execute` schema-extraction success —
+///   `"Schema extracted ({} bytes, {:.1}s)"` (schema_size, duration)
+/// - `commands/frontend_validation.rs::run_type_check` failure branch —
+///   `"Type check failed ({} errors, {:.1}s)"` (error_count, duration)
+/// - `commands/frontend_validation.rs::run_unit_tests` pass branch —
+///   `"Unit tests passed ({} tests, {:.1}s)"` (test_count, duration)
+/// - `commands/prerelease.rs::run_cargo_clippy` failure branch —
+///   `"Clippy failed ({} warnings, {:.1}s)"` (warning_count, duration)
+/// - `commands/prerelease.rs::run_cargo_fmt_check` verify-failure branch
+///   — `"Code formatting check failed after auto-fix ({} files, {:.1}s)"`
+///   (unformatted_files.len(), duration)
+/// - `commands/prerelease.rs::run_cargo_test` pass branch —
+///   `"Tests passed ({} tests, {:.1}s)"` (test_count, duration)
+///
+/// Plus one hardcoded-count sibling at
+/// `commands/prerelease.rs::run_cargo_clippy` pass branch —
+/// `"Clippy passed (0 warnings, {:.1}s)"` — that routes through the
+/// primitive with a `0_usize` count, so the pass and failure arms of
+/// the same gate speak the same grammar at ONE body.
+///
+/// # The four grammar invariants this primitive pins at one place
+///
+/// The three invariants [`msg_with_secs_1`] carries (precision, paren
+/// grammar, seconds unit) plus a fourth this interleaved shape adds:
+///
+/// 1. **Precision.** One decimal digit (`{:.1}`) — same as
+///    [`msg_with_secs_1`] and for the same reasons. A hand-swap to
+///    `{:.0}` or `{:.2}` fails
+///    [`tests::msg_with_count_noun_secs_1_pins_one_decimal_place_precision`].
+/// 2. **Parenthesization.** ` (<count> <noun>, {:.1}s)` — one leading
+///    space, one opening paren, one closing paren, one comma-space
+///    between the noun and the seconds tag. A drift to
+///    ` [<count> <noun>, {:.1}s]` or ` — <count> <noun> in {:.1}s`
+///    fails [`tests::msg_with_count_noun_secs_1_pins_paren_delimiter_grammar`].
+/// 3. **Unit suffix.** Trailing `s`, projected via
+///    [`Duration::as_secs_f64`] — same one-oracle discipline
+///    [`msg_with_secs_1`] pins on the seconds surface.
+/// 4. **Count-noun ordering.** The `count` renders BEFORE the `noun`
+///    with a single space between them (`"3 errors"`, not `"errors 3"`
+///    or `"3-errors"`). Pre-lift every one of the six sites spelled
+///    `"({} <noun>, ...)"` in that exact order (a `bytes` count for
+///    `codegen.rs`, an `errors` count for the type-check failure, a
+///    `tests` count for the unit-tests pass, a `warnings` count for
+///    clippy, a `files` count for the fmt-check failure, a `tests`
+///    count for the cargo-test pass). A drift to `"(<noun> {}, ...)"`
+///    or a hyphen-fused `"({}-<noun>, ...)"` fails
+///    [`tests::msg_with_count_noun_secs_1_pins_count_before_noun_ordering`].
+///
+/// # Typed inputs
+///
+/// - `msg: impl Display` — accepts `&str`, `String`, and any `Display`
+///   sibling (a `Cow<'_, str>` for the pre-lift
+///   [`crate::repo::utf8_lossy_borrow`] project-then-display shape, a
+///   `format_args!` splice for a compound label). Same design ratio
+///   [`msg_took_secs_1`]'s `M: Display` bound carries on the sibling
+///   `(took {:.1}s)` dialect.
+/// - `count: impl Display` — accepts every unsigned integer width the
+///   six consumer sites use inline (`usize` from
+///   `.matches("error TS").count()` and `.len()`, `u32` / `u64` from
+///   parsed test totals, hardcoded `0_usize` from the clippy pass arm).
+///   A `count: usize` signature would force callers with a `u32` count
+///   through an `as usize` cast at the call site; the `Display` bound
+///   preserves the caller's numeric type through the render.
+/// - `noun: &str` — the plural noun the count quantifies (`"bytes"`,
+///   `"errors"`, `"tests"`, `"warnings"`, `"files"`). Kept a bare
+///   `&str` rather than `Display` since every consumer passes a
+///   literal string with no formatting ambiguity.
+/// - `d: Duration` — same load-bearing typed-input reasoning
+///   [`msg_with_secs_1`] documents at length: forces the caller to
+///   name the type at construction, lets the primitive own the
+///   `.as_secs_f64()` projection at ONE place.
+///
+/// # Non-goals
+///
+/// - **Multi-count shapes** such as
+///   `format!("Biome check failed ({} errors, {} warnings, {:.1}s)", errors, warnings, ...)`
+///   in `commands/frontend_validation.rs::run_biome_lint` — the two-
+///   count / two-noun grammar is a distinct dialect from this single-
+///   count / single-noun surface, and would fit awkwardly on a
+///   generalized `(counts: &[(usize, &str)], d)` signature that no
+///   pre-lift site spells. A future `msg_with_two_counts_and_secs_1`
+///   sibling is the natural next lift when that dialect crosses the
+///   three-is-a-law threshold; today only one site exists.
+/// - **Verb-first shapes** such as
+///   `format!("{} passed ({:.1}s)", linter_name, ...)` where the
+///   interleaved arg is a semantic label (not a count) — the
+///   [`msg_with_secs_1`] non-goals list already discusses this;
+///   consuming that shape through this primitive would ask the caller
+///   to pass `""` as the `noun` and burn the tuple grammar on a
+///   render that reads `"linter_name (0 , 1.2s)"`.
+pub fn msg_with_count_noun_secs_1<M: std::fmt::Display, C: std::fmt::Display>(
+    msg: M,
+    count: C,
+    noun: &str,
+    d: std::time::Duration,
+) -> String {
+    format!("{} ({} {}, {:.1}s)", msg, count, noun, d.as_secs_f64())
+}
+
 /// Run a command in a specific directory, restoring the original directory afterward
 ///
 /// # Arguments
@@ -9680,6 +9794,151 @@ mod tests {
              very drift paths the primitive body pins at ONE place. \
              Route the value through `crate::repo::msg_took_secs_1(...)` \
              instead."
+        );
+    }
+
+    /// [`msg_with_count_noun_secs_1`] pins the fleet-standard one-
+    /// decimal-place precision the six sibling consumer sites depend
+    /// on. A hand-swap to `{:.0}` would collapse a sub-second gate
+    /// timing to `0s` (silencing signal-carrying transients); a swap
+    /// to `{:.2}` would drift the interleaved dialect into the
+    /// `commands/integration_tests.rs` `(took {:.2}s)` convention that
+    /// [`msg_with_secs_1`] and [`msg_took_secs_1`] carve out from their
+    /// own bodies. The shield below asserts the render carries exactly
+    /// one digit after the decimal point.
+    #[test]
+    fn msg_with_count_noun_secs_1_pins_one_decimal_place_precision() {
+        let rendered = msg_with_count_noun_secs_1(
+            "Tests passed",
+            3_usize,
+            "tests",
+            std::time::Duration::from_millis(1234),
+        );
+        assert_eq!(
+            rendered, "Tests passed (3 tests, 1.2s)",
+            "msg_with_count_noun_secs_1() must render a 1.234s duration \
+             with ONE decimal digit — `{{:.1}}`, not `{{:.0}}` (would \
+             quantize to `1s` and silence sub-second gate timing) and \
+             not `{{:.2}}` (would drift into the integration_tests.rs \
+             `{{:.2}}s` step-summary dialect the sibling primitives \
+             carve out). Got: {rendered:?}"
+        );
+    }
+
+    /// [`msg_with_count_noun_secs_1`] pins the interleaved suffix
+    /// grammar ` (<count> <noun>, {:.1}s)` — leading single space,
+    /// opening paren, one space between count and noun, one
+    /// comma-space between noun and seconds tag, closing paren, no
+    /// trailing content. A drift to ` [<count> <noun>, {:.1}s]`
+    /// (square brackets), to ` — <count> <noun> in {:.1}s` (em-dash),
+    /// or to a comma-less ` (<count> <noun> {:.1}s)` would silently
+    /// break both operator-facing readability and any scraper matching
+    /// the pre-lift paren-plus-comma shape.
+    #[test]
+    fn msg_with_count_noun_secs_1_pins_paren_delimiter_grammar() {
+        let rendered = msg_with_count_noun_secs_1(
+            "Type check failed",
+            7_usize,
+            "errors",
+            std::time::Duration::from_millis(3400),
+        );
+        assert_eq!(
+            rendered, "Type check failed (7 errors, 3.4s)",
+            "msg_with_count_noun_secs_1() must render the suffix as \
+             ` (<count> <noun>, <secs>s)` — one leading space, opening \
+             paren, one space between count and noun, comma-space \
+             between noun and seconds, closing paren. Any drift \
+             (square brackets, em-dash, missing comma) silently breaks \
+             the six pre-lift consumer sites' shared shape. Got: {rendered:?}"
+        );
+    }
+
+    /// [`msg_with_count_noun_secs_1`] renders count BEFORE noun with a
+    /// single space between them. Pre-lift every one of the six sites
+    /// spelled `"({} <noun>, ...)"` in exactly that order — a drift to
+    /// `"(<noun> {}, ...)"` (noun-first, e.g. `"errors 7"`) or a
+    /// hyphen-fused `"({}-<noun>, ...)"` (e.g. `"7-errors"`) would
+    /// silently alter operator-facing prose across every consumer.
+    #[test]
+    fn msg_with_count_noun_secs_1_pins_count_before_noun_ordering() {
+        let rendered = msg_with_count_noun_secs_1(
+            "Clippy failed",
+            12_u32,
+            "warnings",
+            std::time::Duration::from_millis(500),
+        );
+        assert!(
+            rendered.contains("(12 warnings,"),
+            "msg_with_count_noun_secs_1() must render count BEFORE \
+             noun with a single space between them — pre-lift every \
+             one of the six sites spelled `\"({{}} <noun>, ...)\"` in \
+             that exact order. A drift to `\"warnings 12\"` or a \
+             hyphenated `\"12-warnings\"` would silently alter \
+             operator-facing prose. Got: {rendered:?}"
+        );
+    }
+
+    /// [`msg_with_count_noun_secs_1`] accepts any [`Display`]-bound
+    /// count type — `usize` (the `.matches().count()` and `.len()`
+    /// return type), `u32` / `u64` (parsed test totals), and hardcoded
+    /// numeric literals (`0_usize` for the clippy-pass zero-warnings
+    /// arm). A `count: usize` monomorphic signature would force
+    /// callers with a differently-widthed integer through an `as`
+    /// cast at the callsite; the `impl Display` bound preserves the
+    /// caller's numeric type through the render.
+    #[test]
+    fn msg_with_count_noun_secs_1_accepts_any_display_count_type() {
+        assert_eq!(
+            msg_with_count_noun_secs_1(
+                "Clippy passed",
+                0_usize,
+                "warnings",
+                std::time::Duration::from_millis(0)
+            ),
+            "Clippy passed (0 warnings, 0.0s)"
+        );
+        assert_eq!(
+            msg_with_count_noun_secs_1(
+                "Tests passed",
+                42_u32,
+                "tests",
+                std::time::Duration::from_millis(0)
+            ),
+            "Tests passed (42 tests, 0.0s)"
+        );
+        assert_eq!(
+            msg_with_count_noun_secs_1(
+                "Schema extracted",
+                1024_u64,
+                "bytes",
+                std::time::Duration::from_millis(0)
+            ),
+            "Schema extracted (1024 bytes, 0.0s)"
+        );
+    }
+
+    /// [`msg_with_count_noun_secs_1`]'s trailing unit character is `s`
+    /// (seconds), and the projection ([`Duration::as_secs_f64`])
+    /// agrees with that unit. A future respell that added `ms` to the
+    /// tag but kept the seconds projection would silently over-report
+    /// by 1000× — a `Duration::from_millis(1500).as_secs_f64()` is
+    /// `1.5`, rendered `1.5s`; the same value under a `ms` unit would
+    /// read `1.5ms` and mean 1000× less. Same one-oracle discipline
+    /// [`msg_with_secs_1`] pins on its seconds surface.
+    #[test]
+    fn msg_with_count_noun_secs_1_seconds_unit_agrees_with_projection() {
+        let rendered = msg_with_count_noun_secs_1(
+            "Tests passed",
+            1_usize,
+            "tests",
+            std::time::Duration::from_millis(1500),
+        );
+        assert!(
+            rendered.ends_with("1.5s)"),
+            "msg_with_count_noun_secs_1() must render seconds via \
+             Duration::as_secs_f64 with the `s` unit suffix — a \
+             1500ms input must render `1.5s`, NOT `1500ms`, NOT `1.5ms`. \
+             Got: {rendered:?}"
         );
     }
 }
