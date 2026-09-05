@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use tokio::process::Command;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::repo::get_tool_path;
 use crate::ui::{styled_spinner, SpinnerStyle};
@@ -257,7 +257,7 @@ pub async fn execute(
         // site with the site-specific `⚠️ Failed to get closure info`
         // warning text.
         match crate::nix::path_info_recursive(&result_path).await {
-            Err(e) => warn!("⚠️  Failed to get closure info (non-fatal): {}", e),
+            Err(e) => crate::warn_nonfatal!("Failed to get closure info", e),
             Ok(info) => {
                 info!("   Found {} derivations in closure", info.closure_size);
 
@@ -278,7 +278,7 @@ pub async fn execute(
                         "✅ All {} derivations cached in Attic (60-80% faster future builds)",
                         info.closure_size
                     ),
-                    Err(e) => warn!("⚠️  Failed to push closure to Attic (non-fatal): {}", e),
+                    Err(e) => crate::warn_nonfatal!("Failed to push closure to Attic", e),
                 }
             }
         }

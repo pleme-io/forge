@@ -416,7 +416,7 @@ pub async fn execute(
         match push_result {
             Ok(_) => info!("✅ Cached in Attic"),
             Err(e) => {
-                warn!("⚠️  Failed to push to Attic cache (non-fatal): {}", e);
+                crate::warn_nonfatal!("Failed to push to Attic cache", e);
                 debug!("Attic push error details: {:?}", e);
             }
         }
@@ -511,7 +511,7 @@ pub async fn execute(
             info!("✅ FluxCD reconciliation complete");
         }
         Err(e) => {
-            warn!("⚠️  FluxCD reconcile failed (non-fatal): {}", e);
+            crate::warn_nonfatal!("FluxCD reconcile failed", e);
         }
     }
 
