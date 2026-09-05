@@ -946,6 +946,81 @@ pub fn write_step_heading<W: std::io::Write>(w: &mut W, title: &str) -> std::io:
     writeln!(w, "{}", title.bold())
 }
 
+/// Prints the one-line `<title>.bold()` step-heading via
+/// [`print_step_heading`] AND returns the [`std::time::Instant`] the
+/// caller anchors its `duration = start.elapsed()` measurement on. Fuses
+/// the 8-site sibling stanza pre-lift consumers spelled verbatim as
+/// `crate::ui::print_step_heading("<TITLE>"); let start = Instant::now();`
+/// across `commands/prerelease.rs` (G1 cargo check, G2 cargo clippy, G3
+/// cargo fmt, G4 cargo test, G13 integration tests, G14 E2E tests) and
+/// `commands/frontend_validation.rs` (TypeScript type check, unit tests)
+/// — each step begins with a bold title line and starts its own timer,
+/// and both statements always run in lockstep because the very next
+/// operation reads `start.elapsed()` to compute the step's duration for
+/// its OK/FAIL summary line.
+///
+/// # Distinct from the other `ui::print_*` primitives
+///
+/// [`print_step_heading`] is the bare title-only opening — its
+/// consumer sites either time their step body against an externally
+/// held [`std::time::Instant`] (a caller that folds several sub-steps
+/// under one wall-clock measurement) or do not time it at all (a
+/// non-timed narrative marker between phases). This primitive carries
+/// the *timed* step opening: the fused pair `print_step_heading + let
+/// start = Instant::now()` at the top of a step whose body ends by
+/// reading `start.elapsed()` for its OK/FAIL line. Every non-timed
+/// step opening stays on [`print_step_heading`]; every timed step
+/// opening whose next statement is a bare `let start = Instant::now()`
+/// migrates onto this primitive so the two statements cannot silently
+/// drift apart (a future edit that reorders a diagnostic between them,
+/// hoists the `Instant::now()` above the print so the print's I/O
+/// bleeds into the measured elapsed, or drops the timer entirely under
+/// a "we don't need this timing anymore" cleanup while leaving the
+/// `duration` read downstream compiling against a shadowed name that
+/// no longer measures the step).
+///
+/// # Compounding
+///
+/// Pre-lift 8 sibling sites each spelled the two-line stanza verbatim.
+/// A future adjustment (a swap of [`std::time::Instant::now`] for a
+/// monotonic-clock alternative the whole crate rides on, an OTLP
+/// `step_start` span opened alongside the print so a step's title and
+/// its wall-clock anchor emit as a single structured record instead of
+/// two independent operator-observable side effects, a promotion of
+/// the returned anchor to a typed `StepStart(Instant)` newtype so a
+/// caller cannot accidentally pass an [`Instant`] captured elsewhere
+/// as this step's start, an insertion of a debug `trace!` between the
+/// print and the anchor for step-boundary observability) had to hit
+/// 8 sites in lockstep or drift the step-timing contract; post-lift it
+/// hits ONE typed body. Delegates to [`write_step_heading_start`]
+/// against [`std::io::stdout()`]; the writer split exists so the
+/// fail-before-pass test can pin the emitted bytes AND the returned
+/// [`Instant`]'s post-write ordering against an injected clock without
+/// capturing stdout.
+pub fn print_step_heading_start(title: &str) -> std::time::Instant {
+    let _ = write_step_heading(&mut std::io::stdout().lock(), title);
+    std::time::Instant::now()
+}
+
+/// Writer-taking sibling to [`print_step_heading_start`]. Emits the
+/// single `<title>.bold()` line via [`write_step_heading`] against the
+/// supplied writer, then samples an [`std::time::Instant`] via the
+/// injected `now` closure and returns it. [`print_step_heading_start`]
+/// is the stdout adapter with `Instant::now` as its clock; this variant
+/// exists so tests can pin BOTH the emitted bytes (identical to
+/// [`write_step_heading`]'s contract) and the ordering invariant
+/// (the returned [`Instant`] is sampled AFTER the write, so a step's
+/// measured elapsed does not include the write's I/O) by capturing to a
+/// `Vec<u8>` writer and a controlled clock in the same call.
+pub fn write_step_heading_start<W: std::io::Write>(
+    w: &mut W,
+    title: &str,
+    now: impl FnOnce() -> std::time::Instant,
+) -> std::io::Result<std::time::Instant> {
+    write_step_heading(w, title)?;
+    Ok(now())
+}
+
 /// Prints the one-line `Step <label>: <title>.bold()` labeled-step-heading
 /// grammar 23 pre-lift consumer sites spelled inline as
 /// `println!("Step <label>: {}", "<TITLE>".bold());` across
@@ -5436,12 +5511,139 @@ mod tests {
                     lineno = i + 1
                 );
             }
+            // The forwarding shield accepts EITHER the leaner
+            // `print_step_heading(` primitive OR its timed-fusion sibling
+            // `print_step_heading_start(` — both preserve the same bold-title
+            // visual contract, and a caller migrating its only step-heading
+            // site from the leaner to the timed variant (a legitimate
+            // "this step is timed now" edit) must not fail this shield.
             assert!(
-                body.contains("crate::ui::print_step_heading("),
+                body.contains("crate::ui::print_step_heading(")
+                    || body.contains("crate::ui::print_step_heading_start("),
                 "{module_path} body must forward to \
-                 `crate::ui::print_step_heading(\"<TITLE>\")` — the \
-                 primitive body every one-line bold step-heading in the \
-                 crate now delegates through."
+                 `crate::ui::print_step_heading(\"<TITLE>\")` (or its \
+                 timed-fusion sibling \
+                 `crate::ui::print_step_heading_start(\"<TITLE>\")`) — \
+                 the primitive body every one-line bold step-heading in \
+                 the crate now delegates through."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_step_heading_start`].
+    /// Pins the two invariants the primitive carries beyond
+    /// [`super::write_step_heading`]:
+    ///
+    /// 1. The emitted bytes are identical to [`super::write_step_heading`]'s
+    ///    output for the same title (so the fused primitive cannot silently
+    ///    diverge the bold-title contract from its non-timed peer).
+    /// 2. The returned [`std::time::Instant`] is sampled AFTER the write
+    ///    completes (so a step's measured `elapsed()` does not include the
+    ///    write's I/O). Enforced by handing the primitive an injected clock
+    ///    whose sample the test inspects — an implementation that read the
+    ///    clock BEFORE the write would return the pre-write value here.
+    ///
+    /// A future refactor that hoists the `Instant::now()` above the write
+    /// (bleeding I/O into the measurement), swaps [`writeln!`] for
+    /// [`write!`] on the write side (dropping the `\n` the pre-lift
+    /// `println!` carried), or drops `.bold()` on the title (a "just
+    /// print the string, it's shorter" cleanup) flips this assertion
+    /// rather than compiling and silently diverging the 8 consumer
+    /// sites' visual and timing grammar.
+    #[test]
+    fn write_step_heading_start_matches_write_step_heading_and_samples_clock_after_write() {
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        // Byte-oracle side: the fused primitive's write must be
+        // byte-identical to `write_step_heading` on the same title.
+        let mut fused_buf: Vec<u8> = Vec::new();
+        let mut peer_buf: Vec<u8> = Vec::new();
+        let sentinel = std::time::Instant::now();
+        let returned =
+            super::write_step_heading_start(&mut fused_buf, "G1: cargo check", || sentinel)
+                .expect("write_step_heading_start against a Vec<u8> writer must succeed");
+        super::write_step_heading(&mut peer_buf, "G1: cargo check")
+            .expect("write_step_heading against a Vec<u8> writer must succeed");
+
+        assert_eq!(
+            fused_buf, peer_buf,
+            "write_step_heading_start must emit BYTE-IDENTICAL output to \
+             write_step_heading for the same title — a divergence here \
+             means the fused primitive's write side has drifted from its \
+             non-timed peer's visual grammar."
+        );
+
+        // Clock-ordering side: the returned Instant is what the injected
+        // clock produced AFTER the write completed. An implementation
+        // that sampled the clock BEFORE the write would return a
+        // different (pre-write) instant here.
+        assert_eq!(
+            returned, sentinel,
+            "write_step_heading_start must return the Instant sampled by \
+             its injected `now` closure AFTER the write completes — a \
+             hoist that reads the clock before the write bleeds the \
+             write's I/O into every caller's measured elapsed."
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_step_heading_start`] no longer spell the two-line
+    /// stanza `crate::ui::print_step_heading("<TITLE>");` immediately
+    /// followed by `let start = Instant::now();` inline. Structural
+    /// regression shield — without it, a future refactor could silently
+    /// re-inline the pair (e.g. a "just call the two functions
+    /// separately, it's clearer" cleanup) and reopen the 8-site
+    /// duplication class this lift closed. Enforced at the module
+    /// bodies before their `#[cfg(test)]` regions so a test-support
+    /// mention of the raw shape does not defeat the shield. Line-pair
+    /// matching (title-carrying `print_step_heading` line immediately
+    /// followed by a `let <name> = Instant::now();` line, ignoring
+    /// leading whitespace) uniquely identifies the pre-lift restatement
+    /// — a `print_step_heading` call whose next line is not a bare
+    /// `Instant::now()` binding stays unshielded because it belongs to
+    /// the non-timed step-heading population that legitimately calls
+    /// the leaner primitive.
+    #[test]
+    fn print_step_heading_start_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[
+            (
+                include_str!("commands/prerelease.rs"),
+                "commands/prerelease.rs",
+            ),
+            (
+                include_str!("commands/frontend_validation.rs"),
+                "commands/frontend_validation.rs",
+            ),
+        ];
+        for (source, module_path) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            let lines: Vec<&str> = body.lines().collect();
+            for (i, window) in lines.windows(2).enumerate() {
+                let head = window[0].trim_start();
+                let next = window[1].trim_start();
+                let heading_call = head.starts_with("crate::ui::print_step_heading(")
+                    && !head.starts_with("crate::ui::print_step_heading_start(");
+                let bare_now = next.starts_with("let ") && next.contains("Instant::now()");
+                assert!(
+                    !(heading_call && bare_now),
+                    "{module_path}:{lineno_a}-{lineno_b} spells the \
+                     pre-lift two-line stanza `crate::ui::print_step_heading(...); \
+                     let <name> = Instant::now();` — that pair was \
+                     lifted onto `crate::ui::print_step_heading_start(...)`. \
+                     A re-inline would silently reopen the 8-site \
+                     duplication class this shield exists to close. \
+                     Offending lines: {head:?} then {next:?}",
+                    lineno_a = i + 1,
+                    lineno_b = i + 2,
+                );
+            }
+            assert!(
+                body.contains("crate::ui::print_step_heading_start("),
+                "{module_path} body must forward to \
+                 `crate::ui::print_step_heading_start(\"<TITLE>\")` — the \
+                 primitive body every timed bold step-heading opening \
+                 whose next statement was a bare `let start = \
+                 Instant::now()` now delegates through."
             );
         }
     }
