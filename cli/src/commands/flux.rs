@@ -10,7 +10,9 @@ use crate::flux_get::{
     get_kustomization_scoped, list_kustomizations_all_namespaces, list_kustomizations_in_namespace,
     FluxGetKustomizationsError, KustomizationRow,
 };
-use crate::infrastructure::kubectl::{kubectl_capture_anyhow, kubectl_probe_stdout_capture};
+use crate::infrastructure::kubectl::{
+    kubectl_capture_anyhow, kubectl_probe_push_nonempty_section_4sp, kubectl_probe_stdout_capture,
+};
 use crate::retry::RetryPolicy;
 
 /// The typed exponential-backoff policy for the two deployment-pod-
@@ -801,69 +803,54 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
     }
 
     // 2. Deployment conditions
-    if let Some(stdout) = kubectl_probe_stdout_capture(&[
-        "get",
-        "deployment",
-        deployment_name,
-        "-n",
-        namespace,
-        "-o",
-        "jsonpath={range .status.conditions[*]}{.type}={.status} ({.reason}: {.message}){\"\\n\"}{end}",
-    ])
-    .await
-    {
-        if !stdout.trim().is_empty() {
-            crate::repo::push_section_indented_lines_4sp(
-                &mut diag,
-                "Deployment Conditions",
-                stdout.trim().lines(),
-            );
-        }
-    }
+    kubectl_probe_push_nonempty_section_4sp(
+        &mut diag,
+        "Deployment Conditions",
+        &[
+            "get",
+            "deployment",
+            deployment_name,
+            "-n",
+            namespace,
+            "-o",
+            "jsonpath={range .status.conditions[*]}{.type}={.status} ({.reason}: {.message}){\"\\n\"}{end}",
+        ],
+    )
+    .await;
 
     // 3. All pods for this deployment (not just first)
-    if let Some(stdout) = kubectl_probe_stdout_capture(&[
-        "get",
-        "pods",
-        "-n",
-        namespace,
-        "-l",
-        &format!("app={}", deployment_name),
-        "-o",
-        "wide",
-    ])
-    .await
-    {
-        if !stdout.trim().is_empty() {
-            crate::repo::push_section_indented_lines_4sp(
-                &mut diag,
-                "All Pods",
-                stdout.trim().lines(),
-            );
-        }
-    }
+    kubectl_probe_push_nonempty_section_4sp(
+        &mut diag,
+        "All Pods",
+        &[
+            "get",
+            "pods",
+            "-n",
+            namespace,
+            "-l",
+            &format!("app={}", deployment_name),
+            "-o",
+            "wide",
+        ],
+    )
+    .await;
 
     // 4. Container status details (waiting reasons like ImagePullBackOff, CrashLoopBackOff)
-    if let Some(stdout) = kubectl_probe_stdout_capture(&[
-        "get",
-        "pods",
-        "-n",
-        namespace,
-        "-l",
-        &format!("app={}", deployment_name),
-        "-o",
-        "jsonpath={range .items[*]}{.metadata.name}: {range .status.containerStatuses[*]}[{.name} state={.state} ready={.ready} restarts={.restartCount}] {end}{\"\\n\"}{end}",
-    ])
-    .await
-    {
-        if !stdout.trim().is_empty() {
-            crate::repo::push_section_indented_lines_4sp(
-                &mut diag,
-                "Container States",
-                stdout.trim().lines(),
-            );
-        }
-    }
+    kubectl_probe_push_nonempty_section_4sp(
+        &mut diag,
+        "Container States",
+        &[
+            "get",
+            "pods",
+            "-n",
+            namespace,
+            "-l",
+            &format!("app={}", deployment_name),
+            "-o",
+            "jsonpath={range .items[*]}{.metadata.name}: {range .status.containerStatuses[*]}[{.name} state={.state} ready={.ready} restarts={.restartCount}] {end}{\"\\n\"}{end}",
+        ],
+    )
+    .await;
 
     // 5. Waiting/terminated reasons (the most useful for debugging)
     if let Some(stdout) = kubectl_probe_stdout_capture(&[
@@ -1316,11 +1303,15 @@ mod tests {
     /// Delegation-count shield for the seven best-effort captured-
     /// stdout diagnostic probes in
     /// [`super::gather_deployment_diagnostics`]. Every one MUST route
-    /// through
+    /// through one of the two typed primitives on the
+    /// `crate::infrastructure::kubectl` surface — the raw
     /// [`crate::infrastructure::kubectl::kubectl_probe_stdout_capture`]
-    /// — the async twin of [`crate::retry::probe_stdout_capture_sync`]
-    /// at the `kubectl_command_async()` frontier — so a regression
-    /// that reintroduced the pre-lift four-line stanza
+    /// (async twin of [`crate::retry::probe_stdout_capture_sync`] at
+    /// the `kubectl_command_async()` frontier) OR the fused
+    /// [`crate::infrastructure::kubectl::kubectl_probe_push_nonempty_section_4sp`]
+    /// (probe + `push_section_indented_lines_4sp` at three of the
+    /// seven sites) — so a regression that reintroduced the pre-lift
+    /// four-line stanza
     /// (`if let Ok(output) = kubectl_command_async().args([...]).output().await
     /// { let stdout = String::from_utf8_lossy(&output.stdout); ... }`)
     /// at even one of the seven sites fails here rather than silently
@@ -1332,25 +1323,39 @@ mod tests {
     /// negative-only scan (forbidding the pre-lift stanza) would be
     /// trivially satisfied by absence, so the `>= 7` positive floor
     /// forces every current-and-future diagnostic probe in this
-    /// module to land on the primitive by construction. Scan bounded
-    /// strictly to the module's non-test body (file start to the
-    /// FIRST `#[cfg(test)]\nmod tests {` marker) so this shield's own
-    /// docstring mention of the primitive stays out of scope.
+    /// module to land on one of the two primitives by construction.
+    /// The floor sums direct `kubectl_probe_stdout_capture(` calls
+    /// and fused `kubectl_probe_push_nonempty_section_4sp(` calls
+    /// (each fusion call composes one `kubectl_probe_stdout_capture`
+    /// internally), so a future edit that migrates a raw-probe site
+    /// onto the fusion primitive — or a new probe that lands on either
+    /// primitive — keeps the sum ≥ 7. Scan bounded strictly to the
+    /// module's non-test body (file start to the FIRST
+    /// `#[cfg(test)]\nmod tests {` marker) so this shield's own
+    /// docstring mention of both primitives stays out of scope.
     #[test]
     fn test_gather_deployment_diagnostics_routes_through_kubectl_probe_stdout_capture() {
         const SOURCE: &str = include_str!("flux.rs");
         let body = crate::test_support::module_body_before_tests(SOURCE, "commands/flux.rs");
-        let hits = crate::test_support::code_line_hits(body, "kubectl_probe_stdout_capture(");
+        let raw_hits = crate::test_support::code_line_hits(body, "kubectl_probe_stdout_capture(");
+        let fused_hits =
+            crate::test_support::code_line_hits(body, "kubectl_probe_push_nonempty_section_4sp(");
+        let total = raw_hits.len() + fused_hits.len();
         assert!(
-            hits.len() >= 7,
+            total >= 7,
             "commands/flux.rs::gather_deployment_diagnostics must \
              route every one of its seven best-effort captured-stdout \
-             diagnostic probes through \
-             `crate::infrastructure::kubectl::kubectl_probe_stdout_capture` — \
-             expected >= 7 code-line hits on `kubectl_probe_stdout_capture(`, \
-             found {}. Delegation-count hits: {:#?}",
-            hits.len(),
-            hits,
+             diagnostic probes through either \
+             `crate::infrastructure::kubectl::kubectl_probe_stdout_capture` \
+             or its fused sibling \
+             `crate::infrastructure::kubectl::kubectl_probe_push_nonempty_section_4sp` — \
+             expected raw_hits + fused_hits >= 7, found raw_hits={} + \
+             fused_hits={} = {}. Raw hits: {:#?}. Fused hits: {:#?}",
+            raw_hits.len(),
+            fused_hits.len(),
+            total,
+            raw_hits,
+            fused_hits,
         );
     }
 }
