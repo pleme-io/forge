@@ -1993,27 +1993,27 @@ async fn print_deployment_report(
     println!();
 
     crate::ui::print_report_item("Docker Image");
-    println!("    • Built with crate2nix (per-crate Attic caching)");
-    println!("    • Pushed to GHCR: {}", deploy_config.registry_url());
-    println!("    • Tag: {}", tag_suffix);
+    crate::ui::print_sub_bullet_item("Built with crate2nix (per-crate Attic caching)");
+    crate::ui::print_sub_bullet_item(&format!("Pushed to GHCR: {}", deploy_config.registry_url()));
+    crate::ui::print_sub_bullet_item(&format!("Tag: {}", tag_suffix));
     println!();
 
     crate::ui::print_report_item("GitOps Deployment");
-    println!("    • Manifest updated with new image tag");
-    println!("    • Changes committed to git (main branch)");
-    println!("    • Pushed to remote repository");
+    crate::ui::print_sub_bullet_item("Manifest updated with new image tag");
+    crate::ui::print_sub_bullet_item("Changes committed to git (main branch)");
+    crate::ui::print_sub_bullet_item("Pushed to remote repository");
     println!();
 
     crate::ui::print_report_item("Database Migrations");
-    println!("    • Migration job completed successfully");
-    println!("    • Schema is up to date");
+    crate::ui::print_sub_bullet_item("Migration job completed successfully");
+    crate::ui::print_sub_bullet_item("Schema is up to date");
     println!();
 
     crate::ui::print_report_item("GraphQL Federation");
-    println!("    • Schema extracted from Rust code");
-    println!("    • Supergraph composed with Rover (Federation v2.11.3)");
-    println!("    • Hive Router deployment updated with hash");
-    println!("    • Federation changes committed and pushed");
+    crate::ui::print_sub_bullet_item("Schema extracted from Rust code");
+    crate::ui::print_sub_bullet_item("Supergraph composed with Rover (Federation v2.11.3)");
+    crate::ui::print_sub_bullet_item("Hive Router deployment updated with hash");
+    crate::ui::print_sub_bullet_item("Federation changes committed and pushed");
     println!();
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2060,8 +2060,8 @@ async fn print_deployment_report(
             let image = crate::repo::utf8_lossy_borrow(&image_output.stdout);
 
             crate::ui::print_pending_item("Service Pod Rollout");
-            println!("    • Current pod status: {}", phase);
-            println!("    • Current image: {}", image.dimmed());
+            crate::ui::print_sub_bullet_item(&format!("Current pod status: {}", phase));
+            crate::ui::print_sub_bullet_item(&format!("Current image: {}", image.dimmed()));
 
             // Compose `<repository>:<tag>` via
             // `crate::oci_manifest::image_reference` — the typed
@@ -2069,25 +2069,35 @@ async fn print_deployment_report(
             let expected_image =
                 crate::oci_manifest::image_reference(&deploy_config.registry_url(), tag_suffix);
             if image.contains(tag_suffix) {
-                println!("    • {} New image is already deployed!", "✓".green());
+                // Kept on ONE line so the sibling
+                // `print_report_item_callers_delegate_through_primitive`
+                // structural shield sees the green-check literal and
+                // the site-unique waiting-marker message together on
+                // the same line: the shield line-scans for the green-
+                // check literal and allowlists any line that also
+                // carries the site marker.
+                #[rustfmt::skip]
+                crate::ui::print_sub_bullet_item(&format!("{} New image is already deployed!", "✓".green()));
             } else {
-                println!("    • ⏳ Waiting for Flux to deploy new image...");
+                crate::ui::print_sub_bullet_item("⏳ Waiting for Flux to deploy new image...");
             }
         } else {
             crate::ui::print_pending_item("Service Pod Rollout");
-            println!("    • Flux will create/update pod with new image");
+            crate::ui::print_sub_bullet_item("Flux will create/update pod with new image");
         }
     } else {
         crate::ui::print_pending_item("Service Pod Rollout");
-        println!("    • Flux will deploy the new pod (typically 30-60 seconds)");
+        crate::ui::print_sub_bullet_item("Flux will deploy the new pod (typically 30-60 seconds)");
     }
     println!();
 
     crate::ui::print_pending_item("Hive Router Update");
-    println!("    • Flux will detect supergraph.graphql changes");
-    println!("    • New ConfigMap will be generated (hash suffix)");
-    println!("    • Hive Router pod will restart automatically");
-    println!("    • New schema will be live after restart (typically 1-2 minutes)");
+    crate::ui::print_sub_bullet_item("Flux will detect supergraph.graphql changes");
+    crate::ui::print_sub_bullet_item("New ConfigMap will be generated (hash suffix)");
+    crate::ui::print_sub_bullet_item("Hive Router pod will restart automatically");
+    crate::ui::print_sub_bullet_item(
+        "New schema will be live after restart (typically 1-2 minutes)",
+    );
     println!();
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
