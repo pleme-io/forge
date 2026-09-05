@@ -8,7 +8,7 @@ use std::process::Command;
 use tracing::{info, warn};
 
 use crate::commands::push;
-use crate::commands::release_commit::commit_cluster_overlay_release;
+use crate::commands::release_commit::announce_and_commit_cluster_overlay_release_step;
 use crate::repo::get_tool_path;
 
 /// Resolve the `nc` binary path via the canonical two-argument
@@ -310,10 +310,9 @@ pub async fn release(
     println!();
 
     // Step 8: Commit and push
-    crate::step_header::announce_step_header(7, 7, "Commit and Push");
-    info!("📤 Committing release changes...");
     let file_refs: Vec<&str> = modified_files.iter().map(String::as_str).collect();
-    commit_cluster_overlay_release(None, "nix-builder", &new_tag, &file_refs).await?;
+    announce_and_commit_cluster_overlay_release_step(7, "nix-builder", &new_tag, &file_refs)
+        .await?;
 
     crate::commands::cluster_overlay_release_postamble::announce_release_complete(
         "nix-builder",
