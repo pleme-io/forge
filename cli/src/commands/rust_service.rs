@@ -2137,41 +2137,29 @@ async fn print_deployment_report(
     println!();
 
     println!("  Verify Docker image exists in registry:");
-    println!(
-        "  $ {}",
-        format!(
-            "docker pull {}:{}",
-            deploy_config.registry_url(),
-            tag_suffix
-        )
-        .yellow()
-    );
+    crate::ui::print_shell_example_cmd(&format!(
+        "docker pull {}:{}",
+        deploy_config.registry_url(),
+        tag_suffix
+    ));
     println!();
 
     println!("  Verify git commits were pushed:");
-    println!("  $ {}", "git log --oneline -5".yellow());
+    crate::ui::print_shell_example_cmd("git log --oneline -5");
     println!();
 
     println!("  Verify kustomization manifest has new image tag:");
-    println!(
-        "  $ {}",
-        format!(
-            "grep {} nix/k8s/clusters/{{cluster}}/products/{}/services/{}/kustomization.yaml",
-            tag_suffix, namespace, service
-        )
-        .yellow()
-    );
+    crate::ui::print_shell_example_cmd(&format!(
+        "grep {} nix/k8s/clusters/{{cluster}}/products/{}/services/{}/kustomization.yaml",
+        tag_suffix, namespace, service
+    ));
     println!();
 
     println!("  Verify new pod is running with correct image:");
-    println!(
-        "  $ {}",
-        format!(
-            "kubectl get pods -n {} -l app={} -o jsonpath='{{.items[0].spec.containers[0].image}}'",
-            namespace, service
-        )
-        .yellow()
-    );
+    crate::ui::print_shell_example_cmd(&format!(
+        "kubectl get pods -n {} -l app={} -o jsonpath='{{.items[0].spec.containers[0].image}}'",
+        namespace, service
+    ));
     println!(
         "    Expected: {}:{}",
         deploy_config.registry_url(),
@@ -2180,43 +2168,41 @@ async fn print_deployment_report(
     println!();
 
     println!("  Verify database migrations completed:");
-    println!(
-        "  $ {}",
-        format!(
-            "kubectl get jobs -n {} | grep {}-migration",
-            namespace, service
-        )
-        .yellow()
-    );
+    crate::ui::print_shell_example_cmd(&format!(
+        "kubectl get jobs -n {} | grep {}-migration",
+        namespace, service
+    ));
     println!("    Should show: Completed (1/1)");
     println!();
 
     println!("  Verify GraphQL schema file updated:");
-    println!("  $ {}", "git log --oneline --all -- pkgs/products/<product>/infrastructure/hive-router/subgraphs/*.graphql | head -1".yellow());
+    crate::ui::print_shell_example_cmd(
+        "git log --oneline --all -- pkgs/products/<product>/infrastructure/hive-router/subgraphs/*.graphql | head -1",
+    );
     println!("    Should show recent commit with schema update");
     println!();
 
     println!("  Verify supergraph.graphql updated:");
-    println!("  $ {}", format!("grep 'graph: {}' nix/k8s/clusters/{{cluster}}/products/{}/hive-router/supergraph.graphql | wc -l",
-        service.to_uppercase(), namespace).yellow());
+    crate::ui::print_shell_example_cmd(&format!(
+        "grep 'graph: {}' nix/k8s/clusters/{{cluster}}/products/{}/hive-router/supergraph.graphql | wc -l",
+        service.to_uppercase(), namespace
+    ));
     println!("    Should be > 0 (service present in supergraph)");
     println!();
 
     println!("  Verify Hive Router has new supergraph hash:");
-    println!("  $ {}", format!("kubectl get deployment hive-router -n {} -o jsonpath='{{.spec.template.metadata.annotations.supergraph\\.hash}}'",
-        namespace).yellow());
+    crate::ui::print_shell_example_cmd(&format!(
+        "kubectl get deployment hive-router -n {} -o jsonpath='{{.spec.template.metadata.annotations.supergraph\\.hash}}'",
+        namespace
+    ));
     println!("    Check if hash is recent");
     println!();
 
     println!("  Verify Hive Router ConfigMap updated:");
-    println!(
-        "  $ {}",
-        format!(
-            "kubectl get configmap -n {} | grep hive-router-config",
-            namespace
-        )
-        .yellow()
-    );
+    crate::ui::print_shell_example_cmd(&format!(
+        "kubectl get configmap -n {} | grep hive-router-config",
+        namespace
+    ));
     println!("    Hash suffix should have changed (triggers pod restart)");
     println!();
 
@@ -2230,49 +2216,44 @@ async fn print_deployment_report(
     println!();
 
     println!("  Watch service pod rollout:");
-    println!(
-        "  $ {}",
-        format!("kubectl get pods -n {} -w | grep {}", namespace, service).yellow()
-    );
+    crate::ui::print_shell_example_cmd(&format!(
+        "kubectl get pods -n {} -w | grep {}",
+        namespace, service
+    ));
     println!();
 
     println!("  Check service pod logs:");
-    println!(
-        "  $ {}",
-        format!("kubectl logs -n {} -l app={} -f", namespace, service).yellow()
-    );
+    crate::ui::print_shell_example_cmd(&format!(
+        "kubectl logs -n {} -l app={} -f",
+        namespace, service
+    ));
     println!();
 
     println!("  Check Hive Router status:");
-    println!(
-        "  $ {}",
-        format!("kubectl get pods -n {} | grep hive-router", namespace).yellow()
-    );
+    crate::ui::print_shell_example_cmd(&format!(
+        "kubectl get pods -n {} | grep hive-router",
+        namespace
+    ));
     println!();
 
     println!("  Check Hive Router logs:");
-    println!(
-        "  $ {}",
-        format!("kubectl logs -n {} -l app=hive-router -f", namespace).yellow()
-    );
+    crate::ui::print_shell_example_cmd(&format!(
+        "kubectl logs -n {} -l app=hive-router -f",
+        namespace
+    ));
     println!();
 
     println!("  Check Flux reconciliation status:");
-    println!("  $ {}", "flux get kustomizations".yellow());
+    crate::ui::print_shell_example_cmd("flux get kustomizations");
     println!();
 
     println!("  Test GraphQL endpoint (after router updates):");
-    println!(
-        "  $ {}",
-        format!(
-            "kubectl port-forward -n {} svc/hive-router 4000:4000",
-            namespace
-        )
-        .yellow()
-    );
-    println!(
-        "  $ {}",
-        "curl http://localhost:4000/graphql -d '{\"query\":\"{__schema{types{name}}}\"}'".yellow()
+    crate::ui::print_shell_example_cmd(&format!(
+        "kubectl port-forward -n {} svc/hive-router 4000:4000",
+        namespace
+    ));
+    crate::ui::print_shell_example_cmd(
+        "curl http://localhost:4000/graphql -d '{\"query\":\"{__schema{types{name}}}\"}'",
     );
     println!();
 
