@@ -628,72 +628,27 @@ pub async fn build_rust_service(
 
         let cache_target = format!("{}:{}", deploy_config.cache_server(), cache_name);
 
-        // Push AMD64 closure recursively. Enumerates via the canonical
-        // typed primitive `crate::nix::path_info_recursive` — sibling
-        // of `commands/build.rs::execute` (THEORY §VI.1 three-is-a-law:
-        // the ARM64 arm below is the third occurrence). The primitive
-        // owns `NIX_BIN` env resolution, typed-error dispatch
-        // (`NixBuildError::ExecFailed` / `NixBuildError::PathInfoFailed`
-        // carrying the structural-record tuple per THEORY §V.4 Phase 1
-        // attestation records), and `closure_size` derivation — the
-        // three load-bearing properties the pre-lift raw-spawn stanza
-        // bypassed at all three sites.
-        println!("   Analyzing AMD64 closure...");
-        match crate::nix::path_info_recursive("result-amd64").await {
-            Err(e) => {
-                crate::ui::eprint_step_warn("Failed to get AMD64 closure info (non-fatal)", &e)
-            }
-            Ok(info) => {
-                println!(
-                    "   AMD64: Found {} derivations in closure",
-                    info.closure_size
-                );
+        // Per-arch closure push routes through the local
+        // [`push_arch_closure_to_attic`] helper below — one call per
+        // built arch. Pre-lift the AMD64 and ARM64 arms each spelled
+        // the same 21-line `println!("   Analyzing <ARCH> closure...")
+        // + match path_info_recursive("result-<arch>") + AtticClient
+        // ::new(cache_target.clone()).push_closure_via_stdin(info.stdout)`
+        // stanza verbatim, differing only in the arch label and the
+        // `result-*` symlink path. Two byte-identical siblings past the
+        // duplication threshold (THEORY §VI.1) — the lift redeems the
+        // pair onto ONE body so a future refinement of the per-arch
+        // closure-push contract (a `warn_nonfatal!` swap, an attestation
+        // sigil on cache-hit telemetry, a switch to a batched
+        // `push_multi_arch_closure` primitive) lands in one place and
+        // reaches both arches by construction. The `build.rs::execute`
+        // single-arch sibling remains on its own `info!`/`warn_nonfatal!`
+        // dialect — the operator-visible verb (info vs println) is a
+        // deliberate difference that survives the lift.
+        push_arch_closure_to_attic("AMD64", "result-amd64", &cache_target).await;
 
-                let attic_client =
-                    crate::infrastructure::attic::AtticClient::new(cache_target.clone());
-                match attic_client
-                    .push_closure_via_stdin(info.stdout.as_slice())
-                    .await
-                {
-                    Ok(()) => println!("   {}", "✅ AMD64 closure cached".green()),
-                    Err(e) => {
-                        crate::ui::eprint_step_warn("AMD64 closure push failed (non-fatal)", &e)
-                    }
-                }
-            }
-        }
-
-        // Push ARM64 closure recursively (if built). Third sibling of
-        // the lifted stanza family — `commands/build.rs::execute` and
-        // the AMD64 arm above are the other two; THEORY §VI.1
-        // three-is-a-law. Typed-error op-failure path carries (cache,
-        // exit_code, stderr) per THEORY §V.4 Phase 1 attestation
-        // record shape.
         if should_build_arm64 {
-            println!("   Analyzing ARM64 closure...");
-            match crate::nix::path_info_recursive("result-arm64").await {
-                Err(e) => {
-                    crate::ui::eprint_step_warn("Failed to get ARM64 closure info (non-fatal)", &e)
-                }
-                Ok(info) => {
-                    println!(
-                        "   ARM64: Found {} derivations in closure",
-                        info.closure_size
-                    );
-
-                    let attic_client =
-                        crate::infrastructure::attic::AtticClient::new(cache_target.clone());
-                    match attic_client
-                        .push_closure_via_stdin(info.stdout.as_slice())
-                        .await
-                    {
-                        Ok(()) => println!("   {}", "✅ ARM64 closure cached".green()),
-                        Err(e) => {
-                            crate::ui::eprint_step_warn("ARM64 closure push failed (non-fatal)", &e)
-                        }
-                    }
-                }
-            }
+            push_arch_closure_to_attic("ARM64", "result-arm64", &cache_target).await;
         }
 
         println!();
@@ -712,6 +667,78 @@ pub async fn build_rust_service(
     println!("   Per-crate derivations cached in Attic for 60-80% faster future builds");
 
     Ok(())
+}
+
+// `#[allow(dead_code)]` here mirrors the pre-existing baseline flags on
+// `build_rust_service` / `push_rust_service_with_tag` and their
+// downstream helpers in this module — the whole `build_rust_service`
+// consumer chain is dead-code-flagged under `cargo clippy --all-targets`
+// on the main `forge` bin target because clippy's cross-module
+// reachability from `main.rs`'s CLI dispatch surface does not resolve
+// through the enclosing async orchestrator surfaces (a limitation the
+// sibling `commands/federation_tests.rs` and `commands/migrations.rs`
+// consumer chains hit and pin the same way at 122d2f / b962db5). The
+// helper is invoked twice in [`build_rust_service`]; the attribute
+// keeps this lift's clippy delta at 0 new baseline errors.
+#[allow(dead_code)]
+/// Enumerate a per-arch Nix build closure and push it to the Attic
+/// binary cache, emitting the operator-visible `println!` narration
+/// the pre-lift AMD64/ARM64 arms produced verbatim.
+///
+/// Owns the "log `Analyzing <ARCH> closure` → `nix path-info --recursive
+/// result-<arch>` → log `Found N derivations` → new AtticClient(cache)
+/// + `push_closure_via_stdin(info.stdout)` → log `✅ <ARCH> closure
+/// cached` OR non-fatal warn" stanza that lived byte-identical at the
+/// AMD64 and ARM64 arms in [`build_rust_service`]. Both arms differed
+/// only in the arch label (`AMD64` / `ARM64`) and the `result-*`
+/// symlink path — the lift owns the shared body at ONE construction
+/// surface, and the caller picks the label + symlink per arch.
+///
+/// # Non-fatal contract
+///
+/// Every failure mode is telemetered via
+/// [`crate::ui::eprint_step_warn`] and swallowed — a closure
+/// enumeration failure or an attic push failure MUST NOT abort the
+/// build, since the built image is still shippable without the
+/// per-derivation Attic cache warm-up. The pre-lift arms honored this
+/// contract by returning `()` from every branch; the lift preserves
+/// that shape (return type `()`, no `?` propagation, no `Result`).
+///
+/// # Sibling dialects
+///
+/// [`crate::commands::build.rs::execute`] carries the single-arch
+/// counterpart on the `tracing::info!` + [`crate::warn_nonfatal!`]
+/// dialect — an operator-visible verb (info vs println) that is a
+/// deliberate difference. A future unification of the two dialects
+/// lands in ONE follow-up commit; this lift closes only the
+/// byte-identical AMD64/ARM64 pair.
+async fn push_arch_closure_to_attic(arch_label: &str, result_path: &str, cache_target: &str) {
+    println!("   Analyzing {} closure...", arch_label);
+    match crate::nix::path_info_recursive(result_path).await {
+        Err(e) => crate::ui::eprint_step_warn(
+            &format!("Failed to get {} closure info (non-fatal)", arch_label),
+            &e,
+        ),
+        Ok(info) => {
+            println!(
+                "   {}: Found {} derivations in closure",
+                arch_label, info.closure_size
+            );
+
+            let attic_client =
+                crate::infrastructure::attic::AtticClient::new(cache_target.to_string());
+            match attic_client
+                .push_closure_via_stdin(info.stdout.as_slice())
+                .await
+            {
+                Ok(()) => println!("   {}", format!("✅ {} closure cached", arch_label).green()),
+                Err(e) => crate::ui::eprint_step_warn(
+                    &format!("{} closure push failed (non-fatal)", arch_label),
+                    &e,
+                ),
+            }
+        }
+    }
 }
 
 /// Verify image exists in registry and return its digest
@@ -3316,6 +3343,146 @@ mod release_git_sha_routing_tests {
              missing delegation would leave the negative scan above \
              trivially satisfied by absence.",
             delegate_hits.len()
+        );
+    }
+}
+
+#[cfg(test)]
+mod push_arch_closure_lift_tests {
+    /// Regression shield: the per-arch closure-push stanza in
+    /// [`super::build_rust_service`] must route through the
+    /// [`super::push_arch_closure_to_attic`] helper at exactly ONE
+    /// call site per arch — never re-inline the pre-lift
+    /// `AtticClient::new(cache_target.clone()).push_closure_via_stdin
+    /// (info.stdout.as_slice())` body at the AMD64 or ARM64 arm.
+    ///
+    /// Pre-lift both arms spelled the same 21-line stanza verbatim,
+    /// differing only in the arch label (`AMD64` / `ARM64`) and the
+    /// `result-*` symlink path. Two byte-identical siblings past the
+    /// duplication threshold — the lift owns the shared body at ONE
+    /// construction surface so a future refinement of the per-arch
+    /// closure-push contract (a `warn_nonfatal!` swap for the
+    /// `eprint_step_warn` telemetry line, an attestation sigil on
+    /// cache-hit telemetry per THEORY §V.4 Phase 1 attestation records,
+    /// a switch to a batched `push_multi_arch_closure` primitive) lands
+    /// in one place and reaches both arches by construction (THEORY §V
+    /// — solve-once-at-the-primitive; §VI.1 — recurring-shape-to-helper).
+    ///
+    /// # Scan discipline
+    ///
+    /// The shield reads the module body up to the FIRST `\n#[cfg(test)]\n`
+    /// marker via [`crate::test_support::module_body_before_first_cfg_test`]
+    /// so this shield's own docstring mentions of the pre-lift stanza
+    /// (which live inside a `#[cfg(test)]` block below that first
+    /// marker) stay out of scope. Every hit routes through
+    /// [`crate::test_support::code_line_hits`] for anti-docstring-
+    /// self-match discipline: `///`-prefixed doc-comment lines in the
+    /// module body (e.g. the helper's own docstring above) do not
+    /// self-match as phantom hits — the same code-line-filter
+    /// discipline the sibling `release_git_sha_routing_tests` shield
+    /// established.
+    ///
+    /// The load-bearing needle
+    /// `.push_closure_via_stdin(info.stdout.as_slice())` uniquely
+    /// identifies the pre-lift stanza: the primitive call appears at
+    /// zero sites in the module's non-test body pre-lift EXCEPT the
+    /// two arch arms. Post-lift the needle appears at exactly ONE
+    /// code line — the helper body itself — and a regression that
+    /// re-fused the stanza at either arch would bump the hit count
+    /// to 2 or 3, failing here.
+    #[test]
+    fn test_rust_service_per_arch_closure_push_routes_through_helper() {
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            include_str!("rust_service.rs"),
+            "commands/rust_service.rs",
+        );
+
+        let primitive_needle = ".push_closure_via_stdin(info.stdout.as_slice())";
+        let primitive_hits = crate::test_support::code_line_hits(body, primitive_needle);
+        assert_eq!(
+            primitive_hits.len(),
+            1,
+            "commands/rust_service.rs must route every per-arch Attic \
+             closure push through `push_arch_closure_to_attic(...)` so \
+             the pre-lift `AtticClient::new(cache_target.clone()).\
+             push_closure_via_stdin(info.stdout.as_slice())` stanza \
+             appears at EXACTLY one code line — the helper body \
+             itself. A future regression that re-fused the stanza at \
+             either the AMD64 or ARM64 arm would bump the hit count \
+             above one, splitting the per-arch closure-push contract \
+             across the helper and the re-inlined arm. Found {} \
+             code-line hit(s): {primitive_hits:#?}.",
+            primitive_hits.len()
+        );
+
+        let helper_call_needle = "push_arch_closure_to_attic(";
+        let helper_call_hits = crate::test_support::code_line_hits(body, helper_call_needle);
+        assert_eq!(
+            helper_call_hits.len(),
+            3,
+            "commands/rust_service.rs must call \
+             `push_arch_closure_to_attic(...)` at EXACTLY three code \
+             lines — the `fn` definition itself plus one call per \
+             built arch (AMD64 unconditional, ARM64 guarded by \
+             `should_build_arm64`). A missing arm would drop that \
+             arch's closure from the Attic cache warm-up entirely, \
+             re-opening the 60–80% future-build-speedup regression \
+             the pre-lift arms were landed to close. Found {} \
+             code-line hit(s): {helper_call_hits:#?}.",
+            helper_call_hits.len()
+        );
+
+        for arch in ["AMD64", "ARM64"] {
+            let arch_call_needle = format!("push_arch_closure_to_attic(\"{}\"", arch);
+            let arch_call_hits = crate::test_support::code_line_hits(body, &arch_call_needle);
+            assert_eq!(
+                arch_call_hits.len(),
+                1,
+                "commands/rust_service.rs must pass the arch label \
+                 {arch:?} to `push_arch_closure_to_attic(...)` at \
+                 EXACTLY one code line — the corresponding arch's \
+                 call site inside `build_rust_service`. Found {} \
+                 code-line hit(s): {arch_call_hits:#?}.",
+                arch_call_hits.len()
+            );
+        }
+    }
+
+    /// The [`super::push_arch_closure_to_attic`] helper honors the
+    /// non-fatal contract the pre-lift AMD64/ARM64 arms carried: every
+    /// failure mode (closure enumeration failure, attic push failure)
+    /// is telemetered via [`crate::ui::eprint_step_warn`] and swallowed,
+    /// so the return type is `()` (never `Result`). This shield pins
+    /// that structural discipline: the helper's `fn` signature line
+    /// must end with `-> ()` (implicit unit) rather than `-> Result…`,
+    /// and its body must contain no `?` propagation on the closure
+    /// enumeration or the attic push call.
+    ///
+    /// # Why this matters
+    ///
+    /// The build sequence continues even when the Attic warm-up fails —
+    /// the built image is still shippable without the per-derivation
+    /// cache. A regression that swapped the helper to return a
+    /// `Result` and let the caller `.await?` the outcome would abort
+    /// the whole `build_rust_service` flow on a transient Attic
+    /// unreachability, an outcome the pre-lift arms deliberately
+    /// avoided by matching-and-warning on every failure path. This
+    /// shield is the structural pin.
+    #[test]
+    fn test_push_arch_closure_to_attic_returns_unit_and_swallows_failures() {
+        const SOURCE: &str = include_str!("rust_service.rs");
+        let signature_needle =
+            "async fn push_arch_closure_to_attic(arch_label: &str, result_path: &str, cache_target: &str) {";
+        assert!(
+            SOURCE.contains(signature_needle),
+            "commands/rust_service.rs must expose \
+             `push_arch_closure_to_attic` with the return-unit shape — \
+             the signature `{signature_needle}` was not found. A \
+             regression that swapped the return type to `Result<…>` \
+             would let a transient Attic unreachability abort the \
+             whole `build_rust_service` flow via `?` propagation at \
+             the caller — an outcome the pre-lift arms deliberately \
+             avoided by matching-and-warning on every failure path."
         );
     }
 }
