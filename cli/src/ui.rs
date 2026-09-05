@@ -3548,6 +3548,74 @@ pub fn write_diagnostic_line<W: std::io::Write>(w: &mut W, line: &str) -> std::i
     writeln!(w, "   {}", line)
 }
 
+/// Prints the two-line `"\n   {}"` (leading framing blank +
+/// three-space indent + Display-interpolated line body) validation-
+/// issue enumeration grammar 3 pre-lift consumer sites spelled inline
+/// as `println!("\n   {}", issue.format())` in
+/// `commands/migration_validation.rs` (SQL migration
+/// idempotency/soft-delete/unsafe-drop enumeration ×1, SeaORM
+/// migration-safety enumeration ×1, migration-manifest classification
+/// enumeration ×1). Marks one issue's rendered multi-line body inside
+/// a validation-failure enumeration loop — every pre-lift consumer
+/// invoked the shape from a `for issue in &<coll> { ... }` iteration
+/// that followed a `crate::ui::print_step_failure(&format!("Found {}
+/// <noun>", <coll>.len()))` header, so the leading framing blank
+/// separates consecutive multi-line
+/// `MigrationIssue::format()` bodies (each a `<file>:<line> -
+/// <Class>\n  Statement: <...>\n  Suggestion: <...>` render whose two
+/// continuation rows would otherwise bleed into the next issue's
+/// header row).
+///
+/// # Distinct from every peer `ui::print_*` primitive
+///
+/// [`print_diagnostic_line`] emits `"   {}"` — the same three-space
+/// indent but NO leading framing blank; that primitive owns the
+/// per-line captured-output stream rendering (raw `cargo test` /
+/// `bun` stdout lines) where a framing blank between rows would
+/// silently rewrite the pass-through subprocess stream into a
+/// double-spaced list. This primitive owns the discrete enumeration
+/// grammar where each entry is a self-contained multi-line block whose
+/// framing blank keeps issue bodies from bleeding into their
+/// neighbors. [`print_step_failure`] emits the enumeration's
+/// zero-indent `❌ <msg>` header ONCE ahead of the loop; this
+/// primitive emits one entry per iteration inside the loop, at the
+/// three-space in-body indent so the enumeration reads as nested
+/// under its header row.
+///
+/// # Compounding
+///
+/// Pre-lift 3 sibling sites each restated the leading-blank +
+/// three-space indent + plain `{}` interpolation shape verbatim. A
+/// future adjustment (swapping the framing blank for a `─` separator
+/// row, promoting the framing gap to `.dimmed()`, wiring an OTLP
+/// `validation_issue_emitted` event alongside the print) had to hit 3
+/// sites in lockstep or drift the visual grammar; post-lift it hits
+/// ONE typed body. Delegates to [`write_validation_issue_line`]
+/// against [`std::io::stdout()`]; the writer split exists so the
+/// fail-before-pass test can pin the leading framing blank, the
+/// three-space indent, the verbatim Display body, and the ABSENCE of
+/// every `\x1b[<..>m` ANSI palette sequence by inspecting emitted
+/// bytes rather than shelling out and grepping stdout.
+pub fn print_validation_issue_line(line: &str) {
+    let _ = write_validation_issue_line(&mut std::io::stdout().lock(), line);
+}
+
+/// Writer-taking sibling to [`print_validation_issue_line`]. Emits the
+/// leading-blank + three-space-indented `\n   <line>` row via
+/// [`writeln!`] against the supplied writer.
+/// [`print_validation_issue_line`] is the stdout adapter; this variant
+/// exists so tests can pin the leading framing blank, the three-space
+/// indent, the verbatim Display body, and the ABSENCE of every
+/// `\x1b[<..>m` ANSI palette sequence (the plain-verbatim contract that
+/// distinguishes this primitive from the framing-blankless peer
+/// [`write_diagnostic_line`]) without capturing stdout.
+pub fn write_validation_issue_line<W: std::io::Write>(
+    w: &mut W,
+    line: &str,
+) -> std::io::Result<()> {
+    writeln!(w, "\n   {}", line)
+}
+
 /// Prints the one-line `"   {}: {}"` (three-space indent +
 /// caller-supplied label + literal colon + one space + Display-
 /// interpolated value) labeled field-display grammar 22 pre-lift
@@ -12562,6 +12630,168 @@ mod tests {
                  consumer sites into one call or dropped one of the \
                  labeled tag rows silently fails here. Found \
                  {forward_hits} forwarding hits."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for
+    /// [`super::write_validation_issue_line`]. Pins the two-line body
+    /// every pre-lift consumer spelled verbatim (`println!("\n   {}",
+    /// issue.format())`): a leading framing blank row, then the
+    /// three-space indent followed by the caller-supplied line body
+    /// rendered verbatim through `Display`, no ANSI escape from the
+    /// primitive body, and a trailing newline. A silent contract drift
+    /// a future rewrite might introduce — dropping the leading framing
+    /// blank (a "tighter enumeration spacing" cleanup that would let
+    /// each issue's continuation rows bleed into its neighbor),
+    /// dropping the three-space indent, painting the body `.dimmed()`
+    /// or `.red()` under a themed enumeration palette, folding a
+    /// leading `❌ ` / `→ ` glyph into the primitive body (silently
+    /// shifting the plain enumeration grammar into a peer step-
+    /// primitive grammar), swapping `writeln!` for `write!` (dropping
+    /// the trailing newline), or slipping a trailing framing blank
+    /// (double-spacing every issue) — flips this assertion rather than
+    /// compiling and silently diverging the 3 consumer sites' visual
+    /// grammar.
+    #[test]
+    fn write_validation_issue_line_emits_leading_blank_then_three_space_indented_uncolored_line() {
+        let mut buf: Vec<u8> = Vec::new();
+        let sample =
+            "migrations/0042_foo.sql:12 - Idempotency violation\n  Statement: DROP TABLE users\n  Suggestion: use IF EXISTS";
+        super::write_validation_issue_line(&mut buf, sample)
+            .expect("write_validation_issue_line against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf).expect(
+            "write_validation_issue_line must emit valid UTF-8 (the pre-lift println!s did)",
+        );
+
+        // Byte-for-byte reproduction of the pre-lift inline
+        // `println!("\n   {}", issue.format())` output — the leading
+        // framing blank, the three-space indent, the verbatim
+        // multi-line body (whose two continuation rows carry NO extra
+        // indent from the primitive), and the trailing newline all
+        // reach the writer in the exact pre-lift arrangement.
+        let expected = format!("\n   {sample}\n");
+        assert_eq!(
+            out, expected,
+            "write_validation_issue_line must render the leading \
+             framing blank, three-space indent, verbatim Display body, \
+             and trailing newline byte-for-byte matching the pre-lift \
+             inline `println!(\"\\n   {{}}\", issue.format())` output; \
+             got {out:?}",
+        );
+
+        // The primitive body itself paints NO ANSI escape — every
+        // pre-lift consumer left the issue body uncolored (matching
+        // the peer `write_diagnostic_line` plain-verbatim discipline).
+        // A regression that promoted the body to `.dimmed()` / `.red()`
+        // under a themed enumeration grammar would leak an ANSI
+        // sequence and fail here.
+        assert!(
+            !out.contains("\x1b["),
+            "write_validation_issue_line must emit NO ANSI escape at \
+             pin baseline — every pre-lift consumer left the issue \
+             body uncolored so the multi-line block reads plain \
+             against its `print_step_failure` header; got {out:?}",
+        );
+
+        // Leading `\n` IS part of the contract — the pre-lift shape
+        // spelled the template as `"\n   {}"`. A refactor that hoisted
+        // the newline into the caller would silently reflow the
+        // enumeration (collapsing the framing blank between entries).
+        assert!(
+            out.starts_with('\n'),
+            "write_validation_issue_line must start with a leading \
+             `\\n` framing blank — the pre-lift template was \
+             `\"\\n   {{}}\"`; got {out:?}",
+        );
+
+        // Trailing `\n` reaches the writer — the pre-lift stanza used
+        // `println!` (not `print!`), so the newline is part of the
+        // contract. A fusion that swapped `writeln!` for `write!`
+        // fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_validation_issue_line must emit a trailing `\\n` \
+             (the pre-lift `println!` did); got {out:?}",
+        );
+
+        // Exactly ONE trailing framing blank — a fusion that slipped
+        // a second `\n` at the end (double-spacing every issue) fails
+        // here.
+        assert!(
+            !out.ends_with("\n\n"),
+            "write_validation_issue_line must emit exactly one \
+             trailing `\\n` — the pre-lift `println!(\"\\n   {{}}\", \
+             ...)` framed each entry with a leading blank and a single \
+             trailing newline; a double `\\n` at the tail would \
+             double-space every issue in the enumeration; got {out:?}",
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_validation_issue_line`] no longer spell the
+    /// `println!("\n   {}", issue.format());` shape inline across
+    /// `commands/migration_validation.rs`. Structural regression
+    /// shield — without it, a future refactor could silently re-inline
+    /// the one-liner (e.g. a "just call `println!` directly, it's
+    /// shorter" cleanup) and reopen the 3-site duplication class this
+    /// lift closed. Enforced against the module body BEFORE its first
+    /// `#[cfg(test)]` region so a test-support mention of the raw
+    /// shape does not defeat the shield.
+    ///
+    /// The exact-shape needle is `println!("\n   {}",` immediately
+    /// followed on the same source line by any suffix ending in
+    /// `.format());` (the `Display`-rendered `MigrationIssue::format()`
+    /// call every pre-lift consumer spelled) — the macro invocation
+    /// with the exact leading-blank + three-space indent template and
+    /// the `.format()` argument on the same source line.
+    ///
+    /// The positive count is pinned at the pre-lift site count
+    /// (`migration_validation.rs` ×3). A fusion that folded two
+    /// consumer sites into one call or dropped one of the issue rows
+    /// silently fails here — the negative half above would still pass,
+    /// but the positive count would fall below the pre-lift census.
+    #[test]
+    fn print_validation_issue_line_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str, usize)] = &[(
+            include_str!("commands/migration_validation.rs"),
+            "commands/migration_validation.rs",
+            3,
+        )];
+        for (source, module_path, expected_forwards) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("println!(\"\\n   {}\",") {
+                    continue;
+                }
+                if !line.trim_end().ends_with(".format());") {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `println!(\"\\n   {{}}\", <issue>.format());` \
+                     leading-blank + three-space indented validation-\
+                     issue enumeration stanza — that shape was lifted \
+                     onto `crate::ui::print_validation_issue_line`. A \
+                     re-inline would silently reopen the 3-site \
+                     duplication class this shield exists to close. \
+                     Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            let forward_hits = body
+                .matches("crate::ui::print_validation_issue_line(")
+                .count();
+            assert_eq!(
+                forward_hits, *expected_forwards,
+                "{module_path} body must forward to \
+                 `crate::ui::print_validation_issue_line(...)` at \
+                 exactly {expected_forwards} site(s) — one per pre-lift \
+                 consumer in this module. A fusion that folded two \
+                 consumer sites into one call or dropped one of the \
+                 issue rows silently fails here. Found {forward_hits} \
+                 forwarding hits."
             );
         }
     }
