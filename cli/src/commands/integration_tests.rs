@@ -85,6 +85,58 @@ fn integration_test_retry_delay(attempts: u32) -> Duration {
     INTEGRATION_TEST_RETRY_BACKOFF.compute_delay(attempts.saturating_add(1))
 }
 
+/// Byte-oracle for the between-retry retry-log line
+/// [`execute_suite`]'s three failure branches (test-non-zero-exit,
+/// command-error, timeout) all emit before backing off. The
+/// pre-lift shape lived at three sibling
+/// `warn!("   🔄 Retrying ({}/{})", attempts, max_attempts)` call
+/// sites; extracting the message-body helper lets the shield below
+/// pin the exact rendered bytes at one place rather than at three
+/// diverging `warn!` call arms.
+fn retrying_message(attempts: u32, max_attempts: u32) -> String {
+    format!("   🔄 Retrying ({}/{})", attempts, max_attempts)
+}
+
+/// Fused between-retry stanza for [`execute_suite`]'s post-deployment
+/// retry loop: emit the standard `"   🔄 Retrying (N/M)"` warn line
+/// through the [`retrying_message`] byte oracle, then back off through
+/// the typed [`integration_test_retry_delay`] schedule.
+///
+/// Pre-lift the three failure branches of `execute_suite`'s retry loop
+/// (test-non-zero-exit at line 925, command-error at line 943, timeout
+/// at line 960 as of d197c04) each spelled the identical two-line stanza
+/// `warn!("   🔄 Retrying ({}/{})", attempts, max_attempts); sleep(
+/// integration_test_retry_delay(attempts)).await;` — three sibling
+/// occurrences past THEORY.md §VI.1's three-times threshold ("two
+/// occurrences is a coincidence; three is a law"). Fusing the pair here
+/// forecloses three defect classes at the sibling `INTEGRATION_TEST_RETRY_BACKOFF`
+/// docstring above cites for its own retry-delay lift:
+///
+/// 1. **Two-tag message drift across three sites.** A future edit to
+///    the emoji, spacing, indent, or attempt/max-attempt argument
+///    order at one branch silently diverged from the other two. The
+///    fused helper reads through one shared body all three branches
+///    call, and the byte-oracle shield at [`retrying_message`] pins
+///    the exact rendered bytes.
+/// 2. **Ordering drift between warn and sleep.** All three sites
+///    spelled `warn!` before `sleep`, but the two-line shape carried
+///    no invariant preventing a future edit from reordering them at
+///    one branch (which would emit the retry log before the tests-are-
+///    actually-retrying delay elapsed, misleading anyone reading the
+///    log). The fused helper's linear body enforces the order at one
+///    site.
+/// 3. **Delegation-boundary desync.** A future edit that renamed the
+///    typed delay helper (`integration_test_retry_delay` →
+///    `integration_test_backoff_delay`, say) had to be applied at
+///    three sites in lock-step. The fused helper reads through one
+///    delegation call, and the delegation-boundary shield at
+///    [`tests::test_execute_suite_consumes_typed_retry_delay_not_bare_fixed_sleep`]
+///    pins the canonical call at one place.
+async fn warn_retrying_and_backoff(attempts: u32, max_attempts: u32) {
+    warn!("{}", retrying_message(attempts, max_attempts));
+    sleep(integration_test_retry_delay(attempts)).await;
+}
+
 /// The typed exponential-backoff policy for [`execute`]'s post-deployment
 /// readiness poll loop — `initial_backoff` 2s × `factor` 2 capped at
 /// `max_backoff` 30s. Consumes the pre-existing typed primitive at
@@ -922,8 +974,7 @@ async fn execute_suite(
                         });
                     }
 
-                    warn!("   🔄 Retrying ({}/{})", attempts, max_attempts);
-                    sleep(integration_test_retry_delay(attempts)).await;
+                    warn_retrying_and_backoff(attempts, max_attempts).await;
                 }
             }
             Ok(Err(e)) => {
@@ -940,8 +991,7 @@ async fn execute_suite(
                     });
                 }
 
-                warn!("   🔄 Retrying ({}/{})", attempts, max_attempts);
-                sleep(integration_test_retry_delay(attempts)).await;
+                warn_retrying_and_backoff(attempts, max_attempts).await;
             }
             Err(_) => {
                 error!("   ⏱️  Test suite timed out after {:?}", suite_timeout);
@@ -957,8 +1007,7 @@ async fn execute_suite(
                     });
                 }
 
-                warn!("   🔄 Retrying ({}/{})", attempts, max_attempts);
-                sleep(integration_test_retry_delay(attempts)).await;
+                warn_retrying_and_backoff(attempts, max_attempts).await;
             }
         }
     }
@@ -1867,6 +1916,127 @@ mod integration_test_retry_backoff_tests {
              `execute_suite`'s retry loop — the canonical delegation \
              call was not found at any code line.",
         );
+    }
+
+    // ====================================================================
+    // warn_retrying_and_backoff — three-way retry-log + backoff fusion
+    // ====================================================================
+    //
+    // These pin the fused `warn_retrying_and_backoff` helper that
+    // collapsed the three sibling `warn!("   🔄 Retrying ({}/{})",
+    // attempts, max_attempts); sleep(integration_test_retry_delay(
+    // attempts)).await;` stanzas at `execute_suite`'s three failure
+    // branches (test-non-zero-exit, command-error, timeout). Same
+    // fusion-primitive shape the `kubectl_probe_push_nonempty_section_4sp`
+    // shields at `infrastructure/kubectl.rs::tests` (d197c04) apply for
+    // the three-way probe+push fusion — byte-oracle for the message
+    // shape, delegation-boundary shield for the fusion adoption.
+
+    /// Byte oracle for the retry-log line's rendered shape. Pins the
+    /// exact bytes the pre-lift `warn!("   🔄 Retrying ({}/{})", ...)`
+    /// call emitted, so a future edit to the emoji, spacing, indent,
+    /// separator, or argument order at [`retrying_message`] surfaces
+    /// here rather than silently across a log-parser downstream.
+    #[test]
+    fn test_retrying_message_shape() {
+        assert_eq!(
+            retrying_message(1, 3),
+            "   🔄 Retrying (1/3)",
+            "attempts=1/max=3 must render as the pre-lift `warn!` shape verbatim.",
+        );
+        assert_eq!(
+            retrying_message(2, 3),
+            "   🔄 Retrying (2/3)",
+            "attempts=2/max=3 must render as the pre-lift `warn!` shape verbatim.",
+        );
+        assert_eq!(
+            retrying_message(10, 100),
+            "   🔄 Retrying (10/100)",
+            "multi-digit attempts/max must render as the pre-lift `warn!` shape verbatim.",
+        );
+    }
+
+    /// Whole-module boundary shield: `execute_suite`'s three failure
+    /// branches (test-non-zero-exit, command-error, timeout) MUST each
+    /// consume the fused [`warn_retrying_and_backoff`] helper rather
+    /// than re-fusing the pre-lift two-line
+    /// `warn!("   🔄 Retrying ({}/{})", attempts, max_attempts); sleep(
+    /// integration_test_retry_delay(attempts)).await;` stanza at any
+    /// branch. A future refactor that reintroduces the raw
+    /// `warn!("   🔄 Retrying` shape — or grows a fourth failure branch
+    /// and copies the pre-lift stanza — fails here, not silently as
+    /// three-way message drift. Whole-module boundary discipline sibling
+    /// of the delegation shields listed in the docstrings of the
+    /// per-branch `println!` and `warn!` fusion helpers across
+    /// `commands/`.
+    ///
+    /// Code-line filter (via [`crate::test_support::code_line_hits`])
+    /// skips docstring / prose-comment lines, so the shield does not
+    /// false-positive on `warn_retrying_and_backoff`'s own docstring
+    /// (which cites the pre-lift `warn!("   🔄 Retrying` shape as
+    /// context for the three defects it forecloses).
+    #[test]
+    fn test_execute_suite_consumes_fused_retry_warn_and_backoff_not_raw_warn_sleep_pair() {
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("integration_tests.rs"),
+            "commands/integration_tests.rs",
+        );
+
+        let raw_warn_hits =
+            crate::test_support::code_line_hits(module_body, "warn!(\"   🔄 Retrying (");
+        assert!(
+            raw_warn_hits.is_empty(),
+            "commands/integration_tests.rs must NOT emit a raw \
+             `warn!(\"   🔄 Retrying (...)\", attempts, max_attempts)` \
+             at any `execute_suite` failure branch — every retry-log \
+             site must consume the fused `warn_retrying_and_backoff` \
+             helper. Found code-line hits: {:#?}",
+            raw_warn_hits,
+        );
+        let delegation_hits = crate::test_support::code_line_hits(
+            module_body,
+            "warn_retrying_and_backoff(attempts, max_attempts).await",
+        );
+        assert!(
+            !delegation_hits.is_empty(),
+            "commands/integration_tests.rs must consume the fused \
+             `warn_retrying_and_backoff(attempts, max_attempts).await` \
+             helper at every failure branch of `execute_suite`'s retry \
+             loop — the canonical delegation call was not found at any \
+             code line.",
+        );
+    }
+
+    /// Reconciliation shield: the fused
+    /// [`warn_retrying_and_backoff`] helper's backoff schedule MUST
+    /// remain byte-identical to the standalone
+    /// [`integration_test_retry_delay`] schedule. A future edit that
+    /// swapped the fusion helper's delay call for a different policy
+    /// (a bare `Duration::from_secs(N)`, a different `RetryPolicy`)
+    /// would let the three branches diverge from the reconciled
+    /// schedule the sibling `test_integration_test_retry_delay_*`
+    /// shields already pin.
+    ///
+    /// Cross-checks the fusion body's `sleep` argument by using
+    /// [`tokio::time::pause`] + [`tokio::time::sleep`]'s virtual clock
+    /// to make the helper's timing observable — pause the clock, spawn
+    /// the helper, advance virtual time by exactly the expected
+    /// [`integration_test_retry_delay(attempts)`] Duration, and verify
+    /// the helper wakes.
+    #[tokio::test(start_paused = true)]
+    async fn test_warn_retrying_and_backoff_delay_matches_standalone_delay_for_in_cap_attempts() {
+        for attempts in [1u32, 2, 3, 4, 5, 50] {
+            let expected = integration_test_retry_delay(attempts);
+            let start = tokio::time::Instant::now();
+            warn_retrying_and_backoff(attempts, attempts + 1).await;
+            let elapsed = start.elapsed();
+            assert_eq!(
+                elapsed, expected,
+                "attempts={attempts}: fused helper must sleep exactly \
+                 `integration_test_retry_delay({attempts})` ({expected:?}); \
+                 observed {elapsed:?}.",
+            );
+        }
     }
 }
 
