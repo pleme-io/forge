@@ -1020,16 +1020,11 @@ fn print_e2e_diagnostics(backend_dir: &Path) {
 
     // Screenshots
     let screenshot_dir = backend_dir.join("target/screenshots");
-    if let Ok(entries) = std::fs::read_dir(&screenshot_dir) {
-        let screenshots: Vec<_> = entries
-            .filter_map(|e| e.ok())
-            .filter(|e| crate::repo::path_has_extension(&e.path(), "png"))
-            .collect();
-        if !screenshots.is_empty() {
-            println!("\n   Screenshots captured:");
-            for entry in &screenshots {
-                println!("     {}", entry.path().display());
-            }
+    let screenshots = crate::repo::read_dir_files_with_extension(&screenshot_dir, "png");
+    if !screenshots.is_empty() {
+        println!("\n   Screenshots captured:");
+        for entry in &screenshots {
+            println!("     {}", entry.path().display());
         }
     }
 

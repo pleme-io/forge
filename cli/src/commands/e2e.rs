@@ -1110,17 +1110,12 @@ fn print_failure_diagnostics() {
     }
 
     // Check for screenshots
-    let screenshot_dir = "target/screenshots";
-    if let Ok(entries) = std::fs::read_dir(screenshot_dir) {
-        let screenshots: Vec<_> = entries
-            .filter_map(|e| e.ok())
-            .filter(|e| crate::repo::path_has_extension(&e.path(), "png"))
-            .collect();
-        if !screenshots.is_empty() {
-            eprintln!("\nScreenshots captured:");
-            for entry in &screenshots {
-                eprintln!("  {}", entry.path().display());
-            }
+    let screenshot_dir = std::path::Path::new("target/screenshots");
+    let screenshots = crate::repo::read_dir_files_with_extension(screenshot_dir, "png");
+    if !screenshots.is_empty() {
+        eprintln!("\nScreenshots captured:");
+        for entry in &screenshots {
+            eprintln!("  {}", entry.path().display());
         }
     }
 
