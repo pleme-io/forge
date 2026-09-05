@@ -46,7 +46,7 @@ pub async fn execute(
 
     // Step 1: Build (unless skipped)
     if !skip_build {
-        info!("━━━ Step 1/3: Build ━━━");
+        crate::step_header::announce_step_header(1, 3, "Build");
         commands::build::execute(
             "dockerImage".to_string(),
             ".".to_string(),
@@ -62,7 +62,7 @@ pub async fn execute(
     }
 
     // Step 2: Push
-    info!("━━━ Step 2/3: Push ━━━");
+    crate::step_header::announce_step_header(2, 3, "Push");
     commands::push::execute(
         "result".to_string(),
         registry.clone(),
@@ -79,7 +79,7 @@ pub async fn execute(
     .await?;
 
     // Step 3: GitOps Deploy
-    info!("━━━ Step 3/3: GitOps Deploy ━━━");
+    crate::step_header::announce_step_header(3, 3, "GitOps Deploy");
     println!();
 
     // The manifest parameter should point to kustomization.yaml
@@ -146,7 +146,7 @@ pub async fn execute(
     // This is optional - if config can't be loaded, we skip purging
     if let Ok(config) = DeployConfig::load_for_service(&name) {
         if config.global.cloudflare.enabled {
-            info!("━━━ Step 4/4: Purge Cloudflare Cache ━━━");
+            crate::step_header::announce_step_header(4, 4, "Purge Cloudflare Cache");
             println!();
 
             if let (Some(zone_id), Some(api_token), Some(base_url)) = (

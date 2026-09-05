@@ -39,7 +39,7 @@ pub async fn release(
         .await?;
 
     // Step 2: Push image to GHCR
-    info!("━━━ Step 1/6: Push Image ━━━");
+    crate::step_header::announce_step_header(1, 6, "Push Image");
     push::execute(
         image_path,
         registry.clone(),
@@ -57,27 +57,27 @@ pub async fn release(
     println!();
 
     // Step 3: Update primary cluster kustomization.yaml images[] overlay
-    info!("━━━ Step 2/6: Update primary cluster kustomization ━━━");
+    crate::step_header::announce_step_header(2, 6, "Update primary cluster kustomization");
     update_kustomization_image(&primary_kustomization, &registry, &new_tag).await?;
     println!();
 
     // Step 4: Update secondary cluster kustomization.yaml images[] overlay
-    info!("━━━ Step 3/6: Update secondary cluster kustomization ━━━");
+    crate::step_header::announce_step_header(3, 6, "Update secondary cluster kustomization");
     update_kustomization_image(&secondary_kustomization, &registry, &new_tag).await?;
     println!();
 
     // Step 5: Update primary cluster builder-pool agentImage
-    info!("━━━ Step 4/6: Update primary cluster builder-pool ━━━");
+    crate::step_header::announce_step_header(4, 6, "Update primary cluster builder-pool");
     update_builder_pool_agent_image(&primary_builder_pool, &registry, &new_tag).await?;
     println!();
 
     // Step 6: Update secondary cluster builder-pool agentImage
-    info!("━━━ Step 5/6: Update secondary cluster builder-pool ━━━");
+    crate::step_header::announce_step_header(5, 6, "Update secondary cluster builder-pool");
     update_builder_pool_agent_image(&secondary_builder_pool, &registry, &new_tag).await?;
     println!();
 
     // Step 7: Commit and push
-    info!("━━━ Step 6/6: Commit and Push ━━━");
+    crate::step_header::announce_step_header(6, 6, "Commit and Push");
     info!("📤 Committing release changes...");
     commit_cluster_overlay_release(
         None,

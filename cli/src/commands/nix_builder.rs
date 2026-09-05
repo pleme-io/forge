@@ -246,7 +246,7 @@ pub async fn release(
         .await?;
 
     // Step 2: Push image to GHCR
-    info!("━━━ Step 1/7: Push Image ━━━");
+    crate::step_header::announce_step_header(1, 7, "Push Image");
     push::execute(
         image_path,
         registry.clone(),
@@ -268,41 +268,49 @@ pub async fn release(
 
     // Step 3: Update primary cluster nix-builder kustomization.yaml images[] overlay (if exists)
     if let Some(ref primary_kust) = primary_nix_builder_kustomization {
-        info!("━━━ Step 2/7: Update primary cluster nix-builder kustomization ━━━");
+        crate::step_header::announce_step_header(
+            2,
+            7,
+            "Update primary cluster nix-builder kustomization",
+        );
         update_kustomization_image(primary_kust, &registry, &new_tag).await?;
         modified_files.push(primary_kust.clone());
         println!();
     } else {
-        info!("━━━ Step 2/7: Skip primary cluster nix-builder kustomization (not provided) ━━━");
+        crate::step_header::announce_step_header(
+            2,
+            7,
+            "Skip primary cluster nix-builder kustomization (not provided)",
+        );
         println!();
     }
 
     // Step 4: Update primary cluster kenshi kustomization.yaml BUILDER_IMAGE
-    info!("━━━ Step 3/7: Update primary cluster kenshi BUILDER_IMAGE ━━━");
+    crate::step_header::announce_step_header(3, 7, "Update primary cluster kenshi BUILDER_IMAGE");
     update_kenshi_builder_image(&primary_kenshi_kustomization, &registry, &new_tag).await?;
     modified_files.push(primary_kenshi_kustomization.clone());
     println!();
 
     // Step 5: Update primary cluster builder-pool builderImage
-    info!("━━━ Step 4/7: Update primary cluster builder-pool ━━━");
+    crate::step_header::announce_step_header(4, 7, "Update primary cluster builder-pool");
     update_builder_pool_builder_image(&primary_builder_pool, &registry, &new_tag).await?;
     modified_files.push(primary_builder_pool.clone());
     println!();
 
     // Step 6: Update secondary cluster kenshi kustomization.yaml BUILDER_IMAGE
-    info!("━━━ Step 5/7: Update secondary cluster kenshi BUILDER_IMAGE ━━━");
+    crate::step_header::announce_step_header(5, 7, "Update secondary cluster kenshi BUILDER_IMAGE");
     update_kenshi_builder_image(&secondary_kenshi_kustomization, &registry, &new_tag).await?;
     modified_files.push(secondary_kenshi_kustomization.clone());
     println!();
 
     // Step 7: Update secondary cluster builder-pool builderImage
-    info!("━━━ Step 6/7: Update secondary cluster builder-pool ━━━");
+    crate::step_header::announce_step_header(6, 7, "Update secondary cluster builder-pool");
     update_builder_pool_builder_image(&secondary_builder_pool, &registry, &new_tag).await?;
     modified_files.push(secondary_builder_pool.clone());
     println!();
 
     // Step 8: Commit and push
-    info!("━━━ Step 7/7: Commit and Push ━━━");
+    crate::step_header::announce_step_header(7, 7, "Commit and Push");
     info!("📤 Committing release changes...");
     let file_refs: Vec<&str> = modified_files.iter().map(String::as_str).collect();
     commit_cluster_overlay_release(None, "nix-builder", &new_tag, &file_refs).await?;

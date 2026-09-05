@@ -169,7 +169,7 @@ pub async fn execute(
 
     // Step 1: Build with Nix (unless skipped)
     if !skip_build {
-        info!("━━━ Step 1/3: Build ━━━");
+        crate::step_header::announce_step_header(1, 3, "Build");
         println!();
 
         // Get ATTIC_TOKEN from environment or kubernetes secret
@@ -427,7 +427,7 @@ pub async fn execute(
 
     // Step 2: Push to GHCR (unless skipped)
     if !skip_push {
-        info!("━━━ Step 2/3: Push to GHCR ━━━");
+        crate::step_header::announce_step_header(2, 3, "Push to GHCR");
         println!();
 
         // Get GHCR token via canonical discovery chain
@@ -460,7 +460,7 @@ pub async fn execute(
     }
 
     // Step 3: Update manifest and commit
-    info!("━━━ Step 3/3: GitOps Deployment ━━━");
+    crate::step_header::announce_step_header(3, 3, "GitOps Deployment");
     println!();
 
     let manifest_path = std::path::Path::new(repo_root_str).join(&manifest);
