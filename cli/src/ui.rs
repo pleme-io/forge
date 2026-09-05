@@ -4152,6 +4152,60 @@ pub fn write_forge_invocation_example<W: std::io::Write>(
     writeln!(w, "   {} {}", "forge".bright_cyan(), suffix)
 }
 
+/// Prints the one-line `"  $ <cmd>"` (two-space indent + `$` shell
+/// prompt + single space + `.yellow()`-colored command) example-
+/// invocation grammar every pre-lift consumer spelled inline as
+/// `println!("  $ {}", <cmd>.yellow())` across
+/// `commands/rust_service.rs::print_deployment_report`'s VERIFICATION
+/// COMMANDS and MONITORING COMMANDS sections. Marks a leaf shell
+/// command the operator is expected to run — a `git log` to verify a
+/// push landed, a `kubectl get pods` to watch a rollout, a
+/// `flux get kustomizations` to check reconciliation, a `curl` to
+/// test a GraphQL endpoint — under a plain-indent one-line "Verify
+/// X:" or "Check X:" header. The `<cmd>` reaches the writer painted
+/// `.yellow()` end-to-end (never split between prompt-colored and
+/// command-colored halves), so an operator scanning a report can
+/// distinguish shell commands from surrounding prose at a glance.
+///
+/// # Compounding
+///
+/// Pre-lift 16 sibling sites in `commands/rust_service.rs`
+/// (`print_deployment_report`'s VERIFICATION and MONITORING blocks)
+/// each restated the `println!("  $ {}", <cmd>.yellow())` grammar
+/// verbatim — 5 with a bare `"literal".yellow()` argument, 11 with a
+/// `format!(...).yellow()` argument spanning the multi-line
+/// `println!(\n    "  $ {}",\n    format!(...)\n    .yellow()\n)`
+/// shape. A future palette adjustment (a swap of `.yellow()` for
+/// `.bright_yellow()` under a milestone-grade shell-command grammar,
+/// a promotion to `.bold()` for CI-log readability, a shift of the
+/// two-space indent to three-space under a nested VERIFICATION
+/// sub-report, a swap of `$ ` for `> ` under a PowerShell-friendly
+/// grammar, an OTLP `shell_example_emitted` observability event
+/// wired alongside the print) had to hit 16 sites in lockstep or
+/// drift the visual grammar of the deployment report; post-lift it
+/// hits ONE typed body. Delegates to [`write_shell_example_cmd`]
+/// against [`std::io::stdout()`]; the writer split exists so the
+/// fail-before-pass test can pin the one-line body, the two-space
+/// indent, the `$` prompt glyph, the single-space connective, the
+/// `\x1b[33m` yellow ANSI span around the command bytes, and the
+/// trailing newline by inspecting emitted bytes rather than shelling
+/// out and grepping stdout.
+pub fn print_shell_example_cmd(cmd: &str) {
+    let _ = write_shell_example_cmd(&mut std::io::stdout().lock(), cmd);
+}
+
+/// Writer-taking sibling to [`print_shell_example_cmd`]. Emits the
+/// single `"  $ <cmd>"` line via [`writeln!`] against the supplied
+/// writer, with the `<cmd>` painted `.yellow()`. [`print_shell_example_cmd`]
+/// is the stdout adapter; this variant exists so tests can pin the
+/// one-line body, the two-space indent, the `$` prompt glyph, the
+/// single-space connective, the `\x1b[33m` yellow ANSI sequence
+/// wrapping the command bytes (never the `$` prompt), and the
+/// trailing newline without capturing stdout.
+pub fn write_shell_example_cmd<W: std::io::Write>(w: &mut W, cmd: &str) -> std::io::Result<()> {
+    writeln!(w, "  $ {}", cmd.yellow())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{styled_spinner, SpinnerStyle, SPINNER_TICK};
@@ -13476,6 +13530,187 @@ mod tests {
                  folded two consumer sites into one call or dropped \
                  one of the example invocations silently fails here. \
                  Found {forward_hits} forwarding hits."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_shell_example_cmd`].
+    /// Pins the one-line body every pre-lift consumer spelled verbatim
+    /// (`println!("  $ {}", <cmd>.yellow())`): a two-space indent, a
+    /// literal `$` shell-prompt glyph, a single-space connective, then
+    /// the caller-supplied command bytes painted `.yellow()` (the
+    /// `\x1b[33m…\x1b[0m` span wrapping the command alone, never the
+    /// `$` prompt), and a trailing newline. A silent contract drift a
+    /// future rewrite might introduce — swapping `.yellow()`
+    /// (`\x1b[33m`) for `.bright_yellow()` (`\x1b[93m`, the distinct
+    /// milestone-level `print_warning` palette), widening the indent
+    /// to three-space (colliding with the sibling in-body `print_step_*`
+    /// grammar) or collapsing it to zero, promoting the whole line's
+    /// coloring so the `$` prompt paints yellow at every site
+    /// (swallowing the prompt-vs-command visual split), swapping `$ `
+    /// for `> ` under a PowerShell-friendly grammar, slipping a
+    /// leading or trailing framing blank into the primitive body,
+    /// swapping `writeln!` for `write!` (dropping the trailing
+    /// newline) — flips this assertion rather than compiling and
+    /// silently diverging the 16 consumer sites' visual grammar.
+    #[test]
+    fn write_shell_example_cmd_emits_exactly_one_yellow_cmd_dollar_prefixed_two_indented_line() {
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_shell_example_cmd(&mut buf, "kubectl get pods -n prod")
+            .expect("write_shell_example_cmd against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_shell_example_cmd must emit valid UTF-8 (the pre-lift println!s did)");
+
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_shell_example_cmd must emit exactly one line — the \
+             pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // Two-space indent, NOT three-space (which is the sibling
+        // in-body `print_step_*` grammar) and NOT zero-indent (which
+        // is the sibling `print_tag_field` zero-indent labeled-field
+        // grammar).
+        assert!(
+            lines[0].starts_with("  $ "),
+            "line 0 must begin with `\"  $ \"` (two-space indent + \
+             `$` prompt + one space) — every pre-lift consumer spelled \
+             `\"  $ {{}}\"` verbatim, so the indent and prompt must \
+             reach the writer OUTSIDE the coloring span; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].starts_with("   $"),
+            "line 0 must NOT begin with a three-space indent — that \
+             indent belongs to the sibling in-body `print_step_*` \
+             grammar, not this two-space shell-example grammar; got \
+             {:?}",
+            lines[0]
+        );
+
+        // The command bytes reach the rendered line verbatim.
+        assert!(
+            lines[0].contains("kubectl get pods -n prod"),
+            "line 0 must carry the command verbatim; got {:?}",
+            lines[0]
+        );
+
+        // The `yellow` ANSI sequence — NOT `bright_yellow` (which is
+        // the distinct milestone-level `print_warning` palette).
+        assert!(
+            lines[0].contains("\x1b[33m"),
+            "line 0 must carry the `yellow` ANSI sequence \
+             (`\\x1b[33m`); got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[93m"),
+            "line 0 must NOT carry the `bright_yellow` ANSI sequence \
+             (`\\x1b[93m`) — that palette belongs to the distinct \
+             milestone-level `print_warning` grammar, not this \
+             shell-example primitive; got {:?}",
+            lines[0]
+        );
+
+        // The `.yellow()` coloring wraps the COMMAND alone, never the
+        // `$` prompt — the `\x1b[33m` opener must appear AFTER the
+        // `$ ` prompt, so a terminal without color still renders
+        // `  $ <cmd>` legibly with the prompt visually distinct from
+        // the command bytes.
+        let dollar_pos = lines[0].find("$ ").expect("`$ ` prompt must be present");
+        let ansi_pos = lines[0]
+            .find("\x1b[33m")
+            .expect("yellow ANSI opener must be present");
+        let cmd_pos = lines[0]
+            .find("kubectl get pods -n prod")
+            .expect("command must be present");
+        assert!(
+            dollar_pos < ansi_pos && ansi_pos < cmd_pos,
+            "the `\\x1b[33m` yellow opener must appear AFTER the `$ ` \
+             prompt and BEFORE the command bytes — every pre-lift \
+             consumer spelled `.yellow()` on the command alone, never \
+             on the `$` prompt. Got positions dollar={dollar_pos}, \
+             ansi={ansi_pos}, cmd={cmd_pos} in line {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `println!`, so the newline is part of the contract.
+        assert!(
+            out.ends_with('\n'),
+            "write_shell_example_cmd must emit a trailing `\\n` (the \
+             pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_shell_example_cmd`] no longer spell the
+    /// `println!("  $ {}", <cmd>.yellow())` shape inline in
+    /// `commands/rust_service.rs`. Structural regression shield —
+    /// without it, a future refactor could silently re-inline the
+    /// one-liner (e.g. a "just call `println!` directly, the shape
+    /// is short" cleanup) and reopen the 16-site duplication class
+    /// this lift closed. Enforced against the module body BEFORE its
+    /// first `#[cfg(test)]` region so a test-support mention of the
+    /// raw shape does not defeat the shield.
+    ///
+    /// The exact-shape needle is the character sequence `"  $ {}"` —
+    /// the four-byte prompt template every pre-lift consumer spelled
+    /// verbatim inside a `println!` format string. The primitive
+    /// body itself spells that template at one typed site (in
+    /// `ui.rs`, out of scope for this check) so the shield does not
+    /// self-flag.
+    ///
+    /// The positive count is pinned at the pre-lift site count
+    /// (`rust_service.rs` ×16). A fusion that folded two consumer
+    /// sites into one call or dropped one of the shell examples
+    /// silently fails here — the negative half above would still
+    /// pass, but the positive count would fall below the pre-lift
+    /// census.
+    #[test]
+    fn print_shell_example_cmd_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str, usize)] = &[(
+            include_str!("commands/rust_service.rs"),
+            "commands/rust_service.rs",
+            16,
+        )];
+        for (source, module_path, expected_forwards) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("\"  $ {}\"") {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `\"  $ {{}}\"` two-space `$`-prompted shell-example \
+                     format string inside a `println!(\"  $ {{}}\", \
+                     <cmd>.yellow())` stanza — that shape was lifted \
+                     onto `crate::ui::print_shell_example_cmd`. A \
+                     re-inline would silently reopen the 16-site \
+                     duplication class this shield exists to close. \
+                     Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            let forward_hits = body.matches("crate::ui::print_shell_example_cmd(").count();
+            assert_eq!(
+                forward_hits, *expected_forwards,
+                "{module_path} body must forward to \
+                 `crate::ui::print_shell_example_cmd(...)` at exactly \
+                 {expected_forwards} site(s) — one per pre-lift \
+                 consumer in this module. A fusion that folded two \
+                 consumer sites into one call or dropped one of the \
+                 shell examples silently fails here. Found \
+                 {forward_hits} forwarding hits."
             );
         }
     }
