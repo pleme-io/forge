@@ -379,21 +379,12 @@ pub async fn product_release(
 
         println!();
     } else if skip_gates {
-        println!(
-            "{}",
-            "Phase 0: Skipping pre-release gates (--skip-gates)".dimmed()
-        );
-        println!();
+        crate::ui::print_phase_skipped("Phase 0: Skipping pre-release gates (--skip-gates)");
     } else if !is_staging {
-        println!(
-            "{}",
-            format!(
-                "Phase 0: Skipping pre-release gates (env={}, gates only run for staging)",
-                target_env
-            )
-            .dimmed()
-        );
-        println!();
+        crate::ui::print_phase_skipped(&format!(
+            "Phase 0: Skipping pre-release gates (env={}, gates only run for staging)",
+            target_env
+        ));
     }
 
     // ─── Phase 1: Push artifacts to registry ────────────────────────────────
@@ -584,18 +575,13 @@ pub async fn product_release(
 
     #[cfg(not(feature = "attestation"))]
     let attestation_info: Option<crate::config::AttestationInfoRecord> = {
-        println!(
-            "{}",
-            "Phase 1.5: Attestation skipped (feature disabled)".dimmed()
-        );
-        println!();
+        crate::ui::print_phase_skipped("Phase 1.5: Attestation skipped (feature disabled)");
         None
     };
 
     // ─── Phase 2: Deploy per environment ────────────────────────────────────
     if build_only {
-        println!("{}", "Phase 2: Skipping deploy (--build-only)".dimmed());
-        println!();
+        crate::ui::print_phase_skipped("Phase 2: Skipping deploy (--build-only)");
 
         // Jump straight to Phase 3: persist artifact tags
         crate::ui::print_step_heading("Phase 3: Persist artifact tags");
@@ -609,16 +595,8 @@ pub async fn product_release(
         .await?;
         println!();
 
-        println!(
-            "{}",
-            "Phase 4: Skipping dashboard sync (--build-only)".dimmed()
-        );
-        println!();
-        println!(
-            "{}",
-            "Phase 5: Skipping post-deploy verification (--build-only)".dimmed()
-        );
-        println!();
+        crate::ui::print_phase_skipped("Phase 4: Skipping dashboard sync (--build-only)");
+        crate::ui::print_phase_skipped("Phase 5: Skipping post-deploy verification (--build-only)");
 
         crate::ui::print_release_stage_banner(
             "BUILD COMPLETE",
@@ -745,8 +723,7 @@ pub async fn product_release(
         run_forge_subcommand(&["dashboards", "--working-dir", &product_dir_str]).await?;
         println!();
     } else {
-        println!("{}", "Phase 4: Skipping dashboard sync".dimmed());
-        println!();
+        crate::ui::print_phase_skipped("Phase 4: Skipping dashboard sync");
     }
 
     // ─── Phase 5: Post-deploy verification ──────────────────────────────────
@@ -769,8 +746,7 @@ pub async fn product_release(
         }
         println!();
     } else {
-        println!("{}", "Phase 5: Skipping post-deploy verification".dimmed());
-        println!();
+        crate::ui::print_phase_skipped("Phase 5: Skipping post-deploy verification");
     }
 
     // ─── Done ───────────────────────────────────────────────────────────────
