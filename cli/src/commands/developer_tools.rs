@@ -643,7 +643,7 @@ pub async fn rust_dev_down(service: String) -> Result<()> {
         .await
         .context("Failed to stop docker-compose")?;
 
-        println!("✅ Infrastructure stopped");
+        crate::ui::print_success_line("Infrastructure stopped");
     } else {
         println!("⚠️  No compose.yml found in {}", service_path.display());
     }

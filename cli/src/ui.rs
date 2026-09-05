@@ -1348,6 +1348,91 @@ pub fn write_step_success<W: std::io::Write>(w: &mut W, message: &str) -> std::i
     writeln!(w, "✅ {}", message.green())
 }
 
+/// Prints the one-line `"✅ <message>"` (zero-indent `✅` glyph + plain,
+/// UNSTYLED message) success-acknowledgement grammar 8 pre-lift consumer
+/// sites spelled inline as `println!("✅ <literal>")` — a bare U+2705
+/// checkmark, a single ASCII space, and a plain-text literal, all
+/// uncolored, unbolded, un-adorned — across 5 command modules
+/// (`commands/{federation (×2: "Metadata saved:" + "BFF supergraph
+/// reloaded successfully"), sessions (×2: "No sessions to flush" +
+/// "Sessions flushed successfully!"), rust_service (×2: "ATTIC_TOKEN
+/// configured" + "Cross-compilation to ARM64 available"),
+/// developer_tools (×1: "Infrastructure stopped"),
+/// rust_service (×1: "Integration tests passed!")}.rs`). Marks a
+/// discrete success — a pre-flight check passed, a follow-up notify
+/// call succeeded, a probe returned no work to do, a bounded operation
+/// finished — in the plain-text noise floor UNDER the styled
+/// [`print_success`] milestone banner AND UNDER the `.green()`-tinted
+/// in-body [`print_step_success`] step-completion marker.
+///
+/// # Distinct from [`print_success`] and [`print_step_success`]
+///
+/// [`print_success`] is a `bright_green().bold()` `✅ <msg>` line — the
+/// heaviest palette in the success family, reserved for milestone-level
+/// completion banners at the top-of-command level (three pre-lift
+/// consumers on `commands/{bootstrap,build,push}.rs`).
+/// [`print_step_success`] is a plain `green()` `✅ <msg>` line — the
+/// mid-palette in-body step-completion marker (9 pre-lift consumers
+/// on `commands/{federation,rust_service,schema_validation,
+/// developer_tools}.rs`). This primitive carries the LEANEST rung —
+/// zero color, zero bold, zero framing — every pre-lift consumer
+/// spelled the emit as a bare unstyled `println!` because the
+/// surrounding context (an ATTIC_TOKEN preflight, a BFF notify
+/// follow-up, a session-flush no-op branch) never rose to
+/// step-completion visual weight. A caller that promoted an
+/// unstyled acknowledgement onto [`print_step_success`] would
+/// silently paint the message green at every downstream site and
+/// collapse the three-rung palette contrast this primitive exists to
+/// preserve; a caller that demoted a `green()` step-completion onto
+/// this writer would strip the green ANSI sequence and flatten the
+/// step-completion visual weight into the noise floor.
+///
+/// # Byte-identical to the pre-lift stanzas
+///
+/// The pre-lift consumers spelled the emit as `println!("✅
+/// <literal>")` — no `.green()`, no `.bold()`, no `format!` — so the
+/// rendered bytes are `✅ <literal>\n` with ZERO ANSI escape sequences.
+/// This primitive delegates to [`write_success_line`], which is
+/// `writeln!(w, "✅ {}", message)` (no `.green()` on the message), so
+/// the rendered bytes at every lifted site remain `✅ <literal>\n`
+/// character-for-character. The writer-level test below pins the
+/// zero-ANSI contract against a `Vec<u8>` sink; a future refactor that
+/// slipped a color call onto the message (a "the whole `✅` family
+/// deserves a palette" cleanup) fails there rather than compiling and
+/// silently repainting every terminal at every deployment path.
+///
+/// # Compounding
+///
+/// Pre-lift 8 sibling sites each restated the `println!("✅
+/// <literal>")` grammar verbatim across 5 command modules. A future
+/// palette adjustment (a promotion to `green()` under a unified
+/// success-family palette, a `[✓]` glyph swap under a CI-log-friendly
+/// grammar, an OTLP `success_acknowledge` observability event wired
+/// alongside the print, a demotion to `info!` under a structured-log
+/// consolidation) had to hit 8 sites in lockstep or drift the visual
+/// grammar; post-lift it hits ONE typed body. Delegates to
+/// [`write_success_line`] against [`std::io::stdout()`]; the writer
+/// split exists so the fail-before-pass test can pin the single-line
+/// body, the `✅ ` prefix, and the zero-ANSI-escape contract by
+/// inspecting emitted bytes rather than shelling out and grepping
+/// stdout.
+pub fn print_success_line(message: &str) {
+    let _ = write_success_line(&mut std::io::stdout().lock(), message);
+}
+
+/// Writer-taking sibling to [`print_success_line`]. Emits the single
+/// `✅ <message>` line — unstyled, uncolored, unbolded — via
+/// [`writeln!`] against the supplied writer. [`print_success_line`] is
+/// the stdout adapter; this variant exists so tests can pin the
+/// one-line body, the `✅ ` prefix, and the zero-ANSI-escape contract
+/// (the pre-lift `println!("✅ <literal>")` stanzas emit zero escape
+/// sequences) without capturing stdout — and so a caller that already
+/// owns a `Vec<u8>` or a locked stderr handle need not double-buffer
+/// through [`print_success_line`].
+pub fn write_success_line<W: std::io::Write>(w: &mut W, message: &str) -> std::io::Result<()> {
+    writeln!(w, "✅ {}", message)
+}
+
 /// Prints the one-line `"   {} <message>"` (three-space indent + red
 /// `❌` glyph + plain message) in-body step-failure grammar 40 pre-lift
 /// consumer sites spelled inline as `println!("   {} <fmt>",
@@ -6580,6 +6665,206 @@ mod tests {
                  `crate::ui::print_success(\"<MSG>\")` — the primitive \
                  body every one-line `✅ ` + bright_green().bold() \
                  milestone-completion straggler in the crate now \
+                 delegates through."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_success_line`].
+    /// Pins the one-line body 8 pre-lift consumer sites spelled
+    /// verbatim as `println!("✅ <literal>")` across 5 command modules
+    /// (`commands/{federation, sessions, rust_service, developer_tools,
+    /// rust_service}.rs`): the `✅ ` glyph prefix, a single ASCII
+    /// space, the message text verbatim, the trailing `\n`, and — the
+    /// contract that separates this primitive from the peer
+    /// [`super::write_success`] and [`super::write_step_success`] — ZERO
+    /// ANSI escape sequences on the rendered bytes. A silent contract
+    /// drift a future rewrite might introduce — dropping the `✅ `
+    /// glyph, promoting the palette to `.green()` (`\x1b[32m` — the
+    /// [`super::write_step_success`] palette) or to
+    /// `.bright_green().bold()` (`\x1b[1;92m` — the
+    /// [`super::write_success`] palette), swapping `writeln!` for
+    /// `write!` (loses the trailing `\n`) — flips this assertion rather
+    /// than compiling and silently repainting every terminal at every
+    /// lifted call site.
+    #[test]
+    fn write_success_line_emits_exactly_one_check_prefixed_unstyled_line() {
+        // Force ANSI emission on stdout via [`AnsiOverrideForTest`] so
+        // this test's zero-escape assertion is *forced-color-on*
+        // evidence rather than the trivial *color-auto-detected-off*
+        // shape a bare `Vec<u8>` sink would produce. The pre-lift
+        // stanzas emit zero escapes because they never invoked a
+        // `colored` method — not because color was auto-suppressed on
+        // a non-tty sink. Under the override, ANY `.green()` /
+        // `.bright_green()` / `.bold()` call inside the primitive body
+        // WOULD emit escapes; the assertion below fires if a future
+        // refactor slips one in.
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_success_line(&mut buf, "ATTIC_TOKEN configured")
+            .expect("write_success_line against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_success_line must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — the pre-lift stanza is one `println!`,
+        // not two, and carries no framing blank. A refactor that slips
+        // a leading or trailing blank into the primitive body fails
+        // here.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_success_line must emit exactly one line — the \
+             pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The `✅ ` glyph reaches the rendered line — every pre-lift
+        // consumer spelled it. A fusion that dropped the checkmark
+        // fails here.
+        assert!(
+            lines[0].contains("✅ "),
+            "line 0 must carry the `✅ ` glyph — every pre-lift \
+             consumer spelled it; got {:?}",
+            lines[0]
+        );
+
+        // The message text reaches the rendered line verbatim; a
+        // fusion that hoists the message off the parameter and pins
+        // it to a constant fails here.
+        assert!(
+            lines[0].contains("ATTIC_TOKEN configured"),
+            "line 0 must carry the message verbatim; got {:?}",
+            lines[0]
+        );
+
+        // The rendered bytes are byte-identical to the pre-lift
+        // `println!("✅ ATTIC_TOKEN configured")` — exactly the
+        // eight-byte U+2705 UTF-8 sequence + ASCII space + message
+        // literal + `\n`, with ZERO `\x1b` escape sequences of any
+        // color or attribute kind. This is the contract that separates
+        // `write_success_line` from the peer `write_success`
+        // (`\x1b[1;92m`) and `write_step_success` (`\x1b[32m`). A
+        // future refactor that slipped `.green()`, `.bright_green()`,
+        // `.bold()`, `.dimmed()`, or any other `colored` call into the
+        // body would raise `\x1b` bytes into the emitted output and
+        // silently repaint every terminal at every deployment path —
+        // that regression is caught here.
+        assert!(
+            !out.contains('\x1b'),
+            "write_success_line must emit ZERO ANSI escape sequences — \
+             the pre-lift stanzas spelled `println!(\"✅ <literal>\")` \
+             with no `colored` call, so the emitted bytes carry no \
+             `\\x1b` escape. A refactor that promoted the message onto \
+             `.green()` (`\\x1b[32m` — the `write_step_success` \
+             palette) or onto `.bright_green().bold()` (`\\x1b[1;92m` — \
+             the `write_success` milestone-banner palette) would \
+             collapse the three-rung success-family palette contrast \
+             this primitive exists to preserve; got {:?}",
+            out
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `println!` (not `print!`), so the newline is part of the
+        // contract. A fusion that swapped `writeln!` for `write!`
+        // fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_success_line must terminate with `\\n` — pre-lift \
+             stanza used `println!`, not `print!`; got {:?}",
+            out
+        );
+
+        // The rendered bytes reconstruct the pre-lift stanza
+        // exactly — U+2705 (4 bytes: `\xf0\x9f\x9c\x85`) + ASCII space
+        // + message literal + `\n`, no leading indent, no trailing
+        // whitespace, no framing blank. A regression that swapped
+        // U+2705 (✅) for U+2713 (✓ — the `.green()`-tinted
+        // `write_step_success` palette's glyph on a leaner grammar) or
+        // for U+2714 (✔) would flip this assertion.
+        assert_eq!(
+            out, "✅ ATTIC_TOKEN configured\n",
+            "write_success_line bytes must be byte-identical to the \
+             pre-lift `println!(\"✅ <literal>\")` — U+2705 + ASCII \
+             space + message + `\\n`, zero ANSI escapes, no other \
+             whitespace or framing; got {:?}",
+            out
+        );
+    }
+
+    /// Callers-delegate shield for [`super::print_success_line`]. Every
+    /// pre-lift `println!("✅ <literal>")` acknowledgement across
+    /// 5 command modules (`commands/{federation, sessions,
+    /// rust_service, developer_tools, rust_service}.rs`) was the exact
+    /// inline expansion of [`super::print_success_line`]'s one-line
+    /// body — 8 sites hand-rolling the primitive body verbatim. A
+    /// future re-inline (a "one-liner, may as well spell it out"
+    /// cleanup) would silently reopen the 8-site duplication class
+    /// this shield exists to close; this test scans each consumer
+    /// module's body-before-first-`cfg(test)` for the pre-lift needle
+    /// and asserts the migrated primitive call is present.
+    #[test]
+    fn print_success_line_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[
+            (
+                include_str!("commands/federation.rs"),
+                "commands/federation.rs",
+            ),
+            (include_str!("commands/sessions.rs"), "commands/sessions.rs"),
+            (
+                include_str!("commands/rust_service.rs"),
+                "commands/rust_service.rs",
+            ),
+            (
+                include_str!("commands/developer_tools.rs"),
+                "commands/developer_tools.rs",
+            ),
+        ];
+        for (source, module_path) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                let trimmed = line.trim_start();
+                // Pre-lift needle: `println!("✅ <literal>")` — bare
+                // U+2705 glyph + space + plain literal, no `{}` format
+                // arg, no `.green()` / `.bold()` / any `colored` call.
+                // Peer stanzas the shield MUST NOT catch: the styled
+                // `println!("{}", "✅ <MSG>".bright_green().bold())`
+                // milestone banner (has `{}` format + colored call),
+                // the `println!("✅ {}", ...)` variants (has `{}`
+                // format), the styled `.green()` step-completion (has
+                // `.green()`). All three peers carry marks the needle
+                // rejects.
+                let is_prelift_needle = trimmed.starts_with("println!(\"✅ ")
+                    && !line.contains("{}")
+                    && !line.contains(".green()")
+                    && !line.contains(".bright_green()")
+                    && !line.contains(".bold()")
+                    && !line.contains(".yellow()")
+                    && !line.contains(".red()")
+                    && !line.contains(".cyan()")
+                    && !line.contains(".dimmed()");
+                assert!(
+                    !is_prelift_needle,
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `println!(\"✅ <literal>\")` \
+                     success-acknowledgement stanza — that one-liner \
+                     was lifted onto `crate::ui::print_success_line`. A \
+                     re-inline would silently reopen the 8-site \
+                     duplication class this shield exists to close. \
+                     Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            assert!(
+                body.contains("crate::ui::print_success_line("),
+                "{module_path} body must forward to \
+                 `crate::ui::print_success_line(\"<literal>\")` — the \
+                 primitive body every one-line unstyled `println!(\"✅ \
+                 <literal>\")` success-acknowledgement in the crate now \
                  delegates through."
             );
         }
