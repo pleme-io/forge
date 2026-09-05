@@ -413,6 +413,96 @@ pub async fn kubectl_probe_stdout_capture(args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// Fused best-effort `kubectl` diagnostic-probe + typed-section-append:
+/// compose [`kubectl_probe_stdout_capture`] with the canonical
+/// [`crate::repo::push_section_indented_lines_4sp`] two-space-heading /
+/// four-space-body dialect into one call. On
+/// `Some(non_empty_stdout)`, push a fresh sub-section under `heading`
+/// with each trimmed stdout line indented four spaces; on `None` (spawn
+/// `Err`) or `Some(empty)`, no-op — the `diag` buffer is preserved
+/// verbatim so the operator-facing diagnostic surface never grows a
+/// dangling `<HEADING>:\n` with no body.
+///
+/// # Fusion of two typed primitives at three sibling sites
+///
+/// Three sibling stanzas in
+/// [`crate::commands::flux::gather_deployment_diagnostics`] carry the
+/// four-line pattern
+///
+/// ```text
+/// if let Some(stdout) = kubectl_probe_stdout_capture(&[...]).await {
+///     if !stdout.trim().is_empty() {
+///         crate::repo::push_section_indented_lines_4sp(
+///             &mut diag, "<heading>", stdout.trim().lines());
+///     }
+/// }
+/// ```
+///
+/// verbatim modulo the per-site argv and heading literal — the
+/// **Deployment Conditions** jsonpath at section 2, the **All Pods**
+/// `-o wide` listing at section 3, and the **Container States**
+/// jsonpath at section 4. Three occurrences at THEORY §VI.1's
+/// three-is-a-law threshold (PRIME DIRECTIVE: duplication budget is
+/// zero); this primitive is the law-redeeming consolidation on the
+/// `kubectl_probe_stdout_capture` + `push_section_indented_lines_4sp`
+/// fusion surface.
+///
+/// # Non-goals — the four sibling variants at the same caller
+///
+/// The four remaining probes at `gather_deployment_diagnostics` each
+/// carry a per-site branch predicate or iterator adapter that would
+/// fold as a spurious extra parameter here; they stay on the raw
+/// `kubectl_probe_stdout_capture` + `push_section_indented_lines_4sp`
+/// pair rather than accepting a caller-supplied closure that would
+/// re-open a knowability hole this fusion exists to close:
+///
+/// - **Deployment Replicas** (section 1) writes a scalar tuple rendered
+///   from a `/`-split single line, not a sub-list — the sub-list body
+///   would ship a spurious multi-line body for a scalar payload.
+/// - **Container Wait/Termination Reasons** (section 5) gates on a
+///   `has_reasons` predicate rather than `!trim().is_empty()`: the
+///   probe returns non-empty lines even when every container has
+///   `waiting=:` / `terminated=:` (no active reason), and the section
+///   must skip those rows.
+/// - **Deployment Events** (section 6) tails the iterator through
+///   `.rev().take(10)` to render the ten most-recent rows in
+///   newest-first order — a per-site slice discipline this primitive
+///   deliberately does not absorb.
+/// - **Related Pod Events** (section 7) pre-filters the trimmed lines
+///   through `.filter(|l| l.contains(deployment_name))` into a
+///   `Vec<&str>` before the `.iter().rev().take(15)` tail, and the
+///   header suppression gates on `!pod_events.is_empty()` — the raw-
+///   stdout `!trim().is_empty()` gate would emit the header for an
+///   unrelated-events-only probe.
+///
+/// # Envelope shape by construction
+///
+/// - Spawn `Err` (e.g., `KUBECTL_BIN` resolves to an absent path on a
+///   Nix-hermetic runner) → no-op via [`kubectl_probe_stdout_capture`]
+///   returning `None`.
+/// - Spawn `Ok` + empty stdout (probe ran, returned no rows) → no-op
+///   at the `trim().is_empty()` gate; matches the pre-lift discipline
+///   at every fused site.
+/// - Spawn `Ok` + non-empty stdout → push a fresh sub-section under
+///   `heading` (`"\n  <heading>:\n"`), then push each trimmed stdout
+///   line with a four-space indent through
+///   [`crate::repo::push_section_indented_lines_4sp`]. The fresh
+///   leading newline separates this sub-section from any prior buffer
+///   content, matching the sibling `push_section_indented_lines_4sp`
+///   invariant.
+pub async fn kubectl_probe_push_nonempty_section_4sp(
+    diag: &mut String,
+    heading: &str,
+    args: &[&str],
+) {
+    if let Some(stdout) = kubectl_probe_stdout_capture(args).await {
+        let trimmed = stdout.trim();
+        if !trimmed.is_empty() {
+            crate::repo::push_section_indented_lines_4sp(diag, heading, trimmed.lines());
+        }
+    }
+}
+
 /// Control-flow-carrying async captured-output `kubectl` spawn:
 /// compose [`kubectl_command_async`] with `args`, drive the
 /// spawn-plus-classify ritual at the canonical
@@ -1095,6 +1185,182 @@ mod tests {
              this branch, and the primitive's contract preserves that \
              swallow-every-spawn-error semantic so a diagnostic helper \
              never aborts on spawn Err"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // kubectl_probe_push_nonempty_section_4sp — fused best-effort
+    // probe + `push_section_indented_lines_4sp` on the diagnostic-
+    // surface frontier. Contract: on `Some(non_empty)`, push a fresh
+    // sub-section under the caller's heading with each trimmed line
+    // indented four spaces; on `None` or `Some(empty)`, no-op — the
+    // buffer is preserved verbatim.
+    // ---------------------------------------------------------------
+
+    /// The primitive's canonical happy path: a shim that exits zero
+    /// and prints two rows renders as one sub-section headed by the
+    /// caller's heading literal (two-space indent + `":\n"`) followed
+    /// by both rows each indented four spaces. Pins the fused shape
+    /// three sibling sites at
+    /// `commands/flux::gather_deployment_diagnostics` rely on — a
+    /// regression that switched the heading indent, the body indent,
+    /// or the trailing colon would silently drift the operator-facing
+    /// diagnostic banner every one of those sites feeds.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_kubectl_probe_push_nonempty_section_4sp_appends_headed_body() {
+        let _guard = KUBECTL_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let (_dir, shim) = printf_only_shim("kubectl", "row-one\nrow-two\n");
+        let _scope = KubectlBinScope::set(&shim);
+
+        let mut diag = String::from("prior-content");
+        kubectl_probe_push_nonempty_section_4sp(
+            &mut diag,
+            "Deployment Conditions",
+            &["get", "deployment", "svc", "-n", "ns"],
+        )
+        .await;
+        assert_eq!(
+            diag, "prior-content\n  Deployment Conditions:\n    row-one\n    row-two\n",
+            "non-empty probe must append `\\n  <heading>:\\n` then the \
+             two rows each with a four-space indent — matches the \
+             canonical `push_section_indented_lines_4sp` dialect three \
+             sibling sites at `gather_deployment_diagnostics` all rely \
+             on for their operator-facing banner"
+        );
+    }
+
+    /// A probe whose stdout is empty (or trims to empty) MUST no-op —
+    /// the buffer is preserved verbatim. Pre-lift the three fused
+    /// sites all gated on `!stdout.trim().is_empty()` explicitly to
+    /// avoid a dangling `<heading>:\n` with no body under the
+    /// operator-facing banner; that invariant lives at the primitive
+    /// now.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_kubectl_probe_push_nonempty_section_4sp_empty_stdout_no_ops() {
+        let _guard = KUBECTL_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let (_dir, shim) = printf_only_shim("kubectl", "");
+        let _scope = KubectlBinScope::set(&shim);
+
+        let mut diag = String::from("prior-content");
+        kubectl_probe_push_nonempty_section_4sp(&mut diag, "All Pods", &["get", "pods"]).await;
+        assert_eq!(
+            diag, "prior-content",
+            "an empty-stdout probe must no-op — the pre-lift \
+             `!stdout.trim().is_empty()` gate lives at the fusion \
+             primitive now, so a dangling `<heading>:\\n` with no body \
+             never lands under the operator-facing banner"
+        );
+    }
+
+    /// A probe whose stdout is whitespace-only (blank lines, spaces,
+    /// tabs) MUST no-op — the trim-then-empty gate catches this too.
+    /// `kubectl -o jsonpath=...` emits an empty payload as `""` when
+    /// the jsonpath matches no rows and as a bare `"\n"` when the
+    /// range clause fires zero times; both cases must fold to no-op
+    /// so the banner stays clean.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_kubectl_probe_push_nonempty_section_4sp_whitespace_stdout_no_ops() {
+        let _guard = KUBECTL_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let (_dir, shim) = printf_only_shim("kubectl", "\n\n  \t\n");
+        let _scope = KubectlBinScope::set(&shim);
+
+        let mut diag = String::from("prior-content");
+        kubectl_probe_push_nonempty_section_4sp(&mut diag, "Container States", &["get", "pods"])
+            .await;
+        assert_eq!(
+            diag, "prior-content",
+            "a whitespace-only probe must no-op — the `.trim()` before \
+             `.is_empty()` catches the jsonpath-matched-nothing case \
+             (`\\n\\n  \\t\\n`) that would otherwise emit a header with \
+             a body of blank rows"
+        );
+    }
+
+    /// A spawn `Err` (unresolvable `KUBECTL_BIN`) MUST no-op — the
+    /// `None`-return from [`kubectl_probe_stdout_capture`] short-
+    /// circuits the fusion body, and the operator-facing diagnostic
+    /// surface never aborts on a broken binary path (the whole point
+    /// of the best-effort-diagnostic carve-out).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_kubectl_probe_push_nonempty_section_4sp_spawn_error_no_ops() {
+        let _guard = KUBECTL_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _scope =
+            KubectlBinScope::set("/nonexistent/dir/absolutely-not-a-kubectl-binary-forge-shim");
+
+        let mut diag = String::from("prior-content");
+        kubectl_probe_push_nonempty_section_4sp(&mut diag, "All Pods", &["get", "pods"]).await;
+        assert_eq!(
+            diag, "prior-content",
+            "an unresolvable KUBECTL_BIN spawn must no-op — the \
+             None-arm of `kubectl_probe_stdout_capture` short-circuits \
+             the fusion body so the diagnostic helper never aborts on \
+             a broken binary path (the seven pre-lift sites all relied \
+             on this via the `if let Ok(...)` swallow discipline)"
+        );
+    }
+
+    /// The `(args)`-slice forwards to the spawned kubectl verbatim.
+    /// Pins the argv-forwarding contract three sibling sites at
+    /// `gather_deployment_diagnostics` rely on for their heterogeneous
+    /// 5- to 8-element argv slices — a regression that dropped,
+    /// reordered, or truncated the forwarded argv would break every
+    /// diagnostic probe by construction.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_kubectl_probe_push_nonempty_section_4sp_forwards_args() {
+        let _guard = KUBECTL_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let argv_log = ArgvLog::reserve();
+        let (_dir, shim) = make_executable_shim("kubectl", &argv_log.shim_body("row"));
+        let _scope = KubectlBinScope::set(&shim);
+
+        let mut diag = String::new();
+        kubectl_probe_push_nonempty_section_4sp(
+            &mut diag,
+            "Deployment Conditions",
+            &[
+                "get",
+                "deployment",
+                "backend",
+                "-n",
+                "infrastructure",
+                "-o",
+                "jsonpath={.status}",
+            ],
+        )
+        .await;
+
+        let logged = argv_log.read_argv_log();
+        let lines: Vec<&str> = logged.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                "get",
+                "deployment",
+                "backend",
+                "-n",
+                "infrastructure",
+                "-o",
+                "jsonpath={.status}",
+            ],
+            "the (args)-slice must forward to the spawned kubectl \
+             verbatim — no per-arg escaping, quoting, or reordering; \
+             the three sibling sites at `gather_deployment_diagnostics` \
+             carry heterogeneous argv slices that must land at the \
+             kubectl binary unchanged"
         );
     }
 
