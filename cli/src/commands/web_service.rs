@@ -144,8 +144,8 @@ pub async fn web_regenerate(product: String, service: String, repo_root: String)
     let pleme_linker = get_tool_path("PLEME_LINKER_BIN", "pleme-linker");
     let crate2nix = crate2nix_bin();
 
-    println!("📂 Service: {}", service_dir.display());
-    println!("📂 Hanabi: {}", hanabi_dir.display());
+    crate::ui::print_path_label("Service", &service_dir);
+    crate::ui::print_path_label("Hanabi", &hanabi_dir);
     println!();
 
     // Step 1: Regenerate frontend deps.nix using pleme-linker
@@ -241,7 +241,7 @@ pub async fn web_cargo_update(product: String, service: String, repo_root: Strin
     let cargo = cargo_bin();
     let crate2nix = crate2nix_bin();
 
-    println!("📂 Hanabi: {}", hanabi_dir.display());
+    crate::ui::print_path_label("Hanabi", &hanabi_dir);
     println!();
 
     // Step 1: Run cargo update
