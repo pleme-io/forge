@@ -193,7 +193,7 @@ pub async fn verify_health_endpoint(
                     ));
                     tokio::time::sleep(health_endpoint_retry_delay(attempt)).await;
                 } else {
-                    crate::ui::print_step_failure(&format!("Health check failed: {}", e));
+                    crate::ui::print_step_failure_with_error("Health check failed", &e);
                     return Ok((false, None));
                 }
             }
@@ -268,7 +268,7 @@ pub async fn verify_graphql_endpoint(
             }
         }
         Err(e) => {
-            crate::ui::print_step_failure(&format!("GraphQL check failed: {}", e));
+            crate::ui::print_step_failure_with_error("GraphQL check failed", &e);
             return Ok((false, None));
         }
     }
@@ -392,7 +392,7 @@ pub async fn verify_smoke_queries(
                 }
             }
             Err(e) => {
-                crate::ui::print_step_failure(&format!("{}: {}", smoke.name, e));
+                crate::ui::print_step_failure_with_error(&smoke.name, &e);
                 results.push(SmokeQueryResult {
                     name: smoke.name.clone(),
                     passed: false,
