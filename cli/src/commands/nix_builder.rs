@@ -235,16 +235,15 @@ pub async fn release(
     retries: u32,
     token: Option<String>,
 ) -> Result<()> {
-    info!("🚀 Starting nix-builder release");
-    info!("   Image: {}", image_path);
-    info!("   Registry: {}", registry);
-    println!();
-
-    // Step 1: Get git SHA for tagging
-    let git_sha = push::get_git_sha().await?;
-    let new_tag = format!("amd64-{}", git_sha);
-    info!("📋 Release tag: {}", new_tag);
-    println!();
+    // Step 1: Emit release preamble + resolve git SHA into the canonical
+    // `amd64-<sha>` tag via the shared cluster-overlay release primitive.
+    let new_tag =
+        crate::commands::cluster_overlay_release_preamble::announce_release_start_and_compute_tag(
+            "nix-builder",
+            &image_path,
+            &registry,
+        )
+        .await?;
 
     // Step 2: Push image to GHCR
     info!("━━━ Step 1/7: Push Image ━━━");

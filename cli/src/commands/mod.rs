@@ -2,6 +2,7 @@
 pub mod attestation;
 pub mod bootstrap;
 pub mod build;
+pub mod cluster_overlay_release_preamble;
 pub mod codegen;
 pub mod codegen_validation;
 pub mod comprehensive_release;
