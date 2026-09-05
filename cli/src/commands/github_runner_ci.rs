@@ -422,8 +422,7 @@ pub async fn execute(
         }
         println!();
     } else {
-        info!("⏭️  Skipping build step");
-        println!();
+        crate::info_skipping!("build step");
     }
 
     // Step 2: Push to GHCR (unless skipped)
@@ -457,8 +456,7 @@ pub async fn execute(
         println!("   • {}:{}", registry, git_sha);
         println!();
     } else {
-        info!("⏭️  Skipping push step");
-        println!();
+        crate::info_skipping!("push step");
     }
 
     // Step 3: Update manifest and commit
