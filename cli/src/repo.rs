@@ -2343,6 +2343,73 @@ pub fn sort_dir_entries_by_mtime_desc(entries: &mut [std::fs::DirEntry]) {
     entries.sort_by_key(|e| std::cmp::Reverse(mtime_or_epoch(e)));
 }
 
+/// Collect the [`std::fs::DirEntry`] children of `dir` whose path
+/// extension equals `ext`, treating a `read_dir` failure (missing
+/// directory, EACCES, EIO) as an empty listing rather than propagating
+/// the error to the caller.
+///
+/// # Duplication lift
+///
+/// Pre-lift two sibling best-effort screenshot enumerators on the
+/// E2E-failure post-mortem surface each spelled the same three-line
+/// `std::fs::read_dir(dir)` + `.filter_map(|e| e.ok())` +
+/// `.filter(|e| path_has_extension(&e.path(), "png"))` +
+/// `.collect()` composition inline:
+///
+/// - `commands/e2e.rs::print_failure_diagnostics` — enumerates the
+///   `target/screenshots/*.png` set captured by a failing Playwright
+///   E2E run, so the operator's post-mortem lists exactly the images
+///   the browser produced. The pre-lift stanza guarded the block via
+///   `if let Ok(entries) = std::fs::read_dir(screenshot_dir)`, then
+///   `.filter_map`'d + `.filter`'d + `.collect()`'d into a
+///   `Vec<DirEntry>` the surrounding `if !screenshots.is_empty()`
+///   check consumed.
+/// - `commands/prerelease.rs::print_e2e_diagnostics` — the same
+///   enumeration on the pre-release G14 E2E-failure surface, keyed
+///   at `backend_dir.join("target/screenshots")`.
+///
+/// Both call sites feed the returned `Vec<DirEntry>` into an
+/// `if !<vec>.is_empty()` guard + a `for entry in &<vec>` loop that
+/// prints `entry.path().display()`; neither site relies on the
+/// enumeration order (a `.png` filename is the operator's target,
+/// not a chronology), so the primitive owns the "walk the directory,
+/// keep the extension matches, drop the read errors" fusion in one
+/// place.
+///
+/// # Silent-drift class this closes
+///
+/// The pre-lift `if let Ok(entries) = std::fs::read_dir(...)` block
+/// silently swallows the `Err` arm of [`std::fs::read_dir`] — a
+/// missing directory (the E2E run took no screenshots), an EACCES
+/// denial (a foreign-owned target/ tree), and an EIO all short-circuit
+/// the enumeration without any operator-visible signal. This is the
+/// intended semantics on the diagnostics surface (a post-mortem must
+/// not itself fail when its enumerated artifact happens not to exist),
+/// but a call site that hand-spells the shape is one edit away from
+/// forgetting the `if let Ok(...)` guard and letting the missing
+/// directory bubble as a hard failure through an ambient `?`. Lifting
+/// the swallow into a single primitive pins the "diagnostic-surface
+/// read tolerates absence" contract at one owner rather than at every
+/// consumer.
+///
+/// # Enumeration order
+///
+/// The returned [`Vec`] preserves the [`std::fs::read_dir`]
+/// enumeration order verbatim — filesystem-dependent (ext4 gives
+/// directory-entry order, APFS gives inode order), and neither of
+/// the two consumers relies on a specific order. A caller that
+/// wants newest-first can chain [`sort_dir_entries_by_mtime_desc`]
+/// on the returned slice.
+pub fn read_dir_files_with_extension(dir: &Path, ext: &str) -> Vec<std::fs::DirEntry> {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => entries
+            .filter_map(std::result::Result::ok)
+            .filter(|e| path_has_extension(&e.path(), ext))
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Project a captured process output byte slice
 /// ([`std::process::Output::stdout`] / [`std::process::Output::stderr`],
 /// or any owned `Vec<u8>` that traveled through the same OS pipe) into
@@ -7883,6 +7950,105 @@ mod tests {
                      to the tail) the primitive discharges."
                 );
             }
+        }
+    }
+
+    /// [`read_dir_files_with_extension`] keeps only the extension-
+    /// matching entries under `dir`, drops entries whose extension
+    /// differs or is absent, and does not descend into subdirectories.
+    /// Pins the exact shape the two E2E-diagnostics screenshot
+    /// enumerators (`commands/e2e.rs::print_failure_diagnostics` and
+    /// `commands/prerelease.rs::print_e2e_diagnostics`) rely on when
+    /// they feed the returned `Vec<DirEntry>` into
+    /// `if !<vec>.is_empty()` + a `for` loop that prints
+    /// `entry.path().display()` — a drift to including a `.png.bak` or
+    /// a `subdir/screenshot.png` would silently walk the operator's
+    /// post-mortem past the actual browser-captured images.
+    #[test]
+    fn read_dir_files_with_extension_keeps_only_extension_matches_at_dir_root() {
+        let tmp = tempfile::tempdir().expect("mk tempdir");
+        for name in [
+            "keep-a.png",     // extension hit
+            "keep-b.png",     // extension hit
+            "wrong-ext.jpg",  // extension miss
+            "no-ext",         // no extension
+            "double.png.bak", // final extension is `bak`, not `png`
+        ] {
+            std::fs::write(tmp.path().join(name), b"x").expect("write fixture");
+        }
+        // A subdirectory holding a matching-extension entry — the
+        // primitive is shallow, so this entry must NOT appear.
+        std::fs::create_dir(tmp.path().join("nested")).expect("mkdir nested");
+        std::fs::write(tmp.path().join("nested").join("inner.png"), b"x").expect("write nested");
+
+        let entries = read_dir_files_with_extension(tmp.path(), "png");
+        let mut names: Vec<String> = entries.iter().map(dir_entry_name_lossy).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["keep-a.png".to_string(), "keep-b.png".to_string()],
+            "read_dir_files_with_extension must keep only the shallow \
+             matching-extension entries — a drift that includes a \
+             `.png.bak` or a nested subdirectory's `.png` would silently \
+             widen the operator's E2E screenshot post-mortem past the \
+             actual browser-captured images."
+        );
+    }
+
+    /// [`read_dir_files_with_extension`] treats a missing directory
+    /// as an empty listing rather than propagating the
+    /// [`std::io::Error`] to the caller — the load-bearing half of the
+    /// primitive's contract, because both consumers wrap the returned
+    /// `Vec<DirEntry>` in a bare `if !<vec>.is_empty()` guard with no
+    /// error-arm handling of their own. A drift to bubble the `Err`
+    /// via `?` would fail the entire E2E-failure post-mortem the
+    /// moment a run happened not to capture any screenshots — the
+    /// exact silent-swallow the pre-lift `if let Ok(entries) =
+    /// std::fs::read_dir(...)` shape encoded.
+    #[test]
+    fn read_dir_files_with_extension_returns_empty_on_missing_dir() {
+        let tmp = tempfile::tempdir().expect("mk tempdir");
+        let missing = tmp.path().join("this-dir-does-not-exist");
+        let entries = read_dir_files_with_extension(&missing, "png");
+        assert!(
+            entries.is_empty(),
+            "read_dir_files_with_extension must return an empty Vec \
+             on a missing directory — the two consumers' `if !<vec>\
+             .is_empty()` guard depends on the primitive absorbing \
+             the `std::fs::read_dir` `Err` arm silently. Got: \
+             {names:?}",
+            names = entries.iter().map(dir_entry_name_lossy).collect::<Vec<_>>()
+        );
+    }
+
+    /// Post-lift the two consumer sites lifted onto
+    /// [`read_dir_files_with_extension`] must not silently re-inline
+    /// the primitive's shape at their call points — a re-inline
+    /// reopens the two-copy duplication this lift closed and reopens
+    /// the silent-`read_dir`-swallow contract drift the primitive
+    /// pins. The source-scan shield refuses the exact pre-lift
+    /// `.filter(|e| crate::repo::path_has_extension(&e.path(), "png"))`
+    /// filter needle at each consumer file.
+    #[test]
+    fn read_dir_files_with_extension_consumers_do_not_reinline_the_primitive_shape() {
+        for (name, source) in [
+            ("commands/e2e.rs", include_str!("commands/e2e.rs")),
+            (
+                "commands/prerelease.rs",
+                include_str!("commands/prerelease.rs"),
+            ),
+        ] {
+            let needle = ".filter(|e| crate::repo::path_has_extension(&e.path(), \"png\"))";
+            assert!(
+                !source.contains(needle),
+                "{name} must NOT spell the inline `{needle}` — that \
+                 filter was lifted onto \
+                 `crate::repo::read_dir_files_with_extension`. A \
+                 re-inline reopens the two-copy duplication this lift \
+                 closed and would re-fork the silent-`read_dir`-swallow \
+                 contract one consumer at a time from the primitive's \
+                 owner-frozen shape."
+            );
         }
     }
 
