@@ -897,8 +897,7 @@ async fn run_frontend_gates(config: &PreReleaseConfig) -> Result<GateSummary> {
 
 /// G13: Run integration tests (testcontainers: Postgres + Redis + NATS)
 async fn run_integration_gate(config: &PreReleaseConfig) -> Result<bool> {
-    crate::ui::print_step_heading("G13: Integration tests");
-    let start = Instant::now();
+    let start = crate::ui::print_step_heading_start("G13: Integration tests");
 
     // Ensure Docker is running (auto-start on macOS)
     if let Err(e) = e2e::ensure_docker_running() {
@@ -1036,8 +1035,7 @@ fn print_e2e_diagnostics(backend_dir: &Path) {
 
 /// G14: Run E2E tests (chromiumoxide + testcontainers full stack)
 async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
-    crate::ui::print_step_heading("G14: E2E tests");
-    let start = Instant::now();
+    let start = crate::ui::print_step_heading_start("G14: E2E tests");
 
     // Ensure Docker is running (may already be started by G13)
     if let Err(e) = e2e::ensure_docker_running() {
@@ -1199,8 +1197,7 @@ fn verify_directories(config: &PreReleaseConfig) -> Result<()> {
 
 /// G1: Run cargo check
 async fn run_cargo_check(backend_dir: &Path) -> Result<bool> {
-    crate::ui::print_step_heading("G1: cargo check");
-    let start = Instant::now();
+    let start = crate::ui::print_step_heading_start("G1: cargo check");
 
     // Check lib and bins only (not tests) - consistent with clippy
     // Test targets require test-helpers feature and are validated separately
@@ -1232,8 +1229,7 @@ async fn run_cargo_check(backend_dir: &Path) -> Result<bool> {
 
 /// G2: Run cargo clippy with deny warnings
 async fn run_cargo_clippy(backend_dir: &Path) -> Result<bool> {
-    crate::ui::print_step_heading("G2: cargo clippy");
-    let start = Instant::now();
+    let start = crate::ui::print_step_heading_start("G2: cargo clippy");
 
     // Check lib and bins only (not tests) - test dead code warnings are expected
     // since GraphQL types aren't constructed directly in test code
@@ -1276,8 +1272,7 @@ async fn run_cargo_clippy(backend_dir: &Path) -> Result<bool> {
 
 /// G3: Run cargo fmt (auto-fix) then verify
 async fn run_cargo_fmt_check(backend_dir: &Path) -> Result<bool> {
-    crate::ui::print_step_heading("G3: cargo fmt");
-    let start = Instant::now();
+    let start = crate::ui::print_step_heading_start("G3: cargo fmt");
 
     // First, auto-fix formatting
     let fix_output = cargo_output_at(&["fmt"], backend_dir, "cargo fmt").await?;
@@ -1329,8 +1324,7 @@ async fn run_cargo_fmt_check(backend_dir: &Path) -> Result<bool> {
 
 /// G4: Run cargo test
 async fn run_cargo_test(backend_dir: &Path) -> Result<bool> {
-    crate::ui::print_step_heading("G4: cargo test");
-    let start = Instant::now();
+    let start = crate::ui::print_step_heading_start("G4: cargo test");
 
     let output = cargo_output_at(&["test", "--lib", "--bins"], backend_dir, "cargo test").await?;
 

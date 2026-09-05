@@ -162,8 +162,7 @@ impl FrontendValidationResult {
 /// Executes `bun run type-check` or `tsc --noEmit` to verify type safety.
 /// Returns (passed, detail_lines).
 pub async fn run_type_check(web_dir: &Path) -> Result<(bool, Vec<String>)> {
-    crate::ui::print_step_heading("Running TypeScript type check...");
-    let start = Instant::now();
+    let start = crate::ui::print_step_heading_start("Running TypeScript type check...");
 
     // Try bun run type-check first (defined in package.json)
     let output = bun_output_at(&["run", "type-check"], web_dir, "bun run type-check").await?;
@@ -363,8 +362,7 @@ async fn run_biome_lint(web_dir: &Path) -> Result<(bool, Vec<String>)> {
 ///
 /// Executes `bun run test` (vitest) to verify unit test coverage.
 pub async fn run_unit_tests(web_dir: &Path) -> Result<(bool, Option<usize>, Vec<String>)> {
-    crate::ui::print_step_heading("Running unit tests...");
-    let start = Instant::now();
+    let start = crate::ui::print_step_heading_start("Running unit tests...");
 
     let output = bun_output_at(
         &["run", "test", "--", "--run"], // --run for non-watch mode
