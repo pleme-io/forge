@@ -449,12 +449,9 @@ pub fn list_components() {
     }
 
     println!("Usage:");
-    println!(
-        "   {} pangea push --component <name>",
-        "forge".bright_cyan()
-    );
-    println!("   {} pangea push-all", "forge".bright_cyan());
-    println!("   {} pangea push-all --parallel", "forge".bright_cyan());
+    crate::ui::print_forge_invocation_example("pangea push --component <name>");
+    crate::ui::print_forge_invocation_example("pangea push-all");
+    crate::ui::print_forge_invocation_example("pangea push-all --parallel");
     println!();
 }
 

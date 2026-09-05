@@ -4050,6 +4050,108 @@ pub fn write_tag_field<W: std::io::Write>(
     writeln!(w, "🏷\u{fe0f}  {}: {}", label, value)
 }
 
+/// Prints the one-line `"   {} <suffix>"` (three-space indent +
+/// `.bright_cyan()`-colored `forge` prefix + single space + plain
+/// uncolored subcommand suffix) example-invocation grammar every
+/// pre-lift consumer spelled inline as
+/// `println!("   {} <literal-suffix>", "forge".bright_cyan())`. Marks
+/// ONE example `forge <subcommand>` next-step invocation inside a
+/// `println!("Usage:")` heading block emitted by a `list_*` command
+/// module — a copy-and-run example the operator can paste at their
+/// shell — where the `forge` prefix is bright-cyan to visually anchor
+/// the CLI binary name and the subcommand suffix is uncolored so
+/// `<placeholder>` slots read as literal text an operator substitutes
+/// verbatim.
+///
+/// # Distinct from every peer `ui::print_*` primitive
+///
+/// [`print_next_steps_heading`] emits the plain uncolored `Next
+/// steps:` heading text one indent scope above post-completion
+/// instruction blocks in `commands/{web_service, sync,
+/// developer_tools}.rs`; this primitive lives inside a `println!(
+/// "Usage:")` heading block in the two `list_*` command modules
+/// (`commands/{pangea, bootstrap}.rs::list_{components, binaries}`)
+/// and carries the bright-cyan `forge` binary-name prefix, NOT a
+/// heading. [`print_bullet_item`] wears a `•` BULLET glyph in a
+/// two-space indent — this primitive carries NO glyph and lives at
+/// three-space indent under the `Usage:` heading. [`print_arrow_item`]
+/// wears a `.cyan()`-colored `→` glyph in a two-space indent — this
+/// primitive carries a `.bright_cyan()`-colored `forge` word prefix
+/// in a three-space indent. [`print_arrow_hint`] carries a plain
+/// uncolored `→` glyph in a four-space indent under the "WATCH FOR
+/// THESE ISSUES" operator-troubleshooting block — this primitive
+/// paints its `forge` prefix `.bright_cyan()` (`\x1b[96m`), not plain,
+/// and lives at three-space indent.
+///
+/// # `.bright_cyan()` on the `forge` prefix alone, not the suffix
+///
+/// Pre-lift every consumer spelled the coloring as `"forge"
+/// .bright_cyan()` — the four-byte `forge` binary-name string painted
+/// `.bright_cyan()` (`\x1b[96m`, NOT plain `.cyan()` at `\x1b[36m`,
+/// NOT `.green()` at `\x1b[32m`), with the subcommand suffix
+/// (`pangea push --component <name>`, `bootstrap push-all --parallel`,
+/// …) reaching the writer uncolored so `<name>` / `<binary>`
+/// placeholder slots read as literal text. The primitive preserves
+/// that split: the `\x1b[96m` bright-cyan ANSI sequence wraps the
+/// `forge` word alone, the three-space indent is emitted OUTSIDE the
+/// coloring span, the `\x1b[0m` reset closes the span before the
+/// space that connects prefix to suffix, and no ANSI reaches the
+/// suffix side. A re-lift that painted the whole line
+/// `.bright_cyan()` would swallow the `<placeholder>` slot's visual
+/// contrast against the fixed `forge` prefix; a re-lift that dropped
+/// the coloring altogether would erase the visual anchor the pre-lift
+/// grammar carried.
+///
+/// # stdout, not stderr
+///
+/// Every pre-lift consumer routed through `println!` (stdout), not
+/// `eprintln!` (stderr). The primitive preserves that routing: an
+/// operator running `forge pangea list-components > runbook.txt` sees
+/// the usage examples captured to the runbook; an operator watching
+/// stderr for warnings sees only warnings.
+///
+/// # Compounding
+///
+/// Pre-lift 6 sibling sites across 2 command modules
+/// (`commands/{pangea (×3), bootstrap (×3)}.rs`) each restated the
+/// `println!("   {} <literal>", "forge".bright_cyan())` grammar
+/// verbatim, with the three-space indent, the `.bright_cyan()`
+/// coloring of the `forge` binary-name prefix, the single-space
+/// connective, and the literal subcommand suffix all spelled inline.
+/// A future palette adjustment (a swap of `.bright_cyan()` for
+/// `.cyan()` under a leaner palette, a promotion to `.bold()` for CI
+/// log readability, a shift of the three-space indent to two-space
+/// under a standardized `list_*` layout, a rename of the `forge`
+/// binary itself, an OTLP `usage_example_emitted` observability event
+/// wired alongside the print) had to hit 6 sites in lockstep or drift
+/// the visual grammar; post-lift it hits ONE typed body. Delegates to
+/// [`write_forge_invocation_example`] against [`std::io::stdout()`];
+/// the writer split exists so the fail-before-pass test can pin the
+/// one-line body, the three-space indent, the `\x1b[96mforge\x1b[0m`
+/// bright-cyan ANSI span around the prefix alone, the single-space
+/// connective, and the caller-supplied uncolored suffix reproduction
+/// by inspecting emitted bytes rather than shelling out and grepping
+/// stdout.
+pub fn print_forge_invocation_example(suffix: &str) {
+    let _ = write_forge_invocation_example(&mut std::io::stdout().lock(), suffix);
+}
+
+/// Writer-taking sibling to [`print_forge_invocation_example`]. Emits
+/// the single `"   {} <suffix>"` line via [`writeln!`] against the
+/// supplied writer, with the `forge` prefix painted
+/// `.bright_cyan()`. [`print_forge_invocation_example`] is the stdout
+/// adapter; this variant exists so tests can pin the one-line body,
+/// the three-space indent, the `\x1b[96mforge\x1b[0m` bright-cyan
+/// ANSI span around the prefix alone, the single-space connective,
+/// the ABSENCE of any ANSI escape on the suffix, and the trailing
+/// newline without capturing stdout.
+pub fn write_forge_invocation_example<W: std::io::Write>(
+    w: &mut W,
+    suffix: &str,
+) -> std::io::Result<()> {
+    writeln!(w, "   {} {}", "forge".bright_cyan(), suffix)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{styled_spinner, SpinnerStyle, SPINNER_TICK};
@@ -13141,6 +13243,239 @@ mod tests {
                  consumer sites into one call or dropped one of the \
                  issue rows silently fails here. Found {forward_hits} \
                  forwarding hits."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for
+    /// [`super::write_forge_invocation_example`]. Pins the one-line
+    /// body every pre-lift consumer spelled verbatim
+    /// (`println!("   {} <literal-suffix>", "forge".bright_cyan())`):
+    /// a three-space indent, a `.bright_cyan()`-colored `forge`
+    /// binary-name prefix (the `\x1b[96m…\x1b[0m` span wrapping the
+    /// `forge` word alone), a single-space connective, then the
+    /// caller-supplied uncolored subcommand suffix, and a trailing
+    /// newline. A silent contract drift a future rewrite might
+    /// introduce — swapping `.bright_cyan()` (`\x1b[96m`) for plain
+    /// `.cyan()` (`\x1b[36m`) under a leaner palette, widening the
+    /// indent to four-space or collapsing it to two-space, promoting
+    /// the whole line's coloring so the suffix paints bright-cyan at
+    /// every site (swallowing the `<placeholder>` slot's visual
+    /// contrast against the fixed prefix), promoting the `forge`
+    /// prefix to `.bold()` under CI-log readability pressure, slipping
+    /// a leading or trailing framing blank into the primitive body,
+    /// swapping `writeln!` for `write!` (dropping the trailing
+    /// newline) — flips this assertion rather than compiling and
+    /// silently diverging the 6 consumer sites' visual grammar.
+    #[test]
+    fn write_forge_invocation_example_emits_exactly_one_bright_cyan_forge_prefixed_three_indented_line(
+    ) {
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_forge_invocation_example(&mut buf, "pangea push-all --parallel")
+            .expect("write_forge_invocation_example against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf).expect(
+            "write_forge_invocation_example must emit valid UTF-8 (the pre-lift println!s did)",
+        );
+
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_forge_invocation_example must emit exactly one line \
+             — the pre-lift stanza is one `println!` carrying no \
+             framing blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // Three-space indent, NOT two-space (which is the sibling
+        // `print_bullet_item` / `print_arrow_item` wider-body grammar)
+        // and NOT four-space (which is the sibling `print_arrow_hint`
+        // nested WATCH-FOR-THESE-ISSUES grammar).
+        assert!(
+            lines[0].starts_with("   "),
+            "line 0 must begin with a three-space indent — every \
+             pre-lift consumer spelled `\"   {{}} <literal>\"` \
+             verbatim, so the indent must reach the writer OUTSIDE \
+             the coloring span; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].starts_with("    "),
+            "line 0 must NOT begin with a four-space indent — that \
+             indent belongs to the sibling `print_arrow_hint` nested \
+             WATCH-FOR-THESE-ISSUES grammar, not this three-space \
+             `Usage:`-block example-invocation grammar; got {:?}",
+            lines[0]
+        );
+
+        // The `forge` binary-name prefix reaches the rendered line
+        // verbatim, followed by exactly one space then the suffix.
+        assert!(
+            lines[0].contains("forge"),
+            "line 0 must contain the `forge` binary-name prefix; got \
+             {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("pangea push-all --parallel"),
+            "line 0 must carry the suffix verbatim; got {:?}",
+            lines[0]
+        );
+
+        // The `bright_cyan` ANSI sequence (`\x1b[96m`) wraps the
+        // `forge` prefix — NOT `cyan` (`\x1b[36m`, the sibling
+        // `print_arrow_item` palette), NOT `green` (`\x1b[32m`, the
+        // sibling `print_report_item` palette), NOT `yellow`
+        // (`\x1b[33m`, the sibling `print_pending_item` palette).
+        assert!(
+            lines[0].contains("\x1b[96m"),
+            "line 0 must carry the `bright_cyan` ANSI sequence \
+             (`\\x1b[96m`) — every pre-lift consumer spelled \
+             `\"forge\".bright_cyan()`; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[36m"),
+            "line 0 must NOT carry the plain `cyan` ANSI sequence \
+             (`\\x1b[36m`) — that palette belongs to the sibling \
+             `print_arrow_item` narrative grammar, not this \
+             `bright_cyan`-anchored example-invocation grammar; got \
+             {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[32m"),
+            "line 0 must NOT carry the `green` ANSI sequence \
+             (`\\x1b[32m`) — that palette belongs to the sibling \
+             `print_report_item` completed-row grammar, not this \
+             example-invocation grammar; got {:?}",
+            lines[0]
+        );
+
+        // The `.bright_cyan()` coloring wraps the `forge` PREFIX
+        // alone, never the suffix — the `\x1b[0m` reset must close
+        // the bright-cyan span BEFORE the connecting space and the
+        // suffix begin, so `<placeholder>` slots inside the suffix
+        // read as literal uncolored text.
+        let forge_pos = lines[0]
+            .find("forge")
+            .expect("forge prefix must be present");
+        let reset_pos = lines[0]
+            .find("\x1b[0m")
+            .expect("reset must be present after the forge prefix");
+        let suffix_pos = lines[0]
+            .find("pangea push-all --parallel")
+            .expect("suffix must be present");
+        assert!(
+            forge_pos < reset_pos && reset_pos < suffix_pos,
+            "the `\\x1b[0m` reset must close the bright-cyan span \
+             BEFORE the suffix begins — every pre-lift consumer \
+             spelled `.bright_cyan()` on the `forge` prefix alone, \
+             never on the suffix. Got positions forge={forge_pos}, \
+             reset={reset_pos}, suffix={suffix_pos} in line {:?}",
+            lines[0]
+        );
+
+        // No stray ANSI escape reaches the suffix side of the reset —
+        // the suffix must be plain uncolored bytes so an operator
+        // reading `pangea push --component <name>` sees `<name>` as
+        // literal placeholder text.
+        let after_reset = &lines[0][reset_pos + "\x1b[0m".len()..];
+        assert!(
+            !after_reset.contains("\x1b["),
+            "everything after the `\\x1b[0m` reset must be plain \
+             uncolored bytes — every pre-lift consumer left the \
+             subcommand suffix uncolored so `<placeholder>` slots \
+             read as literal text; got trailing {after_reset:?} in \
+             line {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `println!`, so the newline is part of the contract.
+        assert!(
+            out.ends_with('\n'),
+            "write_forge_invocation_example must emit a trailing \
+             `\\n` (the pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_forge_invocation_example`] no longer spell the
+    /// `println!("   {} <literal>", "forge".bright_cyan())` shape
+    /// inline across `commands/{pangea, bootstrap}.rs`. Structural
+    /// regression shield — without it, a future refactor could
+    /// silently re-inline the one-liner (e.g. a "just call `println!`
+    /// directly, the shape is short" cleanup) and reopen the 6-site
+    /// duplication class this lift closed. Enforced against the
+    /// module body BEFORE its first `#[cfg(test)]` region so a
+    /// test-support mention of the raw shape does not defeat the
+    /// shield.
+    ///
+    /// The exact-shape needle is the character sequence
+    /// `"forge".bright_cyan()` — the four-byte binary-name literal
+    /// followed by the `.bright_cyan()` coloring call — which the
+    /// primitive body itself emits at one typed site (in `ui.rs`, out
+    /// of scope for this check) and every pre-lift consumer restated
+    /// verbatim inside a `println!` template with the `"   {}"`
+    /// three-space + slot prefix. A sibling shape (`"forge"
+    /// .bright_cyan().bold()`, a `format!("   {} ...", "forge"
+    /// .bright_cyan())`) is out of scope by construction — the
+    /// needle's `"forge".bright_cyan()` character sequence flags the
+    /// exact pre-lift grammar.
+    ///
+    /// The positive count is pinned at the pre-lift site count
+    /// (`pangea.rs` ×3, `bootstrap.rs` ×3). A fusion that folded two
+    /// consumer sites into one call or dropped one of the example
+    /// invocations silently fails here — the negative half above
+    /// would still pass, but the positive count would fall below the
+    /// pre-lift census.
+    #[test]
+    fn print_forge_invocation_example_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str, usize)] = &[
+            (include_str!("commands/pangea.rs"), "commands/pangea.rs", 3),
+            (
+                include_str!("commands/bootstrap.rs"),
+                "commands/bootstrap.rs",
+                3,
+            ),
+        ];
+        for (source, module_path, expected_forwards) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("\"forge\".bright_cyan()") {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `\"forge\".bright_cyan()` bright-cyan `forge` \
+                     binary-name coloring inside a `println!(\"   \
+                     {{}} <literal>\", ...)` example-invocation \
+                     stanza — that shape was lifted onto \
+                     `crate::ui::print_forge_invocation_example`. A \
+                     re-inline would silently reopen the 6-site \
+                     duplication class this shield exists to close. \
+                     Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            let forward_hits = body
+                .matches("crate::ui::print_forge_invocation_example(")
+                .count();
+            assert_eq!(
+                forward_hits, *expected_forwards,
+                "{module_path} body must forward to \
+                 `crate::ui::print_forge_invocation_example(...)` at \
+                 exactly {expected_forwards} site(s) — one per \
+                 pre-lift consumer in this module. A fusion that \
+                 folded two consumer sites into one call or dropped \
+                 one of the example invocations silently fails here. \
+                 Found {forward_hits} forwarding hits."
             );
         }
     }
