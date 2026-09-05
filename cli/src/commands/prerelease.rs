@@ -1122,7 +1122,7 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
                 println!();
                 crate::ui::print_dimmed_dashed_marker("cargo test stdout");
                 for line in stdout.lines() {
-                    println!("   {}", line);
+                    crate::ui::print_diagnostic_line(line);
                 }
                 crate::ui::print_dimmed_dashed_marker("cargo test stderr");
                 for line in stderr
@@ -1139,7 +1139,7 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
                     {
                         crate::ui::print_diagnostic_error_line(line);
                     } else {
-                        println!("   {}", line);
+                        crate::ui::print_diagnostic_line(line);
                     }
                 }
                 println!("{}", "───────────────────────".dimmed());
@@ -1275,7 +1275,7 @@ async fn run_cargo_clippy(backend_dir: &Path) -> Result<bool> {
         // Show first few warnings
         for line in stderr.lines().take(10) {
             if line.contains("warning:") || line.contains("error:") {
-                println!("   {}", line);
+                crate::ui::print_diagnostic_line(line);
             }
         }
         Ok(false)
@@ -1297,7 +1297,7 @@ async fn run_cargo_fmt_check(backend_dir: &Path) -> Result<bool> {
             start.elapsed(),
         ));
         for line in stderr.lines().take(5) {
-            println!("   {}", line);
+            crate::ui::print_diagnostic_line(line);
         }
         return Ok(false);
     }
@@ -1375,7 +1375,7 @@ async fn run_cargo_test(backend_dir: &Path) -> Result<bool> {
                 if line.contains("FAILED") || line.contains("panicked") || line.contains("error[") {
                     crate::ui::print_diagnostic_error_line(line);
                 } else {
-                    println!("   {}", line);
+                    crate::ui::print_diagnostic_line(line);
                 }
             }
         }
@@ -1388,7 +1388,7 @@ async fn run_cargo_test(backend_dir: &Path) -> Result<bool> {
                 if line.contains("error") || line.contains("FAILED") || line.contains("panicked") {
                     crate::ui::print_diagnostic_error_line(line);
                 } else {
-                    println!("   {}", line);
+                    crate::ui::print_diagnostic_line(line);
                 }
             }
         }
