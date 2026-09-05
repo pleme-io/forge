@@ -195,7 +195,7 @@ impl NixHooks {
             return Ok(None);
         }
 
-        info!("✅ Discovered nix-hooks at: {}", store_path);
+        crate::info_success!("Discovered nix-hooks at: {}", store_path);
         Ok(Some(path_buf))
     }
 
@@ -345,7 +345,7 @@ pub async fn configure_post_build_hook(
     // construction (THEORY §V, §VI.1).
     wire_post_build_hook_env(cmd, &hook_path, cache_name, cache_url, attic_token);
 
-    info!("✅ Configured attic post-build-hook: {}", hook_path);
+    crate::info_success!("Configured attic post-build-hook: {}", hook_path);
     info!("   (Uploads EVERY built derivation automatically)");
 
     true

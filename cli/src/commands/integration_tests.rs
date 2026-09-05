@@ -698,7 +698,7 @@ pub async fn execute(
             }
         }
     } else {
-        info!("✅ All integration tests passed!");
+        crate::info_success!("All integration tests passed!");
     }
 
     Ok(results)

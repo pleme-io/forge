@@ -326,7 +326,7 @@ pub async fn execute(
             .use_cache(&attic_server)
             .await?;
 
-        info!("✅ Attic configured");
+        crate::info_success!("Attic configured");
         println!();
 
         info!("🔨 Building runner image with Nix...");
@@ -373,7 +373,7 @@ pub async fn execute(
         // Create result-runner symlink pointing to the same nix store path
         crate::repo::replace_symlink_async(&target, std::path::Path::new(&build_output)).await?;
 
-        info!("✅ Build complete: result-runner");
+        crate::info_success!("Build complete: result-runner");
         println!();
 
         // Push to Attic
@@ -414,7 +414,7 @@ pub async fn execute(
             .await;
 
         match push_result {
-            Ok(_) => info!("✅ Cached in Attic"),
+            Ok(_) => crate::info_success!("Cached in Attic"),
             Err(e) => {
                 crate::warn_nonfatal!("Failed to push to Attic cache", e);
                 debug!("Attic push error details: {:?}", e);
@@ -451,7 +451,7 @@ pub async fn execute(
         pb.finish_with_message("Push complete");
 
         println!();
-        info!("✅ Images pushed to GHCR");
+        crate::info_success!("Images pushed to GHCR");
         println!("   • {}:latest", registry);
         println!("   • {}:{}", registry, git_sha);
         println!();
@@ -506,7 +506,7 @@ pub async fn execute(
     // Reconcile the flux-system to pull latest git changes and apply them
     match flux_reconcile::reconcile_kustomization("flux-system", "flux-system", true).await {
         Ok(()) => {
-            info!("✅ FluxCD reconciliation complete");
+            crate::info_success!("FluxCD reconciliation complete");
         }
         Err(e) => {
             crate::warn_nonfatal!("FluxCD reconcile failed", e);
@@ -745,7 +745,7 @@ pub async fn execute(
             Ok(output) if output.status.success() => {
                 let deployed_image = crate::repo::utf8_lossy_trim_owned(&output.stdout);
                 if deployed_image.contains(&git_sha) {
-                    info!("✅ Verified: {}", deployed_image);
+                    crate::info_success!("Verified: {}", deployed_image);
                 } else {
                     warn!("⚠️  Image mismatch!");
                     warn!("   Expected: {}:{}", registry, git_sha);

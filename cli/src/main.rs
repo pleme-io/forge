@@ -71,6 +71,7 @@ mod path_builder;
 mod repo;
 mod retry;
 mod skipping_step;
+mod success_step;
 mod tools;
 
 // New architecture modules

@@ -67,7 +67,7 @@ pub async fn verify(
         verify_external(&hostname, port).await?;
     }
 
-    info!("✅ nix-builder verification complete!");
+    crate::info_success!("nix-builder verification complete!");
     Ok(())
 }
 
@@ -109,7 +109,7 @@ pub async fn test(hostname: String, port: u16, ssh_key: String, package: String)
     ]);
     crate::retry::run_capture_anyhow_sync(ssh_cmd, "ssh probe")?;
 
-    info!("✅ SSH connection successful!");
+    crate::info_success!("SSH connection successful!");
 
     // Test a simple remote build
     info!("Testing remote build of nixpkgs#{}", package);
@@ -135,7 +135,7 @@ pub async fn test(hostname: String, port: u16, ssh_key: String, package: String)
     let nix_build = crate::retry::run_capture_anyhow_sync(nix_cmd, "nix cross-build")?;
 
     let output = crate::repo::utf8_lossy_borrow(&nix_build.stdout);
-    info!("✅ Remote build successful!");
+    crate::info_success!("Remote build successful!");
     info!("Build output: {}", output.trim());
 
     info!("");
@@ -170,7 +170,7 @@ async fn verify_k8s_service(service: &str, namespace: &str, port: u16) -> Result
         anyhow::bail!("Service not accessible: {}. Stderr: {}", service, stderr);
     }
 
-    info!("✅ Service {} is accessible on port {}", service, port);
+    crate::info_success!("Service {} is accessible on port {}", service, port);
     Ok(())
 }
 
@@ -190,7 +190,7 @@ async fn verify_external(hostname: &str, port: u16) -> Result<()> {
         warn!("Make sure to run ./bin/darwin-rebuild to update DNS");
     } else {
         let ip = crate::repo::utf8_lossy_borrow(&dig_output.stdout);
-        info!("✅ DNS resolved to: {}", ip.trim());
+        crate::info_success!("DNS resolved to: {}", ip.trim());
     }
 
     // Check TCP connectivity with timeout
@@ -210,7 +210,7 @@ async fn verify_external(hostname: &str, port: u16) -> Result<()> {
         );
     }
 
-    info!("✅ TCP connection to {}:{} successful", hostname, port);
+    crate::info_success!("TCP connection to {}:{} successful", hostname, port);
     Ok(())
 }
 

@@ -42,7 +42,7 @@ pub async fn execute(
 
         match rollback_result {
             Ok(status) if status.success() => {
-                info!("✅ Rollback initiated successfully");
+                crate::info_success!("Rollback initiated successfully");
                 println!();
 
                 // Monitor the rollback

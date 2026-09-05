@@ -122,7 +122,7 @@ pub async fn execute(
         .use_cache(&attic_server)
         .await?;
 
-    info!("✅ Attic configured");
+    crate::info_success!("Attic configured");
     println!();
 
     // Discover nix-hooks for per-derivation caching
@@ -212,9 +212,9 @@ pub async fn execute(
         )
         .await?;
 
-        info!("✅ Build complete: {}", output);
+        crate::info_success!("Build complete: {}", output);
     } else {
-        info!("✅ Build complete: result");
+        crate::info_success!("Build complete: result");
     }
     println!();
 
