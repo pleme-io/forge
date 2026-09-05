@@ -244,6 +244,110 @@ pub fn write_success_banner<W: std::io::Write>(
     Ok(())
 }
 
+/// Palette + width pairing every pre-lift bare heavy-rule site fed to
+/// [`println!("{}", "━".repeat(<width>).<color>())`]. Closed to the
+/// exact two `(color, width)` pairings the pre-lift 7-site sibling
+/// class carried and nothing more — a new palette entry is a
+/// deliberate additive edit, not an open call-site choice.
+///
+/// # Compounding
+///
+/// Pre-lift each of the 7 sibling sites in `commands/rust_service.rs`
+/// nailed the color and width into two literal arguments at the call
+/// site (`"━".repeat(80).bright_blue()`, `"━".repeat(60).bright_green()`);
+/// a rename that misspells `.bright_blue` as `.brith_blue` fails to
+/// compile, but a drift from width 80 to width 78 at one site alone
+/// silently lines two adjacent report sections against visibly
+/// different rules, and a swap of `.bright_blue()` for `.blue()` on
+/// one rule silently loses the visual contrast against the headline.
+/// Post-lift the mapping [`HeavyRuleStyle`] → `(color, width)` lives
+/// in ONE match arm; the enum is closed, so a future variant added
+/// without an arm fails the exhaustiveness check at build time.
+///
+/// # Distinct from [`write_success_banner`], [`write_release_stage_banner`]
+///
+/// [`write_success_banner`] carries a THREE-line `━`-rule + message +
+/// `━`-rule stanza (`bright_green` throughout) fused as one primitive
+/// because the message is load-bearing to the primitive's identity.
+/// [`write_release_stage_banner`] carries the same three-line shape
+/// under a `=`-rule + composite headline grammar. This primitive
+/// carries the **single-line** bare-rule shape the 7 pre-lift
+/// consumer sites used to open or close a headline whose composition
+/// varies (SUMMARY vs. DEPLOYMENT REPORT vs. PUSH COMPLETE with
+/// arch-suffix branching) enough that a fused three-line primitive
+/// would need to accept a `Display` middle-line and lose the
+/// arch-branch println!s that live between the two rules. Coexists
+/// with the fused banners rather than subsuming them because the
+/// pre-lift consumers of those banners emit exactly one message
+/// between the rules, while these seven consumers emit multiple
+/// heterogeneous lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeavyRuleStyle {
+    /// Summary-section rule (`"━".repeat(80).bright_blue()`). 5
+    /// pre-lift sites in `commands/rust_service.rs`: opening +
+    /// closing rule around the `📋 SUMMARY` headline (:2278, :2280),
+    /// opening + closing rule around the `📊 DEPLOYMENT REPORT`
+    /// headline (:2660, :2662), and the lone trailing rule below the
+    /// `🎉 Deployment workflow complete!` headline (:2290).
+    SummaryBlue80,
+    /// Push-complete milestone rule (`"━".repeat(60).bright_green()`).
+    /// 2 pre-lift sites in `commands/rust_service.rs`: opening +
+    /// closing rule around the `PUSH COMPLETE` headline whose middle
+    /// line branches on `has_arm64` between a single-tag and a
+    /// three-tag body (:1347, :1359).
+    PushCompleteGreen60,
+}
+
+impl HeavyRuleStyle {
+    /// Rule width the [`String::repeat`] call receives — the number
+    /// of `━` glyphs the rule carries.
+    ///
+    /// Kept as a match on the closed enum (rather than a `width`
+    /// field on each variant) so a fleet-wide sweep for the literal
+    /// widths (`60`, `80`) finds this arm, not a runtime value nobody
+    /// can grep for.
+    const fn width(self) -> usize {
+        match self {
+            HeavyRuleStyle::SummaryBlue80 => 80,
+            HeavyRuleStyle::PushCompleteGreen60 => 60,
+        }
+    }
+}
+
+/// Prints the bare heavy-rule line every pre-lift consumer in
+/// `commands/rust_service.rs` spelled inline as
+/// `println!("{}", "━".repeat(<width>).<color>())`. Marks a
+/// section-boundary rule (SUMMARY opening/closing, DEPLOYMENT REPORT
+/// opening/closing, trailing deployment-complete rule, PUSH COMPLETE
+/// opening/closing) at 7 sibling call sites — the pre-lift one-line
+/// stanza — so a future palette shift against rule-char, rule-width,
+/// or color-token happens at ONE site rather than seven.
+///
+/// Delegates to [`write_heavy_rule`] against `std::io::stdout()`; the
+/// writer split exists so the fail-before-pass test can pin the
+/// rule-glyph, width, and palette contract by inspecting emitted
+/// bytes rather than shelling out and grepping stdout.
+pub fn print_heavy_rule(style: HeavyRuleStyle) {
+    let _ = write_heavy_rule(&mut std::io::stdout().lock(), style);
+}
+
+/// Writer-taking sibling to [`print_heavy_rule`]. Emits the single
+/// heavy-rule line (`"━".repeat(<width>).<color>()` per
+/// [`HeavyRuleStyle`]) via [`writeln!`] against the supplied writer.
+/// [`print_heavy_rule`] is the stdout adapter; this variant exists
+/// so tests can pin the rule-glyph, width, and palette contract
+/// without capturing stdout.
+pub fn write_heavy_rule<W: std::io::Write>(
+    w: &mut W,
+    style: HeavyRuleStyle,
+) -> std::io::Result<()> {
+    let bar = "━".repeat(style.width());
+    match style {
+        HeavyRuleStyle::SummaryBlue80 => writeln!(w, "{}", bar.as_str().bright_blue()),
+        HeavyRuleStyle::PushCompleteGreen60 => writeln!(w, "{}", bar.as_str().bright_green()),
+    }
+}
+
 /// Rule-character glyph every pre-lift release-milestone site fed to
 /// [`String::repeat`] verbatim. Pinned as one named constant so a
 /// future swap of the release-milestone grammar's rule character (a
@@ -11138,6 +11242,202 @@ mod tests {
                  consumer in this module. A fusion that folded two \
                  consumer sites into one call or dropped one of the \
                  labeled readout lines silently fails here. Found \
+                 {forward_hits} forwarding hits."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_heavy_rule`] under
+    /// the [`super::HeavyRuleStyle::SummaryBlue80`] variant. Pins the
+    /// single-line body every pre-lift consumer spelled verbatim
+    /// (`"━".repeat(80).bright_blue()`): exactly one line, exactly
+    /// 80 `━` glyphs, the `bright_blue` ANSI sequence (`\x1b[94m`),
+    /// and a trailing `\n`. A silent contract drift a future rewrite
+    /// might introduce — dropping a glyph to width 78, promoting the
+    /// rule color to `blue` and losing the visual-contrast contract
+    /// against the `bright_blue().bold()` headline, dropping the
+    /// trailing newline, hoisting the rule glyph off `━` under a
+    /// leaner ASCII-only readout — flips this assertion rather than
+    /// compiling and silently diverging the five consumer sites'
+    /// visual grammar.
+    #[test]
+    fn write_heavy_rule_summary_blue_80_emits_one_bright_blue_bar_line_of_80_glyphs() {
+        // Force ANSI emission (colored auto-drops sequences on a
+        // non-tty stdout) and serialize against peer banner tests
+        // via [`AnsiOverrideForTest`]; its Drop restores colored's
+        // auto-detection on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`], closing the set-write-unset window
+        // without a manual [`colored::control::unset_override`] call
+        // that a future test author could omit.
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_heavy_rule(&mut buf, super::HeavyRuleStyle::SummaryBlue80)
+            .expect("write_heavy_rule against a Vec<u8> writer must succeed");
+        let out = String::from_utf8(buf)
+            .expect("write_heavy_rule must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — the pre-lift stanza is one `println!`,
+        // not two, and carries no framing blank.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_heavy_rule must emit exactly one line — the \
+             pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The rule width reaches `String::repeat` at the enum-mapped
+        // 80 — a fusion that hoists the width off the variant and
+        // pins it to a fresh literal (78, 76) fails here.
+        let bar_glyph_count = lines[0].chars().filter(|c| *c == '━').count();
+        assert_eq!(
+            bar_glyph_count, 80,
+            "line 0 must contain exactly 80 `━` glyphs; got {}",
+            bar_glyph_count
+        );
+
+        // The palette contract: the rule carries the `bright_blue`
+        // ANSI sequence (`\x1b[94m`). A silent swap of
+        // `.bright_blue()` for `.blue()` (`\x1b[34m`) on the rule
+        // loses the contrast against the `bright_blue().bold()`
+        // headline the 5 consumer sites paint between the rules.
+        assert!(
+            lines[0].contains("\x1b[94m"),
+            "line 0 must carry the `bright_blue` ANSI sequence \
+             (`\\x1b[94m`); got {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza
+        // used `println!` (not `print!`), so the newline is part of
+        // the contract. A fusion that swapped `writeln!` for
+        // `write!` fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_heavy_rule must emit a trailing `\\n` (the \
+             pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Fail-before-pass envelope for [`super::write_heavy_rule`] under
+    /// the [`super::HeavyRuleStyle::PushCompleteGreen60`] variant.
+    /// Pins the single-line body every pre-lift consumer spelled
+    /// verbatim (`"━".repeat(60).bright_green()`): exactly one line,
+    /// exactly 60 `━` glyphs, the `bright_green` ANSI sequence
+    /// (`\x1b[92m`), and a trailing `\n`. Peer to
+    /// [`write_heavy_rule_summary_blue_80_emits_one_bright_blue_bar_line_of_80_glyphs`]
+    /// — pins the OTHER pre-lift `(color, width)` pairing so a fusion
+    /// that collapsed both variants onto one arm (or dropped the
+    /// PushComplete variant on the assumption "callers can pass
+    /// SummaryBlue80") silently drifts the PUSH COMPLETE grammar off
+    /// its 60-glyph green rule onto an 80-glyph blue one.
+    #[test]
+    fn write_heavy_rule_push_complete_green_60_emits_one_bright_green_bar_line_of_60_glyphs() {
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_heavy_rule(&mut buf, super::HeavyRuleStyle::PushCompleteGreen60)
+            .expect("write_heavy_rule against a Vec<u8> writer must succeed");
+        let out = String::from_utf8(buf)
+            .expect("write_heavy_rule must emit valid UTF-8 (the pre-lift println!s did)");
+
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_heavy_rule must emit exactly one line; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        let bar_glyph_count = lines[0].chars().filter(|c| *c == '━').count();
+        assert_eq!(
+            bar_glyph_count, 60,
+            "line 0 must contain exactly 60 `━` glyphs; got {}",
+            bar_glyph_count
+        );
+
+        // The palette contract: the rule carries the `bright_green`
+        // ANSI sequence (`\x1b[92m`). A silent swap of
+        // `.bright_green()` for `.green()` (`\x1b[32m`) on the rule
+        // loses the contrast against the `PUSH COMPLETE.green().bold()`
+        // headline the 2 consumer sites paint between the rules.
+        assert!(
+            lines[0].contains("\x1b[92m"),
+            "line 0 must carry the `bright_green` ANSI sequence \
+             (`\\x1b[92m`); got {:?}",
+            lines[0]
+        );
+
+        assert!(
+            out.ends_with('\n'),
+            "write_heavy_rule must emit a trailing `\\n`; got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto [`super::print_heavy_rule`]
+    /// no longer spell the `println!("{}", "━".repeat(<width>).<color>())`
+    /// shape inline in `commands/rust_service.rs`. Structural
+    /// regression shield — without it, a future refactor could
+    /// silently re-inline the one-liner (e.g. a "just call `println!`
+    /// directly, it's shorter" cleanup) and reopen the 7-site
+    /// duplication class this lift closed. Enforced against the
+    /// module body BEFORE its first `#[cfg(test)]` region so a
+    /// test-support mention of the raw shape does not defeat the
+    /// shield.
+    ///
+    /// The exact-shape needle is `println!("{}", "━".repeat(` on one
+    /// source line — the macro invocation with the exact `{}` value
+    /// slot and the `"━".repeat(` literal opener. A sibling shape
+    /// carrying a different glyph (`"═".repeat`, `"─".repeat`) or a
+    /// runtime-composed rule (`bar_string.bright_blue()`) is OUT of
+    /// scope by construction — the needle's `"━".repeat(` character
+    /// sequence rejects both.
+    ///
+    /// The positive count is pinned at the pre-lift 7-site census
+    /// (`rust_service.rs` ×7). A fusion that folded two rule sites
+    /// into one call or dropped one of the rules silently fails
+    /// here — the negative half above would still pass, but the
+    /// positive count would fall below the pre-lift census.
+    #[test]
+    fn print_heavy_rule_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str, usize)] = &[(
+            include_str!("commands/rust_service.rs"),
+            "commands/rust_service.rs",
+            7,
+        )];
+        for (source, module_path, expected_forwards) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("println!(\"{}\", \"\u{2501}\".repeat(") {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `println!(\"{{}}\", \"\u{2501}\".repeat(<width>).<color>())` \
+                     bare heavy-rule stanza — that shape was lifted \
+                     onto `crate::ui::print_heavy_rule`. A re-inline \
+                     would silently reopen the 7-site duplication \
+                     class this shield exists to close. Offending \
+                     line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            let forward_hits = body.matches("crate::ui::print_heavy_rule(").count();
+            assert_eq!(
+                forward_hits, *expected_forwards,
+                "{module_path} body must forward to \
+                 `crate::ui::print_heavy_rule(...)` at exactly \
+                 {expected_forwards} site(s) — one per pre-lift \
+                 consumer in this module. A fusion that folded two \
+                 consumer sites into one call or dropped one of the \
+                 rule lines silently fails here. Found \
                  {forward_hits} forwarding hits."
             );
         }
