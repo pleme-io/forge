@@ -3654,6 +3654,114 @@ pub fn write_field<W: std::io::Write>(
     writeln!(w, "   {}: {}", label, value)
 }
 
+/// Prints the one-line `"📂 {}: {}"` (`📂` FILE FOLDER glyph, one
+/// space, caller-supplied label, literal colon, one space, then the
+/// interpolated [`std::path::Display`]) zero-indent directory-role
+/// readout grammar 8 pre-lift consumer sites spelled inline as
+/// `println!("📂 <Label>: {}", <path>.display())` across 2 command
+/// modules (`commands/{web_service (×3: Service, Hanabi ×2),
+/// developer_tools (×5: Service ×2, Workspace ×2, Service
+/// directory)}.rs`). Marks a single labeled directory row inside the
+/// preamble a `forge web-service <cmd>` / `forge developer-tools
+/// <cmd>` invocation prints before it starts touching those
+/// directories — one row of a "here is where I will be working"
+/// operator readout that names a single filesystem role (`Service`,
+/// `Workspace`, `Hanabi`, `Service directory`) with the resolved
+/// absolute path painted plain.
+///
+/// # Distinct from every peer `ui::print_*` primitive
+///
+/// [`print_field`] carries the same `<label>: <value>` connective but
+/// under a THREE-space in-body indent with NO leading glyph — that
+/// primitive lifts the 22-site labeled field-display grammar 8 command
+/// modules use INSIDE a configuration / metadata readout block already
+/// framed by a `<CATEGORY>:` header; this primitive carries a leading
+/// `📂 ` FILE FOLDER glyph at ZERO indent, marking a top-level row a
+/// command prints in its intro preamble — the FIRST rows the operator
+/// sees, one indent level up from the `print_field` grammar's readout
+/// interior. [`print_bullet_item`] carries a two-space `•` bullet-list
+/// entry — DIFFERENT indent (two vs. zero), DIFFERENT glyph (`•` vs.
+/// `📂`), DIFFERENT semantic role (a catalog row in a bulleted list vs.
+/// a top-level labeled directory row). [`print_step_info`] carries a
+/// zero-indent `ℹ️  <msg>` uncolored step-info line — same zero indent
+/// but a plain-message payload rather than a labeled-directory shape,
+/// and the `ℹ️ ` INFORMATION SOURCE glyph rather than the `📂` FILE
+/// FOLDER glyph.
+///
+/// # `Path` value, `.display()`-projected
+///
+/// Pre-lift every consumer spelled the value interpolation as
+/// `<path>.display()` — the [`std::path::Display`] adapter that projects
+/// a [`std::path::Path`] into a `Display` renderer with the platform's
+/// native separator preserved. The primitive accepts `&Path` and
+/// invokes `.display()` internally so the caller no longer has to
+/// remember the projection idiom, and the writer's byte-for-byte output
+/// matches the pre-lift inline `println!` unchanged. A fusion that
+/// accepted `impl Display` instead would let a caller pass a
+/// `PathBuf::to_string_lossy()` (which silently mangles non-UTF-8 path
+/// bytes into `U+FFFD` REPLACEMENT CHARACTER) and drift the byte-for-
+/// byte reproduction contract; the closed `&Path` signature routes
+/// every caller through `.display()` at ONE typed boundary.
+///
+/// # Label-side plain, value-side plain
+///
+/// The primitive body paints NO ANSI on either the label or the value —
+/// every pre-lift consumer left both uncolored, and a fusion that
+/// promoted the label to `.bold()` or the path to `.cyan()` under a
+/// themed-readout grammar would drift the visual shape across 8 sites
+/// in lockstep. The `📂` FILE FOLDER glyph reaches the writer as the
+/// four-byte `f0 9f 93 82` UTF-8 sequence, the zero indent puts the row
+/// flush against column 0, and the colon-space `": "` connective is
+/// load-bearing signal — a fusion that dropped the colon or the space
+/// would silently drift every consumer's visual grammar.
+///
+/// # stdout, not stderr
+///
+/// Every pre-lift consumer routed through `println!` (stdout), not
+/// `eprintln!` (stderr). The primitive preserves that routing: an
+/// operator running a `forge <cmd>` invocation and redirecting only
+/// stdout to a runbook capture sees the directory-role preamble; an
+/// operator watching stderr for warnings sees only warnings.
+///
+/// # Compounding
+///
+/// Pre-lift 8 sibling sites each restated the `println!("📂 <Label>:
+/// {}", <path>.display())` grammar verbatim, with the `📂` glyph, the
+/// zero indent, the literal colon-space connective, and the
+/// `.display()` projection all spelled inline. A future palette
+/// adjustment (a swap of the `📂` FILE FOLDER glyph for `📁` FILE
+/// FOLDER (closed) under a leaner grammar, a promotion of the label to
+/// `.bold()` under CI-log readability pressure, a shift of the zero
+/// indent to two-space under a standardized preamble grammar, an OTLP
+/// `working_directory_reported` observability event wired alongside
+/// the print, a fusion with `set_current_dir_labeled` so the readout
+/// is emitted at the point of the actual `chdir`) had to hit 8 sites
+/// in lockstep or drift the visual grammar; post-lift it hits ONE
+/// typed body. Delegates to [`write_path_label`] against
+/// [`std::io::stdout()`]; the writer split exists so the
+/// fail-before-pass test can pin the one-line body, the zero indent,
+/// the `📂 ` glyph, the label-colon-space-value shape, and the
+/// absence of any ANSI escape by inspecting emitted bytes rather than
+/// shelling out and grepping stdout.
+pub fn print_path_label(label: &str, path: &std::path::Path) {
+    let _ = write_path_label(&mut std::io::stdout().lock(), label, path);
+}
+
+/// Writer-taking sibling to [`print_path_label`]. Emits the single
+/// `📂 <label>: <path.display()>` line via [`writeln!`] against the
+/// supplied writer. [`print_path_label`] is the stdout adapter; this
+/// variant exists so tests can pin the one-line body, the zero indent,
+/// the `📂 ` FILE FOLDER glyph, the literal colon-space connective,
+/// and the `Path.display()`-projected value's byte-for-byte
+/// reproduction without capturing stdout.
+pub fn write_path_label<W: std::io::Write>(
+    w: &mut W,
+    label: &str,
+    path: &std::path::Path,
+) -> std::io::Result<()> {
+    writeln!(w, "📂 {}: {}", label, path.display())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{styled_spinner, SpinnerStyle, SPINNER_TICK};
@@ -11919,6 +12027,194 @@ mod tests {
                  consumer in this module. A fusion that folded two \
                  consumer sites into one call or dropped one of the \
                  rule lines silently fails here. Found \
+                 {forward_hits} forwarding hits."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_path_label`]. Pins
+    /// the primitive's one-line body, the ZERO-space indent, the `📂 `
+    /// FILE FOLDER glyph + space prefix, the literal colon-space
+    /// connective between label and value, the plain (uncolored) label
+    /// and path spans, the [`std::path::Display`]-projected value
+    /// rendering, and the trailing newline — every observable shape 8
+    /// pre-lift consumers depended on. A regression that hoisted the
+    /// label into a `.bold()` / `.cyan()` span, swapped `📂` for `📁`
+    /// (FILE FOLDER (closed)) or a plain ASCII marker, dropped the
+    /// trailing newline, slipped a leading indent onto the row, or
+    /// bridged the path through `.to_string_lossy()` (which mangles
+    /// non-UTF-8 bytes into `U+FFFD`) silently drifts every consumer's
+    /// preamble; each such regression trips exactly one assertion here.
+    #[test]
+    fn write_path_label_emits_exactly_one_zero_indent_folder_glyph_label_colon_path_line() {
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_path_label(
+            &mut buf,
+            "Service",
+            std::path::Path::new("/tmp/kraken/backend"),
+        )
+        .expect("write_path_label against a Vec<u8> writer must succeed");
+        let out = String::from_utf8(buf)
+            .expect("write_path_label must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — the pre-lift stanza is one `println!`
+        // carrying no framing blank.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_path_label must emit exactly one line — the \
+             pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // Byte-for-byte reproduction of the pre-lift inline
+        // `println!("📂 Service: {}", path.display())` output — the
+        // `📂 ` FILE FOLDER glyph + space prefix, the label, the
+        // colon-space connective, and the `.display()`-projected path
+        // all reach the writer in the exact pre-lift arrangement, at
+        // ZERO indent (flush against column 0).
+        assert_eq!(
+            lines[0], "📂 Service: /tmp/kraken/backend",
+            "write_path_label must render `📂 <label>: \
+             <path.display()>` byte-for-byte matching the pre-lift \
+             inline `println!(\"📂 Service: {{}}\", \
+             Path::new(\"/tmp/kraken/backend\").display())` output; \
+             got {:?}",
+            lines[0]
+        );
+
+        // The row is flush against column 0 — NOT a two-space indent
+        // (the sibling `print_bullet_item` grammar), NOT a three-space
+        // indent (the sibling in-body `print_step_*` / `print_field`
+        // grammar). A silent indent promotion would collide with those
+        // sibling readout scopes.
+        assert!(
+            !lines[0].starts_with(' '),
+            "line 0 must NOT begin with any leading whitespace — \
+             every pre-lift consumer emitted the row at ZERO indent \
+             (top-level preamble scope, one indent level up from the \
+             `print_field` in-body readout); got {:?}",
+            lines[0]
+        );
+
+        // The `📂` FILE FOLDER glyph reaches the writer as the four-
+        // byte `f0 9f 93 82` UTF-8 sequence — NOT `📁` FILE FOLDER
+        // (closed) as `f0 9f 93 81`, NOT the ASCII `>` or `#`
+        // fallback a "CI-log-friendly" cleanup might promote to.
+        assert!(
+            lines[0]
+                .as_bytes()
+                .windows(4)
+                .any(|w| w == [0xf0, 0x9f, 0x93, 0x82]),
+            "line 0 must carry the U+1F4C2 `📂` FILE FOLDER codepoint \
+             as the four-byte UTF-8 sequence `f0 9f 93 82` — a swap \
+             to `📁` (closed folder) or an ASCII fallback silently \
+             changes the visual grammar; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('\u{1F4C1}'),
+            "line 0 must NOT contain the U+1F4C1 `📁` FILE FOLDER \
+             (closed) glyph — that codepoint belongs to the closed-\
+             folder variant a future primitive could use for a \
+             distinct semantic role; got {:?}",
+            lines[0]
+        );
+
+        // The label side and value side carry NO ANSI escape at pin
+        // baseline — every pre-lift consumer left both uncolored. A
+        // future regression that promoted the label to `.bold()` or
+        // the path to `.cyan()` under a themed-readout grammar would
+        // leak an ANSI sequence into the row and fail here.
+        assert!(
+            !lines[0].contains("\x1b["),
+            "write_path_label must emit NO ANSI escape at pin baseline \
+             (label side plain, path side plain) — every pre-lift \
+             consumer left both uncolored and passed a plain \
+             `Path::display()`; got {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza
+        // used `println!` (not `print!`), so the newline is part of
+        // the contract. A fusion that swapped `writeln!` for
+        // `write!` fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_path_label must emit a trailing `\\n` (the pre-lift \
+             `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_path_label`] no longer spell the
+    /// `println!("📂 <Label>: {}", <path>.display())` shape inline
+    /// across the 2 pre-lift command modules. Structural regression
+    /// shield — without it, a future refactor could silently re-inline
+    /// the one-liner (e.g. a "just call `println!` directly, it's
+    /// shorter" cleanup) and reopen the 8-site duplication class this
+    /// lift closed. Enforced against each module body BEFORE its first
+    /// `#[cfg(test)]` region so a test-support mention of the raw
+    /// shape does not defeat the shield.
+    ///
+    /// The exact-shape needle is `println!("📂 ` (opening quote +
+    /// `📂` FILE FOLDER glyph + one space) — the pre-lift
+    /// `println!("📂 <Label>: {}", <path>.display())` grammar's
+    /// unmistakable prefix. A sibling shape carrying a different glyph
+    /// (`println!("📦 ...`, `println!("🎯 ...`) or a runtime-composed
+    /// row is OUT of scope by construction — the needle's `"📂 `
+    /// character sequence rejects both.
+    ///
+    /// The positive count is pinned per-module at the pre-lift site
+    /// count (`web_service.rs` ×3, `developer_tools.rs` ×5). A fusion
+    /// that folded two consumer sites into one call or dropped one of
+    /// the labeled directory rows silently fails here — the negative
+    /// half above would still pass, but the positive count would fall
+    /// below the pre-lift census.
+    #[test]
+    fn print_path_label_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str, usize)] = &[
+            (
+                include_str!("commands/web_service.rs"),
+                "commands/web_service.rs",
+                3,
+            ),
+            (
+                include_str!("commands/developer_tools.rs"),
+                "commands/developer_tools.rs",
+                5,
+            ),
+        ];
+        for (source, module_path, expected_forwards) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("println!(\"\u{1F4C2} ") {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `println!(\"\u{1F4C2} <Label>: {{}}\", \
+                     <path>.display())` zero-indent labeled directory-\
+                     role stanza — that shape was lifted onto \
+                     `crate::ui::print_path_label`. A re-inline would \
+                     silently reopen the 8-site duplication class this \
+                     shield exists to close. Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            let forward_hits = body.matches("crate::ui::print_path_label(").count();
+            assert_eq!(
+                forward_hits, *expected_forwards,
+                "{module_path} body must forward to \
+                 `crate::ui::print_path_label(...)` at exactly \
+                 {expected_forwards} site(s) — one per pre-lift \
+                 consumer in this module. A fusion that folded two \
+                 consumer sites into one call or dropped one of the \
+                 labeled directory rows silently fails here. Found \
                  {forward_hits} forwarding hits."
             );
         }

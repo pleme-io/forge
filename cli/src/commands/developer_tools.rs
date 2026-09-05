@@ -289,8 +289,8 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
         .parent()
         .ok_or_else(|| anyhow!("Failed to find workspace root (parent of service directory)"))?;
 
-    println!("📂 Service: {}", service_path.display());
-    println!("📂 Workspace: {}", workspace_root.display());
+    crate::ui::print_path_label("Service", &service_path);
+    crate::ui::print_path_label("Workspace", workspace_root);
     println!();
 
     // Change to workspace root
@@ -373,8 +373,8 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
         .parent()
         .ok_or_else(|| anyhow!("Failed to find workspace root (parent of service directory)"))?;
 
-    println!("📂 Service: {}", service_path.display());
-    println!("📂 Workspace: {}", workspace_root.display());
+    crate::ui::print_path_label("Service", &service_path);
+    crate::ui::print_path_label("Workspace", workspace_root);
     println!();
 
     // Change to workspace root
@@ -444,7 +444,7 @@ pub async fn rust_dev(
     // Get paths from environment
     let service_path = service_path_from_env()?;
 
-    println!("📂 Service directory: {}", service_path.display());
+    crate::ui::print_path_label("Service directory", &service_path);
 
     // Load deploy.yaml configuration
     let config = crate::config::DeployConfig::load_for_service(&service)?;
