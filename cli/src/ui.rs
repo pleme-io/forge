@@ -3762,6 +3762,123 @@ pub fn write_path_label<W: std::io::Write>(
     writeln!(w, "📂 {}: {}", label, path.display())
 }
 
+/// Prints the one-line `"🏷️  {}: {}"` (`🏷` LABEL glyph + U+FE0F
+/// VS16 variation selector + two spaces, caller-supplied label,
+/// literal colon, one space, then the interpolated
+/// [`std::fmt::Display`] value) zero-indent tag-emoji labeled-field
+/// readout grammar 6 pre-lift consumer sites spelled inline as
+/// `println!("🏷️  <Label>: {}", <value>)` across 2 command modules
+/// (`commands/{rust_service (×5: Git SHA + Image tag + Registry + SHA
+///     + Deploy tag), migrations (×1: Image tag)}.rs`). Marks a single
+/// labeled build-/deploy-tag row inside the preamble a `forge
+/// rust-service <cmd>` / `forge migrations <cmd>` invocation prints
+/// before it starts touching those tags — one row of a "here is the
+/// tag / registry / SHA I will be publishing under" operator readout
+/// that names a single tagging role (`Git SHA`, `Image tag`,
+/// `Registry`, `SHA`, `Deploy tag`) with the resolved value rendered
+/// through the caller-supplied `Display`.
+///
+/// # Distinct from every peer `ui::print_*` primitive
+///
+/// [`print_field`] carries the same `<label>: <value>` connective but
+/// under a THREE-space in-body indent with NO leading glyph — that
+/// primitive lifts the 22-site labeled field-display grammar 8
+/// command modules use INSIDE a configuration / metadata readout
+/// block already framed by a `<CATEGORY>:` header; this primitive
+/// carries a leading `🏷️  ` LABEL glyph at ZERO indent, marking a
+/// top-level row a command prints in its intro preamble — the FIRST
+/// rows the operator sees, one indent level up from the
+/// `print_field` grammar's readout interior. [`print_path_label`]
+/// carries the same zero-indent labeled-field shape but with the
+/// `📂 ` FILE FOLDER glyph and a `&Path`-typed value slot rather
+/// than a `Display`-typed one — DIFFERENT glyph (`🏷️` vs. `📂`),
+/// DIFFERENT semantic role (a tag / registry / SHA row vs. a
+/// filesystem-role row), DIFFERENT value contract (arbitrary
+/// `Display` vs. `Path.display()`). [`print_step_info`] carries a
+/// zero-indent `ℹ️  <msg>` uncolored step-info line — same zero
+/// indent but a plain-message payload rather than a labeled-field
+/// shape, and the `ℹ️ ` INFORMATION SOURCE glyph rather than the
+/// `🏷` LABEL glyph.
+///
+/// # `Display` value, caller-formatted
+///
+/// Pre-lift the value slot accepted any `Display` renderer the
+/// caller supplied — three consumers passed a plain `String` (`Git
+/// SHA`, `Image tag`, `Deploy tag`), one passed `.cyan()`-wrapped
+/// (`Registry`), one passed `.dimmed()`-wrapped (`SHA`), and one
+/// passed a plain `&str`. The primitive accepts `impl Display` so
+/// the caller-supplied ANSI (or lack of ANSI) reaches the writer
+/// verbatim; the label side, by contrast, is closed to `&str` so a
+/// future palette adjustment (a promotion of the label to `.bold()`,
+/// a swap of the colon connective for `=`) hits ONE typed body
+/// rather than 6 sites in lockstep. The `🏷️` glyph carries the
+/// U+FE0F VS16 variation selector so terminal renderers paint the
+/// emoji presentation form rather than the monochrome text form —
+/// dropping VS16 would silently drift the visual grammar across
+/// every consumer.
+///
+/// # Two spaces after the emoji, not one
+///
+/// The primitive body emits `🏷️` + TWO spaces + label — every
+/// pre-lift consumer spelled the two-space gap inline, and the
+/// spacing is load-bearing: the VS16-tagged emoji glyph occupies two
+/// display columns on most terminals, so the two-space gap yields
+/// a visually consistent four-column left margin that lines up with
+/// sibling zero-indent glyph-labeled rows (`📂 ` FILE FOLDER +
+/// single space, since that glyph carries no VS16 and occupies two
+/// columns on its own). A fusion that collapsed the gap to one space
+/// would silently shrink the readout's left column across every
+/// consumer.
+///
+/// # stdout, not stderr
+///
+/// Every pre-lift consumer routed through `println!` (stdout), not
+/// `eprintln!` (stderr). The primitive preserves that routing: an
+/// operator running a `forge <cmd>` invocation and redirecting only
+/// stdout to a runbook capture sees the tag-readout preamble; an
+/// operator watching stderr for warnings sees only warnings.
+///
+/// # Compounding
+///
+/// Pre-lift 6 sibling sites each restated the `println!("🏷️
+/// <Label>: {}", <value>)` grammar verbatim, with the `🏷️` glyph,
+/// the two-space gap, the zero indent, the literal colon-space
+/// connective, and the `Display` interpolation all spelled inline.
+/// A future palette adjustment (a swap of the `🏷️` LABEL glyph for
+/// `🔖` BOOKMARK under a leaner grammar, a promotion of the label
+/// to `.bold()` under CI-log readability pressure, a shift of the
+/// zero indent to two-space under a standardized preamble grammar,
+/// an OTLP `image_tag_reported` observability event wired alongside
+/// the print, a fusion with `compute_deploy_tag` so the readout is
+/// emitted at the point of the actual tag computation) had to hit
+/// 6 sites in lockstep or drift the visual grammar; post-lift it
+/// hits ONE typed body. Delegates to [`write_tag_field`] against
+/// [`std::io::stdout()`]; the writer split exists so the
+/// fail-before-pass test can pin the one-line body, the zero
+/// indent, the `🏷️  ` glyph + two-space prefix, the
+/// label-colon-space-value shape, and the caller-supplied ANSI
+/// reproduction by inspecting emitted bytes rather than shelling
+/// out and grepping stdout.
+pub fn print_tag_field(label: &str, value: impl std::fmt::Display) {
+    let _ = write_tag_field(&mut std::io::stdout().lock(), label, &value);
+}
+
+/// Writer-taking sibling to [`print_tag_field`]. Emits the single
+/// `🏷️  <label>: <value>` line via [`writeln!`] against the supplied
+/// writer. [`print_tag_field`] is the stdout adapter; this variant
+/// exists so tests can pin the one-line body, the zero indent, the
+/// `🏷️  ` LABEL glyph + two-space prefix, the literal colon-space
+/// connective, and the caller-supplied `Display`-formatted value's
+/// byte-for-byte reproduction (including any `.cyan()` / `.dimmed()`
+/// ANSI from the value side) without capturing stdout.
+pub fn write_tag_field<W: std::io::Write>(
+    w: &mut W,
+    label: &str,
+    value: &dyn std::fmt::Display,
+) -> std::io::Result<()> {
+    writeln!(w, "🏷\u{fe0f}  {}: {}", label, value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{styled_spinner, SpinnerStyle, SPINNER_TICK};
@@ -12215,6 +12332,235 @@ mod tests {
                  consumer in this module. A fusion that folded two \
                  consumer sites into one call or dropped one of the \
                  labeled directory rows silently fails here. Found \
+                 {forward_hits} forwarding hits."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_tag_field`]. Pins
+    /// the primitive's one-line body, the ZERO-space indent, the
+    /// `🏷️  ` LABEL glyph (with U+FE0F VS16 variation selector) +
+    /// TWO-space prefix, the literal colon-space connective between
+    /// label and value, the plain (uncolored) label span, and the
+    /// trailing newline — every observable shape 6 pre-lift consumers
+    /// depended on. Also pins a two-value pass that lets the caller
+    /// supply a `.cyan()` / `.dimmed()`-wrapped value: the wrapper's
+    /// ANSI escape reaches the writer verbatim on the value side and
+    /// leaves the label side plain. A regression that hoisted the
+    /// label into a `.bold()` / `.cyan()` span, swapped `🏷️` for
+    /// `🔖` (BOOKMARK) or a plain ASCII marker, dropped the U+FE0F
+    /// variation selector, collapsed the two-space gap to one space,
+    /// dropped the trailing newline, or slipped a leading indent
+    /// onto the row silently drifts every consumer's preamble; each
+    /// such regression trips exactly one assertion here.
+    #[test]
+    fn write_tag_field_emits_exactly_one_zero_indent_tag_glyph_label_colon_value_line() {
+        use colored::Colorize;
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        // Plain-value pass — pins the label-side plain, value-side
+        // plain shape 4 of 6 pre-lift consumers depend on.
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_tag_field(&mut buf, "Git SHA", &"a1b2c3d")
+            .expect("write_tag_field against a Vec<u8> writer must succeed");
+        let out = String::from_utf8(buf)
+            .expect("write_tag_field must emit valid UTF-8 (the pre-lift println!s did)");
+
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_tag_field must emit exactly one line — the \
+             pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        assert_eq!(
+            lines[0], "🏷\u{fe0f}  Git SHA: a1b2c3d",
+            "write_tag_field must render `🏷️  <label>: <value>` \
+             byte-for-byte matching the pre-lift inline \
+             `println!(\"🏷️  Git SHA: {{}}\", \"a1b2c3d\")` output; \
+             got {:?}",
+            lines[0]
+        );
+
+        assert!(
+            !lines[0].starts_with(' '),
+            "line 0 must NOT begin with any leading whitespace — \
+             every pre-lift consumer emitted the row at ZERO indent \
+             (top-level preamble scope, one indent level up from the \
+             `print_field` in-body readout); got {:?}",
+            lines[0]
+        );
+
+        assert!(
+            lines[0]
+                .as_bytes()
+                .windows(4)
+                .any(|w| w == [0xf0, 0x9f, 0x8f, 0xb7]),
+            "line 0 must carry the U+1F3F7 `🏷` LABEL codepoint \
+             as the four-byte UTF-8 sequence `f0 9f 8f b7` — a swap \
+             to `🔖` (BOOKMARK) or an ASCII fallback silently \
+             changes the visual grammar; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('\u{1F516}'),
+            "line 0 must NOT contain the U+1F516 `🔖` BOOKMARK glyph \
+             — that codepoint belongs to a distinct semantic role a \
+             future primitive could adopt; got {:?}",
+            lines[0]
+        );
+
+        assert!(
+            lines[0]
+                .as_bytes()
+                .windows(3)
+                .any(|w| w == [0xef, 0xb8, 0x8f]),
+            "line 0 must carry the U+FE0F VS16 variation selector \
+             as the three-byte UTF-8 sequence `ef b8 8f` immediately \
+             after the `🏷` codepoint — dropping it silently drifts \
+             terminals from the emoji presentation form to the \
+             monochrome text form; got {:?}",
+            lines[0]
+        );
+
+        assert!(
+            lines[0].contains("\u{fe0f}  Git SHA:"),
+            "line 0 must carry EXACTLY two spaces between the \
+             `🏷️` emoji cluster (U+1F3F7 + U+FE0F) and the label \
+             — a fusion that collapsed the gap to one space silently \
+             shrinks the readout's left column across every \
+             consumer; got {:?}",
+            lines[0]
+        );
+
+        assert!(
+            !lines[0].contains("\x1b["),
+            "write_tag_field must emit NO ANSI escape on the \
+             plain-value baseline (label side plain, value side plain) \
+             — 4 of 6 pre-lift consumers passed a plain `String`; \
+             got {:?}",
+            lines[0]
+        );
+
+        assert!(
+            out.ends_with('\n'),
+            "write_tag_field must emit a trailing `\\n` (the pre-lift \
+             `println!` did); got {:?}",
+            out
+        );
+
+        // Colored-value pass — 2 of 6 pre-lift consumers passed
+        // a `.cyan()` / `.dimmed()`-wrapped value; the wrapper's
+        // ANSI escape must reach the writer verbatim on the value
+        // side while the label side stays plain.
+        let mut buf2: Vec<u8> = Vec::new();
+        let value = "ghcr.io/pleme-io".cyan();
+        super::write_tag_field(&mut buf2, "Registry", &value)
+            .expect("write_tag_field with a colored value must succeed");
+        let out2 =
+            String::from_utf8(buf2).expect("write_tag_field must emit valid UTF-8 for colored");
+        let line = out2.lines().next().expect("one line");
+        assert!(
+            line.starts_with("🏷\u{fe0f}  Registry: "),
+            "colored-value pass must still emit the `🏷️  Registry: \
+             ` label prefix at ZERO indent, plain; got {:?}",
+            line
+        );
+        assert!(
+            line.contains("\x1b["),
+            "colored-value pass MUST forward the caller's ANSI \
+             escape verbatim onto the value side (a pre-lift consumer \
+             passed `registry.cyan()` at rust_service.rs:1711 and \
+             depends on the ANSI reaching the terminal); got {:?}",
+            line
+        );
+        let prefix = "🏷\u{fe0f}  Registry: ";
+        assert!(
+            !line[..prefix.len()].contains("\x1b["),
+            "the `🏷️  <label>: ` prefix MUST stay ANSI-free even \
+             when the value is colored — a regression that promoted \
+             the label to `.bold()` / `.cyan()` under a themed \
+             grammar would leak an escape into the prefix; got {:?}",
+            &line[..prefix.len()]
+        );
+    }
+
+    /// Post-lift the callers migrated onto [`super::print_tag_field`]
+    /// no longer spell the `println!("🏷️  <Label>: {}", <value>)`
+    /// shape inline across the 2 pre-lift command modules. Structural
+    /// regression shield — without it, a future refactor could
+    /// silently re-inline the one-liner and reopen the 6-site
+    /// duplication class this lift closed. Enforced against each
+    /// module body BEFORE its first `#[cfg(test)]` region so a
+    /// test-support mention of the raw shape does not defeat the
+    /// shield.
+    ///
+    /// The exact-shape needle is `println!("🏷` (opening quote +
+    /// `🏷` LABEL glyph, without matching on the trailing VS16 so
+    /// a future stripping of the variation selector still trips the
+    /// shield) — the pre-lift `println!("🏷️  <Label>: {}", <value>)`
+    /// grammar's unmistakable prefix. A sibling shape carrying a
+    /// different glyph (`println!("📦 ...`, `println!("🎯 ...`) or a
+    /// runtime-composed row is OUT of scope by construction — the
+    /// needle's `"🏷` character sequence rejects both. The scan
+    /// tolerates the multi-line `🏷️  Image tags: amd64-{}, arm64-{},
+    /// {} (manifest)` sibling on `commands/rust_service.rs:1307` —
+    /// that stanza is a distinct multi-value arity carrying a
+    /// three-way interpolation, not a member of this labeled-field
+    /// class, so its OUTER `println!("` opens on the preceding line
+    /// and the `🏷` glyph appears on the continuation line without
+    /// the `println!("` prefix.
+    ///
+    /// The positive count is pinned per-module at the pre-lift site
+    /// count (`rust_service.rs` ×5, `migrations.rs` ×1). A fusion
+    /// that folded two consumer sites into one call or dropped one of
+    /// the labeled tag rows silently fails here — the negative half
+    /// above would still pass, but the positive count would fall
+    /// below the pre-lift census.
+    #[test]
+    fn print_tag_field_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str, usize)] = &[
+            (
+                include_str!("commands/rust_service.rs"),
+                "commands/rust_service.rs",
+                5,
+            ),
+            (
+                include_str!("commands/migrations.rs"),
+                "commands/migrations.rs",
+                1,
+            ),
+        ];
+        for (source, module_path, expected_forwards) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("println!(\"\u{1F3F7}") {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `println!(\"\u{1F3F7}\u{fe0f}  <Label>: {{}}\", \
+                     <value>)` zero-indent tag-emoji labeled-field \
+                     stanza — that shape was lifted onto \
+                     `crate::ui::print_tag_field`. A re-inline would \
+                     silently reopen the 6-site duplication class this \
+                     shield exists to close. Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            let forward_hits = body.matches("crate::ui::print_tag_field(").count();
+            assert_eq!(
+                forward_hits, *expected_forwards,
+                "{module_path} body must forward to \
+                 `crate::ui::print_tag_field(...)` at exactly \
+                 {expected_forwards} site(s) — one per pre-lift \
+                 consumer in this module. A fusion that folded two \
+                 consumer sites into one call or dropped one of the \
+                 labeled tag rows silently fails here. Found \
                  {forward_hits} forwarding hits."
             );
         }

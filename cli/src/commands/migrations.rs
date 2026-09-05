@@ -351,7 +351,7 @@ pub async fn run_migrations(
         DatabaseType::None => unreachable!(),
     };
     println!("📊 Database type: {}", db_type_str);
-    println!("🏷️  Image tag: {}", image_tag);
+    crate::ui::print_tag_field("Image tag", &image_tag);
 
     // Delegate to database-specific migration implementation
     match config.database_type() {

@@ -360,7 +360,7 @@ pub async fn build_rust_service(
 
     // Compute git SHA for build tagging and version embedding
     let git_sha = get_tag_suffix().await?;
-    println!("🏷️  Git SHA: {}", git_sha);
+    crate::ui::print_tag_field("Git SHA", &git_sha);
     println!();
 
     // Write .version file for Nix to read (backup mechanism)
@@ -1308,7 +1308,7 @@ pub async fn orchestrate_release(
             tag_suffix, tag_suffix, tag_suffix
         );
     } else {
-        println!("🏷️  Image tag: {}", deploy_tag);
+        crate::ui::print_tag_field("Image tag", &deploy_tag);
     }
     println!();
 
@@ -1708,8 +1708,8 @@ pub async fn orchestrate_standalone_release(
         });
     }
 
-    println!("🏷️  Registry: {}", registry.cyan());
-    println!("🏷️  SHA: {}", tag_suffix.dimmed());
+    crate::ui::print_tag_field("Registry", registry.cyan());
+    crate::ui::print_tag_field("SHA", tag_suffix.dimmed());
     println!();
 
     push_docker_images(&images, &registry, &tag_suffix).await?;
@@ -2355,7 +2355,7 @@ pub async fn release_rust_service(
     // IMPORTANT: This prevents tag mismatch when HEAD moves between steps
     let tag_suffix = get_tag_suffix().await?;
     let deploy_tag = compute_deploy_tag(&tag_suffix, "amd64", false, false);
-    println!("🏷️  Deploy tag: {}", deploy_tag);
+    crate::ui::print_tag_field("Deploy tag", &deploy_tag);
     println!();
 
     // Step 1: Build
