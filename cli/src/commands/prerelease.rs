@@ -1030,10 +1030,7 @@ fn print_e2e_diagnostics(backend_dir: &Path) {
 
     println!();
     println!("   {}", "Troubleshooting:".bold());
-    println!("     1. Rebuild images:  nix run .#e2e:prepare -- --force");
-    println!("     2. Run headful:     nix run .#test:e2e -- --headless false");
-    println!("     3. Run one test:    nix run .#test:e2e -- --filter test_name");
-    println!("     4. Check logs:      docker logs <container_name>");
+    crate::ui::print_e2e_troubleshooting_steps("     ");
     println!("{}", "────────────────────────────".dimmed());
 }
 

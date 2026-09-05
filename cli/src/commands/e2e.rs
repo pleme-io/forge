@@ -1121,10 +1121,7 @@ fn print_failure_diagnostics() {
 
     eprintln!("\n{}", "=".repeat(72));
     eprintln!("Troubleshooting:");
-    eprintln!("  1. Rebuild images:  nix run .#e2e:prepare -- --force");
-    eprintln!("  2. Run headful:     nix run .#test:e2e -- --headless false");
-    eprintln!("  3. Run one test:    nix run .#test:e2e -- --filter test_name");
-    eprintln!("  4. Check logs:      docker logs <container_name>");
+    crate::ui::eprint_e2e_troubleshooting_steps("  ");
     eprintln!("{}", "=".repeat(72));
 }
 
