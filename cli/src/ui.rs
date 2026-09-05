@@ -3448,6 +3448,106 @@ pub fn write_diagnostic_error_line<W: std::io::Write>(
     writeln!(w, "   {}", line.red())
 }
 
+/// Prints the one-line `"   {}"` (three-space indent + verbatim
+/// captured-output line body, no coloring, no glyph) diagnostic-stream
+/// plain-line grammar 9 pre-lift consumer sites spelled inline as
+/// `println!("   {}", line)` across 2 command modules
+/// (`commands/{prerelease (×6), frontend_validation (×3)}.rs`). Marks
+/// ONE captured-output line inside a diagnostic-stream dump — a
+/// stdout/stderr line from a spawned subprocess (`cargo test`,
+/// `cargo fmt`, `cargo clippy`, `bun x biome check`) that the caller
+/// wants rendered verbatim, uncolored, under the same three-space body
+/// indent that peer [`print_diagnostic_error_line`] uses for its
+/// highlighted-red sibling. This primitive is the plain else-branch of
+/// the highlight-vs-verbatim dispatch: pre-lift every caller emitted a
+/// row like this inside the same diagnostic-block loop that dispatched
+/// error-substring-matching lines to `.red()` and non-matching lines to
+/// this plain shape, so the two primitives ALWAYS ship together — a
+/// caller migrating to one and not the other silently drifts the
+/// diagnostic-block palette by half.
+///
+/// # Distinct from every peer `ui::print_*` primitive
+///
+/// [`print_diagnostic_error_line`] shares the three-space body indent
+/// but paints the whole line body `.red()` for filter-matched
+/// diagnostic-stream lines — this primitive is the plain-verbatim
+/// else-branch companion: NO coloring, NO glyph, just the raw
+/// subprocess line under the same indent so the highlighted and
+/// non-highlighted rows align byte-column-for-byte and an operator can
+/// scan the block as one visual grid. [`print_step_info`] is a
+/// zero-indent `ℹ️  <msg>` step-info line at a different scope; this
+/// primitive shares no leading `ℹ️  ` glyph and always runs at the
+/// three-space in-body indent. [`print_field`] shares the three-space
+/// indent but carries a literal-label prefix and a `": "` connective
+/// — this primitive carries neither. [`print_arrow_hint`] and
+/// [`print_arrow_item`] wear a `→` marker glyph inside their body;
+/// this primitive carries no glyph and passes the caller-supplied
+/// line body straight through.
+///
+/// # Verbatim line body, no coloring, no glyph prefix
+///
+/// Pre-lift every consumer spelled the row as `println!("   {}", line)`
+/// — the FULL captured-output line body (the exact string from the
+/// subprocess's stdout/stderr, verbatim including any embedded ANSI
+/// escapes and tabs) reaches the writer unadorned, with NO `.red()` /
+/// `.dimmed()` / `.italic()` chain, NO leading `❌` / `⚠️` / `✗`
+/// glyph, and NO structural template between the three-space indent
+/// and the line body. The primitive preserves that shape: no ANSI
+/// escape reaches the writer from the primitive body itself, so a
+/// caller passing a plain `&str` sees byte-for-byte the same output a
+/// pre-lift inline `println!` produced, and a caller whose line
+/// carries embedded subprocess ANSI (a colored `cargo test` output
+/// line, a `bun` colored diagnostic) still passes those escapes
+/// through verbatim. A fusion that painted the line body `.dimmed()`
+/// under a "de-emphasize non-matching lines" cleanup would silently
+/// drift the visual grammar of the highlight-vs-verbatim dispatch —
+/// pre-lift the non-matching branch was deliberately uncolored so a
+/// scan of the diagnostic block picks out `.red()`-painted matches
+/// against a plain background, and a `.dimmed()` promotion would
+/// collapse that contrast.
+///
+/// # stdout, not stderr
+///
+/// Every pre-lift consumer routed through `println!` (stdout), not
+/// `eprintln!` (stderr), matching the stream routing peer
+/// [`print_diagnostic_error_line`] uses for the highlighted sibling.
+/// The primitive preserves that routing so the whole diagnostic block
+/// — matched and non-matched lines alike — funnels into THIS process's
+/// stdout and a caller piping stdout captures the whole scrollable
+/// subprocess post-mortem in one stream.
+///
+/// # Compounding
+///
+/// Pre-lift 9 sibling sites each restated the `println!("   {}", line)`
+/// grammar verbatim, with the three-space indent and the plain `{}`
+/// interpolation on the whole line body all spelled inline. A future
+/// adjustment (a swap of the three-space indent for four-space under a
+/// standardized diagnostic grammar, a promotion to `.dimmed()` under a
+/// leaner de-emphasis distinction, an OTLP `diagnostic_line_emitted`
+/// observability event wired alongside the print) had to hit 9 sites
+/// in lockstep or drift the visual grammar; post-lift it hits ONE
+/// typed body. Delegates to [`write_diagnostic_line`] against
+/// [`std::io::stdout()`]; the writer split exists so the
+/// fail-before-pass test can pin the one-line body, the three-space
+/// indent, and the ABSENCE of every `\x1b[<..>m` ANSI palette sequence
+/// by inspecting emitted bytes rather than shelling out and grepping
+/// stdout.
+pub fn print_diagnostic_line(line: &str) {
+    let _ = write_diagnostic_line(&mut std::io::stdout().lock(), line);
+}
+
+/// Writer-taking sibling to [`print_diagnostic_line`]. Emits the
+/// single `   <line>` row via [`writeln!`] against the supplied
+/// writer. [`print_diagnostic_line`] is the stdout adapter; this
+/// variant exists so tests can pin the one-line body, the three-space
+/// indent, and the ABSENCE of every `\x1b[<..>m` ANSI palette
+/// sequence (the plain-verbatim contract that distinguishes this
+/// primitive from its red-highlighted peer
+/// [`write_diagnostic_error_line`]) without capturing stdout.
+pub fn write_diagnostic_line<W: std::io::Write>(w: &mut W, line: &str) -> std::io::Result<()> {
+    writeln!(w, "   {}", line)
+}
+
 /// Prints the one-line `"   {}: {}"` (three-space indent +
 /// caller-supplied label + literal colon + one space + Display-
 /// interpolated value) labeled field-display grammar 22 pre-lift
@@ -11209,6 +11309,168 @@ mod tests {
                  folded two consumer sites into one call or dropped \
                  one of the highlighted lines silently fails here. \
                  Found {forward_hits} forwarding hits."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_diagnostic_line`].
+    /// Pins the one-line body every pre-lift consumer spelled verbatim
+    /// (`println!("   {}", line)`): a three-space indent, the
+    /// caller-supplied line body rendered verbatim through `Display`,
+    /// no ANSI escape from the primitive body, and a trailing newline.
+    /// A silent contract drift a future rewrite might introduce —
+    /// dropping the three-space indent (a "tighter body spacing"
+    /// cleanup), painting the line body `.dimmed()` under a
+    /// "de-emphasize non-matching lines" promotion (which would drift
+    /// the highlight-vs-verbatim palette contrast against the peer
+    /// [`super::write_diagnostic_error_line`] `.red()` sibling),
+    /// promoting to `.bold()` under CI-log-highlight pressure, folding
+    /// a leading `❌ ` / `⚠️  ` / `→ ` glyph into the primitive body
+    /// (silently shifting the plain captured-line grammar into a peer
+    /// step-primitive grammar), swapping `writeln!` for `write!`
+    /// (dropping the trailing newline), or slipping a framing blank
+    /// into the primitive body — flips this assertion rather than
+    /// compiling and silently diverging the 9 consumer sites' visual
+    /// grammar.
+    #[test]
+    fn write_diagnostic_line_emits_exactly_one_three_space_indented_uncolored_line() {
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_diagnostic_line(&mut buf, "running 42 tests")
+            .expect("write_diagnostic_line against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_diagnostic_line must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — the pre-lift stanza is one `println!`,
+        // not two, and carries no framing blank on either side. A
+        // refactor that slips a leading or trailing blank into the
+        // primitive body would silently change all 9 callers' output
+        // at once.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_diagnostic_line must emit exactly one line — the \
+             pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // Byte-for-byte reproduction of the pre-lift inline
+        // `println!("   {}", "running 42 tests")` output — the
+        // three-space indent and the verbatim line body reach the
+        // writer in the exact pre-lift arrangement, with NO ANSI
+        // wrapper and NO glyph prefix.
+        assert_eq!(
+            lines[0], "   running 42 tests",
+            "write_diagnostic_line must render the three-space indent \
+             and the verbatim line body byte-for-byte matching the \
+             pre-lift inline `println!(\"   {{}}\", line)` output; \
+             got {:?}",
+            lines[0]
+        );
+
+        // The primitive body itself paints NO ANSI escape — every
+        // pre-lift consumer left the line body uncolored (that
+        // distinguishes this primitive from its `.red()`-painted peer
+        // [`super::write_diagnostic_error_line`]). A future
+        // regression that promoted the body to `.dimmed()` /
+        // `.bold()` / `.red()` under a themed diagnostic-block
+        // grammar would leak an ANSI sequence into the line and fail
+        // here.
+        assert!(
+            !lines[0].contains("\x1b["),
+            "write_diagnostic_line must emit NO ANSI escape at pin \
+             baseline — every pre-lift consumer left the line body \
+             uncolored so the plain rows contrast against the peer \
+             `write_diagnostic_error_line` `.red()`-painted rows \
+             inside the same diagnostic block; got {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza
+        // used `println!` (not `print!`), so the newline is part of
+        // the contract. A fusion that swapped `writeln!` for
+        // `write!` fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_diagnostic_line must emit a trailing `\\n` (the \
+             pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_diagnostic_line`] no longer spell the
+    /// `println!("   {}", line);` shape inline across
+    /// `commands/{prerelease.rs, frontend_validation.rs}`.
+    /// Structural regression shield — without it, a future refactor
+    /// could silently re-inline the one-liner (e.g. a "just call
+    /// `println!` directly, it's shorter" cleanup) and reopen the
+    /// 9-site duplication class this lift closed. Enforced against
+    /// each module body BEFORE its first `#[cfg(test)]` region so a
+    /// test-support mention of the raw shape does not defeat the
+    /// shield.
+    ///
+    /// The exact-shape needle is `println!("   {}",` immediately
+    /// followed on the same source line by any suffix ending in
+    /// `line);` (the plain, uncolored, `Display`-interpolated `line`
+    /// binding every pre-lift consumer spelled) — the macro
+    /// invocation with the exact three-space indent-template and the
+    /// plain `line` argument on the same source line.
+    ///
+    /// The positive count is pinned per-module at the pre-lift site
+    /// count (`prerelease.rs` ×6, `frontend_validation.rs` ×3). A
+    /// fusion that folded two consumer sites into one call or dropped
+    /// one of the plain rows silently fails here — the negative half
+    /// above would still pass, but the positive count would fall
+    /// below the pre-lift census.
+    #[test]
+    fn print_diagnostic_line_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str, usize)] = &[
+            (
+                include_str!("commands/prerelease.rs"),
+                "commands/prerelease.rs",
+                6,
+            ),
+            (
+                include_str!("commands/frontend_validation.rs"),
+                "commands/frontend_validation.rs",
+                3,
+            ),
+        ];
+        for (source, module_path, expected_forwards) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("println!(\"   {}\",") {
+                    continue;
+                }
+                if !line.trim_end().ends_with("line);") {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `println!(\"   {{}}\", line);` three-space \
+                     indented plain-verbatim diagnostic-stream \
+                     line stanza — that shape was lifted onto \
+                     `crate::ui::print_diagnostic_line`. A re-inline \
+                     would silently reopen the 9-site duplication \
+                     class this shield exists to close. Offending \
+                     line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            let forward_hits = body.matches("crate::ui::print_diagnostic_line(").count();
+            assert_eq!(
+                forward_hits, *expected_forwards,
+                "{module_path} body must forward to \
+                 `crate::ui::print_diagnostic_line(...)` at exactly \
+                 {expected_forwards} site(s) — one per pre-lift \
+                 consumer in this module. A fusion that folded two \
+                 consumer sites into one call or dropped one of the \
+                 plain rows silently fails here. Found {forward_hits} \
+                 forwarding hits."
             );
         }
     }
