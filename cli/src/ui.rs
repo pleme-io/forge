@@ -1352,6 +1352,97 @@ pub fn write_step_failure<W: std::io::Write>(w: &mut W, message: &str) -> std::i
     writeln!(w, "   {} {}", "❌".red(), message)
 }
 
+/// Prints the one-line `"   {} <label>: <err>"` (three-space indent +
+/// red `❌` glyph + caller-supplied label + literal colon-space
+/// connective + interpolated `Display` error) in-body step-failure
+/// grammar 10 pre-lift consumer sites spelled inline as
+/// `crate::ui::print_step_failure(&format!("<label>: {}", <err>))`
+/// across 2 command modules (`commands/{prerelease (×7:
+/// Integration-tests-error, E2E-tests-error, Docker-not-available ×2,
+/// Failed-to-run-integration-tests, Failed-to-prepare-E2E-images,
+/// Failed-to-run-E2E-tests), post_deploy_verification (×3:
+/// Health-check-failed, GraphQL-check-failed, per-smoke-query
+/// `<smoke.name>: <err>`)}.rs`). A fusion of [`print_step_failure`]
+/// with the pre-lift `format!("<label>: {}", err)` composition every
+/// consumer hand-spelled — the same fixed grammar, one typed body.
+/// The `label: &str` typed argument accepts both string literals
+/// (`"Docker not available"`) and `&String` deref-coerced values
+/// (`&smoke.name`, the per-item smoke-query fault-branch on
+/// `post_deploy_verification.rs`) — the same shape reached
+/// `print_step_failure(&format!("<label>: {}", <err>))` pre-lift
+/// regardless of whether `<label>` was a literal or an interpolated
+/// `Display` operand.
+///
+/// # Distinct from the base [`print_step_failure`] primitive
+///
+/// [`print_step_failure`] takes ONE `&str` message and writes it
+/// verbatim; callers that carried a fixed `<label>: <err>` shape had
+/// to compose the `format!("<label>: {}", err)` inline at every site,
+/// re-restating the colon-space connective and the `Display`
+/// interpolation across 9 sibling fault-branch stanzas. This fusion
+/// carries the `label: &str` and the `err: impl Display` typed
+/// arguments separately, formats the pre-lift composition ONCE in
+/// its body, and delegates to [`write_step_failure`] — the same
+/// `   ❌.red() <message>` byte-for-byte payload the pre-lift
+/// `format!`s produced, minus the 9-site copy-and-paste.
+///
+/// # Compounding
+///
+/// Pre-lift 10 sibling sites each restated the `format!("<label>: {}",
+/// <err>)` composition INSIDE the `print_step_failure(&format!(...))`
+/// call, so the colon-space connective, the `Display` interpolation
+/// idiom, and the leading `label` string all reached the primitive
+/// pre-composed. A future refinement of the fault-branch grammar (a
+/// swap of `: ` for ` — ` under a smarter connective, an inclusion of
+/// the error's `.source()` chain via `{:#}` instead of `{}` under
+/// anyhow's context-preserving `Display`, an OTLP `step_failed`
+/// observability event wired alongside the print that carries the
+/// label + err as SEPARATE structured attributes rather than a
+/// pre-composed string, a shift of the error painting to
+/// `.dimmed()` under a leaner error-side palette) had to hit 10
+/// sites in lockstep or drift the readout; post-lift it hits ONE
+/// typed body. The `err: impl Display` typed argument stays a
+/// STRUCTURED value at the primitive boundary — the observability
+/// or `.source()`-chain change lands in one place and every consumer
+/// picks it up by construction. The `label: &str` typed argument
+/// accepts both string-literal callers (7 sites) and `&String`
+/// deref-coerced callers (the per-smoke-query
+/// `post_deploy_verification.rs:395` `<smoke.name>: <err>`
+/// fault-branch) under one signature; the pre-lift `format!(...)`
+/// composition erased the label's origin (literal vs. interpolated
+/// `Display` operand) into a `String` at every site regardless, so
+/// the fusion's `&str` signature is a strictly-more-typed peer that
+/// still reaches both shapes through deref coercion.
+///
+/// Delegates to [`write_step_failure_with_error`] against
+/// [`std::io::stdout()`]; the writer split exists so the
+/// fail-before-pass test can pin the one-line body, the three-space
+/// indent, the `❌ ` glyph, the `\x1b[31m` red ANSI palette on the
+/// glyph alone, the literal colon-space connective between label and
+/// error, and the `Display`-formatted error's byte-for-byte
+/// reproduction by inspecting emitted bytes rather than shelling out
+/// and grepping stdout.
+pub fn print_step_failure_with_error(label: &str, err: impl std::fmt::Display) {
+    let _ = write_step_failure_with_error(&mut std::io::stdout().lock(), label, &err);
+}
+
+/// Writer-taking sibling to [`print_step_failure_with_error`]. Emits
+/// the single `   <❌.red()> <label>: <err>` line via [`writeln!`]
+/// against the supplied writer. [`print_step_failure_with_error`] is
+/// the stdout adapter; this variant exists so tests can pin the
+/// one-line body, the three-space indent, the `❌ ` glyph, the
+/// `\x1b[31m` red ANSI sequence around the glyph (never the label,
+/// never the error), the literal colon-space connective between
+/// label and error, and the caller-supplied `Display`-formatted
+/// error's byte-for-byte reproduction without capturing stdout.
+pub fn write_step_failure_with_error<W: std::io::Write>(
+    w: &mut W,
+    label: &str,
+    err: &dyn std::fmt::Display,
+) -> std::io::Result<()> {
+    writeln!(w, "   {} {}: {}", "❌".red(), label, err)
+}
+
 /// Prints the one-line `"   {} <message>"` (three-space indent + green
 /// `✅` glyph + plain message) in-body step-pass grammar 62 pre-lift
 /// consumer sites spelled inline as one of two shapes across 15 command
@@ -6438,6 +6529,243 @@ mod tests {
                  primitive body every three-space-indented `❌.red()` \
                  in-body step-failure in the crate now delegates \
                  through."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for
+    /// [`super::write_step_failure_with_error`]. Pins the one-line
+    /// body every pre-lift consumer produced by composing
+    /// `format!("<label>: {}", <err>)` inside a
+    /// `print_step_failure(&...)` call: a three-space indent, a
+    /// `.red()`-colored `❌` glyph, a single space, the caller's
+    /// label reproduced VERBATIM (plain, uncolored), a literal
+    /// colon-space connective, then the caller's `Display`-formatted
+    /// error reproduced VERBATIM (plain, uncolored). A silent
+    /// contract drift a future rewrite might introduce — swapping
+    /// `: ` for ` — ` under a smarter connective, promoting the
+    /// whole line's coloring so the label / error paint red at every
+    /// site (colliding with a sibling that colors the error side via
+    /// `.dimmed()`), dropping the `❌ ` glyph, swapping `.red()` for
+    /// `.bright_red()` (`\x1b[91m` — the milestone-level
+    /// [`super::print_error`] palette), or slipping a trailing blank
+    /// line into the primitive body — flips this assertion rather
+    /// than compiling and silently diverging the 9 consumer sites'
+    /// visual grammar.
+    #[test]
+    fn write_step_failure_with_error_emits_exactly_one_label_colon_err_line() {
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        // A `std::io::Error` is the load-bearing pre-lift `err` type —
+        // an `anyhow::Error` (`prerelease.rs` fault-branch `e`) and a
+        // `std::io::Error` (`e2e::ensure_docker_running` return) both
+        // reach the primitive through `impl Display`, and the writer's
+        // byte-for-byte output must not depend on which concrete type
+        // was passed. A `std::io::Error` gives a deterministic
+        // `Display` payload independent of environment.
+        let err = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused");
+        super::write_step_failure_with_error(&mut buf, "Docker not available", &err)
+            .expect("write_step_failure_with_error against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf).expect(
+            "write_step_failure_with_error must emit valid UTF-8 (the pre-lift `format!`s did)",
+        );
+
+        // Exactly one line — the pre-lift stanza is one `println!`
+        // (through `print_step_failure`), not two, and carries no
+        // framing blank. A refactor that slips a leading or trailing
+        // blank into the primitive body fails here.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_step_failure_with_error must emit exactly one line — \
+             the pre-lift stanza was one `print_step_failure` call \
+             carrying no framing blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The three-space indent reaches the rendered line before any
+        // ANSI escape — the fusion delegates to `write_step_failure`,
+        // which emits the indent OUTSIDE the coloring span. A rewrite
+        // that hoisted the indent inside the coloring span or dropped
+        // it altogether fails here.
+        assert!(
+            lines[0].starts_with("   "),
+            "line 0 must begin with a three-space indent — the \
+             fusion delegates to `write_step_failure`, which emits \
+             the indent OUTSIDE the coloring span; got {:?}",
+            lines[0]
+        );
+
+        // The `❌ ` glyph reaches the rendered line — a rewrite that
+        // swapped `❌ ` for `✗ ` under a "CI-log-friendly" cleanup or
+        // dropped the glyph altogether fails here.
+        assert!(
+            lines[0].contains('❌'),
+            "line 0 must contain the `❌` glyph — the fusion \
+             delegates to `write_step_failure`, which spells \
+             `\"❌\".red()` on the marker; got {:?}",
+            lines[0]
+        );
+
+        // The caller's label reaches the rendered line VERBATIM
+        // (plain, uncolored). A fusion that hoisted the label into a
+        // `.bold()` / `.dimmed()` span, dropped the label altogether,
+        // or pre-composed a fixed string would fail here.
+        assert!(
+            lines[0].contains("Docker not available"),
+            "line 0 must carry the caller-supplied label verbatim \
+             (plain, uncolored) — the pre-lift `format!(\"<label>: \
+             {{}}\", <err>)` composition passed the label as the \
+             format string's LITERAL prefix, not through any coloring; \
+             got {:?}",
+            lines[0]
+        );
+
+        // The literal colon-space connective reaches the rendered
+        // line between label and error. A fusion that swapped `: `
+        // for ` — ` (a smarter connective) or dropped the space
+        // (collapsing the readout's left column) fails here.
+        assert!(
+            lines[0].contains("Docker not available: connection refused"),
+            "line 0 must carry the literal `: ` (colon-space) \
+             connective between label and error — the pre-lift \
+             `format!(\"<label>: {{}}\", <err>)` spelled the \
+             `: ` verbatim between the LITERAL prefix and the \
+             `{{}}` interpolation slot; got {:?}",
+            lines[0]
+        );
+
+        // The `.red()` coloring wraps the GLYPH alone, never the
+        // label, never the error text. Pin that the label and the
+        // error text are NOT bracketed by a red-open + reset pair:
+        // the red span must close (`\x1b[0m`) BEFORE the space that
+        // precedes the label.
+        let x_pos = lines[0].find('❌').expect("glyph must be present");
+        let reset_pos = lines[0]
+            .find("\x1b[0m")
+            .expect("reset must be present after the glyph");
+        let label_pos = lines[0]
+            .find("Docker not available")
+            .expect("label must be present");
+        assert!(
+            x_pos < reset_pos && reset_pos < label_pos,
+            "the `\\x1b[0m` reset must close the red span BEFORE the \
+             label begins — the fusion paints the `❌` glyph alone \
+             `.red()`, never the label or the error text. Got \
+             positions x={x_pos}, reset={reset_pos}, label={label_pos} \
+             in line {:?}",
+            lines[0]
+        );
+
+        // The `red` ANSI sequence (`\x1b[31m`) reaches the rendered
+        // line; a fusion that dropped `.red()` (a "just print the
+        // string" cleanup) or promoted the palette to `.bright_red()`
+        // (`\x1b[91m` — the [`super::print_error`] milestone palette)
+        // fails here.
+        assert!(
+            lines[0].contains("\x1b[31m"),
+            "line 0 must carry the `red` ANSI sequence (`\\x1b[31m`) \
+             — the fusion delegates to `write_step_failure`, which \
+             spells `.red()` (never `.bright_red()`) on the glyph; \
+             got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[91m"),
+            "line 0 must NOT carry the `bright_red` ANSI sequence \
+             (`\\x1b[91m`) — that palette belongs to the heavier \
+             milestone-level `print_error`, not this in-body \
+             step-failure fusion; got {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — the fusion delegates
+        // to `write_step_failure`, which uses `writeln!`.
+        assert!(
+            out.ends_with('\n'),
+            "write_step_failure_with_error must emit a trailing `\\n` \
+             (the delegate `writeln!` does); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_step_failure_with_error`] no longer spell the
+    /// pre-lift inline `print_step_failure(&format!("<label>: {}",
+    /// <err>))` composition across the 2 pre-lift command modules.
+    /// Structural regression shield — without it, a future refactor
+    /// could silently re-inline the `format!("<label>: {}", err)`
+    /// composition (e.g. a "just call `format!` directly, it's
+    /// shorter" cleanup) and reopen the 9-site duplication class this
+    /// fusion closed. Enforced at the module bodies before their
+    /// `#[cfg(test)]` regions so a test-support mention of the raw
+    /// shape does not defeat the shield.
+    ///
+    /// The exact-shape needle is `print_step_failure(&format!("` —
+    /// the pre-lift `print_step_failure(&format!("<label>: {}",
+    /// <err>))` grammar's unmistakable prefix. Sibling shapes that
+    /// still legitimately pre-compose a `format!` string through
+    /// `msg_with_secs_1` or `msg_with_count_noun_secs_1` (the
+    /// `prerelease.rs` timing-suffix fault-branches) reach
+    /// `print_step_failure` through those TYPED primitives —
+    /// `print_step_failure(&crate::repo::msg_with_secs_1(...))`, not
+    /// through a raw `format!` — so the needle rejects them by
+    /// construction. Sibling shapes that pass a bare `&format!` for
+    /// a NON-`<label>: {}` composition (a multi-arg message with
+    /// no colon-space connective) are the residue this fusion does
+    /// not cover; the shield anchors on the `: {}", ` sub-substring
+    /// to distinguish the lifted shape from any residual raw-format
+    /// call.
+    #[test]
+    fn print_step_failure_with_error_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str, usize)] = &[
+            (
+                include_str!("commands/prerelease.rs"),
+                "commands/prerelease.rs",
+                7,
+            ),
+            (
+                include_str!("commands/post_deploy_verification.rs"),
+                "commands/post_deploy_verification.rs",
+                3,
+            ),
+        ];
+        for (source, module_path, expected_forwards) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("print_step_failure(&format!(\"") {
+                    continue;
+                }
+                if !line.contains(": {}\", ") {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `print_step_failure(&format!(\"<label>: {{}}\", \
+                     <err>))` fault-branch shape — that composition \
+                     was lifted onto \
+                     `crate::ui::print_step_failure_with_error(<label>, \
+                     &<err>)`. A re-inline would silently reopen the \
+                     9-site duplication class this shield exists to \
+                     close. Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            let forwards = body
+                .matches("crate::ui::print_step_failure_with_error(")
+                .count();
+            assert_eq!(
+                forwards, *expected_forwards,
+                "{module_path} body must forward to \
+                 `crate::ui::print_step_failure_with_error(<label>, \
+                 &<err>)` at the pre-lift site count \
+                 ({expected_forwards}) — a fusion that dropped one \
+                 of the fault-branch prints or folded two into a \
+                 single call fails here; got {forwards}"
             );
         }
     }

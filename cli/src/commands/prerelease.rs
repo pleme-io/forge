@@ -467,7 +467,7 @@ pub async fn execute(
                 }
             }
             Err(e) => {
-                crate::ui::print_step_failure(&format!("Integration tests error: {}", e));
+                crate::ui::print_step_failure_with_error("Integration tests error", &e);
                 summary.failed.push("G13: Integration tests".to_string());
             }
         }
@@ -499,7 +499,7 @@ pub async fn execute(
                 }
             }
             Err(e) => {
-                crate::ui::print_step_failure(&format!("E2E tests error: {}", e));
+                crate::ui::print_step_failure_with_error("E2E tests error", &e);
                 summary.failed.push("G14: E2E tests".to_string());
             }
         }
@@ -902,7 +902,7 @@ async fn run_integration_gate(config: &PreReleaseConfig) -> Result<bool> {
 
     // Ensure Docker is running (auto-start on macOS)
     if let Err(e) = e2e::ensure_docker_running() {
-        crate::ui::print_step_failure(&format!("Docker not available: {}", e));
+        crate::ui::print_step_failure_with_error("Docker not available", &e);
         return Ok(false);
     }
 
@@ -948,7 +948,7 @@ async fn run_integration_gate(config: &PreReleaseConfig) -> Result<bool> {
             }
         }
         Ok(Err(e)) => {
-            crate::ui::print_step_failure(&format!("Failed to run integration tests: {}", e));
+            crate::ui::print_step_failure_with_error("Failed to run integration tests", &e);
             Ok(false)
         }
         Err(_) => {
@@ -1044,7 +1044,7 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
 
     // Ensure Docker is running (may already be started by G13)
     if let Err(e) = e2e::ensure_docker_running() {
-        crate::ui::print_step_failure(&format!("Docker not available: {}", e));
+        crate::ui::print_step_failure_with_error("Docker not available", &e);
         return Ok(false);
     }
 
@@ -1059,7 +1059,7 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
     // Always force-rebuild E2E images to ensure tests run against the current code.
     // Without force=true, stale images from a previous build would be reused.
     if let Err(e) = e2e::prepare_e2e_images(repo_root.clone(), false, false, true) {
-        crate::ui::print_step_failure(&format!("Failed to prepare E2E images: {}", e));
+        crate::ui::print_step_failure_with_error("Failed to prepare E2E images", &e);
         return Ok(false);
     }
 
@@ -1148,7 +1148,7 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
             let _ = e2e::cleanup_testcontainers();
             let _ = e2e::cleanup_e2e_images();
 
-            crate::ui::print_step_failure(&format!("Failed to run E2E tests: {}", e));
+            crate::ui::print_step_failure_with_error("Failed to run E2E tests", &e);
             print_e2e_diagnostics(&config.backend_dir);
             Ok(false)
         }
