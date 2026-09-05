@@ -580,7 +580,7 @@ pub async fn validate_migrations_with_config(
     } else {
         crate::ui::print_step_failure(&format!("Found {} issues", all_issues.len()));
         for issue in &all_issues {
-            println!("\n   {}", issue.format());
+            crate::ui::print_validation_issue_line(&issue.format());
         }
     }
 
@@ -947,7 +947,7 @@ pub async fn validate_seaorm_migrations(
     } else {
         crate::ui::print_step_failure(&format!("Found {} safety issues", all_issues.len()));
         for issue in &all_issues {
-            println!("\n   {}", issue.format());
+            crate::ui::print_validation_issue_line(&issue.format());
         }
     }
 
@@ -1215,7 +1215,7 @@ pub async fn validate_migration_manifest(
     } else {
         crate::ui::print_step_failure(&format!("Found {} manifest issues", issues.len()));
         for issue in &issues {
-            println!("\n   {}", issue.format());
+            crate::ui::print_validation_issue_line(&issue.format());
         }
     }
 
