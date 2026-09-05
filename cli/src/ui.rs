@@ -1156,6 +1156,68 @@ pub fn write_phase_heading<W: std::io::Write>(w: &mut W, title: &str) -> std::io
     writeln!(w)
 }
 
+/// Prints the two-line `<text>.dimmed() + framing blank` phase-skipped
+/// grammar 8 pre-lift consumer sites spelled inline as
+/// `println!("{}", "<text>".dimmed()); println!();` (or the runtime-
+/// formatted `println!("{}", format!("<text>", <args>).dimmed());
+/// println!();` peer) across `commands/product_release.rs`
+/// (`orchestrate_product_release` skip branches: Phase 0 `--skip-gates`,
+/// Phase 0 non-staging environment, Phase 1.5 attestation-feature-
+/// disabled, Phase 2 `--build-only`, Phase 4 `--build-only`, Phase 5
+/// `--build-only`, Phase 4 no dashboard sync, Phase 5 no post-deploy).
+///
+/// Marks a top-level phase the pipeline chose not to execute, in the
+/// same visual scope as the phase's opening
+/// [`print_step_heading("Phase N: …")`] but on the leaner
+/// `.dimmed() + framing blank` grammar so the operator's eye reads
+/// past a skipped phase without stalling on it.
+///
+/// # Distinct from the other `ui::print_*` primitives
+///
+/// [`print_phase_heading`] is a `.bold().underline()` + framing blank
+/// two-liner marking a phase OPENING that the pipeline WILL execute.
+/// [`print_step_heading`] is a bare `.bold()` one-liner marking a
+/// step or phase opening one scope below. [`print_step_skip`] is a
+/// three-space `○ <message>.yellow()` in-body step-skipped marker for
+/// individual gate skips inside a phase (its scope is one below a
+/// whole phase); its color and prefix are different because it lives
+/// inside an already-open phase's readout, not at the phase-boundary
+/// scope this primitive owns. This primitive carries the leanest
+/// phase-scope skip grammar — a single `.dimmed()` line the operator
+/// scans past, plus the framing blank that separates the skip note
+/// from the next phase's opening.
+///
+/// # Compounding
+///
+/// Pre-lift 8 sibling sites each restated the
+/// `println!("{}", "<text>".dimmed()); println!();` two-liner
+/// verbatim. A future palette adjustment (a `⏭️  ` prefix, a swap of
+/// `.dimmed()` for a lighter `.italic()` under a leaner grammar, a
+/// promotion to a full [`print_phase_heading`]-shaped body when the
+/// operator asks for skipped phases to stand out, an OTLP
+/// `phase_skipped` observability event, dropping the framing blank
+/// under a tighter body-spacing cleanup) had to hit 8 sites in
+/// lockstep or drift the visual grammar; post-lift it hits ONE typed
+/// body. Delegates to [`write_phase_skipped`] against
+/// `std::io::stdout()`; the writer split exists so the fail-before-
+/// pass test can pin the two-line body, the `\x1b[2m` dim ANSI
+/// sequence, and the trailing framing blank by inspecting emitted
+/// bytes rather than shelling out and grepping stdout.
+pub fn print_phase_skipped(text: &str) {
+    let _ = write_phase_skipped(&mut std::io::stdout().lock(), text);
+}
+
+/// Writer-taking sibling to [`print_phase_skipped`]. Emits the two-
+/// line body — the `<text>.dimmed()` note then a framing blank — via
+/// [`writeln!`] against the supplied writer.
+/// [`print_phase_skipped`] is the stdout adapter; this variant exists
+/// so tests can pin the two-line body, the `\x1b[2m` dim ANSI
+/// sequence, and the trailing blank without capturing stdout.
+pub fn write_phase_skipped<W: std::io::Write>(w: &mut W, text: &str) -> std::io::Result<()> {
+    writeln!(w, "{}", text.dimmed())?;
+    writeln!(w)
+}
+
 /// Prints the one-line `✅ <message>.green()` in-body step-completion
 /// grammar 9 pre-lift consumer sites spelled inline as
 /// `println!("✅ {}", "<MSG>".green());` across 4 command modules
@@ -4992,6 +5054,163 @@ mod tests {
                  `crate::ui::print_phase_heading(\"<TITLE>\")` — the \
                  primitive body every two-line bold+underlined phase \
                  heading in the crate now delegates through."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_phase_skipped`]. Pins
+    /// the exact two-line body every pre-lift consumer spelled verbatim
+    /// (`println!("{}", "<text>".dimmed()); println!();`). A silent
+    /// contract drift a future rewrite might introduce — dropping
+    /// `.dimmed()` so a skipped phase reads as loudly as an executed
+    /// one, promoting the note to bright / bold under a "make skips
+    /// more visible" cleanup that would then compete for eye-attention
+    /// with the neighboring phase headings, prepending a ⏭️  or ↷
+    /// emoji prefix that shifts the leading column and misaligns with
+    /// the peer [`super::print_phase_heading`] flush-left grammar,
+    /// dropping the trailing framing blank so the next phase's opening
+    /// crowds against the skip note, promoting the blank to two blanks
+    /// under a more spacious body, swapping `writeln!` for `write!`
+    /// (losing the trailing `\n`) — flips this assertion rather than
+    /// compiling and silently diverging the 8 consumer sites' visual
+    /// grammar.
+    #[test]
+    fn write_phase_skipped_emits_dimmed_text_then_blank_line() {
+        // Force ANSI emission (colored auto-drops sequences on a
+        // non-tty stdout) and serialize against peer banner tests
+        // via [`AnsiOverrideForTest`]; its Drop restores colored's
+        // auto-detection on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`], closing the set-write-unset window
+        // without a manual [`colored::control::unset_override`] call
+        // that a future test author could omit.
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_phase_skipped(&mut buf, "Phase 2: Skipping deploy (--build-only)")
+            .expect("write_phase_skipped against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_phase_skipped must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly two lines — the pre-lift stanza was two `println!`
+        // calls (the dimmed note + one framing blank). A refactor that
+        // drops the trailing blank (a "tighter body spacing" cleanup)
+        // or promotes it to two blanks fails here.
+        let lines: Vec<&str> = out.split_inclusive('\n').collect();
+        assert_eq!(
+            lines.len(),
+            2,
+            "write_phase_skipped must emit exactly two lines — the \
+             pre-lift stanza carried the dimmed note followed by ONE \
+             framing blank via a second `println!()`; got {}:\n{:?}",
+            lines.len(),
+            out
+        );
+
+        // The text reaches line 0 verbatim; a fusion that hoists the
+        // text off the parameter and pins it to a constant fails here.
+        assert!(
+            lines[0].contains("Phase 2: Skipping deploy (--build-only)"),
+            "line 0 must carry the text verbatim; got {:?}",
+            lines[0]
+        );
+
+        // The `dim` SGR parameter (`2`) reaches line 0 — every pre-
+        // lift consumer chained `.dimmed()` on the composed string. A
+        // fusion that dropped `.dimmed()` (a "just print it plain,
+        // that's shorter" cleanup) or promoted the palette to `.bold()`
+        // / `.bright_*()` (which would erase the visual distinction
+        // between a skipped phase and an executed one) fails here.
+        assert!(
+            lines[0].contains("\x1b[2m"),
+            "line 0 must carry the `dim` SGR sequence (`\\x1b[2m`) — \
+             every pre-lift consumer spelled `.dimmed()` on the \
+             composed string, and dropping it collapses the phase-skip \
+             grammar onto the executed-phase palette; got {:?}",
+            lines[0]
+        );
+        // Sanity: neither the executed-phase `.bold().underline()` pair
+        // nor a bright palette should leak in. A pre-lift regression
+        // check aimed at future "make skips more visible" cleanups.
+        assert!(
+            !lines[0].contains("\x1b[1m"),
+            "line 0 must NOT carry the `bold` SGR parameter (`1`) — \
+             `.bold()` belongs to the peer executed-phase heading \
+             `print_phase_heading`, and promoting the skip note to \
+             bold erases the visual distinction between a skipped \
+             phase and an executed one; got {:?}",
+            lines[0]
+        );
+
+        // Line 1 is the trailing framing blank — exactly `\n`. A
+        // refactor that promotes it to a blank-with-content (a stray
+        // space) or drops it entirely fails here.
+        assert_eq!(
+            lines[1], "\n",
+            "line 1 must be exactly `\\n` — every pre-lift trailing \
+             `println!()` emits an empty line, and any content there \
+             (a stray space, a promoted styled rule) is a visual \
+             regression; got {:?}",
+            lines[1]
+        );
+
+        // The trailing `\n` on the whole output reaches the writer —
+        // pre-lift stanza used two `println!` calls (not `print!`), so
+        // both newlines are part of the contract. A fusion that
+        // swapped either `writeln!` for `write!` fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_phase_skipped must end with `\\n` — both pre-lift \
+             `println!`s emit trailing newlines; got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the caller sites in [`commands/product_release.rs`]
+    /// no longer spell the `println!("{}", "<text>".dimmed());
+    /// println!();` phase-skipped stanza inline. Structural regression
+    /// shield — without it, a future refactor could silently re-inline
+    /// the two-liner (e.g. a "just call `println!` directly, it's
+    /// shorter" cleanup) and reopen the 8-site duplication class this
+    /// lift closed. Enforced at the module body before its
+    /// `#[cfg(test)]` region so a test-support mention of the raw
+    /// shape does not defeat the shield. The exact-shape needle
+    /// `"Phase ` co-occurring with `".dimmed()` on the SAME line
+    /// uniquely identifies the pre-lift restatement; other
+    /// dimmed-carrying `println!`s in `product_release.rs` (the
+    /// `">>".dimmed()` invocation-preview stanzas, the
+    /// `.dimmed()` two-column arg-display shape) do not carry the
+    /// literal `"Phase ` prefix and stay unshielded because they are
+    /// morally-adjacent shapes with their own lift targets, not this
+    /// one.
+    #[test]
+    fn print_phase_skipped_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[(
+            include_str!("commands/product_release.rs"),
+            "commands/product_release.rs",
+        )];
+        for (source, module_path) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                assert!(
+                    !(line.contains("\"Phase ") && line.contains(".dimmed()")),
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `\"Phase <N>: <text>\".dimmed()` phase-skipped \
+                     stanza — that two-liner was lifted onto \
+                     `crate::ui::print_phase_skipped`. A re-inline \
+                     would silently reopen the 8-site duplication \
+                     class this shield exists to close. Offending \
+                     line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            assert!(
+                body.contains("crate::ui::print_phase_skipped("),
+                "{module_path} body must forward to \
+                 `crate::ui::print_phase_skipped(\"<text>\")` — the \
+                 primitive body every two-line \
+                 `<text>.dimmed() + framing blank` phase-skipped \
+                 stanza in the crate now delegates through."
             );
         }
     }
