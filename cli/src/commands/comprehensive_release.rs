@@ -280,7 +280,7 @@ pub async fn execute(
         debug!("Migrations directory found: {}", migrations_dir.display());
     }
 
-    info!("✅ Input validation complete");
+    crate::info_success!("Input validation complete");
     println!();
 
     // Get git SHA for tagging

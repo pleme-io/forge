@@ -132,7 +132,7 @@ pub async fn execute(
     info!("🔄 Triggering FluxCD reconciliation...");
     match flux_reconcile::reconcile_kustomization("flux-system", "flux-system", false).await {
         Ok(()) => {
-            info!("✅ FluxCD reconciliation triggered");
+            crate::info_success!("FluxCD reconciliation triggered");
         }
         Err(e) => {
             crate::warn_nonfatal!("FluxCD reconcile failed", e);
@@ -170,7 +170,7 @@ pub async fn execute(
 
                 match cloudflare::purge_cache(zone_id, api_token, &urls).await {
                     Ok(()) => {
-                        info!("✅ Cloudflare cache purged successfully");
+                        crate::info_success!("Cloudflare cache purged successfully");
                         println!();
                     }
                     Err(e) => {

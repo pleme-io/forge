@@ -108,7 +108,7 @@ pub async fn purge_cache(zone_id: &str, api_token: &str, urls: &[String]) -> Res
         );
     }
 
-    info!("✅ Cloudflare cache purged successfully");
+    crate::info_success!("Cloudflare cache purged successfully");
     Ok(())
 }
 
