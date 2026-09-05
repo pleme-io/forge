@@ -1344,7 +1344,7 @@ pub async fn orchestrate_release(
 
         // If push-only, we're done
         if push_only {
-            println!("{}", "━".repeat(60).bright_green());
+            crate::ui::print_heavy_rule(crate::ui::HeavyRuleStyle::PushCompleteGreen60);
             if has_arm64 {
                 println!(
                     "{}  Tags: amd64-{}, arm64-{}, {} (manifest)",
@@ -1356,7 +1356,7 @@ pub async fn orchestrate_release(
             } else {
                 println!("{}  Tag: {}", "PUSH COMPLETE".green().bold(), deploy_tag);
             }
-            println!("{}", "━".repeat(60).bright_green());
+            crate::ui::print_heavy_rule(crate::ui::HeavyRuleStyle::PushCompleteGreen60);
             return Ok(());
         }
 
@@ -2275,9 +2275,9 @@ async fn print_deployment_report(
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // SUMMARY
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    println!("{}", "━".repeat(80).bright_blue());
+    crate::ui::print_heavy_rule(crate::ui::HeavyRuleStyle::SummaryBlue80);
     println!("{}", "📋 SUMMARY".bright_blue().bold());
-    println!("{}", "━".repeat(80).bright_blue());
+    crate::ui::print_heavy_rule(crate::ui::HeavyRuleStyle::SummaryBlue80);
     println!();
 
     crate::ui::print_report_item("All build and GitOps operations completed successfully");
@@ -2287,7 +2287,7 @@ async fn print_deployment_report(
     println!();
 
     println!("{}", "🎉 Deployment workflow complete!".green().bold());
-    println!("{}", "━".repeat(80).bright_blue());
+    crate::ui::print_heavy_rule(crate::ui::HeavyRuleStyle::SummaryBlue80);
     println!();
 
     Ok(())
@@ -2657,9 +2657,9 @@ pub async fn release_rust_service(
 
     // Generate comprehensive deployment report
     println!();
-    println!("{}", "━".repeat(80).bright_blue());
+    crate::ui::print_heavy_rule(crate::ui::HeavyRuleStyle::SummaryBlue80);
     println!("📊 {}", "DEPLOYMENT REPORT".bright_blue().bold());
-    println!("{}", "━".repeat(80).bright_blue());
+    crate::ui::print_heavy_rule(crate::ui::HeavyRuleStyle::SummaryBlue80);
     print_deployment_report(&service, &namespace, &deploy_config, &deploy_tag).await?;
 
     // Step 9: Post-release FluxCD health check with retry (can be skipped via config)
