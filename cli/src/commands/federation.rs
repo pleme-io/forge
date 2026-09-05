@@ -293,7 +293,7 @@ pub async fn update_federation(
 
     metadata.save(&federation_dir).await?;
 
-    println!("✅ Metadata saved:");
+    crate::ui::print_success_line("Metadata saved:");
     crate::ui::print_field("Hash", &metadata.supergraph_hash[..16]);
     crate::ui::print_field("Services", metadata.services.len());
     crate::ui::print_field("Rover", &metadata.rover_version);
@@ -558,7 +558,7 @@ pub async fn update_federation(
         println!("🔔 {}", "Notifying BFF to reload supergraph...".bold());
         match notify_bff_supergraph_reload(bff_url).await {
             Ok(result) => {
-                println!("✅ BFF supergraph reloaded successfully");
+                crate::ui::print_success_line("BFF supergraph reloaded successfully");
                 crate::ui::print_field("Hash", &result.hash);
                 crate::ui::print_field("Subgraphs", result.subgraph_count);
             }

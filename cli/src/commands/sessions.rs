@@ -168,7 +168,7 @@ pub async fn flush(product: String, environment: String, force: bool, dry_run: b
     println!("   Found {} session(s)", session_count);
 
     if session_count == 0 {
-        println!("✅ No sessions to flush");
+        crate::ui::print_success_line("No sessions to flush");
         return Ok(());
     }
 
@@ -202,7 +202,7 @@ pub async fn flush(product: String, environment: String, force: bool, dry_run: b
     let deleted = delete_sessions(&namespace, &config.valkey_pod, &password)?;
 
     println!();
-    println!("✅ Sessions flushed successfully!");
+    crate::ui::print_success_line("Sessions flushed successfully!");
     println!("   Deleted {} session key(s)", deleted);
     println!("   Users will need to log in again to get updated permissions.");
 

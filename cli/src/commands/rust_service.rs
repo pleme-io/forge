@@ -316,7 +316,7 @@ pub async fn build_rust_service(
     // Check ATTIC_TOKEN from environment (set by Nix wrapper)
     let has_attic_token = check_token("ATTIC_TOKEN");
     if has_attic_token {
-        println!("✅ ATTIC_TOKEN configured");
+        crate::ui::print_success_line("ATTIC_TOKEN configured");
     } else {
         println!(
             "{}",
@@ -342,7 +342,7 @@ pub async fn build_rust_service(
             if host_arch == "x86_64" {
                 let available = check_cross_compilation_available();
                 if available {
-                    println!("✅ Cross-compilation to ARM64 available");
+                    crate::ui::print_success_line("Cross-compilation to ARM64 available");
                 } else {
                     crate::ui::print_step_info(
                         "Skipping ARM64 build (cross-compilation not configured)",
@@ -1648,7 +1648,9 @@ pub async fn orchestrate_release(
                                     .await
                                     {
                                         Ok(_) => {
-                                            println!("✅ Integration tests passed!");
+                                            crate::ui::print_success_line(
+                                                "Integration tests passed!",
+                                            );
                                             println!();
                                         }
                                         Err(e) => {
