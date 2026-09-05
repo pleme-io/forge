@@ -136,7 +136,7 @@ pub async fn execute(
             info!("✅ FluxCD reconciliation triggered");
         }
         Err(e) => {
-            warn!("⚠️  FluxCD reconcile failed (non-fatal): {}", e);
+            crate::warn_nonfatal!("FluxCD reconcile failed", e);
         }
     }
 
@@ -175,7 +175,7 @@ pub async fn execute(
                         println!();
                     }
                     Err(e) => {
-                        warn!("⚠️  Cloudflare cache purge failed (non-fatal): {}", e);
+                        crate::warn_nonfatal!("Cloudflare cache purge failed", e);
                         println!();
                     }
                 }

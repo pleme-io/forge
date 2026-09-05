@@ -65,6 +65,7 @@ mod hermetic_scratch;
 mod k8s;
 mod nix;
 mod nix_hooks;
+mod nonfatal_warning;
 mod observability;
 mod path_builder;
 mod repo;
