@@ -7,7 +7,7 @@ use anyhow::Result;
 use tracing::info;
 
 use crate::commands::push;
-use crate::commands::release_commit::commit_cluster_overlay_release;
+use crate::commands::release_commit::announce_and_commit_cluster_overlay_release_step;
 
 /// Release kenshi operator: push image and update K8s manifests for all clusters
 ///
@@ -63,10 +63,8 @@ pub async fn release(
     println!();
 
     // Step 5: Commit and push
-    crate::step_header::announce_step_header(4, 4, "Commit and Push");
-    info!("📤 Committing release changes...");
-    commit_cluster_overlay_release(
-        None,
+    announce_and_commit_cluster_overlay_release_step(
+        4,
         "kenshi operator",
         &new_tag,
         &[&primary_kustomization, &secondary_kustomization],

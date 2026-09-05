@@ -367,24 +367,42 @@ mod tests {
 
     // Positive half of the shield: the six pre-lift files MUST each
     // forward through `crate::step_header::announce_step_header(` at
-    // least the pre-lift count of times, so a migration that dropped a
-    // call site outright leaves the negative "no raw inline shape" scan
-    // trivially satisfied by absence but the positive count still
-    // fails.
+    // least the pre-lift count of times (or through
+    // `announce_and_commit_cluster_overlay_release_step` — the fusion
+    // primitive in `commands/release_commit.rs` that transitively
+    // emits the terminal `Commit and Push` step header — for the
+    // three cluster-overlay release flows whose `Commit and Push`
+    // step is now the fusion primitive's slot). A migration that
+    // dropped a call site outright leaves the negative "no raw inline
+    // shape" scan trivially satisfied by absence but the positive
+    // count still fails.
+    //
+    // The three cluster-overlay release flows
+    // (`kenshi.rs`, `kenshi_agent.rs`, `nix_builder.rs`) each lifted
+    // their terminal `Commit and Push` step onto
+    // `crate::commands::release_commit::\
+    // announce_and_commit_cluster_overlay_release_step`; the fusion
+    // primitive transitively calls
+    // `crate::step_header::announce_step_header` from
+    // `commands/release_commit.rs`, so the direct-count in each of
+    // those three flows dropped by one — see the positive-half
+    // sibling shield in `commands/release_commit.rs`
+    // (`every_cluster_overlay_release_consumer_delegates_through_commit_and_push_fusion`)
+    // which pins the fusion-call count at exactly 1 per consumer.
     #[test]
     fn every_prelift_module_forwards_through_announce_step_header() {
         use std::path::PathBuf;
         let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("src")
             .join("commands");
-        // (module basename, minimum forward count from the pre-lift census)
+        // (module basename, minimum direct forward count)
         let expectations: &[(&str, usize)] = &[
             ("comprehensive_release.rs", 6),
             ("deploy.rs", 4),
             ("github_runner_ci.rs", 3),
-            ("kenshi.rs", 4),
-            ("kenshi_agent.rs", 6),
-            ("nix_builder.rs", 8),
+            ("kenshi.rs", 3),
+            ("kenshi_agent.rs", 5),
+            ("nix_builder.rs", 7),
         ];
         for (basename, min_count) in expectations {
             let path = commands_dir.join(basename);

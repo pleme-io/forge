@@ -27,9 +27,25 @@
 //! every release-commit path in forge.
 
 use anyhow::Result;
+use std::io;
 use tracing::info;
 
 use crate::infrastructure::git::{CommitPushOutcome, GitClient};
+
+/// The canonical `Commit and Push` step title carried by the final step
+/// header of every cluster-overlay release flow. Named as a `const` so
+/// a future re-titling (`Publish`, `Land Release`) flows to all three
+/// flows from one edit rather than through three inline literal edits.
+const COMMIT_AND_PUSH_STEP_TITLE: &str = "Commit and Push";
+
+/// The canonical `📤 Committing release changes...` info line the
+/// three cluster-overlay release flows in
+/// `commands/{kenshi,kenshi_agent,nix_builder}.rs` each emitted
+/// immediately before invoking [`commit_cluster_overlay_release`].
+/// Named as a `const` so a future drift to a different verb (a
+/// `🚀 Publishing`, a `📦 Landing`) flows to all three flows from one
+/// edit rather than through three inline literal edits.
+const COMMIT_RELEASE_CHANGES_INFO_LINE: &str = "📤 Committing release changes...";
 
 /// Build the canonical cluster-overlay release commit subject.
 ///
@@ -81,6 +97,106 @@ pub async fn commit_cluster_overlay_release(
         }
     }
     Ok(outcome)
+}
+
+/// Emit the canonical `Commit and Push` step-header + `📤 Committing
+/// release changes...` info-line preamble bytes to `w` — byte-for-byte
+/// identical to the two-line stanza the three cluster-overlay release
+/// flows in `commands/{kenshi,kenshi_agent,nix_builder}.rs` each
+/// spelled inline immediately before invoking
+/// [`commit_cluster_overlay_release`].
+///
+/// Composes with [`crate::step_header::write_step_header`] at
+/// `total_steps/total_steps` (the `Commit and Push` step is the
+/// terminal step of each of the three flows) so the step-index
+/// invariant (`1 <= step <= total`, `total >= 1`) is inherited from
+/// the sibling primitive and enforced at ONE typed boundary rather
+/// than restated at each consumer.
+///
+/// The direct-writer variant exists so the fail-before-pass test can
+/// pin the exact emitted bytes (the three `━` opener + closer, the
+/// `Step {total}/{total}: Commit and Push` label, the `📤 ` opener
+/// on the info line, the trailing newlines) without capturing a
+/// tracing subscriber and without racing an ambient logger — the
+/// same split every prior sibling-writer refactor honors (see
+/// `nonfatal_warning.rs`, `success_step.rs`, `skipping_step.rs`,
+/// `step_header.rs` for the canonical split rationale).
+#[allow(dead_code)] // See doc comment: the writer is a test/byte-oracle
+                    // peer of the tracing-routed
+                    // `announce_and_commit_cluster_overlay_release_step`,
+                    // and a future `collect_commit_and_push_preambles`
+                    // audit sibling will consume it directly.
+pub fn write_commit_and_push_step_preamble<W: io::Write>(
+    w: &mut W,
+    total_steps: usize,
+) -> io::Result<()> {
+    crate::step_header::write_step_header(
+        w,
+        total_steps,
+        total_steps,
+        &COMMIT_AND_PUSH_STEP_TITLE,
+    )?;
+    writeln!(w, "{}", COMMIT_RELEASE_CHANGES_INFO_LINE)?;
+    Ok(())
+}
+
+/// Announce the terminal `Commit and Push` step of a cluster-overlay
+/// release flow at position `total_steps/total_steps`, emit the
+/// canonical `📤 Committing release changes...` info line, then
+/// delegate to [`commit_cluster_overlay_release`] to stage `files`,
+/// commit with the canonical subject for `(component, new_tag)`, and
+/// push to `origin/main`.
+///
+/// Fusion primitive over the three sibling four-line stanzas the
+/// cluster-overlay release flows in
+/// `commands/{kenshi,kenshi_agent,nix_builder}.rs` each spelled
+/// inline verbatim (modulo the per-flow `total_steps`, `component`,
+/// and `files` slice):
+///
+/// ```ignore
+/// crate::step_header::announce_step_header(N, N, "Commit and Push");
+/// info!("📤 Committing release changes...");
+/// commit_cluster_overlay_release(None, "<component>", &new_tag, &<files>).await?;
+/// ```
+///
+/// Three occurrences of an identical shape past THEORY §VI.1's
+/// three-is-a-law threshold; this primitive is the law-redeeming
+/// extraction. Post-lift each flow calls
+/// [`announce_and_commit_cluster_overlay_release_step`] with
+/// `(total_steps, component, new_tag, files)` and inherits the
+/// canonical `Step N/N: Commit and Push` header, the canonical
+/// `📤 Committing release changes...` info line, the `main`-branch
+/// push target, and the `Pushed`-vs-`NoChangesStaged` outcome log
+/// pair through one site.
+///
+/// # Grammar pinned by the byte-oracle sibling
+///
+/// The two-line preamble bytes
+/// (`━━━ Step N/N: Commit and Push ━━━\n` + `📤 Committing release
+/// changes...\n`) are pinned by [`write_commit_and_push_step_preamble`]
+/// under `#[cfg(test)]`; a drift here (a step-title rename, an emoji
+/// swap on the info line, a color change on either line) surfaces as
+/// a localized test failure at one site, not as silent log-drift
+/// across three release flows.
+///
+/// # Types-as-theorems: the terminal-step invariant
+///
+/// The primitive fixes `step == total_steps` at the call site so an
+/// operator eyeballing the header sees `Step N/N: Commit and Push`
+/// unambiguously flagged as the terminal step of the flow. A future
+/// consumer that reached for this primitive for a non-terminal
+/// commit step (a mid-flow `Publish and Continue`) would need a
+/// separate primitive with distinct semantics — a design-level
+/// forcing function rather than an implicit off-by-one.
+pub async fn announce_and_commit_cluster_overlay_release_step(
+    total_steps: usize,
+    component: &str,
+    new_tag: &str,
+    files: &[&str],
+) -> Result<CommitPushOutcome> {
+    crate::step_header::announce_step_header(total_steps, total_steps, COMMIT_AND_PUSH_STEP_TITLE);
+    info!("{}", COMMIT_RELEASE_CHANGES_INFO_LINE);
+    commit_cluster_overlay_release(None, component, new_tag, files).await
 }
 
 #[cfg(test)]
@@ -270,5 +386,136 @@ mod tests {
             "git",
             "git_command_sync",
         );
+    }
+
+    /// Pin the exact two-line preamble bytes emitted by
+    /// [`write_commit_and_push_step_preamble`]: the three-`━` opener +
+    /// `Step N/N: Commit and Push` label + three-`━` closer + newline,
+    /// then the `📤 Committing release changes...` info line + newline.
+    /// A future refactor that renamed the step title, swapped the
+    /// `📤` glyph, dropped one of the trailing newlines, or promoted
+    /// either line to a colored ANSI rendering (which would break
+    /// parity with the three consumers' pre-lift plain
+    /// `info!`-routed emission) regresses this assertion.
+    #[test]
+    fn write_commit_and_push_step_preamble_emits_the_canonical_two_line_stanza() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_commit_and_push_step_preamble(&mut buf, 4).unwrap();
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "\u{2501}\u{2501}\u{2501} Step 4/4: Commit and Push \u{2501}\u{2501}\u{2501}\n\
+             \u{1f4e4} Committing release changes...\n"
+        );
+    }
+
+    /// The preamble writer MUST emit `Step N/N` with the caller's
+    /// `total_steps` in BOTH slots — the `Commit and Push` step is by
+    /// construction the terminal step of every cluster-overlay
+    /// release flow, so an operator eyeballing the header sees
+    /// `Step 7/7: Commit and Push` unambiguously flagged as the last
+    /// step. Pins the terminal-step invariant against a future
+    /// refactor that walked the numerator past the total, or dropped
+    /// the numerator/denominator symmetry.
+    #[test]
+    fn write_commit_and_push_step_preamble_carries_terminal_step_over_total_workflow_widths() {
+        for total in [4usize, 6, 7] {
+            let mut buf: Vec<u8> = Vec::new();
+            write_commit_and_push_step_preamble(&mut buf, total).unwrap();
+            let rendered = String::from_utf8(buf).unwrap();
+            let expected_header = format!(
+                "\u{2501}\u{2501}\u{2501} Step {total}/{total}: Commit and Push \
+                 \u{2501}\u{2501}\u{2501}\n"
+            );
+            assert!(
+                rendered.starts_with(&expected_header),
+                "preamble for total_steps={total} must open with `{expected_header:?}`; \
+                 got: {rendered:?}"
+            );
+            assert!(
+                rendered.ends_with("\u{1f4e4} Committing release changes...\n"),
+                "preamble must terminate with the canonical `📤 Committing …` line; \
+                 got: {rendered:?}"
+            );
+        }
+    }
+
+    /// The preamble writer MUST inherit the sibling
+    /// [`crate::step_header::write_step_header`] step-index invariant
+    /// (`total >= 1`) — a `total_steps = 0` invocation is impossible
+    /// by construction (a workflow has at least one step), and the
+    /// underlying primitive's debug-only assertion is the enforcement
+    /// point. Pinned here so a future off-by-one in the fusion
+    /// primitive's `total`-forwarding surfaces at ONE site rather
+    /// than through a live release surface.
+    #[test]
+    #[should_panic(expected = "workflow step total must be >= 1")]
+    fn write_commit_and_push_step_preamble_rejects_zero_total_steps() {
+        let mut buf: Vec<u8> = Vec::new();
+        let _ = write_commit_and_push_step_preamble(&mut buf, 0);
+    }
+
+    /// Caller shield: no `info!("📤 Committing release changes...")`
+    /// literal may survive in the three consumer modules
+    /// (`commands/{kenshi,kenshi_agent,nix_builder}.rs`). Every
+    /// `Commit and Push` step preamble in a cluster-overlay release
+    /// flow must resolve through
+    /// [`announce_and_commit_cluster_overlay_release_step`] so a
+    /// future drift to a new preamble shape (a new verb on the info
+    /// line, a re-titled step) flows to all three flows from one
+    /// edit.
+    ///
+    /// The forbidden shape is reconstructed at test time via
+    /// `format!` from the bare string `"Committing release changes"`
+    /// so this shield's own source text does not false-match itself.
+    #[test]
+    fn commit_and_push_step_preamble_routes_through_fusion_not_inline_info_literal() {
+        let forbidden = format!("{}{}", "\u{1f4e4} ", "Committing release changes...");
+        for (path, source) in [
+            ("commands/kenshi.rs", include_str!("kenshi.rs")),
+            ("commands/kenshi_agent.rs", include_str!("kenshi_agent.rs")),
+            ("commands/nix_builder.rs", include_str!("nix_builder.rs")),
+        ] {
+            assert!(
+                !source.contains(&forbidden),
+                "`{path}` must not spell the inline `info!(\"{forbidden}\")` line; \
+                 route through `crate::commands::release_commit::\
+                 announce_and_commit_cluster_overlay_release_step` instead \
+                 (the byte-oracle-covered canonical Commit-and-Push step preamble)."
+            );
+        }
+    }
+
+    /// Positive-half delegation shield: the three consumer modules
+    /// MUST each carry exactly one call to
+    /// [`announce_and_commit_cluster_overlay_release_step`]. Guards
+    /// against a silent removal of the terminal-commit step from a
+    /// consumer (a refactor that accidentally dropped the fusion
+    /// call while migrating a step, a merge that lost the call in a
+    /// conflict resolution) — the commit + push is load-bearing for
+    /// the release actually landing on `origin/main`, so its presence
+    /// at exactly one site per flow is a structural invariant.
+    #[test]
+    fn every_cluster_overlay_release_consumer_delegates_through_commit_and_push_fusion() {
+        // Match the CALL-syntax `(` suffix so the leading `use
+        // crate::commands::release_commit::announce_and_...;` import
+        // line — which carries the identifier without a call — does
+        // not double-count against the per-consumer invocation
+        // invariant.
+        let needle = "announce_and_commit_cluster_overlay_release_step(";
+        for (path, source) in [
+            ("commands/kenshi.rs", include_str!("kenshi.rs")),
+            ("commands/kenshi_agent.rs", include_str!("kenshi_agent.rs")),
+            ("commands/nix_builder.rs", include_str!("nix_builder.rs")),
+        ] {
+            let count = source.matches(needle).count();
+            assert_eq!(
+                count, 1,
+                "`{path}` must invoke `crate::commands::release_commit::\
+                 {needle}` exactly once for its terminal Commit-and-Push \
+                 step; found {count}. A flow that runs to completion \
+                 without emitting the commit + push breaks the release \
+                 landing on `origin/main`."
+            );
+        }
     }
 }
