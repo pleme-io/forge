@@ -427,12 +427,9 @@ pub fn list_binaries() {
     }
 
     println!("Usage:");
-    println!(
-        "   {} bootstrap push --binary <name>",
-        "forge".bright_cyan()
-    );
-    println!("   {} bootstrap push-all", "forge".bright_cyan());
-    println!("   {} bootstrap push-all --parallel", "forge".bright_cyan());
+    crate::ui::print_forge_invocation_example("bootstrap push --binary <name>");
+    crate::ui::print_forge_invocation_example("bootstrap push-all");
+    crate::ui::print_forge_invocation_example("bootstrap push-all --parallel");
     println!();
 }
 
