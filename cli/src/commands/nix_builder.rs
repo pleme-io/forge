@@ -307,15 +307,11 @@ pub async fn release(
     let file_refs: Vec<&str> = modified_files.iter().map(String::as_str).collect();
     commit_cluster_overlay_release(None, "nix-builder", &new_tag, &file_refs).await?;
 
-    println!();
-    info!("╔════════════════════════════════════════════════════════════╗");
-    info!("║  ✅ nix-builder release complete!                          ║");
-    info!("╚════════════════════════════════════════════════════════════╝");
-    println!();
-    info!("Image: {}:{}", registry, new_tag);
-    info!("Updated all clusters");
-    info!("FluxCD will reconcile the changes automatically.");
-    println!();
+    crate::commands::cluster_overlay_release_postamble::announce_release_complete(
+        "nix-builder",
+        &registry,
+        &new_tag,
+    );
 
     Ok(())
 }

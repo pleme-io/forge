@@ -92,15 +92,11 @@ pub async fn release(
     )
     .await?;
 
-    println!();
-    info!("╔════════════════════════════════════════════════════════════╗");
-    info!("║  ✅ kenshi-agent release complete!                         ║");
-    info!("╚════════════════════════════════════════════════════════════╝");
-    println!();
-    info!("Image: {}:{}", registry, new_tag);
-    info!("Updated all clusters");
-    info!("FluxCD will reconcile the changes automatically.");
-    println!();
+    crate::commands::cluster_overlay_release_postamble::announce_release_complete(
+        "kenshi-agent",
+        &registry,
+        &new_tag,
+    );
 
     Ok(())
 }
