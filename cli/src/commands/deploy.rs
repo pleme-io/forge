@@ -58,8 +58,7 @@ pub async fn execute(
         )
         .await?;
     } else {
-        info!("⏭️  Skipping build step");
-        println!();
+        crate::info_skipping!("build step");
     }
 
     // Step 2: Push

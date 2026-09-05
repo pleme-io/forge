@@ -367,8 +367,7 @@ pub async fn execute(
         );
         println!();
     } else {
-        info!("⏭️  Skipping unit tests");
-        println!();
+        crate::info_skipping!("unit tests");
     }
 
     // ========================================================================
@@ -402,8 +401,7 @@ pub async fn execute(
         );
         println!();
     } else {
-        info!("⏭️  Skipping build step");
-        println!();
+        crate::info_skipping!("build step");
     }
 
     // ========================================================================
@@ -735,8 +733,7 @@ pub async fn execute(
             println!();
         }
     } else {
-        info!("⏭️  Skipping integration tests");
-        println!();
+        crate::info_skipping!("integration tests");
     }
 
     // ========================================================================
@@ -772,8 +769,7 @@ pub async fn execute(
         );
         println!();
     } else {
-        info!("⏭️  Skipping push step");
-        println!();
+        crate::info_skipping!("push step");
     }
 
     // ========================================================================
@@ -811,8 +807,7 @@ pub async fn execute(
         );
         println!();
     } else {
-        info!("⏭️  Skipping deploy step");
-        println!();
+        crate::info_skipping!("deploy step");
     }
 
     // ========================================================================
