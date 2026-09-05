@@ -2227,6 +2227,109 @@ pub fn write_bullet_item<W: std::io::Write>(w: &mut W, message: &str) -> std::io
     writeln!(w, "  • {}", message)
 }
 
+/// Prints the one-line `"    • <message>"` (four-space indent + U+2022
+/// `•` BULLET glyph + single space + plain uncolored message) nested
+/// sub-bullet grammar every pre-lift consumer in
+/// `commands/rust_service.rs` spelled inline as
+/// `println!("    • <literal>")` or `println!("    • <fmt>", <args>)`.
+/// Marks a leaf sub-entry inside the `print_deployment_report`
+/// "COMPLETED ACTIONS" / "PENDING ROLLOUTS" report — a per-item detail
+/// dangling one indent scope beneath a `print_report_item` / `print_
+/// pending_item` head ("Docker Image" head → "Built with crate2nix",
+/// "Pushed to GHCR: …", "Tag: …" sub-bullets; "GitOps Deployment"
+/// head → "Manifest updated with new image tag", …; and every peer
+/// head under the report body). The four-space indent is the sibling
+/// leaf peer of the two-space wider-body [`print_bullet_item`]
+/// declarative-list entry.
+///
+/// # Distinct from the other `ui::print_*` primitives
+///
+/// [`print_bullet_item`] carries the two-space `• ` wider-body
+/// declarative-list entry — same U+2022 `•` glyph, same uncolored
+/// palette, DIFFERENT indent width (two vs. four spaces), DIFFERENT
+/// semantic role (a top-level "Generated files: <path>" catalog entry
+/// under a `println!("<HEADING>:")` heading vs. a leaf sub-detail
+/// dangling beneath a `print_report_item` / `print_pending_item` head).
+/// Folding this primitive into [`print_bullet_item`] would either
+/// narrow every "Built with crate2nix" / "Pushed to GHCR: …" /
+/// "Manifest updated with new image tag" sub-bullet two spaces to the
+/// left (collapsing the visual nesting under the report head) or widen
+/// every "Generated files: <path>" catalog entry two spaces to the
+/// right (silently drifting the catalog grammar). [`print_arrow_hint`]
+/// carries the four-space `→ ` leaf hint — same four-space indent
+/// width, DIFFERENT glyph (`→` forward-arrow vs. `•` bullet), and
+/// DIFFERENT semantic role (a "check logs for startup errors" leaf
+/// troubleshooting hint beneath a `□.dimmed()` watch-item head vs. a
+/// per-item detail beneath a report head). Folding this primitive
+/// into [`print_arrow_hint`] would swap the `•` bullet for `→`
+/// forward-arrow at every site, misclassifying inert report details as
+/// troubleshooting narration.
+///
+/// # No coloring at all
+///
+/// Pre-lift every consumer spelled the row as a plain
+/// `println!("    • <literal>")` / `println!("    • <fmt>", <args>)`
+/// with no `.dimmed()` / `.green()` / `.cyan()` chain on the indent,
+/// glyph, or space (a subset of sites do wrap parts of the composed
+/// message argument in `.dimmed()` or `"✓".green()`, but those spans
+/// belong to the caller's message payload, never to the primitive's
+/// prefix). The primitive preserves that: neither the four-space
+/// indent, nor the `•` glyph, nor the space reach the writer through
+/// any [`colored`] chain, so no `\x1b[<..>m` ANSI sequence appears
+/// around the prefix. A future palette adjustment that wraps this
+/// primitive's prefix in `.dimmed()` is a deliberate additive edit;
+/// the pre-lift shape reaches ONE typed boundary rather than 22
+/// literal sites.
+///
+/// # U+2022 `•` BULLET, not U+00B7 `·` middle-dot or ASCII `*`
+///
+/// Pre-lift every consumer spelled the glyph as the U+2022 `•` BULLET
+/// codepoint (three UTF-8 bytes `e2 80 a2`), not U+00B7 `·` middle-dot
+/// (two UTF-8 bytes `c2 b7`), not the ASCII `*` asterisk. The
+/// primitive preserves that: the exact three-byte `• ` sequence
+/// reaches the writer between the four-space indent and the message.
+/// A swap to `·` would render as a nearly-invisible middle-dot on
+/// most fonts; a swap to `*` would collide with markdown/README list
+/// grammars the operator reads in a wholly different visual register.
+///
+/// # Compounding
+///
+/// Pre-lift 22 sibling sites in `commands/rust_service.rs` (the
+/// `print_deployment_report` body: Docker-Image ×3, GitOps-Deployment
+/// ×3, Database-Migrations ×2, GraphQL-Federation ×4, Service-Pod-
+/// Rollout branch tree ×6, Hive-Router-Update ×4) each restated the
+/// `println!("    • <literal>")` / `println!("    • <fmt>", <args>)`
+/// grammar verbatim, with the four-space indent, the U+2022 `•`
+/// glyph, the single trailing space, and the absence of every ANSI
+/// palette sequence on the prefix all spelled inline. A future
+/// adjustment (a swap of `• ` for `- ` under a markdown-friendly
+/// grammar, a promotion of the prefix to `.dimmed()` so the report
+/// head pulls forward against a receded detail catalog, an OTLP
+/// `sub_bullet_item_emitted` observability event wired alongside the
+/// print, a shift of the four-space indent to two or six spaces
+/// under a standardized report-indent) had to hit 22 sites in
+/// lockstep or drift the visual grammar; post-lift it hits ONE typed
+/// body. Delegates to [`write_sub_bullet_item`] against
+/// [`std::io::stdout()`]; the writer split exists so the fail-before-
+/// pass test can pin the one-line body, the four-space indent, the
+/// `•` U+2022 glyph, and the ABSENCE of every `\x1b[<..>m` ANSI
+/// palette sequence on the prefix by inspecting emitted bytes rather
+/// than shelling out and grepping stdout.
+pub fn print_sub_bullet_item(message: &str) {
+    let _ = write_sub_bullet_item(&mut std::io::stdout().lock(), message);
+}
+
+/// Writer-taking sibling to [`print_sub_bullet_item`]. Emits the
+/// single `"    • <message>"` line via [`writeln!`] against the
+/// supplied writer. [`print_sub_bullet_item`] is the stdout adapter;
+/// this variant exists so tests can pin the one-line body, the
+/// four-space indent, the U+2022 `•` BULLET glyph, and the ABSENCE
+/// of every ANSI palette sequence around the four-space + glyph +
+/// space prefix without capturing stdout.
+pub fn write_sub_bullet_item<W: std::io::Write>(w: &mut W, message: &str) -> std::io::Result<()> {
+    writeln!(w, "    • {}", message)
+}
+
 /// Prints the one-line `"  {} <message>"` (two-space indent +
 /// `bright_green`-colored `✅` glyph + plain message) wider-body
 /// summary-pass grammar every pre-lift consumer in `commands/test.rs`
@@ -7356,12 +7459,16 @@ mod tests {
                 "commands/search_sync.rs",
             ),
         ];
-        // Four-space bullet-decorated `"    • {} New image is
-        // already deployed!"` in `commands/rust_service.rs` —
-        // distinct waiting-marker grammar with a four-space indent
-        // and a bullet ornament, not this primitive's two-space
-        // report-item shape.
-        const ALLOWLIST_SUBSTRINGS: &[&str] = &["• {} New image is already deployed!"];
+        // Four-space bullet-decorated `"{} New image is already
+        // deployed!"` waiting-marker in `commands/rust_service.rs` —
+        // distinct grammar with a four-space indent + bullet
+        // ornament, now delegated through
+        // `crate::ui::print_sub_bullet_item` (the `• ` glyph reaches
+        // the writer inside the primitive body, so the source line
+        // carrying `"✓".green()` no longer spells the bullet inline).
+        // Matched via the site-specific message substring, which is
+        // unique to this waiting-marker site across the crate.
+        const ALLOWLIST_SUBSTRINGS: &[&str] = &["New image is already deployed!"];
         for (source, module_path) in CALLERS {
             let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
             for (i, line) in body.lines().enumerate() {
@@ -8539,6 +8646,248 @@ mod tests {
                  {forward_hits} forwarding hits."
             );
         }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_sub_bullet_item`].
+    /// Pins the one-line body every pre-lift consumer in
+    /// `commands/rust_service.rs` spelled verbatim
+    /// (`println!("    • <literal>")` or
+    /// `println!("    • <fmt>", <args>)`): a four-space indent, a plain
+    /// U+2022 `•` BULLET glyph, a single space, then the message. A
+    /// silent contract drift a future rewrite might introduce —
+    /// narrowing the indent to two-space (colliding with the sibling
+    /// wider-body [`super::print_bullet_item`] declarative catalog
+    /// grammar), widening the indent to six-space (drifting the
+    /// visual nesting beneath the `print_report_item` /
+    /// `print_pending_item` head), swapping U+2022 `•` for U+00B7 `·`
+    /// middle-dot (would render as a nearly-invisible dot on most
+    /// fonts) or ASCII `*` (would collide with markdown/README list
+    /// grammars) or `→` (would collide with the sibling
+    /// [`super::print_arrow_hint`] four-space leaf-hint grammar),
+    /// wrapping the prefix in `.dimmed()` / `.green()` / `.cyan()`,
+    /// slipping a trailing blank line into the primitive body —
+    /// flips this assertion rather than compiling and silently
+    /// diverging the 22 consumer sites' visual grammar.
+    #[test]
+    fn write_sub_bullet_item_emits_exactly_one_four_indented_uncolored_bullet_leaf_line() {
+        // Force ANSI-emission serialization against peer banner tests
+        // via [`AnsiOverrideForTest`] — even though this primitive's
+        // prefix emits NO ANSI sequences, the guard's presence pins
+        // the discipline: if a future refactor slips a `.dimmed()` /
+        // `.green()` chain into the writer's prefix, the guard
+        // ensures the sequence actually reaches the buffer for
+        // detection here rather than being auto-stripped by
+        // [`colored`]'s non-tty fallback. The guard's Drop restores
+        // colored's auto-detection on scope exit AFTER releasing the
+        // shared [`ANSI_OVERRIDE_LOCK`].
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_sub_bullet_item(&mut buf, "Built with crate2nix (per-crate Attic caching)")
+            .expect("write_sub_bullet_item against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_sub_bullet_item must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — the pre-lift stanza is one `println!`
+        // carrying no framing blank.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_sub_bullet_item must emit exactly one line — the \
+             pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // Exactly four spaces of indent followed by `• ` verbatim —
+        // NOT two-space (the sibling wider-body [`print_bullet_item`]
+        // declarative catalog grammar), NOT three-space (the sibling
+        // in-body `print_step_*` grammar). The needle uses a five-
+        // char prefix guard so a fusion that widened the indent to
+        // five or more spaces also flips this.
+        assert!(
+            lines[0].starts_with("    • "),
+            "line 0 must begin with a four-space indent followed by \
+             `• ` verbatim — every pre-lift consumer spelled \
+             `\"    • <literal>\"` or `\"    • <fmt>\"` verbatim, so \
+             the four-space indent + glyph + space triple must reach \
+             the writer OUTSIDE any coloring span; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].starts_with("     "),
+            "line 0 must NOT begin with a five-or-more-space indent — \
+             a widened indent would drift the visual nesting beneath \
+             the sibling `print_report_item` / `print_pending_item` \
+             head; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].starts_with("  • "),
+            "line 0 must NOT begin with a two-space indent followed \
+             by `• ` — that two-space grammar belongs to the sibling \
+             wider-body `print_bullet_item` declarative catalog, not \
+             this nested sub-bullet primitive; got {:?}",
+            lines[0]
+        );
+
+        // The U+2022 BULLET glyph reaches the rendered line as the
+        // three-byte `e2 80 a2` UTF-8 sequence — NOT U+00B7 `·`
+        // middle-dot (two bytes `c2 b7`), NOT ASCII `*` (one byte
+        // `2a`), NOT `→` forward-arrow (three bytes `e2 86 92`,
+        // the sibling `print_arrow_hint` glyph at the same four-space
+        // indent). A silent codepoint drift renders the catalog
+        // nearly-invisible or misclassifies inert details as
+        // troubleshooting narration.
+        assert!(
+            lines[0]
+                .as_bytes()
+                .windows(3)
+                .any(|w| w == [0xe2, 0x80, 0xa2]),
+            "line 0 must carry the U+2022 `•` BULLET codepoint as the \
+             three-byte UTF-8 sequence `e2 80 a2` — a swap to U+00B7 \
+             `·` middle-dot or ASCII `*` silently changes the visual \
+             grammar; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('·'),
+            "line 0 must NOT contain the U+00B7 `·` middle-dot glyph \
+             — that codepoint renders nearly-invisibly on most fonts; \
+             got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('*'),
+            "line 0 must NOT contain the ASCII `*` asterisk — that \
+             glyph collides with markdown/README list grammars the \
+             operator reads in a wholly different visual register; \
+             got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].starts_with("    → "),
+            "line 0 must NOT begin with `    → ` — that four-space \
+             `→` grammar belongs to the sibling `print_arrow_hint` \
+             leaf-hint primitive, not this nested sub-bullet \
+             primitive; got {:?}",
+            lines[0]
+        );
+
+        // The message text reaches the rendered line verbatim.
+        assert!(
+            lines[0].contains("Built with crate2nix (per-crate Attic caching)"),
+            "line 0 must carry the message verbatim; got {:?}",
+            lines[0]
+        );
+
+        // ABSENCE OF ALL PALETTE ANSI SEQUENCES around the prefix —
+        // the primitive itself emits no coloring. (Callers are free
+        // to wrap parts of the message payload in `.dimmed()` /
+        // `"✓".green()`, but those spans live inside the message
+        // argument, never around the four-space + `•` + space
+        // prefix.) A silent promotion of the prefix would flip one
+        // of these assertions.
+        for (ansi_seq, palette_label) in [
+            ("\x1b[2m", "dim"),
+            ("\x1b[90m", "bright_black"),
+            ("\x1b[36m", "cyan"),
+            ("\x1b[96m", "bright_cyan"),
+            ("\x1b[33m", "yellow"),
+            ("\x1b[31m", "red"),
+            ("\x1b[1m", "bold"),
+        ] {
+            assert!(
+                !lines[0].contains(ansi_seq),
+                "line 0 must NOT carry the `{palette_label}` ANSI \
+                 sequence ({ansi_seq:?}) — every pre-lift consumer \
+                 spelled the sub-bullet as a plain `println!(\"    • \
+                 <literal>\")` / `println!(\"    • <fmt>\", <args>)` \
+                 with NO coloring chain on the four-space + `•` + \
+                 space prefix. Got {:?}",
+                lines[0]
+            );
+        }
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `println!`, so the newline is part of the contract.
+        assert!(
+            out.ends_with('\n'),
+            "write_sub_bullet_item must emit a trailing `\\n` (the \
+             pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers in `commands/rust_service.rs` migrated
+    /// onto [`super::print_sub_bullet_item`] no longer spell the
+    /// `println!("    • <literal>")` / `println!("    • <fmt>", <args>)`
+    /// shape inline. Structural regression shield — without it a
+    /// future refactor could silently re-inline the one-liner
+    /// (e.g. a "just call `println!` directly, it's shorter" cleanup)
+    /// and reopen the 22-site duplication class this lift closed.
+    /// Enforced at the module body BEFORE its first `#[cfg(test)]`
+    /// region so a test-support mention of the raw shape does not
+    /// defeat the shield.
+    ///
+    /// The exact-shape needle is the four-space `println!("    • `
+    /// prefix, which is the pre-lift `println!("    • <literal>")` /
+    /// `println!("    • <fmt>", <args>)` grammar in full (indent +
+    /// macro + opening quote + four spaces + bullet + space). No
+    /// allowlist is required because every pre-lift occurrence in the
+    /// crate belonged to this class; a re-inline with any literal
+    /// completing the shape flips the shield.
+    ///
+    /// The positive count is pinned at TWENTY-TWO — one per pre-lift
+    /// consumer (Docker-Image ×3, GitOps-Deployment ×3, Database-
+    /// Migrations ×2, GraphQL-Federation ×4, Service-Pod-Rollout
+    /// branch tree ×6, Hive-Router-Update ×4). A fusion that folded
+    /// two consumer sites into one call or dropped one of the sub-
+    /// bullet rows silently fails here — the negative half above
+    /// would still pass, but this positive count would fall to
+    /// twenty-one.
+    #[test]
+    fn print_sub_bullet_item_callers_in_rust_service_delegate_through_primitive() {
+        const SRC: &str = include_str!("commands/rust_service.rs");
+        const MODULE_PATH: &str = "commands/rust_service.rs";
+        let body = crate::test_support::module_body_before_first_cfg_test(SRC, MODULE_PATH);
+        for (i, line) in body.lines().enumerate() {
+            // Match the pre-lift `println!("    • ` prefix in full —
+            // indent + macro + opening quote + four spaces + bullet +
+            // space. A comment or docstring line whose payload text
+            // happens to spell `    • ` never matches because the
+            // needle demands the `println!("` prefix reach the byte
+            // before the four-space indent.
+            if !line.contains("println!(\"    • ") {
+                continue;
+            }
+            panic!(
+                "{MODULE_PATH}:{lineno} spells the pre-lift inline \
+                 `println!(\"    • <literal>\")` four-space nested \
+                 sub-bullet stanza — that shape was lifted onto \
+                 `crate::ui::print_sub_bullet_item`. A re-inline \
+                 would silently reopen the 22-site duplication class \
+                 this shield exists to close. Offending line: \
+                 {line:?}",
+                lineno = i + 1
+            );
+        }
+        let forward_hits = body.matches("crate::ui::print_sub_bullet_item(").count();
+        assert_eq!(
+            forward_hits, 22,
+            "{MODULE_PATH} body must forward to \
+             `crate::ui::print_sub_bullet_item(\"<MSG>\")` at exactly \
+             TWENTY-TWO sites — one per pre-lift consumer (Docker-\
+             Image ×3, GitOps-Deployment ×3, Database-Migrations ×2, \
+             GraphQL-Federation ×4, Service-Pod-Rollout branch tree \
+             ×6, Hive-Router-Update ×4). A fusion that fused two \
+             consumer sites into one call or dropped one of the \
+             sub-bullet rows silently fails here. Found \
+             {forward_hits} forwarding hits."
+        );
     }
 
     /// Fail-before-pass envelope for [`super::write_step_warn`]. Pins
