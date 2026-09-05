@@ -301,7 +301,7 @@ pub async fn execute(
     // ========================================================================
     if !skip_unit_tests {
         let step_start = Instant::now();
-        info!("━━━ Step 1/5: Pre-Build Validation ━━━");
+        crate::step_header::announce_step_header(1, 5, "Pre-Build Validation");
         println!();
 
         info!("🧪 Running unit tests...");
@@ -377,7 +377,7 @@ pub async fn execute(
 
     if !skip_build {
         let step_start = Instant::now();
-        info!("━━━ Step 2/5: Build Docker Image ━━━");
+        crate::step_header::announce_step_header(2, 5, "Build Docker Image");
         println!();
 
         commands::build::execute(
@@ -410,7 +410,7 @@ pub async fn execute(
     if !skip_integration_tests {
         if let Some(compose_path) = &compose_file {
             let step_start = Instant::now();
-            info!("━━━ Step 3/5: Integration Testing ━━━");
+            crate::step_header::announce_step_header(3, 5, "Integration Testing");
             println!();
 
             // Check if compose file exists
@@ -727,7 +727,7 @@ pub async fn execute(
                 println!();
             }
         } else {
-            info!("━━━ Step 3/5: Integration Testing ━━━");
+            crate::step_header::announce_step_header(3, 5, "Integration Testing");
             println!();
             warn!("⚠️  No compose file provided, skipping integration tests");
             println!();
@@ -741,7 +741,7 @@ pub async fn execute(
     // ========================================================================
     if !skip_push {
         let step_start = Instant::now();
-        info!("━━━ Step 4/5: Push to Registry ━━━");
+        crate::step_header::announce_step_header(4, 5, "Push to Registry");
         println!();
 
         commands::push::execute(
@@ -777,7 +777,7 @@ pub async fn execute(
     // ========================================================================
     if !skip_deploy {
         let step_start = Instant::now();
-        info!("━━━ Step 5/5: Deploy to Kubernetes ━━━");
+        crate::step_header::announce_step_header(5, 5, "Deploy to Kubernetes");
         println!();
 
         // Create result symlink at repo root for deploy command
