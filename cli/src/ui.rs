@@ -4297,6 +4297,87 @@ pub fn write_shell_example_cmd<W: std::io::Write>(w: &mut W, cmd: &str) -> std::
     writeln!(w, "  $ {}", cmd.yellow())
 }
 
+/// Prints the canonical four-step E2E-failure troubleshooting instruction
+/// block to stdout, with each `1.`/`2.`/`3.`/`4.` line prefixed by the
+/// caller-supplied `indent`. Peer to [`eprint_e2e_troubleshooting_steps`]
+/// (stderr adapter) and delegates to [`write_e2e_troubleshooting_steps`]
+/// against [`std::io::stdout()`].
+///
+/// # Compounding
+///
+/// Pre-lift two sibling sites — the four-`println!` block at the tail
+/// of `commands/prerelease.rs::print_e2e_diagnostics` (5-space indent,
+/// stdout) and the four-`eprintln!` block at the tail of
+/// `commands/e2e.rs::print_failure_diagnostics` (2-space indent,
+/// stderr) — spelled the identical 4-step instruction sequence verbatim:
+///
+/// ```text
+/// 1. Rebuild images:  nix run .#e2e:prepare -- --force
+/// 2. Run headful:     nix run .#test:e2e -- --headless false
+/// 3. Run one test:    nix run .#test:e2e -- --filter test_name
+/// 4. Check logs:      docker logs <container_name>
+/// ```
+///
+/// The two blocks differ only in stream (stdout / stderr) and in
+/// leading indent (5-space nested-under-header at the prerelease E2E
+/// gate; 2-space top-level at the e2e diagnostics dumper). Both point
+/// operators at the same four nix-run + docker recovery invocations, so
+/// a future change to any step (a new `--pattern` filter flag, a
+/// renamed `#test:e2e` attribute, an added step 5, a swap of
+/// `docker logs` for `kubectl logs` under a k8s-native E2E gate) had to
+/// land in both places in lockstep or one of the two E2E failure paths
+/// would print guidance the other path could not reproduce. Post-lift
+/// both sites collapse to a single [`print_e2e_troubleshooting_steps`]
+/// / [`eprint_e2e_troubleshooting_steps`] call; a future edit lands in
+/// ONE typed body and reaches both surfaces by construction.
+///
+/// The `indent` parameter is a raw prefix string so both nested and
+/// top-level callers can share the same body — the primitive does not
+/// prescribe a specific indent depth, only that the four steps and
+/// their exact text are the fleet's canonical E2E recovery sequence.
+pub fn print_e2e_troubleshooting_steps(indent: &str) {
+    let _ = write_e2e_troubleshooting_steps(&mut std::io::stdout().lock(), indent);
+}
+
+/// Stderr adapter for [`write_e2e_troubleshooting_steps`]. Peer to
+/// [`print_e2e_troubleshooting_steps`] (stdout adapter). Used by the
+/// `commands/e2e.rs::print_failure_diagnostics` failure-dumper which
+/// routes all its diagnostic output through `eprintln!` so an operator
+/// piping stdout to a file still sees the guidance on their terminal.
+pub fn eprint_e2e_troubleshooting_steps(indent: &str) {
+    let _ = write_e2e_troubleshooting_steps(&mut std::io::stderr().lock(), indent);
+}
+
+/// Writer-taking sibling to [`print_e2e_troubleshooting_steps`] and
+/// [`eprint_e2e_troubleshooting_steps`]. Emits the canonical four-step
+/// E2E troubleshooting instruction block — verbatim text, in order,
+/// each line prefixed by `indent` — via four [`writeln!`] calls against
+/// the supplied writer. The stdout / stderr adapters exist so tests can
+/// pin the exact byte sequence (step count, step order, per-step
+/// command text, and the trailing newline after step 4) by inspecting
+/// emitted bytes rather than capturing stdout or stderr.
+pub fn write_e2e_troubleshooting_steps<W: std::io::Write>(
+    w: &mut W,
+    indent: &str,
+) -> std::io::Result<()> {
+    writeln!(
+        w,
+        "{indent}1. Rebuild images:  nix run .#e2e:prepare -- --force"
+    )?;
+    writeln!(
+        w,
+        "{indent}2. Run headful:     nix run .#test:e2e -- --headless false"
+    )?;
+    writeln!(
+        w,
+        "{indent}3. Run one test:    nix run .#test:e2e -- --filter test_name"
+    )?;
+    writeln!(
+        w,
+        "{indent}4. Check logs:      docker logs <container_name>"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{styled_spinner, SpinnerStyle, SPINNER_TICK};
@@ -14039,6 +14120,135 @@ mod tests {
                  consumer sites into one call or dropped one of the \
                  shell examples silently fails here. Found \
                  {forward_hits} forwarding hits."
+            );
+        }
+    }
+
+    /// [`write_e2e_troubleshooting_steps`] emits exactly four lines —
+    /// the canonical four-step E2E-failure troubleshooting instruction
+    /// block — with each line prefixed by the caller-supplied indent
+    /// and each step carrying the exact recovery command the two
+    /// pre-lift sites (`commands/e2e.rs::print_failure_diagnostics`
+    /// stderr dump; `commands/prerelease.rs::print_e2e_diagnostics`
+    /// stdout dump) spelled inline. Pins the step count, step order,
+    /// exact per-step text, indent handling, and trailing newline —
+    /// dropping a step, reordering the steps, drifting the text of any
+    /// nix-run invocation, forgetting the `writeln!` on the last step
+    /// (silently omitting the trailing newline before the framing
+    /// rule), or reintroducing the pre-lift inline stanza at either
+    /// consumer site flips this assertion rather than compiling and
+    /// silently diverging the two E2E failure paths' operator
+    /// guidance.
+    #[test]
+    fn write_e2e_troubleshooting_steps_emits_exact_four_step_block_with_indent() {
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_e2e_troubleshooting_steps(&mut buf, "  ")
+            .expect("write_e2e_troubleshooting_steps against a Vec<u8> writer must succeed");
+        let out = String::from_utf8(buf).expect(
+            "write_e2e_troubleshooting_steps must emit valid UTF-8 \
+             (the pre-lift eprintln!/println!s did)",
+        );
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            4,
+            "write_e2e_troubleshooting_steps must emit exactly four lines — one per \
+             troubleshooting step; got {}:\n{}",
+            lines.len(),
+            out
+        );
+        assert_eq!(
+            lines[0],
+            "  1. Rebuild images:  nix run .#e2e:prepare -- --force"
+        );
+        assert_eq!(
+            lines[1],
+            "  2. Run headful:     nix run .#test:e2e -- --headless false"
+        );
+        assert_eq!(
+            lines[2],
+            "  3. Run one test:    nix run .#test:e2e -- --filter test_name"
+        );
+        assert_eq!(
+            lines[3],
+            "  4. Check logs:      docker logs <container_name>"
+        );
+        assert!(
+            out.ends_with('\n'),
+            "write_e2e_troubleshooting_steps must end with a newline — every step is a \
+             writeln!, including step 4, so the caller's next line lands on a fresh row \
+             (the pre-lift eprintln!/println!s guaranteed this); got tail bytes {:?}",
+            out.as_bytes().iter().rev().take(4).collect::<Vec<_>>()
+        );
+
+        let mut buf2: Vec<u8> = Vec::new();
+        super::write_e2e_troubleshooting_steps(&mut buf2, "     ")
+            .expect("write_e2e_troubleshooting_steps with 5-space indent must succeed");
+        let out2 = String::from_utf8(buf2).expect("5-space rendering must be valid UTF-8");
+        let lines2: Vec<&str> = out2.lines().collect();
+        assert_eq!(
+            lines2.len(),
+            4,
+            "5-space rendering must still emit four lines"
+        );
+        for (i, l) in lines2.iter().enumerate() {
+            assert!(
+                l.starts_with("     "),
+                "5-space rendering line {} must start with the supplied indent; got {:?}",
+                i,
+                l
+            );
+        }
+    }
+
+    /// Both pre-lift consumer sites — `commands/e2e.rs::print_failure_diagnostics`
+    /// and `commands/prerelease.rs::print_e2e_diagnostics` — must forward
+    /// to the fusion primitive rather than respell the four-step block
+    /// inline. Pinning the delegation shape means a re-inline of the
+    /// four `[e]println!` lines at either site silently re-opens the
+    /// two-site duplication class this primitive exists to close.
+    #[test]
+    fn e2e_troubleshooting_steps_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str, &str)] = &[
+            (
+                include_str!("commands/e2e.rs"),
+                "commands/e2e.rs",
+                "crate::ui::eprint_e2e_troubleshooting_steps(",
+            ),
+            (
+                include_str!("commands/prerelease.rs"),
+                "commands/prerelease.rs",
+                "crate::ui::print_e2e_troubleshooting_steps(",
+            ),
+        ];
+        // Every step's `<idx>. <label>` text — must NOT appear inline in
+        // either consumer's module body, since the primitive owns them
+        // now. A re-inline at either site (someone splicing back a raw
+        // `eprintln!("  1. Rebuild images: ...")` line for a "one-off"
+        // tweak) flips this assertion.
+        const STEP_LEAD_NEEDLES: &[&str] = &[
+            "1. Rebuild images:",
+            "2. Run headful:",
+            "3. Run one test:",
+            "4. Check logs:",
+        ];
+        for (source, module_path, forward_needle) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for needle in STEP_LEAD_NEEDLES {
+                assert!(
+                    !body.contains(needle),
+                    "{module_path} must not contain the pre-lift inline step lead \
+                     {needle:?} — the four-step E2E troubleshooting block was lifted \
+                     onto `crate::ui::{{e,}}print_e2e_troubleshooting_steps`. A \
+                     re-inline reopens the two-site duplication class this shield \
+                     exists to close."
+                );
+            }
+            assert!(
+                body.contains(forward_needle),
+                "{module_path} body must forward to `{forward_needle}...)` — the \
+                 fusion primitive is the ONE typed body of the four-step E2E \
+                 troubleshooting guidance both failure-dumpers now share."
             );
         }
     }
