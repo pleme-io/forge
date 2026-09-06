@@ -242,7 +242,7 @@ pub async fn execute(
 
     info!("🎯 Target: {}", registry);
     info!("📦 Image path: {}", image_path);
-    info!("🏷️  Tags: {}", tags.join(", "));
+    crate::info_tags_field!(tags);
     println!();
 
     // Push to Attic cache first (if requested). Routes through

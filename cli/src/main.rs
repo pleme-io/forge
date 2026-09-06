@@ -75,6 +75,7 @@ mod retry;
 mod skipping_step;
 mod step_header;
 mod success_step;
+mod tags_field;
 mod tools;
 
 // New architecture modules
