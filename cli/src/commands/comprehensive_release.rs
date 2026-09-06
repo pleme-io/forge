@@ -286,7 +286,7 @@ pub async fn execute(
     // Get git SHA for tagging
     let git_sha = git::get_short_sha()?;
     crate::info_git_sha_field!(git_sha);
-    info!("🎯 Registry: {}", registry);
+    crate::info_registry_field!(registry);
     info!("🌍 Namespace: {} (staging)", namespace);
     println!();
 

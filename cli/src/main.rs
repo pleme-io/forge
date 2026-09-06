@@ -72,6 +72,7 @@ mod nonfatal_warning;
 mod observability;
 mod path_builder;
 mod pushed_image_ref_list;
+mod registry_field;
 mod repo;
 mod retry;
 mod skipping_step;

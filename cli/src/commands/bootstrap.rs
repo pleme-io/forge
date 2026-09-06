@@ -273,7 +273,7 @@ pub async fn push_single(
 
     // Push
     let registry = binary_def.registry_url();
-    info!("🎯 Registry: {}", registry);
+    crate::info_registry_field!(registry);
     crate::info_tags_field!(tags);
     println!();
 
