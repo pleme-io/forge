@@ -241,12 +241,23 @@ mod tests {
         );
     }
 
-    // Positive half of the shield: the seven pre-lift files under
+    // Positive half of the shield: the pre-lift files under
     // `commands/` MUST each forward through
     // `crate::info_indented_success!(` at least the pre-lift count of
     // times, so a migration that dropped a call site outright leaves
     // the negative "no raw inline shape" scan trivially satisfied by
     // absence but the positive count still fails.
+    //
+    // A subsequent fusion primitive that legitimately absorbs a
+    // sub-step success emission from a consumer file (the `commands/
+    // builder_pool_edit.rs::update_builder_pool_field` extraction moved
+    // one `info_indented_success!("Builder pool updated")` site out of
+    // `commands/kenshi_agent.rs::update_builder_pool_agent_image` and
+    // one out of `commands/nix_builder.rs::update_builder_pool_builder_image`)
+    // subtracts from the pre-lift count on its source file(s) and adds
+    // a row on the new primitive's file, preserving the fleet-wide
+    // total. That is the correct maintenance shape for this census —
+    // never lower a count without booking the moved site's new home.
     #[test]
     fn every_prelift_module_forwards_through_info_indented_success_macro() {
         use std::path::PathBuf;
@@ -256,10 +267,11 @@ mod tests {
         // (module basename, minimum forward count from the pre-lift census)
         let expectations: &[(&str, usize)] = &[
             ("bootstrap.rs", 1),
+            ("builder_pool_edit.rs", 1),
             ("comprehensive_release.rs", 1),
             ("kenshi.rs", 1),
-            ("kenshi_agent.rs", 2),
-            ("nix_builder.rs", 3),
+            ("kenshi_agent.rs", 1),
+            ("nix_builder.rs", 2),
             ("push.rs", 2),
             ("release_commit.rs", 1),
         ];

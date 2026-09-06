@@ -47,9 +47,9 @@
 //! all four consumers by construction rather than through four inline
 //! literal edits that inevitably drift.
 //!
-//! # Distinct from the sibling `update_builder_pool_agent_image` shape
+//! # Distinct from the sibling `builder_pool_edit` shape
 //!
-//! `commands/kenshi_agent.rs::update_builder_pool_agent_image` carries a
+//! `commands/builder_pool_edit.rs::update_builder_pool_field` carries a
 //! near-identical three-line preamble but with a `"Builder pool file"`
 //! existence-check label + `builder_pool_path` variable rather than
 //! `kustomization_path`. The label semantically distinguishes a
@@ -59,8 +59,10 @@
 //! (`Kustomization overlay file not found — was the overlay generated?`
 //! vs. `Builder pool file not found — was the CRD applied?`) can diverge
 //! without rewriting either primitive. This module is scoped to the
-//! Kustomization-overlay label; a `builder_pool_edit` sibling on the
-//! same shape is the future extraction if that helper repeats.
+//! Kustomization-overlay label; the sibling `builder_pool_edit` module
+//! (redeeming the reservation this comment previously held) owns the
+//! `"Builder pool file"` label and the `agentImage:` / `builderImage:`
+//! YAML field splice.
 //!
 //! # `info!` at the primitive body, byte-oracle writer alongside
 //!
@@ -263,7 +265,7 @@ mod tests {
     /// through [`open_for_update`] so a future refinement of the
     /// existence-check label reaches all consumers by construction.
     ///
-    /// The `commands/kenshi_agent.rs::update_builder_pool_agent_image`
+    /// The `commands/builder_pool_edit.rs::update_builder_pool_field`
     /// sibling on the `"Builder pool file"` label is deliberately out
     /// of scope — see the module docs for why the two file-kinds are
     /// held apart.

@@ -291,9 +291,27 @@ pub async fn release(
     modified_files.push(primary_kenshi_kustomization.clone());
     println!();
 
-    // Step 5: Update primary cluster builder-pool builderImage
+    // Step 5: Update primary cluster builder-pool builderImage — the
+    // `require_existing_labeled("Builder pool file")` +
+    // `info!("📝 Updating: {}", ...)` + `read_text_async` +
+    // `image_reference` + indent-preserving `.trim().starts_with(<field>:)`
+    // splice + `write_text_async` + `info_indented_success!` fusion now
+    // lives at ONE typed boundary at
+    // `commands::builder_pool_edit::update_builder_pool_field`, shared
+    // with the sibling `commands/kenshi_agent.rs::update_builder_pool_field
+    // (BuilderPoolField::AgentImage, ...)` consumer so a future
+    // refinement of the builder-pool CRD schema, the miss envelope, or
+    // the announcement grammar flows to both builder-pool release flows
+    // from one edit. `BuilderPoolField::BuilderImage` selects the
+    // `builderImage:` YAML field the nix-builder builder pool references.
     crate::step_header::announce_step_header(4, 7, "Update primary cluster builder-pool");
-    update_builder_pool_builder_image(&primary_builder_pool, &registry, &new_tag).await?;
+    crate::commands::builder_pool_edit::update_builder_pool_field(
+        &primary_builder_pool,
+        crate::commands::builder_pool_edit::BuilderPoolField::BuilderImage,
+        &registry,
+        &new_tag,
+    )
+    .await?;
     modified_files.push(primary_builder_pool.clone());
     println!();
 
@@ -303,9 +321,18 @@ pub async fn release(
     modified_files.push(secondary_kenshi_kustomization.clone());
     println!();
 
-    // Step 7: Update secondary cluster builder-pool builderImage
+    // Step 7: Update secondary cluster builder-pool builderImage — same
+    // fusion primitive as the primary-cluster call above; a future edit
+    // to the builder-pool edit shape reaches both sibling calls from
+    // one boundary.
     crate::step_header::announce_step_header(6, 7, "Update secondary cluster builder-pool");
-    update_builder_pool_builder_image(&secondary_builder_pool, &registry, &new_tag).await?;
+    crate::commands::builder_pool_edit::update_builder_pool_field(
+        &secondary_builder_pool,
+        crate::commands::builder_pool_edit::BuilderPoolField::BuilderImage,
+        &registry,
+        &new_tag,
+    )
+    .await?;
     modified_files.push(secondary_builder_pool.clone());
     println!();
 
@@ -443,51 +470,6 @@ async fn update_kenshi_builder_image(
     crate::repo::write_text_async(path, &final_content).await?;
 
     crate::info_indented_success!("Kenshi kustomization updated");
-    Ok(())
-}
-
-/// Update builder-pool YAML builderImage field
-///
-/// Finds the builderImage field and updates it to the new tag.
-async fn update_builder_pool_builder_image(
-    builder_pool_path: &str,
-    registry: &str,
-    new_tag: &str,
-) -> Result<()> {
-    let path = crate::repo::require_existing_labeled(builder_pool_path, "Builder pool file")?;
-
-    info!("📝 Updating: {}", builder_pool_path);
-
-    // Read content
-    let content = crate::repo::read_text_async(path).await?;
-
-    let new_image = crate::oci_manifest::image_reference(registry, new_tag);
-    let mut updated = false;
-    let mut new_content = String::new();
-
-    for line in content.lines() {
-        // Update builderImage field (not agentImage - that's for kenshi-agent)
-        if line.trim().starts_with("builderImage:") {
-            let indent = line.len() - line.trim_start().len();
-            let indent_str: String = line.chars().take(indent).collect();
-            new_content.push_str(&format!("{}builderImage: {}\n", indent_str, new_image));
-            updated = true;
-            info!("   Updated builderImage to: {}", new_image);
-        } else {
-            new_content.push_str(line);
-            new_content.push('\n');
-        }
-    }
-
-    if !updated {
-        anyhow::bail!("No builderImage field found in {}", builder_pool_path);
-    }
-
-    // Write back
-    let final_content = new_content.trim_end().to_string() + "\n";
-    crate::repo::write_text_async(path, &final_content).await?;
-
-    crate::info_indented_success!("Builder pool updated");
     Ok(())
 }
 
