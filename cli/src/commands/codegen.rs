@@ -155,7 +155,7 @@ pub async fn execute(backend_dir: &Path, web_dir: &Path) -> Result<CodegenResult
         crate::ui::SectionCompletionStyle::Success,
     );
     println!();
-    println!("Generated files:");
+    crate::ui::print_generated_files_heading();
     println!("  - src/gql/ (typed document nodes)");
     println!("  - src/lib/graphql/generated/hooks.ts (TanStack Query hooks)");
     println!();

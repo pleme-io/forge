@@ -188,7 +188,7 @@ pub async fn web_regenerate(product: String, service: String, repo_root: String)
     // Success summary
     print_success_banner(80, "✅ REGENERATION COMPLETE");
     println!();
-    println!("Generated files:");
+    crate::ui::print_generated_files_heading();
     crate::ui::print_bullet_item(&format!("{}", service_dir.join("deps.nix").display()));
     crate::ui::print_bullet_item(&format!("{}", hanabi_dir.join("Cargo.nix").display()));
     println!();
