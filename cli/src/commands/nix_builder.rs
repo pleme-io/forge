@@ -333,12 +333,8 @@ async fn update_kustomization_image(
     registry: &str,
     new_tag: &str,
 ) -> Result<()> {
-    let path = crate::repo::require_existing_labeled(kustomization_path, "Kustomization file")?;
-
-    info!("📝 Updating: {}", kustomization_path);
-
-    // Read content
-    let content = crate::repo::read_text_async(path).await?;
+    let (path, content) =
+        crate::commands::kustomization_edit::open_for_update(kustomization_path).await?;
 
     // Find and replace newTag in images[] section
     // Pattern:
@@ -398,12 +394,8 @@ async fn update_kenshi_builder_image(
     registry: &str,
     new_tag: &str,
 ) -> Result<()> {
-    let path = crate::repo::require_existing_labeled(kustomization_path, "Kustomization file")?;
-
-    info!("📝 Updating: {}", kustomization_path);
-
-    // Read content
-    let content = crate::repo::read_text_async(path).await?;
+    let (path, content) =
+        crate::commands::kustomization_edit::open_for_update(kustomization_path).await?;
 
     // Find and replace BUILDER_IMAGE reference
     // Pattern: - BUILDER_IMAGE={registry}:amd64-xxx

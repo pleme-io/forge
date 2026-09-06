@@ -108,12 +108,8 @@ async fn update_kustomization_image(
     registry: &str,
     new_tag: &str,
 ) -> Result<()> {
-    let path = crate::repo::require_existing_labeled(kustomization_path, "Kustomization file")?;
-
-    info!("📝 Updating: {}", kustomization_path);
-
-    // Read content
-    let content = crate::repo::read_text_async(path).await?;
+    let (path, content) =
+        crate::commands::kustomization_edit::open_for_update(kustomization_path).await?;
 
     let new_image = crate::oci_manifest::image_reference(registry, new_tag);
     let mut updated_images = false;

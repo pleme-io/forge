@@ -81,12 +81,8 @@ pub async fn update_kustomization(
     new_tag: &str,
     commit: bool,
 ) -> Result<()> {
-    let path = crate::repo::require_existing_labeled(kustomization_path, "Kustomization file")?;
-
-    info!("📝 Updating kustomization: {}", kustomization_path);
-
-    // Read current content
-    let content = crate::repo::read_text_async(path).await?;
+    let (path, content) =
+        crate::commands::kustomization_edit::open_for_update(kustomization_path).await?;
 
     // Extract service name from registry for matching (last path component).
     // Falls back to the raw input only when the registry string has no
