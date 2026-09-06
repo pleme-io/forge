@@ -3635,6 +3635,90 @@ pub fn indent_preserving_kv_line(source_line: &str, key: &str, value: &str) -> S
     format!("{}{}: {}\n", indent_str, key, value)
 }
 
+/// Splice `new_image` into `source_line` at the first occurrence of
+/// `registry_marker`, replacing everything from that marker's first byte
+/// through the first delimiter byte (`"`, `'`, ` `, `\n`) after it.
+/// Returns `Some(rewritten_line)` on a hit and `None` when the marker is
+/// absent.
+///
+/// # Byte oracle
+///
+/// The returned string is
+/// `{prefix}{new_image}{suffix}\n` where
+/// - `prefix = &source_line[..source_line.find(registry_marker)?]`
+/// - `suffix = &source_line[source_line.find(registry_marker)? + first_delim_offset..]`
+///
+/// The single trailing `'\n'` matches the sibling
+/// [`indent_preserving_kv_line`] primitive's shape: callers
+/// `String::push_str` the returned value into an accumulating
+/// content buffer without appending their own terminator.
+///
+/// # Pre-lift shape
+///
+/// Two sibling splice sites — `commands/kenshi_agent.rs::
+/// update_kustomization_image`'s AGENT_IMAGE env-var pass and
+/// `commands/nix_builder.rs::update_kenshi_builder_image`'s BUILDER_IMAGE
+/// configMapGenerator pass — each spelled the same 8-line
+///
+/// ```text
+/// let start_idx = line.find(registry).unwrap[_or(0)];   // sibling variant
+/// let prefix = &line[..start_idx];
+/// let after_registry = &line[start_idx..];
+/// let tag_end = after_registry
+///     .find(|c: char| c == '"' || c == '\'' || c == ' ' || c == '\n')
+///     .unwrap_or(after_registry.len());
+/// let suffix = &after_registry[tag_end..];
+/// new_content.push_str(&format!("{}{}{}\n", prefix, new_image, suffix));
+/// ```
+///
+/// stanza. The pre-lift split held two write-side variants for the miss
+/// arm — `unwrap()` under an outer `line.contains(registry)` guard vs
+/// `unwrap_or(0) + if start_idx > 0` — that this primitive collapses to
+/// one `Option<String>` return. Post-lift each caller uses the
+/// `Option` shape it needs (`if let Some { .. } else { push verbatim }`
+/// for the guardless kenshi-agent AGENT_IMAGE site, `.expect` under the
+/// pre-existing outer guard for the nix-builder BUILDER_IMAGE site) so
+/// the pre-lift byte behavior is preserved at both.
+///
+/// # Delimiter alphabet
+///
+/// The four delimiter bytes (`'"'`, `'\''`, `' '`, `'\n'`) form the
+/// canonical "end-of-image-reference" alphabet across the two sibling
+/// input shapes:
+/// - `- AGENT_IMAGE=ghcr.io/org/kenshi-agent:amd64-abc` → space or line end
+/// - `image: "ghcr.io/org/svc:amd64-abc"` → double quote
+/// - `image: 'ghcr.io/org/svc:amd64-abc'` → single quote
+/// - `- BUILDER_IMAGE=ghcr.io/org/nix-builder:amd64-abc` → space or line end
+///
+/// A drift of this alphabet (a swap to `.split_whitespace()`, a lift to a
+/// UTF-8-aware tokenizer, a shape that treats `,` or `}` as delimiter)
+/// lands at ONE body across the two sibling sites and is caught by the
+/// sibling `#[cfg(test)]` cases pinning each of the four bytes.
+///
+/// # No-marker → None (not empty string)
+///
+/// A missing marker returns `None` rather than the source line verbatim.
+/// This forces the caller to spell the miss-arm behavior explicitly
+/// — the pre-lift split held two different miss-arm shapes and hiding
+/// the miss inside the primitive as `Some(source_line.to_string() + "\n")`
+/// would silently collapse the kenshi-agent site's `push line + '\n'`
+/// (byte-identical) with a hypothetical drift where the caller wanted
+/// to skip the line entirely.
+pub fn splice_registry_anchored_image_ref(
+    source_line: &str,
+    registry_marker: &str,
+    new_image: &str,
+) -> Option<String> {
+    let start_idx = source_line.find(registry_marker)?;
+    let prefix = &source_line[..start_idx];
+    let after = &source_line[start_idx..];
+    let tag_end = after
+        .find(|c: char| c == '"' || c == '\'' || c == ' ' || c == '\n')
+        .unwrap_or(after.len());
+    let suffix = &after[tag_end..];
+    Some(format!("{}{}{}\n", prefix, new_image, suffix))
+}
+
 /// Run a command in a specific directory, restoring the original directory afterward
 ///
 /// # Arguments
@@ -11002,6 +11086,199 @@ mod tests {
             rendered, "  k: v1\n",
             "body must render as exactly `{{indent}}{{key}}: {{value}}\\n` \
              with ONE space between colon and value. Got: {rendered:?}"
+        );
+    }
+
+    // ---- splice_registry_anchored_image_ref -----------------------
+    //
+    // The two sibling pre-lift splice sites — `commands/kenshi_agent
+    // .rs::update_kustomization_image` at the AGENT_IMAGE env-var arm
+    // and `commands/nix_builder.rs::update_kenshi_builder_image` at the
+    // BUILDER_IMAGE configMapGenerator arm — each spelled the same
+    // 8-line `let start_idx = line.find(registry).unwrap[_or(0)]; let
+    // prefix = &line[..start_idx]; let after = &line[start_idx..]; let
+    // tag_end = after.find(|c| c == '"' || c == '\'' || c == ' ' || c ==
+    // '\n').unwrap_or(after.len()); let suffix = &after[tag_end..];
+    // push_str(&format!("{}{}{}\n", prefix, new_image, suffix))` stanza.
+    // These cases pin the byte shape the primitive returns across the
+    // four delimiter alphabet bytes and the miss arm every consumer
+    // relies on. Fail-before-pass-after: the primitive did not exist
+    // pre-lift; each case would have been a compile error before the
+    // primitive landed and a passing shape assertion after.
+
+    #[test]
+    fn splice_registry_anchored_image_ref_agent_image_env_shape() {
+        // Pre-lift `commands/kenshi_agent.rs::update_kustomization_image`
+        // at the AGENT_IMAGE env-var arm on an eight-space-indented
+        // input line: the resulting `push_str(&format!("{}{}{}\n",
+        // prefix, new_image, suffix))` yielded the same shape.
+        let line = "        - AGENT_IMAGE=ghcr.io/pleme-io/kenshi-agent:amd64-oldsha";
+        let rewritten = splice_registry_anchored_image_ref(
+            line,
+            "ghcr.io/pleme-io/kenshi-agent",
+            "ghcr.io/pleme-io/kenshi-agent:amd64-newsha",
+        );
+        assert_eq!(
+            rewritten.as_deref(),
+            Some("        - AGENT_IMAGE=ghcr.io/pleme-io/kenshi-agent:amd64-newsha\n"),
+            "AGENT_IMAGE env-var splice must land with the leading \
+             eight-space prefix + `- AGENT_IMAGE=` preserved verbatim, \
+             the image reference replaced, and a single trailing `\\n`. \
+             Got: {rewritten:?}"
+        );
+    }
+
+    #[test]
+    fn splice_registry_anchored_image_ref_builder_image_config_map_shape() {
+        // Pre-lift `commands/nix_builder.rs::update_kenshi_builder_image`
+        // at the BUILDER_IMAGE configMapGenerator literal arm.
+        let line = "  - BUILDER_IMAGE=ghcr.io/pleme-io/nix-builder:amd64-oldsha";
+        let rewritten = splice_registry_anchored_image_ref(
+            line,
+            "ghcr.io/pleme-io/nix-builder",
+            "ghcr.io/pleme-io/nix-builder:amd64-newsha",
+        );
+        assert_eq!(
+            rewritten.as_deref(),
+            Some("  - BUILDER_IMAGE=ghcr.io/pleme-io/nix-builder:amd64-newsha\n"),
+            "BUILDER_IMAGE configMap literal splice must land with the \
+             leading two-space prefix + `- BUILDER_IMAGE=` preserved \
+             verbatim. Got: {rewritten:?}"
+        );
+    }
+
+    #[test]
+    fn splice_registry_anchored_image_ref_double_quote_delimiter() {
+        // `image: "ghcr.io/org/x:oldtag"` → the primitive's `'"'`
+        // delimiter clause stops the tag scan at the closing quote, so
+        // the trailing quote survives verbatim in the spliced suffix.
+        let line = "      image: \"ghcr.io/org/svc:amd64-old\"";
+        let rewritten = splice_registry_anchored_image_ref(
+            line,
+            "ghcr.io/org/svc",
+            "ghcr.io/org/svc:amd64-new",
+        );
+        assert_eq!(
+            rewritten.as_deref(),
+            Some("      image: \"ghcr.io/org/svc:amd64-new\"\n"),
+            "double-quote delimiter must preserve the trailing `\"` \
+             byte in the spliced suffix. Got: {rewritten:?}"
+        );
+    }
+
+    #[test]
+    fn splice_registry_anchored_image_ref_single_quote_delimiter() {
+        // Sibling of the double-quote case pinning the `'\''` delimiter
+        // clause.
+        let line = "      image: 'ghcr.io/org/svc:amd64-old'";
+        let rewritten = splice_registry_anchored_image_ref(
+            line,
+            "ghcr.io/org/svc",
+            "ghcr.io/org/svc:amd64-new",
+        );
+        assert_eq!(
+            rewritten.as_deref(),
+            Some("      image: 'ghcr.io/org/svc:amd64-new'\n"),
+            "single-quote delimiter must preserve the trailing `'` \
+             byte in the spliced suffix. Got: {rewritten:?}"
+        );
+    }
+
+    #[test]
+    fn splice_registry_anchored_image_ref_space_delimiter_preserves_trailing_tokens() {
+        // A mid-line marker followed by tokens after a space — the
+        // primitive's `' '` delimiter clause stops the tag scan at the
+        // first space, so everything from that space onward survives
+        // verbatim as suffix.
+        let line = "  ARG IMG=ghcr.io/org/x:oldtag # canonical comment";
+        let rewritten =
+            splice_registry_anchored_image_ref(line, "ghcr.io/org/x", "ghcr.io/org/x:newtag");
+        assert_eq!(
+            rewritten.as_deref(),
+            Some("  ARG IMG=ghcr.io/org/x:newtag # canonical comment\n"),
+            "space delimiter must stop the tag scan at the first space \
+             and preserve every trailing byte (comment, siblings tokens) \
+             verbatim. Got: {rewritten:?}"
+        );
+    }
+
+    #[test]
+    fn splice_registry_anchored_image_ref_no_trailing_delimiter_takes_full_slice() {
+        // No delimiter after the tag — the primitive's
+        // `.unwrap_or(after.len())` fallback takes the full slice from
+        // the marker to the end of the line as the tag span.
+        // `.lines()` strips the terminator, so this is the natural
+        // input shape when the marker is the last token on a line.
+        let line = "    image: ghcr.io/org/x:amd64-oldtag";
+        let rewritten =
+            splice_registry_anchored_image_ref(line, "ghcr.io/org/x", "ghcr.io/org/x:amd64-newtag");
+        assert_eq!(
+            rewritten.as_deref(),
+            Some("    image: ghcr.io/org/x:amd64-newtag\n"),
+            "no-trailing-delimiter case must consume the full suffix as \
+             the tag span and terminate with a single `\\n`. \
+             Got: {rewritten:?}"
+        );
+    }
+
+    #[test]
+    fn splice_registry_anchored_image_ref_marker_absent_returns_none() {
+        // The miss arm — `registry_marker` never appears in
+        // `source_line`. Pre-lift, the two sibling sites diverged here
+        // (`unwrap()` vs `unwrap_or(0) + if start_idx > 0`); the
+        // primitive collapses both to `None` and forces each caller to
+        // spell its miss-arm behavior at the site.
+        let line = "  - SOME_OTHER=ghcr.io/other/svc:latest";
+        let rewritten = splice_registry_anchored_image_ref(
+            line,
+            "ghcr.io/pleme-io/nix-builder",
+            "ghcr.io/pleme-io/nix-builder:amd64-newsha",
+        );
+        assert!(
+            rewritten.is_none(),
+            "marker-absent case must return `None`, not the source line \
+             or an empty string. Got: {rewritten:?}"
+        );
+    }
+
+    #[test]
+    fn splice_registry_anchored_image_ref_marker_at_index_zero_returns_some() {
+        // The pre-lift kenshi_agent site used `unwrap_or(0) + if
+        // start_idx > 0` — treating index 0 as "no match". The
+        // primitive positively documents index 0 as a hit; the
+        // divergence is inert because the outer `line.contains(
+        // "AGENT_IMAGE")` guard makes an unindented AGENT_IMAGE line
+        // unreachable in practice. This case pins the primitive's
+        // positional-correctness contract independent of the caller's
+        // outer guard.
+        let line = "ghcr.io/org/x:oldtag other";
+        let rewritten =
+            splice_registry_anchored_image_ref(line, "ghcr.io/org/x", "ghcr.io/org/x:newtag");
+        assert_eq!(
+            rewritten.as_deref(),
+            Some("ghcr.io/org/x:newtag other\n"),
+            "marker at index 0 must be treated as a positional hit \
+             (empty prefix) and returned as `Some`. Got: {rewritten:?}"
+        );
+    }
+
+    #[test]
+    fn splice_registry_anchored_image_ref_appends_exactly_one_trailing_newline() {
+        // Sibling of `indent_preserving_kv_line_appends_exactly_one_trailing_newline`
+        // — a doubled or missing `\n` terminator would drift the
+        // pre-lift byte-for-byte contract at both sibling consumer
+        // sites.
+        let rewritten =
+            splice_registry_anchored_image_ref("  image: r/x:o", "r/x", "r/x:n").unwrap();
+        assert!(
+            rewritten.ends_with('\n'),
+            "rendered line must end in `\\n`. Got: {rewritten:?}"
+        );
+        assert!(
+            !rewritten.ends_with("\n\n"),
+            "rendered line must NOT end in `\\n\\n` — a doubled \
+             terminator would drift the pre-lift shape. Got: \
+             {rewritten:?}"
         );
     }
 }

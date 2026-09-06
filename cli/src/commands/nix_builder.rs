@@ -441,19 +441,24 @@ async fn update_kenshi_builder_image(
         if line.contains(registry)
             && (line.contains("BUILDER_IMAGE") || line.contains("nix-builder:"))
         {
-            // Replace the image reference in this line
-            // Use regex-like replacement: find registry:tag pattern and replace
-            let start_idx = line.find(registry).unwrap();
-            let prefix = &line[..start_idx];
-
-            // Find the end of the tag (newline, quote, or end of string)
-            let after_registry = &line[start_idx..];
-            let tag_end = after_registry
-                .find(|c: char| c == '"' || c == '\'' || c == ' ' || c == '\n')
-                .unwrap_or(after_registry.len());
-
-            let suffix = &after_registry[tag_end..];
-            new_content.push_str(&format!("{}{}{}\n", prefix, new_image, suffix));
+            // Registry-anchored `{prefix}{new_image}{suffix}\n` splice
+            // — the same primitive the sibling `kenshi_agent.rs::
+            // update_kustomization_image` AGENT_IMAGE arm rides — lands
+            // at `crate::repo::splice_registry_anchored_image_ref` so
+            // the delimiter alphabet (`"`, `'`, ` `, `\n`), the
+            // trailing-newline shape, and the miss envelope stay pinned
+            // at ONE body across both flows. The outer `line.contains(
+            // registry) && (line.contains("BUILDER_IMAGE") || line
+            // .contains("nix-builder:"))` guard guarantees the
+            // primitive's `Some` arm; `.expect` surfaces any future
+            // weakening of that guard as a fault right at this call
+            // site rather than as a silent no-op.
+            let rewritten =
+                crate::repo::splice_registry_anchored_image_ref(line, registry, &new_image).expect(
+                    "outer `line.contains(registry)` guard guarantees \
+                         marker present in line",
+                );
+            new_content.push_str(&rewritten);
             updated = true;
             info!("   Updated BUILDER_IMAGE to: {}", new_image);
         } else {
