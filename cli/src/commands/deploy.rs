@@ -21,7 +21,7 @@ pub async fn execute(
         "Nexus Deploy - GitOps Workflow",
     );
 
-    info!("🎯 Target: {}:{}", registry, tag);
+    crate::info_deploy_target_field!(registry, tag);
     info!("📦 Namespace: {}", namespace);
     info!("🚀 Deployment: {}", name);
     println!();

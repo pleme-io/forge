@@ -60,6 +60,7 @@ mod version;
 
 // Legacy modules (to be migrated)
 mod cloudflare;
+mod deploy_target_field;
 mod git;
 mod git_sha_field;
 mod hermetic_scratch;
