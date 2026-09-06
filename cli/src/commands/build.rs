@@ -21,7 +21,7 @@ pub async fn execute(
     crate::info_git_sha_field!(git_sha);
 
     // Configure Attic cache
-    info!("🔧 Configuring Attic cache...");
+    crate::info_attic_configure!();
     info!("   URL: {}", cache_url);
     info!("   Cache: {}", cache_name);
 

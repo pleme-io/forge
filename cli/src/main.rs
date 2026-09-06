@@ -59,6 +59,7 @@ mod tree_listing;
 mod version;
 
 // Legacy modules (to be migrated)
+mod attic_configure_step;
 mod cloudflare;
 mod deploy_target_field;
 mod git;
