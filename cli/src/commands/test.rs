@@ -213,10 +213,7 @@ pub async fn execute(
     let test_type = TestType::from_str(test_type)?;
 
     println!();
-    println!(
-        "{}",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".bright_blue()
-    );
+    crate::ui::print_heavy_rule(crate::ui::HeavyRuleStyle::TestSectionBlue60);
     println!(
         "  {} Testing {} ({})",
         "🧪".bright_green(),
@@ -226,10 +223,7 @@ pub async fn execute(
             ServiceType::Web => "Web",
         }
     );
-    println!(
-        "{}",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".bright_blue()
-    );
+    crate::ui::print_heavy_rule(crate::ui::HeavyRuleStyle::TestSectionBlue60);
     println!();
 
     match service_type {
@@ -372,10 +366,7 @@ async fn run_web_tests(service: &str, service_dir: &str, test_type: TestType) ->
 
     // Summary
     println!();
-    println!(
-        "{}",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".bright_blue()
-    );
+    crate::ui::print_heavy_rule(crate::ui::HeavyRuleStyle::TestSectionBlue60);
 
     if tests_run > 0 {
         crate::ui::print_summary_pass(&format!(
@@ -395,10 +386,7 @@ async fn run_web_tests(service: &str, service_dir: &str, test_type: TestType) ->
         );
     }
 
-    println!(
-        "{}",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".bright_blue()
-    );
+    crate::ui::print_heavy_rule(crate::ui::HeavyRuleStyle::TestSectionBlue60);
     println!();
 
     Ok(())
@@ -526,15 +514,9 @@ async fn run_test_suite(
 
 fn print_success_summary() {
     println!();
-    println!(
-        "{}",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".bright_blue()
-    );
+    crate::ui::print_heavy_rule(crate::ui::HeavyRuleStyle::TestSectionBlue60);
     crate::ui::print_summary_pass("All tests passed!");
-    println!(
-        "{}",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".bright_blue()
-    );
+    crate::ui::print_heavy_rule(crate::ui::HeavyRuleStyle::TestSectionBlue60);
     println!();
 }
 
