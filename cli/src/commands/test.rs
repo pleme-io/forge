@@ -414,7 +414,7 @@ async fn run_test_suite(
     );
 
     if !config.description.is_empty() {
-        println!("     {}", config.description.dimmed());
+        crate::ui::print_descriptor_description(&config.description);
     }
     println!("     Command: {}", config.command.dimmed());
     println!();
