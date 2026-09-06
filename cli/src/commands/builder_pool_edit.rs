@@ -176,9 +176,17 @@ pub fn splice_builder_pool_field(
 
     for line in content.lines() {
         if line.trim().starts_with(&needle) {
-            let indent = line.len() - line.trim_start().len();
-            let indent_str: String = line.chars().take(indent).collect();
-            out.push_str(&format!("{}{}: {}\n", indent_str, field_name, new_image));
+            // The indent-preserving `{indent}{field_name}: {new_image}
+            // \n` splice rides the shared
+            // `crate::repo::indent_preserving_kv_line` primitive —
+            // sibling of the three `commands/{kenshi,kenshi_agent,
+            // nix_builder}.rs::update_kustomization_image` `newTag:`
+            // splices — so the byte shape stays pinned at one body
+            // across the four sibling flows and any future refinement
+            // of the indent-computation surface lands there.
+            out.push_str(&crate::repo::indent_preserving_kv_line(
+                line, field_name, new_image,
+            ));
             match_count += 1;
         } else {
             out.push_str(line);

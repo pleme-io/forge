@@ -157,11 +157,16 @@ async fn update_kustomization_image(
             in_kenshi_agent_image = false;
         }
 
-        // Update newTag within the kenshi-agent image block
+        // Update newTag within the kenshi-agent image block. The
+        // indent-preserving `{indent}newTag: {new_tag}\n` splice rides
+        // the shared `crate::repo::indent_preserving_kv_line` primitive
+        // — sibling of the kenshi and nix-builder images[] splices and
+        // of the builder-pool field splice — so the byte shape stays
+        // pinned at one body across the four sibling flows.
         if in_kenshi_agent_image && line.contains("newTag:") {
-            let indent = line.len() - line.trim_start().len();
-            let indent_str: String = line.chars().take(indent).collect();
-            new_content.push_str(&format!("{}newTag: {}\n", indent_str, new_tag));
+            new_content.push_str(&crate::repo::indent_preserving_kv_line(
+                line, "newTag", new_tag,
+            ));
             updated_images = true;
             info!("   Updated images[] newTag to: {}", new_tag);
         }
