@@ -130,6 +130,6 @@ async fn update_kustomization_image(
     let final_content = new_content.trim_end().to_string() + "\n";
     crate::repo::write_text_async(path, &final_content).await?;
 
-    info!("   ✅ Kustomization updated");
+    crate::info_indented_success!("Kustomization updated");
     Ok(())
 }

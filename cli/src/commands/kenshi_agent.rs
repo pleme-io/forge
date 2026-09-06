@@ -173,7 +173,7 @@ async fn update_kustomization_image(
     let final_content = new_content.trim_end().to_string() + "\n";
     crate::repo::write_text_async(path, &final_content).await?;
 
-    info!("   ✅ Kustomization updated");
+    crate::info_indented_success!("Kustomization updated");
     Ok(())
 }
 
@@ -218,6 +218,6 @@ async fn update_builder_pool_agent_image(
     let final_content = new_content.trim_end().to_string() + "\n";
     crate::repo::write_text_async(path, &final_content).await?;
 
-    info!("   ✅ Builder pool updated");
+    crate::info_indented_success!("Builder pool updated");
     Ok(())
 }

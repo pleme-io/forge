@@ -144,7 +144,7 @@ pub async fn update_kustomization(
     }
     crate::repo::write_text_async(path, &updated_content).await?;
 
-    info!("   ✅ Kustomization updated");
+    crate::info_indented_success!("Kustomization updated");
 
     // Commit and push if requested
     if commit {
@@ -197,7 +197,7 @@ pub async fn update_kustomization(
             .await
             .context("Failed to push kustomization changes to git")?;
 
-        info!("   ✅ Kustomization committed and pushed");
+        crate::info_indented_success!("Kustomization committed and pushed");
     }
 
     Ok(())
