@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::path::Path;
 use tracing::{info, warn};
 
-use crate::{cloudflare, commands, config::DeployConfig, flux_reconcile, git};
+use crate::{cloudflare, commands, config::DeployConfig, git};
 
 pub async fn execute(
     manifest: String,
@@ -112,17 +112,22 @@ pub async fn execute(
         &tag,
     )?;
 
-    // Trigger FluxCD reconciliation
-    // Note: Single-source architecture means infrastructure is applied directly by flux-system
-    info!("🔄 Triggering FluxCD reconciliation...");
-    match flux_reconcile::reconcile_kustomization("flux-system", "flux-system", false).await {
-        Ok(()) => {
-            crate::info_success!("FluxCD reconciliation triggered");
-        }
-        Err(e) => {
-            crate::warn_nonfatal!("FluxCD reconcile failed", e);
-        }
-    }
+    // Trigger FluxCD reconciliation — the info-line announcement +
+    // Ok=>info_success! + Err=>warn_nonfatal! fusion now lives at ONE
+    // typed boundary at
+    // `commands::flux_system_reconcile::announce_and_reconcile_flux_system`,
+    // shared with the sibling `commands/github_runner_ci.rs` consumer
+    // so a future re-branding of the announcement, the success phrase,
+    // the failure label, or the `(kustomization, namespace)` reconcile
+    // target flows to both flows from one edit. Mode `Triggered` maps
+    // to `with_source=false` + success phrase `"triggered"` — the
+    // single-source architecture means infrastructure is applied
+    // directly by flux-system so this flow only kicks off the
+    // reconciliation rather than waiting for source readiness.
+    commands::flux_system_reconcile::announce_and_reconcile_flux_system(
+        commands::flux_system_reconcile::FluxSystemReconcileMode::Triggered,
+    )
+    .await;
 
     println!();
 

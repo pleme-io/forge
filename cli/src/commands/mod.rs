@@ -15,6 +15,7 @@ pub mod e2e;
 pub mod federation;
 pub mod federation_tests;
 pub mod flux;
+pub mod flux_system_reconcile;
 pub mod frontend_validation;
 pub mod gem;
 pub mod github_runner_ci;
