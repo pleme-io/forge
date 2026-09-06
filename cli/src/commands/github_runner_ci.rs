@@ -3,7 +3,6 @@ use std::time::Duration;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
-use crate::flux_reconcile;
 use crate::git;
 use crate::infrastructure::kubectl::kubectl_command_async;
 use crate::repo::get_tool_path;
@@ -486,18 +485,21 @@ pub async fn execute(
         &git_sha,
     )?;
 
-    // Trigger FluxCD reconciliation and wait for deployment
-    info!("🔄 Triggering FluxCD reconciliation...");
-
-    // Reconcile the flux-system to pull latest git changes and apply them
-    match flux_reconcile::reconcile_kustomization("flux-system", "flux-system", true).await {
-        Ok(()) => {
-            crate::info_success!("FluxCD reconciliation complete");
-        }
-        Err(e) => {
-            crate::warn_nonfatal!("FluxCD reconcile failed", e);
-        }
-    }
+    // Trigger FluxCD reconciliation and wait for deployment — the
+    // info-line announcement + Ok=>info_success! + Err=>warn_nonfatal!
+    // fusion now lives at ONE typed boundary at
+    // `commands::flux_system_reconcile::announce_and_reconcile_flux_system`,
+    // shared with the sibling `commands/deploy.rs` consumer so a
+    // future re-branding of the announcement, the success phrase, the
+    // failure label, or the `(kustomization, namespace)` reconcile
+    // target flows to both flows from one edit. Mode `Completed` maps
+    // to `with_source=true` + success phrase `"complete"` — the runner
+    // CI flow waits for source + kustomization readiness before
+    // proceeding to the rollout-watch step.
+    crate::commands::flux_system_reconcile::announce_and_reconcile_flux_system(
+        crate::commands::flux_system_reconcile::FluxSystemReconcileMode::Completed,
+    )
+    .await;
 
     // Give Kubernetes a moment to start the rollout
     tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;

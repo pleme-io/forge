@@ -285,11 +285,20 @@ mod tests {
             .join("src")
             .join("commands");
         // (module basename, minimum forward count from the pre-lift census)
+        //
+        // `deploy.rs` and `github_runner_ci.rs` each shed ONE forward
+        // when `commands/flux_system_reconcile.rs` lifted the
+        // `"FluxCD reconciliation <triggered|complete>"` success line
+        // into its own `announce_and_reconcile_flux_system` fusion —
+        // the primitive itself now carries the pre-lift call, and
+        // its own module is pinned as a `("flux_system_reconcile.rs", 1)`
+        // row so a future drop of THAT call would still be caught.
         let expectations: &[(&str, usize)] = &[
             ("build.rs", 3),
             ("comprehensive_release.rs", 1),
-            ("deploy.rs", 2),
-            ("github_runner_ci.rs", 6),
+            ("deploy.rs", 1),
+            ("flux_system_reconcile.rs", 1),
+            ("github_runner_ci.rs", 5),
             ("integration_tests.rs", 1),
             ("nix_builder.rs", 6),
             ("rollout.rs", 1),

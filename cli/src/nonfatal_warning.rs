@@ -261,10 +261,19 @@ mod tests {
             .join("src")
             .join("commands");
         // (module basename, minimum forward count from the pre-lift census)
+        //
+        // `deploy.rs` and `github_runner_ci.rs` each shed ONE forward
+        // when `commands/flux_system_reconcile.rs` lifted the
+        // `"FluxCD reconcile failed"` non-fatal warning into its own
+        // `announce_and_reconcile_flux_system` fusion — the primitive
+        // itself now carries the pre-lift call, and its own module
+        // is pinned as a `("flux_system_reconcile.rs", 1)` row so a
+        // future drop of THAT call would still be caught.
         let expectations: &[(&str, usize)] = &[
             ("build.rs", 2),
-            ("deploy.rs", 2),
-            ("github_runner_ci.rs", 2),
+            ("deploy.rs", 1),
+            ("flux_system_reconcile.rs", 1),
+            ("github_runner_ci.rs", 1),
         ];
         for (basename, min_count) in expectations {
             let path = commands_dir.join(basename);
