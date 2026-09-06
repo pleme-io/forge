@@ -372,6 +372,74 @@ pub fn write_heavy_rule<W: std::io::Write>(
     }
 }
 
+/// Rule-character glyph every pre-lift box-bottom site in
+/// [`commands/status.rs`](crate::commands::status)'s
+/// `print_text_status` closed a thin box with, spelled through the
+/// ambient `let thin_sep = "─".repeat(width);` local (`width = 80`).
+/// Pinned as one named constant so a future swap of the thin-box
+/// grammar's rule character (a promotion to `━` to unify with
+/// [`write_heavy_rule`]'s heavy rule, a demotion to `-` for a leaner
+/// ASCII-only readout) happens at ONE typed boundary rather than the
+/// nine pre-lift call sites the primitive collapses.
+const THIN_BOX_BOTTOM_RULE_CHAR: &str = "─";
+
+/// Rule width every pre-lift box-bottom site in `commands/status.rs`
+/// spelled through the ambient `let width = 80` local. Same
+/// one-boundary pinning as [`THIN_BOX_BOTTOM_RULE_CHAR`]; the width
+/// is fixed at 80 because every pre-lift `┌─ <Section> ─...─┐`
+/// opening row is an 82-glyph literal (`┌` + 80 × `─` + `┐`), so an
+/// 80-glyph `└─...─┘` closing row lines up with its opening row
+/// byte-for-byte.
+const THIN_BOX_BOTTOM_WIDTH: usize = 80;
+
+/// Prints the two-line box-bottom stanza every pre-lift consumer in
+/// [`print_text_status`](crate::commands::status) spelled inline as
+/// `println!("└{}┘", thin_sep); println!();`. Closes an
+/// `┌─ <Section> ─...─┐`-opened thin box (Overview, Replicas,
+/// Conditions, Pods, Containers, Related Resources, Services, Recent
+/// Migrations, Recent Events) at 9 sibling call sites — the pre-lift
+/// 2-line stanza — so a future palette shift against rule-char,
+/// rule-width, closing-corner glyphs (`└`/`┘`), or trailing-blank
+/// omission happens at ONE site rather than nine.
+///
+/// # Distinct from [`print_heavy_rule`]
+///
+/// [`print_heavy_rule`] carries a **single**-line `━`-rule under a
+/// closed palette+width enum, always colored, used to open or close
+/// a headline whose composition varies. This primitive carries a
+/// **two**-line stanza — a `└─...─┘` box-bottom (with corner glyphs,
+/// NOT a bare rule) plus a trailing blank — always uncolored,
+/// closing an `┌─ <Section> ─...─┐` opening whose section title
+/// varies. The two coexist rather than fusing because the corner
+/// glyphs and the trailing-blank are load-bearing to the box-close
+/// grammar (a bare rule of the same width would visually merge with
+/// the following section's opening row), and the always-uncolored
+/// contract lets a `--no-color` grep or a CI log post-processor that
+/// strips ANSI still surface the box boundary intact.
+///
+/// Delegates to [`write_thin_box_bottom`] against `std::io::stdout()`;
+/// the writer split exists so the fail-before-pass test can pin the
+/// two-line body, closing-corner glyphs, rule width, and
+/// trailing-blank contract by inspecting emitted bytes rather than
+/// shelling out and grepping stdout.
+pub fn print_thin_box_bottom() {
+    let _ = write_thin_box_bottom(&mut std::io::stdout().lock());
+}
+
+/// Writer-taking sibling to [`print_thin_box_bottom`]. Emits the two
+/// box-bottom lines (`└` + [`THIN_BOX_BOTTOM_WIDTH`] ×
+/// [`THIN_BOX_BOTTOM_RULE_CHAR`] + `┘`, then an empty line) via
+/// [`writeln!`] against the supplied writer.
+/// [`print_thin_box_bottom`] is the stdout adapter; this variant
+/// exists so tests can pin the two-line, closing-corner, and
+/// rule-width contract without capturing stdout.
+pub fn write_thin_box_bottom<W: std::io::Write>(w: &mut W) -> std::io::Result<()> {
+    let bar = THIN_BOX_BOTTOM_RULE_CHAR.repeat(THIN_BOX_BOTTOM_WIDTH);
+    writeln!(w, "└{}┘", bar)?;
+    writeln!(w)?;
+    Ok(())
+}
+
 /// Rule-character glyph every pre-lift release-milestone site fed to
 /// [`String::repeat`] verbatim. Pinned as one named constant so a
 /// future swap of the release-milestone grammar's rule character (a
@@ -15245,5 +15313,213 @@ mod tests {
                  troubleshooting guidance both failure-dumpers now share."
             );
         }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_thin_box_bottom`].
+    /// Pins the two-line body every pre-lift consumer in
+    /// [`super::super::commands::status`]'s `print_text_status`
+    /// spelled verbatim as `println!("└{}┘", thin_sep); println!();`:
+    /// exactly two lines, line 0 is `└` + 80 × `─` + `┘` with the
+    /// opening/closing corner glyphs at the head and tail, line 1 is
+    /// empty, and neither line carries any ANSI escape sequence. A
+    /// silent contract drift a future rewrite might introduce —
+    /// dropping the trailing blank so the next section's opening row
+    /// visually merges with the closing rule, hoisting the rule width
+    /// off 80 so an 82-glyph opening row sits above a shorter closing
+    /// row, swapping `└`/`┘` for `┌`/`┐` and inverting the closing
+    /// grammar, wrapping the emit in `.color()` and losing the
+    /// `--no-color` box boundary — flips this assertion rather than
+    /// compiling and silently diverging the nine consumer sites'
+    /// visual grammar.
+    #[test]
+    fn write_thin_box_bottom_emits_close_row_then_blank_line() {
+        // Force ANSI emission (colored auto-drops sequences on a
+        // non-tty stdout) and serialize against peer banner tests
+        // via [`AnsiOverrideForTest`]. This primitive is deliberately
+        // ASCII+box-drawing-only (no `.color()` calls in its writer)
+        // so the guard's `set_override(true)` cannot inject colors on
+        // its own — but the guard's Drop restoring colored's
+        // auto-detection AND the [`ANSI_OVERRIDE_LOCK`] serialization
+        // matter because a regression that promotes the writer to
+        // `.color()` would light up under the override, and that
+        // failure must not race with a peer banner test that expects
+        // colors ON.
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_thin_box_bottom(&mut buf)
+            .expect("write_thin_box_bottom against a Vec<u8> writer must succeed");
+        let out = String::from_utf8(buf)
+            .expect("write_thin_box_bottom must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly two output lines — the pre-lift stanza is TWO
+        // `println!`s (the close row plus a trailing blank), not one
+        // and not three. A fusion that drops the trailing blank
+        // (silently visually merging the closing rule with the next
+        // section's opening `┌─ <Section> ─...─┐` row) fails here,
+        // as does one that duplicates it.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            2,
+            "write_thin_box_bottom must emit exactly two lines — the \
+             pre-lift stanza is `println!(\"└{{}}┘\", thin_sep); \
+             println!();`, two macro invocations; got {}:\n{:?}",
+            lines.len(),
+            out
+        );
+
+        // Line 0 must open with `└` and close with `┘` — the closing
+        // corner glyphs of the thin box. A swap of `└`/`┘` for `┌`/`┐`
+        // (inverting the closing grammar into an opening row) fails
+        // here.
+        assert!(
+            lines[0].starts_with('└'),
+            "line 0 must open with the closing-corner glyph `└` — the \
+             pre-lift stanza spelled `println!(\"└{{}}┘\", thin_sep);`; \
+             got {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[0].ends_with('┘'),
+            "line 0 must close with the closing-corner glyph `┘` — the \
+             pre-lift stanza spelled `println!(\"└{{}}┘\", thin_sep);`; \
+             got {:?}",
+            lines[0]
+        );
+
+        // The rule width reaches `String::repeat` at the enum-mapped
+        // [`super::THIN_BOX_BOTTOM_WIDTH`] (80) — a fusion that hoists
+        // the width off the constant and pins it to a fresh literal
+        // (say, 78 to save two columns) fails here. The pre-lift
+        // stanza fed `thin_sep = "─".repeat(80)`, so line 0 carries
+        // exactly 80 `─` glyphs between the corner glyphs.
+        let bar_glyph_count = lines[0].chars().filter(|c| *c == '─').count();
+        assert_eq!(
+            bar_glyph_count, 80,
+            "line 0 must contain exactly `THIN_BOX_BOTTOM_WIDTH` (80) `─` \
+             glyphs between `└` and `┘`; got {} in {:?}",
+            bar_glyph_count, lines[0]
+        );
+
+        // Line 1 must be empty — the trailing `println!();` the
+        // pre-lift stanza emitted. A fusion that drops it fails here.
+        assert!(
+            lines[1].is_empty(),
+            "line 1 must be empty — the pre-lift stanza's trailing \
+             `println!();` visually separates the closing rule from \
+             the next section's opening `┌─ <Section> ─...─┐` row; \
+             got {:?}",
+            lines[1]
+        );
+
+        // The trailing `\n` reaches the writer — the pre-lift second
+        // `println!();` emits `\n`, so the whole output ends with a
+        // newline. A fusion that swapped the second `writeln!` for
+        // `write!` (or dropped it) fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_thin_box_bottom must emit a trailing `\\n` (the \
+             pre-lift `println!();` did); got {:?}",
+            out
+        );
+
+        // The DISTINGUISHING property of this primitive vs. every
+        // peer heavy-rule primitive in this module: NO ANSI escape
+        // sequences on any line. The pre-lift stanza spelled a bare
+        // `println!(\"└{{}}┘\", thin_sep)` with no `.color()` wrapper,
+        // and the always-uncolored contract lets a `--no-color` grep
+        // or a CI log post-processor that strips ANSI still surface
+        // the box boundary intact. A future silent promotion of the
+        // primitive to `.color()` (e.g. a helpful "let's brighten
+        // this" edit) would break that contract silently across all
+        // nine consumers; the ESC (`\x1b`) absence assertion catches
+        // it before compile.
+        for (i, line) in lines.iter().enumerate() {
+            assert!(
+                !line.contains('\x1b'),
+                "line {} must NOT contain any ANSI escape sequence — \
+                 the pre-lift stanza spelled `println!(\"└{{}}┘\", \
+                 thin_sep)` with no `.color()` wrapper, and this \
+                 primitive's distinguishing contract vs. every peer \
+                 heavy-rule primitive is that a `--no-color` consumer \
+                 still sees a clean box boundary; got {:?}",
+                i,
+                line
+            );
+        }
+    }
+
+    /// Structural regression shield for the 9-site lift closed by
+    /// [`super::print_thin_box_bottom`]. Pre-lift every one of
+    /// [`super::super::commands::status`]'s `print_text_status`
+    /// closing-row sites spelled the two-line stanza
+    /// `println!("└{}┘", thin_sep); println!();` verbatim; a re-inline
+    /// at any single site (someone splicing back a raw
+    /// `println!("└{{}}┘", thin_sep)` for a "one-off" tweak) silently
+    /// reopens the 9-site duplication class this primitive exists to
+    /// close. The negative half pins that the pre-lift needle is gone
+    /// from the module body; the positive half pins that the
+    /// primitive is called at exactly nine sites — one per pre-lift
+    /// consumer (Overview, Replicas, Conditions, Pods, Containers,
+    /// Related Resources, Services, Recent Migrations, Recent
+    /// Events).
+    #[test]
+    fn print_thin_box_bottom_callers_delegate_through_primitive() {
+        const STATUS_SRC: &str = include_str!("commands/status.rs");
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            STATUS_SRC,
+            "commands/status.rs",
+        );
+
+        // Negative assertion — no pre-lift inline closing row (using
+        // the ambient `thin_sep` local) remains anywhere in the
+        // module body. The needle is a full `println!` spelling, so
+        // tests (which never construct this exact call form) cannot
+        // false-positive it.
+        let inline_hits = body.matches("println!(\"└{}┘\", thin_sep)").count();
+        assert_eq!(
+            inline_hits, 0,
+            "commands/status.rs must NOT spell the pre-lift inline \
+             `println!(\"└{{}}┘\", thin_sep)` closing row — the two-\
+             line stanza (close row + trailing blank) was lifted onto \
+             `crate::ui::print_thin_box_bottom`. A re-inline reopens \
+             the 9-site duplication class this shield exists to close. \
+             Found {inline_hits} inline occurrences."
+        );
+
+        // Negative assertion — the ambient `let thin_sep = ...` local
+        // itself must be gone. Post-lift no site consumes it, so its
+        // continued definition would be dead code AND a re-inline
+        // hook waiting to happen. A future edit that resurrects the
+        // local to "just in case someone needs it" fails here.
+        let thin_sep_binding_hits = body.matches("let thin_sep").count();
+        assert_eq!(
+            thin_sep_binding_hits, 0,
+            "commands/status.rs must NOT rebind `thin_sep` — every \
+             pre-lift consumer of the `\"─\".repeat(80)` local was \
+             lifted onto `crate::ui::print_thin_box_bottom`, which \
+             owns the width. A re-binding is either dead code or a \
+             re-inline hook. Found {thin_sep_binding_hits} bindings."
+        );
+
+        // Positive assertion — the module forwards through the
+        // primitive at exactly nine sites, one per pre-lift consumer.
+        // A fusion that folds one back to inline `println!`s
+        // (silently splitting the visual grammar across two sections)
+        // fails here — the negative half above would still pass, but
+        // this positive count would fall to eight.
+        let forward_hits = body.matches("crate::ui::print_thin_box_bottom()").count();
+        assert_eq!(
+            forward_hits, 9,
+            "commands/status.rs must forward through \
+             `crate::ui::print_thin_box_bottom()` at exactly NINE \
+             sites — one per pre-lift consumer (Overview, Replicas, \
+             Conditions, Pods, Containers, Related Resources, \
+             Services, Recent Migrations, Recent Events). A fusion \
+             that folds one back to inline `println!`s or that adds a \
+             tenth caller without extending this shield's expected \
+             count fails here. Found {forward_hits} forwarding hits."
+        );
     }
 }

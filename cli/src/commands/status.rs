@@ -1280,7 +1280,6 @@ impl Default for RelatedServices {
 fn print_text_status(status: &ServiceStatus) {
     let width = 80;
     let separator = "═".repeat(width);
-    let thin_sep = "─".repeat(width);
 
     // Header
     println!();
@@ -1322,8 +1321,7 @@ fn print_text_status(status: &ServiceStatus) {
             tag.bright_green().bold()
         );
     }
-    println!("└{}┘", thin_sep);
-    println!();
+    crate::ui::print_thin_box_bottom();
 
     // Replicas Section
     let rep = &status.deployment.replicas;
@@ -1346,8 +1344,7 @@ fn print_text_status(status: &ServiceStatus) {
         "│  Ready: {}/{:<5} Available: {:<5} Updated: {:<5} Unavailable: {:<11}│",
         rep.ready, rep.desired, rep.available, rep.updated, rep.unavailable
     );
-    println!("└{}┘", thin_sep);
-    println!();
+    crate::ui::print_thin_box_bottom();
 
     // Conditions
     if !status.deployment.conditions.is_empty() {
@@ -1365,8 +1362,7 @@ fn print_text_status(status: &ServiceStatus) {
                 icon, cond.condition_type, cond.status, reason
             );
         }
-        println!("└{}┘", thin_sep);
-        println!();
+        crate::ui::print_thin_box_bottom();
     }
 
     // Pods Section
@@ -1408,8 +1404,7 @@ fn print_text_status(status: &ServiceStatus) {
                 println!("│    └─ IP: {:<68}│", ip.dimmed());
             }
         }
-        println!("└{}┘", thin_sep);
-        println!();
+        crate::ui::print_thin_box_bottom();
     }
 
     // Containers Section
@@ -1461,8 +1456,7 @@ fn print_text_status(status: &ServiceStatus) {
                 );
             }
         }
-        println!("└{}┘", thin_sep);
-        println!();
+        crate::ui::print_thin_box_bottom();
     }
 
     // Related Services Section
@@ -1526,8 +1520,7 @@ fn print_text_status(status: &ServiceStatus) {
             );
         }
 
-        println!("└{}┘", thin_sep);
-        println!();
+        crate::ui::print_thin_box_bottom();
     }
 
     // K8s Services
@@ -1548,8 +1541,7 @@ fn print_text_status(status: &ServiceStatus) {
                 println!("│    └─ Ports: {:<64}│", svc.ports.join(", ").dimmed());
             }
         }
-        println!("└{}┘", thin_sep);
-        println!();
+        crate::ui::print_thin_box_bottom();
     }
 
     // Migrations Section
@@ -1574,8 +1566,7 @@ fn print_text_status(status: &ServiceStatus) {
                 duration
             );
         }
-        println!("└{}┘", thin_sep);
-        println!();
+        crate::ui::print_thin_box_bottom();
     }
 
     // Events Section
@@ -1604,8 +1595,7 @@ fn print_text_status(status: &ServiceStatus) {
                 event.count.to_string().dimmed()
             );
         }
-        println!("└{}┘", thin_sep);
-        println!();
+        crate::ui::print_thin_box_bottom();
     }
 
     // Footer
