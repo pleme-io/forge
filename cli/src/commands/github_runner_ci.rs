@@ -359,7 +359,7 @@ pub async fn execute(
         println!();
 
         // Push to Attic
-        info!("📤 Pushing to Attic cache...");
+        crate::info_attic_push!();
         debug!("Pushing {} to cache {}", build_output, cache_name);
 
         // Delegated to the typed
