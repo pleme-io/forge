@@ -4871,6 +4871,115 @@ pub fn write_tag_field<W: std::io::Write>(
     writeln!(w, "🏷\u{fe0f}  {}: {}", label, value)
 }
 
+/// Prints the one-line `"📦 Deployed: {registry}:{tag}"` (`📦`
+/// PACKAGE glyph + single space, literal `Deployed: ` label,
+/// then the composed `registry:tag` image reference joined by a
+/// bare colon) zero-indent deployment-postamble image-ref callout
+/// every pre-lift consumer spelled inline as
+/// `println!("📦 Deployed: {}:{}", registry, <tag|git_sha>);`
+/// across 2 command modules (`commands/{deploy (post-`✅
+/// Deployment Complete!` boxed banner in `deploy_service`),
+/// github_runner_ci (post-`✅ GitHub Runner CI Complete!` boxed
+/// banner in `execute`)}.rs`). Marks the "which container image
+/// reference just got wired into the cluster" single-row readout
+/// a deploy-family command emits IMMEDIATELY after its green
+/// completion banner — the operator's anchor for the exact
+/// `<registry>:<tag>` string reconciled by FluxCD.
+///
+/// # Distinct from every peer `ui::print_*` primitive
+///
+/// [`print_tag_field`] carries a `🏷️  ` LABEL glyph with the
+/// U+FE0F VS16 selector, a two-space glyph→label gap, and a
+/// caller-supplied `impl Display` value slot — this primitive
+/// carries a `📦` PACKAGE glyph (no VS16), a one-space glyph→
+/// label gap, a FIXED `Deployed` label, and a TWO-part
+/// `registry:tag` value shape joined by a bare colon rather than
+/// a colon-space connective. [`print_path_label`] carries a `📂`
+/// FILE FOLDER glyph with a `Path.display()`-projected value —
+/// DIFFERENT glyph, DIFFERENT semantic role (a filesystem-role
+/// row vs. a deployed-image-ref row). [`print_pushed_image_ref_list`]
+/// emits a `   • <registry>:<tag>` three-space bulleted enumeration
+/// of every tag PUSHED to a registry in the `push` / `bootstrap`
+/// pipelines' post-push summary — DIFFERENT indent (three-space
+/// vs. zero), DIFFERENT arity (a list of `[String]` tags vs. a
+/// single `tag` scalar), DIFFERENT semantic role (a bullet in a
+/// listing of everything pushed, one row per tag, vs. a top-level
+/// preamble row naming THE one image the deploy just committed
+/// into the GitOps overlay). Folding this primitive into any peer
+/// would collapse the deployment-postamble anchor's zero-indent
+/// visual weight against the bulleted-listing grammar, or drift
+/// the fixed `Deployed` label into a caller-supplied slot the
+/// two consumers already agreed on.
+///
+/// # `Display` value on each half, caller-supplied
+///
+/// Both the `registry` and `tag` halves accept `impl Display`
+/// so the two pre-lift consumers can pass either a plain `&str`
+/// (`registry: &str`, `tag: &str`) or a colored `String`
+/// (`registry.cyan()`) transparently. The bare colon between the
+/// two halves is load-bearing signal — a fusion that inserted a
+/// space (`{}: {}`) would silently drift the visual grammar into
+/// a labeled `key: value` shape and break the operator's
+/// muscle-memory grep for the pushable image reference form.
+///
+/// # stdout, not stderr
+///
+/// Every pre-lift consumer routed through `println!` (stdout),
+/// not `eprintln!` (stderr). The primitive preserves that
+/// routing: an operator running a `forge deploy` /
+/// `forge github-runner-ci` invocation and redirecting only
+/// stdout to a deployment log sees the deployed image-ref
+/// anchor; an operator watching stderr for warnings sees only
+/// warnings.
+///
+/// # Compounding
+///
+/// Pre-lift 2 sibling sites each restated the `println!("📦
+/// Deployed: {}:{}", registry, <tag|git_sha>)` grammar
+/// verbatim, with the `📦` glyph, the zero indent, the literal
+/// `Deployed: ` label, the bare colon connective between
+/// registry and tag, and the two `Display` interpolations all
+/// spelled inline. A future palette adjustment (a swap of the
+/// `📦` PACKAGE glyph for `🚢` SHIP or `📬` MAILBOX under a
+/// leaner deployment grammar, a promotion of the label to
+/// `.bold()` or of the tag to `.cyan()` under a themed readout,
+/// a shift of the zero indent to two-space under a standardized
+/// preamble grammar, an OTLP `image_deployed` observability
+/// event wired alongside the print carrying the exact
+/// `(registry, tag)` pair, a fusion with a `flux_reconcile`
+/// step-completion hook so the readout is emitted at the point
+/// of the actual reconciliation) had to hit 2 sites in lockstep
+/// or drift the visual grammar; post-lift it hits ONE typed
+/// body. Delegates to [`write_deployed_image_ref`] against
+/// [`std::io::stdout()`]; the writer split exists so the
+/// fail-before-pass test can pin the one-line body, the zero
+/// indent, the `📦 ` glyph + single-space prefix, the literal
+/// `Deployed: ` label, the bare-colon `registry:tag`
+/// connective, and the caller-supplied ANSI reproduction by
+/// inspecting emitted bytes rather than shelling out and
+/// grepping stdout.
+pub fn print_deployed_image_ref(registry: impl std::fmt::Display, tag: impl std::fmt::Display) {
+    let _ = write_deployed_image_ref(&mut std::io::stdout().lock(), &registry, &tag);
+}
+
+/// Writer-taking sibling to [`print_deployed_image_ref`]. Emits
+/// the single `📦 Deployed: <registry>:<tag>` line via
+/// [`writeln!`] against the supplied writer.
+/// [`print_deployed_image_ref`] is the stdout adapter; this
+/// variant exists so tests can pin the one-line body, the zero
+/// indent, the `📦 ` PACKAGE glyph + single-space prefix, the
+/// literal `Deployed: ` label, the bare-colon `registry:tag`
+/// connective, and the caller-supplied `Display`-formatted value
+/// bytes' byte-for-byte reproduction (including any `.cyan()` /
+/// `.dimmed()` ANSI from either half) without capturing stdout.
+pub fn write_deployed_image_ref<W: std::io::Write>(
+    w: &mut W,
+    registry: &dyn std::fmt::Display,
+    tag: &dyn std::fmt::Display,
+) -> std::io::Result<()> {
+    writeln!(w, "📦 Deployed: {}:{}", registry, tag)
+}
+
 /// Prints the one-line `"   {} <suffix>"` (three-space indent +
 /// `.bright_cyan()`-colored `forge` prefix + single space + plain
 /// uncolored subcommand suffix) example-invocation grammar every
@@ -16814,6 +16923,232 @@ mod tests {
                  primitive body every three-space `>>.dimmed() + \
                  env.cyan().bold()` per-env scope-open banner in the \
                  crate now delegates through."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_deployed_image_ref`].
+    /// Pins the primitive's one-line body, the ZERO-space indent, the
+    /// `📦` PACKAGE glyph (U+1F4E6, no VS16 variation selector) + ONE-
+    /// space glyph→label gap, the literal `Deployed:` label + one space
+    /// value connective, the BARE-colon `<registry>:<tag>` value shape
+    /// (no space either side of the colon), the plain (uncolored) label
+    /// span, and the trailing newline — every observable shape the 2
+    /// pre-lift consumers depended on. Also pins a colored-registry
+    /// pass: the caller-supplied `.cyan()` ANSI escape reaches the
+    /// writer verbatim on the value side and leaves the label side
+    /// plain. A regression that swapped `📦` for `🚢`/`📬`, promoted
+    /// the label to `.bold()`, replaced the bare colon with a colon-
+    /// space `key: value` connective, hoisted the primitive onto a
+    /// leading indent, or swapped `writeln!` for `write!` — each such
+    /// regression trips exactly one assertion here.
+    #[test]
+    fn write_deployed_image_ref_emits_exactly_one_zero_indent_package_deployed_registry_colon_tag_line(
+    ) {
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        // Plain-registry / plain-tag pass — the pre-lift shape both
+        // consumer sites emit verbatim.
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_deployed_image_ref(&mut buf, &"ghcr.io/pleme-io/forge", &"amd64-a1b2c3d")
+            .expect("write_deployed_image_ref against a Vec<u8> writer must succeed");
+        let out = String::from_utf8(buf)
+            .expect("write_deployed_image_ref must emit valid UTF-8 (the pre-lift println!s did)");
+
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_deployed_image_ref must emit exactly one line — the \
+             pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        assert_eq!(
+            lines[0], "📦 Deployed: ghcr.io/pleme-io/forge:amd64-a1b2c3d",
+            "write_deployed_image_ref must render `📦 Deployed: \
+             <registry>:<tag>` byte-for-byte matching the pre-lift \
+             inline `println!(\"📦 Deployed: {{}}:{{}}\", registry, \
+             <tag|git_sha>)` output; got {:?}",
+            lines[0]
+        );
+
+        assert!(
+            !lines[0].starts_with(' '),
+            "line 0 must NOT begin with any leading whitespace — every \
+             pre-lift consumer emitted the row at ZERO indent (top-level \
+             deployment-postamble scope, one indent level up from the \
+             `print_field` in-body readout); got {:?}",
+            lines[0]
+        );
+
+        assert!(
+            lines[0]
+                .as_bytes()
+                .windows(4)
+                .any(|w| w == [0xf0, 0x9f, 0x93, 0xa6]),
+            "line 0 must carry the U+1F4E6 `📦` PACKAGE codepoint as \
+             the four-byte UTF-8 sequence `f0 9f 93 a6` — a swap to \
+             `🚢` (SHIP), `📬` (MAILBOX), or an ASCII fallback \
+             silently changes the visual grammar; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('\u{fe0f}'),
+            "line 0 must NOT carry the U+FE0F VS16 variation selector \
+             — the `📦` PACKAGE glyph has no text presentation form to \
+             disambiguate from, and every pre-lift consumer omitted \
+             VS16 (unlike the `🏷️` LABEL glyph in \
+             `print_tag_field`); got {:?}",
+            lines[0]
+        );
+
+        assert!(
+            lines[0].starts_with("📦 Deployed: "),
+            "line 0 must carry EXACTLY one space between the `📦` \
+             emoji and `Deployed:` (a fusion that stretched it to two \
+             spaces would drift from the pre-lift grammar the two \
+             consumer sites share); got {:?}",
+            lines[0]
+        );
+
+        assert!(
+            !lines[0].contains(": ghcr.io/pleme-io/forge :"),
+            "the `<registry>:<tag>` value must be joined by a BARE \
+             colon with NO surrounding whitespace — a fusion that \
+             inserted a colon-space `key: value` connective on the \
+             registry:tag half would drift the operator's muscle-memory \
+             grep for the pushable image reference form; got {:?}",
+            lines[0]
+        );
+
+        assert!(
+            !lines[0].contains("\x1b["),
+            "write_deployed_image_ref must emit NO ANSI escape on the \
+             plain-value baseline (label side plain, registry+tag side \
+             plain) — both pre-lift consumers passed plain `String` / \
+             `&str` values; got {:?}",
+            lines[0]
+        );
+
+        assert!(
+            out.ends_with('\n'),
+            "write_deployed_image_ref must emit a trailing `\\n` (the \
+             pre-lift `println!` did); got {:?}",
+            out
+        );
+
+        // Colored-registry pass — the primitive accepts `impl Display`
+        // on both halves so a future themed readout can wrap the
+        // registry with `.cyan()` without a signature change; the
+        // wrapper's ANSI escape must reach the writer verbatim on the
+        // value side while the label side stays plain.
+        let mut buf2: Vec<u8> = Vec::new();
+        let registry = "ghcr.io/pleme-io/forge".cyan();
+        super::write_deployed_image_ref(&mut buf2, &registry, &"amd64-a1b2c3d")
+            .expect("write_deployed_image_ref with a colored registry must succeed");
+        let out2 = String::from_utf8(buf2)
+            .expect("write_deployed_image_ref must emit valid UTF-8 for colored");
+        let line = out2.lines().next().expect("one line");
+        assert!(
+            line.starts_with("📦 Deployed: "),
+            "colored-registry pass must still emit the `📦 Deployed: ` \
+             label prefix at ZERO indent, plain; got {:?}",
+            line
+        );
+        assert!(
+            line.contains("\x1b["),
+            "colored-registry pass MUST forward the caller's ANSI \
+             escape verbatim onto the value side (a future themed \
+             readout could wrap the registry with `.cyan()` and \
+             depends on the ANSI reaching the terminal); got {:?}",
+            line
+        );
+        let prefix = "📦 Deployed: ";
+        assert!(
+            !line[..prefix.len()].contains("\x1b["),
+            "the `📦 Deployed: ` prefix MUST stay ANSI-free even when \
+             the value is colored — a regression that promoted the \
+             label to `.bold()` / `.cyan()` under a themed grammar \
+             would leak an escape into the prefix; got {:?}",
+            &line[..prefix.len()]
+        );
+        assert!(
+            line.ends_with("amd64-a1b2c3d"),
+            "colored-registry pass must still emit the bare-colon \
+             `<registry>:<tag>` connective with the plain tag half on \
+             the far right; got {:?}",
+            line
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_deployed_image_ref`] no longer spell the
+    /// `println!("📦 Deployed: {}:{}", registry, <tag|git_sha>)` shape
+    /// inline across the 2 pre-lift command modules. Structural
+    /// regression shield — without it, a future refactor could
+    /// silently re-inline the one-liner and reopen the 2-site
+    /// duplication class this lift closed. Enforced against each
+    /// module body BEFORE its first `#[cfg(test)]` region so a
+    /// test-support mention of the raw shape does not defeat the
+    /// shield.
+    ///
+    /// The exact-shape needle is `println!("📦 Deployed:` (opening
+    /// quote + `📦` PACKAGE glyph + single space + literal `Deployed:`
+    /// label prefix) — the pre-lift `println!("📦 Deployed: {}:{}",
+    /// registry, ...)` grammar's unmistakable prefix. A sibling shape
+    /// carrying a different glyph (`println!("🎯 ...`, `println!("🚀
+    /// ...`), a different label (`println!("📦 Namespace:`), or a
+    /// runtime-composed row is OUT of scope by construction — the
+    /// needle's `"📦 Deployed:` character sequence rejects each.
+    #[test]
+    fn print_deployed_image_ref_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str, bool)] = &[
+            (
+                include_str!("commands/deploy.rs"),
+                "commands/deploy.rs",
+                false,
+            ),
+            (
+                include_str!("commands/github_runner_ci.rs"),
+                "commands/github_runner_ci.rs",
+                true,
+            ),
+        ];
+        for (source, module_path, has_cfg_test) in CALLERS {
+            let body: &str = if *has_cfg_test {
+                crate::test_support::module_body_before_first_cfg_test(source, module_path)
+            } else {
+                source
+            };
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("println!(\"\u{1F4E6} Deployed:") {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `println!(\"\u{1F4E6} Deployed: {{}}:{{}}\", \
+                     registry, <tag|git_sha>)` zero-indent deployment-\
+                     postamble image-ref stanza — that shape was lifted \
+                     onto `crate::ui::print_deployed_image_ref`. A \
+                     re-inline would silently reopen the 2-site \
+                     duplication class this shield exists to close. \
+                     Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            let forward_hits = body.matches("crate::ui::print_deployed_image_ref(").count();
+            assert_eq!(
+                forward_hits, 1,
+                "{module_path} body must forward to \
+                 `crate::ui::print_deployed_image_ref(...)` at exactly \
+                 one site — one per pre-lift consumer in this module. \
+                 A fusion that folded the two consumer sites into one \
+                 call or dropped one of the deployed image-ref rows \
+                 silently fails here. Found {forward_hits} forwarding \
+                 hits."
             );
         }
     }

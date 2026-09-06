@@ -758,7 +758,7 @@ pub async fn execute(
         crate::ui::BoxedBannerStyle::GreenBold,
         "✅ GitHub Runner CI Complete!",
     );
-    println!("📦 Deployed: {}:{}", registry, git_sha);
+    crate::ui::print_deployed_image_ref(registry, &git_sha);
     println!("🎯 Namespace: {}", namespace);
     println!("🚀 StatefulSet: {}", name);
     println!();

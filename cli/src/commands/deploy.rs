@@ -184,7 +184,7 @@ pub async fn execute(
         crate::ui::BoxedBannerStyle::GreenBold,
         "✅ Deployment Complete!",
     );
-    println!("📦 Deployed: {}:{}", registry, tag);
+    crate::ui::print_deployed_image_ref(registry, tag);
     println!("🎯 Strategy: FluxCD GitOps");
     println!();
     println!("Monitor deployment:");
