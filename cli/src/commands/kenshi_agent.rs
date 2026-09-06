@@ -170,18 +170,25 @@ async fn update_kustomization_image(
             updated_images = true;
             info!("   Updated images[] newTag to: {}", new_tag);
         }
-        // Update AGENT_IMAGE env var reference if present
+        // Update AGENT_IMAGE env var reference if present. The
+        // registry-anchored `{prefix}{new_image}{suffix}\n` splice
+        // (`line.find(registry)` → `find(|c| c == '"' || c == '\'' ||
+        // c == ' ' || c == '\n')` → three-piece format) now rides the
+        // pure `crate::repo::splice_registry_anchored_image_ref`
+        // primitive — sibling of the `nix_builder.rs::
+        // update_kenshi_builder_image` BUILDER_IMAGE arm — so the
+        // delimiter alphabet, the trailing-newline shape, and the miss
+        // envelope stay pinned at ONE body across both flows. The
+        // pre-lift `unwrap_or(0) + if start_idx > 0` conservative guard
+        // becomes the `if let Some { .. } else { push verbatim }` shape
+        // below: byte-identical because the outer `line.contains(
+        // "AGENT_IMAGE") && line.contains("kenshi-agent:")` predicate
+        // makes an unindented AGENT_IMAGE line unreachable in practice.
         else if line.contains("AGENT_IMAGE") && line.contains("kenshi-agent:") {
-            // Replace the image:tag pattern
-            let start_idx = line.find(registry).unwrap_or(0);
-            if start_idx > 0 {
-                let prefix = &line[..start_idx];
-                let after_registry = &line[start_idx..];
-                let tag_end = after_registry
-                    .find(|c: char| c == '"' || c == '\'' || c == ' ' || c == '\n')
-                    .unwrap_or(after_registry.len());
-                let suffix = &after_registry[tag_end..];
-                new_content.push_str(&format!("{}{}{}\n", prefix, new_image, suffix));
+            if let Some(rewritten) =
+                crate::repo::splice_registry_anchored_image_ref(line, registry, &new_image)
+            {
+                new_content.push_str(&rewritten);
                 updated_env = true;
                 info!("   Updated AGENT_IMAGE env to: {}", new_image);
             } else {
