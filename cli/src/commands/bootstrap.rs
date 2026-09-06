@@ -274,7 +274,7 @@ pub async fn push_single(
     // Push
     let registry = binary_def.registry_url();
     info!("🎯 Registry: {}", registry);
-    info!("🏷️  Tags: {}", tags.join(", "));
+    crate::info_tags_field!(tags);
     println!();
 
     push_tags_with_progress(&image_path, &registry, &tags, &ghcr_token, retries).await?;
