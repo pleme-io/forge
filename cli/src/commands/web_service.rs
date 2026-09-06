@@ -193,8 +193,11 @@ pub async fn web_regenerate(product: String, service: String, repo_root: String)
     crate::ui::print_bullet_item(&format!("{}", hanabi_dir.join("Cargo.nix").display()));
     println!();
     crate::ui::print_next_steps_heading();
-    println!("  1. Review the changes: git diff");
-    println!("  2. Commit: git add -A && git commit -m 'chore: regenerate deps'");
+    crate::ui::print_next_step(1, "Review the changes: git diff");
+    crate::ui::print_next_step(
+        2,
+        "Commit: git add -A && git commit -m 'chore: regenerate deps'",
+    );
     println!();
 
     Ok(())
@@ -282,9 +285,12 @@ pub async fn web_cargo_update(product: String, service: String, repo_root: Strin
     crate::ui::print_bullet_item(&format!("{}", hanabi_dir.join("Cargo.nix").display()));
     println!();
     crate::ui::print_next_steps_heading();
-    println!("  1. Review the changes: git diff");
-    println!("  2. Test the build: cargo build");
-    println!("  3. Commit: git add -A && git commit -m 'chore: update Hanabi deps'");
+    crate::ui::print_next_step(1, "Review the changes: git diff");
+    crate::ui::print_next_step(2, "Test the build: cargo build");
+    crate::ui::print_next_step(
+        3,
+        "Commit: git add -A && git commit -m 'chore: update Hanabi deps'",
+    );
     println!();
 
     Ok(())

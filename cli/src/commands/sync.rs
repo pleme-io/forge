@@ -425,9 +425,9 @@ pub async fn execute(working_dir: &Path, skip_entities: bool) -> Result<SyncResu
     println!();
 
     crate::ui::print_next_steps_heading();
-    println!("  1. Review generated files in web/src/gql/");
-    println!("  2. Run 'cd web && bun run type-check' to verify types");
-    println!("  3. Run 'nix run .#release' for full release");
+    crate::ui::print_next_step(1, "Review generated files in web/src/gql/");
+    crate::ui::print_next_step(2, "Run 'cd web && bun run type-check' to verify types");
+    crate::ui::print_next_step(3, "Run 'nix run .#release' for full release");
 
     Ok(SyncResult {
         migration_count,

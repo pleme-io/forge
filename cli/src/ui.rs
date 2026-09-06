@@ -3972,6 +3972,99 @@ pub fn write_next_steps_heading<W: std::io::Write>(w: &mut W) -> std::io::Result
     writeln!(w, "{}", NEXT_STEPS_HEADING_TEXT)
 }
 
+/// Prints the one-line `"  <index>. <text>"` (two-space indent + 1-based
+/// decimal ordinal + `. ` separator + plain uncolored instruction text)
+/// numbered next-step-instruction grammar 13 pre-lift consumer sites
+/// spelled inline as `println!("  <N>. <text>")` across 3 command
+/// modules (`commands/{web_service (×5: 1..=2 under regenerate + 1..=3
+/// under cargo-update), sync (×3: 1..=3 under sync), developer_tools
+/// (×5: 1..=2 under regenerate + 1..=3 under cargo-update)}.rs`).
+/// Marks one row inside the numbered "what to do next" instruction list
+/// that follows a [`print_next_steps_heading`] label — every pre-lift
+/// site emitted 2 or 3 consecutive rows starting at index `1`,
+/// enumerating the review/build/commit steps the operator reads after
+/// the surrounding pipeline reports a completion banner.
+///
+/// # Distinct from every peer `ui::print_*` primitive
+///
+/// [`print_bullet_item`] carries the same two-space indent but a `•`
+/// U+2022 BULLET glyph, marking an UNORDERED declarative-list entry
+/// (a "Generated files:" catalog row) rather than an ORDERED
+/// instruction step — folding this primitive into it would erase the
+/// ordinal that carries the reader through the sequence.
+/// [`print_numbered_step_heading`] carries a `Step <label>: <title>`
+/// bold-title heading inside a pipeline body; this primitive is the
+/// leaf ROW under a `Next steps:` post-completion heading, a distinct
+/// scope (a pipeline STEP that a build enters vs. a post-completion
+/// INSTRUCTION the operator reads). [`print_numbered_check_heading`]
+/// carries a `Check <index>: <title>` `.blue()`-wrapped validation
+/// heading — same numeric ordinal, DIFFERENT scope and DIFFERENT
+/// palette (a validation check's own heading vs. a plain instruction
+/// row under a heading a sibling primitive emits).
+///
+/// # `u32` index locks the positive-ordinal invariant
+///
+/// Pre-lift every consumer spelled the ordinal as a plain decimal
+/// starting at `1` and rising by one per row (`1.`, `2.`, `3.`); no
+/// consumer emitted `0.` or a fractional `2.5.` (that grammar belongs
+/// to the sibling [`print_numbered_step_heading`], which composes
+/// pipeline-step labels like `"2.5/9"` and takes a `&str`). A `u32`
+/// index locks the "positive ordinal" invariant at the type boundary
+/// per THEORY §V.1 unrepresentability: a caller reaching for `-1` or
+/// `"2.5"` would fail to compile rather than silently emit a garbled
+/// row.
+///
+/// # No coloring, two-space indent
+///
+/// Pre-lift every consumer spelled the row as a plain
+/// `println!("  <N>. <text>")` with no `.dimmed()` / `.bold()` /
+/// `.cyan()` chain on the indent, ordinal, separator, or text. The
+/// primitive preserves that: neither the indent nor the ordinal nor
+/// the `. ` separator reach the writer through any [`colored`] chain,
+/// so no `\x1b[<..>m` ANSI sequence appears in the rendered line. The
+/// two-space indent matches the sibling [`print_bullet_item`] wider-
+/// body catalog grammar — a "Next steps:" numbered list and a
+/// "Generated files:" bulleted list emit at the same indent so the
+/// two post-completion catalogs align under their headings.
+///
+/// # Compounding
+///
+/// Pre-lift 13 sibling sites each restated the `println!("  <N>.
+/// <text>")` grammar verbatim, with the two-space indent, the numeric
+/// ordinal, the `. ` separator, and the instruction text all spelled
+/// inline. A future adjustment (a swap of the two-space indent for a
+/// four-space wider-body under a leaner post-completion catalog
+/// grammar, a promotion of the ordinal to `.bold()` for heavier
+/// emphasis against the surrounding body, a swap of the `. ` separator
+/// for a `) ` closing-paren under a leaner numbered-list grammar, an
+/// OTLP `next_step_row_emitted` observability event wired alongside
+/// the print, a swap of the plain decimal for a zero-padded `01.` /
+/// `02.` under a fixed-width layout) had to hit 13 sites in lockstep
+/// or drift the visual grammar; post-lift it hits ONE typed body.
+/// Delegates to [`write_next_step`] against [`std::io::stdout()`]; the
+/// writer split exists so the fail-before-pass test can pin the one-
+/// line body, the two-space indent, the decimal ordinal, the `. `
+/// separator, and the absence of every `\x1b[<..>m` ANSI palette
+/// sequence by inspecting emitted bytes rather than shelling out and
+/// grepping stdout.
+pub fn print_next_step(index: u32, text: &str) {
+    let _ = write_next_step(&mut std::io::stdout().lock(), index, text);
+}
+
+/// Writer-taking sibling to [`print_next_step`]. Emits the single
+/// `"  <index>. <text>"` line via [`writeln!`] against the supplied
+/// writer. [`print_next_step`] is the stdout adapter; this variant
+/// exists so tests can pin the one-line body, the two-space indent,
+/// the decimal ordinal, the `. ` separator, and the ABSENCE of every
+/// ANSI palette sequence without capturing stdout.
+pub fn write_next_step<W: std::io::Write>(
+    w: &mut W,
+    index: u32,
+    text: &str,
+) -> std::io::Result<()> {
+    writeln!(w, "  {}. {}", index, text)
+}
+
 /// Literal heading text the [`print_generated_files_heading`] /
 /// [`write_generated_files_heading`] pair emits — every pre-lift
 /// consumer spelled this same sixteen-byte string
@@ -13089,6 +13182,219 @@ mod tests {
                  consumer sites into one call or dropped one of the \
                  headings silently fails here. Found {forward_hits} \
                  forwarding hits."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_next_step`]. Pins
+    /// the one-line body every pre-lift consumer spelled verbatim
+    /// (`println!("  <N>. <text>")`): a two-space indent, a plain
+    /// decimal ordinal, a `. ` separator, then the instruction text. A
+    /// silent contract drift a future rewrite might introduce —
+    /// widening the indent to four spaces (collapsing the two post-
+    /// completion catalogs' shared indent grammar with
+    /// [`super::print_bullet_item`]), swapping the `. ` separator for
+    /// `) ` under a leaner numbered-list grammar, promoting the ordinal
+    /// to `.bold()` (making it compete for weight with the instruction
+    /// text), promoting the whole line to `.dimmed()` (making it recede
+    /// so far the reader misses the step boundary), slipping a leading
+    /// blank line into the primitive body (visually detaching the row
+    /// from its sibling rows) — flips this assertion rather than
+    /// compiling and silently diverging the 13 consumer sites' visual
+    /// grammar.
+    #[test]
+    fn write_next_step_emits_exactly_one_two_indented_uncolored_decimal_ordinal_instruction_line() {
+        // Force ANSI-emission serialization against peer banner tests
+        // via [`AnsiOverrideForTest`] — even though this primitive
+        // emits NO ANSI sequences, the guard's presence pins the
+        // discipline: if a future refactor slips a `.bold()` /
+        // `.dimmed()` / `.cyan()` chain into the writer, the guard
+        // ensures the sequence actually reaches the buffer for
+        // detection here rather than being auto-stripped by
+        // [`colored`]'s non-tty fallback. The guard's Drop restores
+        // colored's auto-detection on scope exit AFTER releasing the
+        // shared [`ANSI_OVERRIDE_LOCK`].
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_next_step(&mut buf, 2, "Commit: git add -A && git commit")
+            .expect("write_next_step against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_next_step must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — the pre-lift stanza is one `println!`
+        // carrying no framing blank.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_next_step must emit exactly one line — the pre-lift \
+             stanza is one `println!` carrying no framing blank; got \
+             {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The exact composed body reaches the rendered line verbatim.
+        // Compare against a hand-composed expected form so a silent
+        // divergence in the format string (a swap of `". "` for `") "`,
+        // a drop of the indent, a swap of a plain decimal for a
+        // zero-padded `02.`) flips this.
+        assert_eq!(
+            lines[0], "  2. Commit: git add -A && git commit",
+            "line 0 must equal the pre-lift `\"  <N>. <text>\"` \
+             composed form verbatim — the two-space indent, the plain \
+             decimal ordinal `2`, the `. ` separator, then the \
+             instruction text; got {:?}",
+            lines[0]
+        );
+
+        // Exactly two spaces of indent followed by the decimal ordinal
+        // — NOT zero-space (the sibling `println!("Next steps:")`
+        // heading grammar sitting immediately above the numbered list),
+        // NOT four-space (the sibling [`print_sub_bullet_item`] nested
+        // leaf grammar). A fusion that widened the indent to four or
+        // more spaces also flips this.
+        assert!(
+            lines[0].starts_with("  2."),
+            "line 0 must begin with a two-space indent followed by the \
+             plain decimal ordinal verbatim — every pre-lift consumer \
+             spelled `\"  <N>. <text>\"`, so the indent + ordinal + `.` \
+             prefix must reach the writer OUTSIDE any coloring span; \
+             got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].starts_with("    "),
+            "line 0 must NOT begin with a four-space indent — that \
+             indent belongs to the sibling nested `print_sub_bullet_item` \
+             / `print_arrow_hint` leaf grammar, not this wider-body \
+             numbered next-step grammar; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].starts_with("   "),
+            "line 0 must NOT begin with a three-space indent — that \
+             indent belongs to the sibling in-body `print_step_*` \
+             grammar, not this wider-body next-step grammar; got {:?}",
+            lines[0]
+        );
+
+        // The `. ` separator sits between ordinal and text — NOT `) `
+        // (a leaner numbered-list grammar), NOT `: ` (a labeled-field
+        // grammar the sibling `print_field` primitive owns).
+        assert!(
+            lines[0].contains(". "),
+            "line 0 must carry the `. ` separator between ordinal and \
+             text verbatim — every pre-lift consumer spelled the row as \
+             `\"  <N>. <text>\"`; a swap to `) ` or `: ` silently \
+             changes the visual grammar; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains(") "),
+            "line 0 must NOT contain `) ` — that separator belongs to a \
+             hypothetical leaner numbered-list grammar the pre-lift \
+             consumers deliberately avoided; got {:?}",
+            lines[0]
+        );
+
+        // Absolutely no ANSI escape sequence reaches the writer — the
+        // pre-lift consumers all spelled the row plain (no `.bold()` /
+        // `.dimmed()` / `.cyan()` chain). A silent palette promotion
+        // would paint the inert instruction with a status color,
+        // collapsing the visual distinction against the sibling
+        // `print_step_pass` / `print_step_failure` semantic-loaded
+        // grammars.
+        assert!(
+            !lines[0].contains("\x1b["),
+            "line 0 must NOT contain any `\\x1b[` ANSI escape prefix — \
+             every pre-lift consumer emitted the numbered instruction \
+             row plain, and a silent palette promotion would collide \
+             with sibling colored primitives; got {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `println!`, so the newline is part of the contract.
+        assert!(
+            out.ends_with('\n'),
+            "write_next_step must emit a trailing `\\n` (the pre-lift \
+             `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto [`super::print_next_step`]
+    /// no longer spell the `println!("  <N>. <text>")` shape inline
+    /// across `commands/{web_service.rs, sync.rs, developer_tools.rs}`.
+    /// Structural regression shield — a future refactor could silently
+    /// re-inline the one-liner (e.g. a "just call `println!` directly,
+    /// it's shorter" cleanup) and reopen the 13-site duplication class
+    /// this lift closed. Enforced against each module body BEFORE its
+    /// first `#[cfg(test)]` region so a test-support mention of the raw
+    /// shape does not defeat the shield.
+    ///
+    /// The exact-shape needle covers the pre-lift ordinals actually
+    /// spelled inline (`"  1. "`, `"  2. "`, `"  3. "` — the numbered
+    /// next-step consumer never went past three rows). A re-inline of
+    /// any of the three ordinals with any suffix completing the shape
+    /// flips the shield.
+    ///
+    /// The positive count is pinned per-module at the pre-lift site
+    /// count (`web_service.rs` ×5, `sync.rs` ×3, `developer_tools.rs`
+    /// ×5). A fusion that folded two consumer sites into one call or
+    /// dropped a row silently fails here — the negative half above
+    /// would still pass, but the positive count would fall below the
+    /// pre-lift census.
+    #[test]
+    fn print_next_step_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str, usize)] = &[
+            (
+                include_str!("commands/web_service.rs"),
+                "commands/web_service.rs",
+                5,
+            ),
+            (include_str!("commands/sync.rs"), "commands/sync.rs", 3),
+            (
+                include_str!("commands/developer_tools.rs"),
+                "commands/developer_tools.rs",
+                5,
+            ),
+        ];
+        const NEEDLES: &[&str] = &["\"  1. ", "\"  2. ", "\"  3. "];
+        for (source, module_path, expected_forwards) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("println!(") {
+                    continue;
+                }
+                for needle in NEEDLES {
+                    if line.contains(needle) {
+                        panic!(
+                            "{module_path}:{lineno} spells the pre-lift \
+                             inline `println!(\"  <N>. <text>\")` \
+                             two-space numbered next-step stanza — that \
+                             shape was lifted onto \
+                             `crate::ui::print_next_step`. A re-inline \
+                             would silently reopen the 13-site \
+                             duplication class this shield exists to \
+                             close. Offending line: {line:?}",
+                            lineno = i + 1
+                        );
+                    }
+                }
+            }
+            let forward_hits = body.matches("crate::ui::print_next_step(").count();
+            assert_eq!(
+                forward_hits, *expected_forwards,
+                "{module_path} body must forward to \
+                 `crate::ui::print_next_step(<INDEX>, \"<TEXT>\")` at \
+                 exactly {expected_forwards} site(s) — one per pre-lift \
+                 consumer row in this module. A fusion that folded two \
+                 rows into one call or dropped a row silently fails \
+                 here. Found {forward_hits} forwarding hits."
             );
         }
     }
