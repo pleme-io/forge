@@ -289,10 +289,7 @@ pub async fn execute(
 
     println!();
     crate::ui::print_success("Images pushed successfully!");
-    for tag in &tags {
-        println!("   • {}:{}", registry, tag);
-    }
-    println!();
+    crate::pushed_image_ref_list::print_pushed_image_ref_list(&registry, &tags);
 
     // Update kustomization.yaml if requested
     if let Some(kustomization_path) = update_kustomization_path {
