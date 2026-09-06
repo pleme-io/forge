@@ -473,15 +473,18 @@ pub async fn execute(
     info!("📝 Updating ConfigMap with GIT_SHA...");
     git::update_configmap_git_sha(&manifest_path, &git_sha).await?;
 
-    // Commit and push
-    info!("📤 Committing to Git...");
-
-    let pb = styled_spinner(SpinnerStyle::Green, "Pushing to main...");
-
-    git::commit_and_push(&manifest_path, &old_tag, &git_sha)?;
-
-    pb.finish_with_message("✅ Pushed to main");
-    println!();
+    // Commit and push — the info-line preamble + green-spinner +
+    // git::commit_and_push + canonical finish-message + trailing
+    // blank line fusion now lives at ONE typed boundary at
+    // `commands::manifest_push::commit_and_push_manifest_with_progress`,
+    // shared with the sibling `commands/deploy.rs` consumer so a
+    // future re-branding of the push target flows to both flows
+    // from one edit.
+    crate::commands::manifest_push::commit_and_push_manifest_with_progress(
+        &manifest_path,
+        &old_tag,
+        &git_sha,
+    )?;
 
     // Trigger FluxCD reconciliation and wait for deployment
     info!("🔄 Triggering FluxCD reconciliation...");
