@@ -417,7 +417,7 @@ pub fn list_binaries() {
 
     for binary in BOOTSTRAP_BINARIES {
         println!("   {} {}", "•".bright_cyan(), binary.name.bright_white());
-        println!("     {}", binary.description.dimmed());
+        crate::ui::print_descriptor_description(binary.description);
         println!(
             "     {} {}",
             "Registry:".dimmed(),

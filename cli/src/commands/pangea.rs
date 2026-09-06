@@ -432,7 +432,7 @@ pub fn list_components() {
 
     for component in PANGEA_COMPONENTS {
         println!("   {} {}", "-".bright_cyan(), component.name.bright_white());
-        println!("     {}", component.description.dimmed());
+        crate::ui::print_descriptor_description(component.description);
         println!(
             "     {} {}",
             "Registry:".dimmed(),

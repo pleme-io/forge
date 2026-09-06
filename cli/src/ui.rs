@@ -2857,6 +2857,116 @@ pub fn write_sub_bullet_item<W: std::io::Write>(w: &mut W, message: &str) -> std
     writeln!(w, "    • {}", message)
 }
 
+/// Prints the one-line `"     {}"` (five-space indent + caller-supplied
+/// text body painted `.dimmed()`) descriptor-card description-line
+/// grammar 3 pre-lift consumer sites spelled inline as
+/// `println!("     {}", <descriptor>.description.dimmed())` across
+/// `commands/{bootstrap (`BOOTSTRAP_BINARIES` iteration in
+/// `list_binaries`), pangea (`PANGEA_COMPONENTS` iteration in
+/// `list_components`), test (`TestSuiteConfig` narration in
+/// `run_test_suite`)}.rs`. Marks the dimmed sub-detail row that sits
+/// under a listing-card head — the human-readable `.description` field
+/// of a static descriptor (a `BootstrapBinary` pushed by `bootstrap
+/// push-all`, a `PangeaComponent` pushed by `pangea push-all`, a
+/// `TestSuiteConfig` executed by `test <service>`). Every pre-lift site
+/// sat exactly one row beneath a bullet head (`"   {} {}"` bullet + name
+/// row in the bootstrap/pangea list-* iterators, the `"  {} Running …"`
+/// suite-header row in `commands/test.rs::run_test_suite`) and used the
+/// five-space indent to nest under it with a `.dimmed()` palette so the
+/// operator scans the head row and the description reads as inert
+/// context.
+///
+/// # Distinct from the other `ui::print_*` primitives
+///
+/// [`print_sub_bullet_item`] carries the four-space `• ` leaf sub-detail
+/// under a `print_report_item` / `print_pending_item` head — SAME plain
+/// `Display` interpolation of the message body but DIFFERENT indent
+/// width (four vs. five spaces), DIFFERENT prefix (a `• ` U+2022 BULLET
+/// glyph + space vs. no glyph), DIFFERENT palette (uncolored vs.
+/// `.dimmed()`), and DIFFERENT semantic role (a per-item detail row
+/// under a deployment-report head vs. a descriptor's `.description`
+/// field under a listing-card head). Folding this primitive into
+/// [`print_sub_bullet_item`] would slip a `• ` glyph into every pre-lift
+/// descriptor-card description row and shift the row one space to the
+/// left, colliding with the four-space report-body grammar. [`print_
+/// diagnostic_line`] carries the three-space uncolored captured-line
+/// grammar — DIFFERENT indent width (three vs. five spaces), DIFFERENT
+/// palette (uncolored vs. `.dimmed()`), DIFFERENT semantic role (a raw
+/// subprocess-stdout line inside a diagnostic-block dump vs. a
+/// human-authored descriptor `.description` under a listing card).
+/// [`print_bullet_item`] carries the two-space `• ` wider-body
+/// declarative-list entry — DIFFERENT indent, DIFFERENT prefix,
+/// DIFFERENT palette; folding would flatten the two-tier
+/// `head → indented dimmed description` visual hierarchy the pre-lift
+/// consumers deliberately built. [`print_arrow_hint`] carries the
+/// four-space `→ ` leaf-hint under a `□.dimmed()` watch-item head —
+/// DIFFERENT indent, DIFFERENT prefix, DIFFERENT palette on the glyph.
+///
+/// # `.dimmed()` on the message, not on any prefix
+///
+/// Pre-lift every consumer spelled the palette as `<expr>.dimmed()` on
+/// the interpolated argument, not on a composed line
+/// (`format!("     {}", msg).dimmed()`). The primitive preserves that:
+/// the `\x1b[2m` dim ANSI sequence wraps the message body only, the
+/// five-space indent is emitted OUTSIDE the coloring span, and the
+/// closing `\x1b[0m` reset reaches the writer before the trailing
+/// newline. A promotion that painted the whole line `.dimmed()` would
+/// wrap the indent too, and a terminal without color support (colored
+/// crate's non-tty fallback) would produce byte-identical output only if
+/// the primitive preserves the pre-lift `<val>.dimmed()` shape.
+///
+/// # Five-space indent, one wider than every sibling
+///
+/// Pre-lift every consumer spelled the indent as five literal spaces —
+/// wider than the two-space [`print_bullet_item`] declarative catalog,
+/// the three-space [`print_diagnostic_line`] captured-output row, and
+/// the four-space [`print_sub_bullet_item`] report-detail row. The
+/// five-space indent is deliberate: every pre-lift bullet-head row above
+/// this description sat at three-space (`"   {} {}"` in
+/// bootstrap/pangea's list iterators) or two-space (`"  {} Running …"`
+/// in test.rs's suite header), so the description reads two spaces
+/// inside the head row's leftmost non-space column. A shift to four- or
+/// six-space would collide with the sibling `print_sub_bullet_item`
+/// grammar or drift the visual nesting under the head row.
+///
+/// # Compounding
+///
+/// Pre-lift 3 sibling sites each restated the `println!("     {}",
+/// <descriptor>.description.dimmed())` shape verbatim, with the five-
+/// space indent, the plain `{}` interpolation of a `.dimmed()`-wrapped
+/// argument, and the `.description` field access on a static-descriptor
+/// binding all spelled inline. A future adjustment (a swap of the
+/// five-space indent for four-space under a standardized descriptor-
+/// card grammar, a promotion of the palette from `.dimmed()` to
+/// `.italic()` for stronger differentiation from head rows, an OTLP
+/// `descriptor_description_emitted` observability event wired alongside
+/// the print, a folding of the description body into a `head\n     -
+/// <desc>` shape under a leaner card grammar) had to hit 3 sites in
+/// lockstep or drift the listing-card visual grammar; post-lift it hits
+/// ONE typed body. Delegates to [`write_descriptor_description`] against
+/// [`std::io::stdout()`]; the writer split exists so the fail-before-
+/// pass test can pin the one-line body, the five-space indent, the
+/// `\x1b[2m` dim ANSI wrap on the message-only span, and the absence of
+/// every other palette sequence by inspecting emitted bytes rather than
+/// shelling out and grepping stdout.
+pub fn print_descriptor_description(text: &str) {
+    let _ = write_descriptor_description(&mut std::io::stdout().lock(), text);
+}
+
+/// Writer-taking sibling to [`print_descriptor_description`]. Emits the
+/// single `"     <text.dimmed()>"` line via [`writeln!`] against the
+/// supplied writer. [`print_descriptor_description`] is the stdout
+/// adapter; this variant exists so tests can pin the one-line body, the
+/// five-space indent, the `\x1b[2m` dim ANSI wrap on the message-only
+/// span (never around the indent), and the absence of every other
+/// palette sequence without capturing stdout.
+pub fn write_descriptor_description<W: std::io::Write>(
+    w: &mut W,
+    text: &str,
+) -> std::io::Result<()> {
+    writeln!(w, "     {}", text.dimmed())
+}
+
 /// Prints the one-line `"  {} <message>"` (two-space indent +
 /// `bright_green`-colored `✅` glyph + plain message) wider-body
 /// summary-pass grammar every pre-lift consumer in `commands/test.rs`
@@ -10603,6 +10713,253 @@ mod tests {
              sub-bullet rows silently fails here. Found \
              {forward_hits} forwarding hits."
         );
+    }
+
+    /// Fail-before-pass envelope for
+    /// [`super::write_descriptor_description`]. Pins the one-line body
+    /// every pre-lift consumer spelled verbatim (`println!("     {}",
+    /// <descriptor>.description.dimmed())` across
+    /// `commands/{bootstrap,pangea,test}.rs`): a five-space indent,
+    /// then the caller-supplied text body wrapped in the `\x1b[2m` dim
+    /// ANSI sequence and closed with the `\x1b[0m` reset before the
+    /// trailing newline. A silent contract drift a future rewrite might
+    /// introduce — narrowing the indent to four-space (colliding with
+    /// the sibling [`super::print_sub_bullet_item`] leaf sub-detail
+    /// grammar), widening it to six-space (drifting the visual nesting
+    /// under the head row), promoting the palette from `.dimmed()` to
+    /// `.italic()` / `.cyan()` / `.bright_black()`, folding a leading
+    /// `• ` / `→ ` / `- ` glyph into the primitive body (silently
+    /// shifting the descriptor-card description grammar into a peer
+    /// sub-bullet or leaf-hint grammar), wrapping the composed line in
+    /// `.dimmed()` (so the indent paints dim too rather than the
+    /// message alone), or swapping `writeln!` for `write!` (dropping
+    /// the trailing newline) — flips this assertion rather than
+    /// compiling and silently diverging the 3 consumer sites' visual
+    /// grammar.
+    #[test]
+    fn write_descriptor_description_emits_exactly_one_five_indented_dimmed_line() {
+        // Force ANSI emission (colored auto-drops sequences on a
+        // non-tty stdout) and serialize against peer banner tests via
+        // [`AnsiOverrideForTest`]; its Drop restores colored's
+        // auto-detection on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`].
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_descriptor_description(
+            &mut buf,
+            "PostgreSQL database initialization (users, schemas, extensions)",
+        )
+        .expect("write_descriptor_description against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf).expect(
+            "write_descriptor_description must emit valid UTF-8 (the pre-lift println!s did)",
+        );
+
+        // Exactly one line — the pre-lift stanza is one `println!`,
+        // not two, and carries no framing blank. A refactor that slips
+        // a leading or trailing blank fails here.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_descriptor_description must emit exactly one line — \
+             the pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // Exactly five spaces of indent — NOT four (the sibling
+        // [`print_sub_bullet_item`] four-space `• ` leaf sub-detail
+        // grammar), NOT six or more (a widened indent would drift the
+        // visual nesting under the listing-card head row every
+        // pre-lift consumer built the five-space indent to sit inside).
+        assert!(
+            lines[0].starts_with("     "),
+            "line 0 must begin with a five-space indent — every \
+             pre-lift consumer spelled `println!(\"     {{}}\", \
+             <val>.dimmed())` verbatim, so the five-space indent must \
+             reach the writer OUTSIDE any coloring span; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].starts_with("      "),
+            "line 0 must NOT begin with a six-or-more-space indent — a \
+             widened indent would drift the visual nesting beneath the \
+             listing-card head row; got {:?}",
+            lines[0]
+        );
+
+        // The five-space indent reaches the writer OUTSIDE the dim
+        // coloring span — a promotion that wrapped the composed line
+        // in `.dimmed()` would paint the indent bytes too, so the
+        // opening `\x1b[2m` would land at byte 0 rather than after the
+        // five spaces. Pin that split.
+        assert!(
+            !lines[0].starts_with("\x1b["),
+            "line 0 must NOT begin with an ANSI escape — the five-space \
+             indent is emitted OUTSIDE the coloring span. A promotion \
+             that wrapped the composed line in `.dimmed()` would land \
+             the `\\x1b[2m` at byte 0 rather than after the indent; \
+             got {:?}",
+            lines[0]
+        );
+
+        // The `\x1b[2m` dim ANSI sequence reaches the writer around
+        // the message-only span, opened after the five-space indent
+        // and closed with `\x1b[0m` before the trailing newline. Every
+        // pre-lift consumer spelled the palette as
+        // `<expr>.dimmed()` on the interpolated argument, not on the
+        // composed line, so the dim wrap is around the message only.
+        assert!(
+            lines[0].contains("\x1b[2m"),
+            "line 0 must carry the `\\x1b[2m` dim ANSI escape — every \
+             pre-lift consumer painted the description body \
+             `.dimmed()`; got {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("\x1b[0m"),
+            "line 0 must carry the `\\x1b[0m` ANSI reset closing the \
+             dim span before the trailing newline; got {:?}",
+            lines[0]
+        );
+
+        // The message text reaches the rendered line verbatim inside
+        // the dim wrap.
+        assert!(
+            lines[0].contains("PostgreSQL database initialization (users, schemas, extensions)"),
+            "line 0 must carry the message body verbatim inside the \
+             dim wrap; got {:?}",
+            lines[0]
+        );
+
+        // ABSENCE of every other palette ANSI sequence around the
+        // primitive body. The primitive itself paints only `.dimmed()`
+        // (`\x1b[2m`); every other palette wrap would signal a silent
+        // promotion (`.italic()`, `.cyan()`, `.bright_black()`,
+        // `.bold()`, `.red()`, `.green()`, `.yellow()`).
+        for (ansi_seq, palette_label) in [
+            ("\x1b[3m", "italic"),
+            ("\x1b[36m", "cyan"),
+            ("\x1b[96m", "bright_cyan"),
+            ("\x1b[90m", "bright_black"),
+            ("\x1b[1m", "bold"),
+            ("\x1b[31m", "red"),
+            ("\x1b[32m", "green"),
+            ("\x1b[33m", "yellow"),
+        ] {
+            assert!(
+                !lines[0].contains(ansi_seq),
+                "line 0 must NOT carry the `{palette_label}` ANSI \
+                 sequence ({ansi_seq:?}) — every pre-lift consumer \
+                 spelled the description body as \
+                 `<val>.dimmed()` with NO other palette chain. Got {:?}",
+                lines[0]
+            );
+        }
+
+        // ABSENCE of any leaf-glyph prefix in the primitive body. Every
+        // pre-lift consumer spelled the description row as a bare
+        // dimmed line, not a bulleted/arrowed sub-detail. Folding in a
+        // `• `, `→ `, or `- ` prefix would drift the descriptor-card
+        // grammar into a peer sub-bullet or leaf-hint grammar.
+        assert!(
+            !lines[0].starts_with("     • "),
+            "line 0 must NOT begin with `     • ` — that five-space \
+             `•` grammar would collide with the sibling sub-bullet \
+             leaf detail primitive; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].starts_with("     → "),
+            "line 0 must NOT begin with `     → ` — that five-space \
+             `→` grammar would collide with the sibling arrow-hint \
+             leaf primitive; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].starts_with("     - "),
+            "line 0 must NOT begin with `     - ` — that five-space \
+             ASCII-dash grammar would collide with markdown/README \
+             list conventions; got {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `println!`, so the newline is part of the contract.
+        assert!(
+            out.ends_with('\n'),
+            "write_descriptor_description must emit a trailing `\\n` \
+             (the pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers in `commands/{bootstrap,pangea,test}.rs`
+    /// migrated onto [`super::print_descriptor_description`] no longer
+    /// spell the `println!("     {}", <val>.dimmed())` shape inline.
+    /// Structural regression shield — without it a future refactor
+    /// could silently re-inline the one-liner (e.g. a "just call
+    /// `println!` directly, it's shorter" cleanup) and reopen the
+    /// 3-site duplication class this lift closed. Enforced against
+    /// each module body BEFORE its first `#[cfg(test)]` region so a
+    /// test-support mention of the raw shape does not defeat the
+    /// shield.
+    ///
+    /// The exact-shape needle is the five-space `println!("     {}",`
+    /// prefix immediately followed by an argument ending in
+    /// `.dimmed());` — the plain `Display`-interpolated dimmed
+    /// argument grammar every pre-lift consumer spelled. The positive
+    /// forward count is pinned per-module at the pre-lift site count
+    /// (bootstrap ×1, pangea ×1, test ×1).
+    #[test]
+    fn print_descriptor_description_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str, usize)] = &[
+            (
+                include_str!("commands/bootstrap.rs"),
+                "commands/bootstrap.rs",
+                1,
+            ),
+            (include_str!("commands/pangea.rs"), "commands/pangea.rs", 1),
+            (include_str!("commands/test.rs"), "commands/test.rs", 1),
+        ];
+        for (source, module_path, expected_forwards) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("println!(\"     {}\",") {
+                    continue;
+                }
+                if !line.trim_end().ends_with(".dimmed());") {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `println!(\"     {{}}\", <val>.dimmed())` \
+                     five-space descriptor-card description stanza — \
+                     that shape was lifted onto \
+                     `crate::ui::print_descriptor_description`. A \
+                     re-inline would silently reopen the 3-site \
+                     duplication class this shield exists to close. \
+                     Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            let forward_hits = body
+                .matches("crate::ui::print_descriptor_description(")
+                .count();
+            assert_eq!(
+                forward_hits, *expected_forwards,
+                "{module_path} body must forward to \
+                 `crate::ui::print_descriptor_description(...)` at \
+                 exactly {expected_forwards} site(s) — one per pre-lift \
+                 consumer in this module. A fusion that folded two \
+                 consumer sites into one call or dropped one of the \
+                 dimmed description rows silently fails here. Found \
+                 {forward_hits} forwarding hits."
+            );
+        }
     }
 
     /// Fail-before-pass envelope for [`super::write_step_warn`]. Pins
