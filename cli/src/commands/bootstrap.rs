@@ -287,10 +287,7 @@ pub async fn push_single(
             .bright_green()
             .bold()
     );
-    for tag in &tags {
-        println!("   • {}:{}", registry, tag);
-    }
-    println!();
+    crate::pushed_image_ref_list::print_pushed_image_ref_list(&registry, &tags);
 
     Ok(())
 }
