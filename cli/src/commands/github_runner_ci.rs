@@ -210,7 +210,7 @@ pub async fn execute(
         // §VI.1 recurring-shape-to-helper.
         let attic_server = crate::infrastructure::attic::attic_server_alias();
 
-        info!("🔧 Configuring Attic cache...");
+        crate::info_attic_configure!();
 
         let safe_mode = is_safe_mode();
         if safe_mode {
