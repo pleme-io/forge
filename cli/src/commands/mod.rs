@@ -24,6 +24,7 @@ pub mod infra;
 pub mod integration_tests;
 pub mod kenshi;
 pub mod kenshi_agent;
+pub mod kustomization_edit;
 pub mod local;
 pub mod migration_new;
 pub mod migration_validation;
