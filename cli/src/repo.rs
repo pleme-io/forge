@@ -3560,6 +3560,81 @@ where
     push_indented_lines_4sp(buf, lines);
 }
 
+/// Render a YAML-shaped `<key>: <value>` line preserving the exact
+/// leading-whitespace prefix of `source_line` verbatim, terminated by a
+/// single `'\n'`.
+///
+/// Four sibling per-line splice sites across the cluster-overlay release
+/// flow each spelled the same three-line inline stanza
+///
+/// ```text
+/// let indent = line.len() - line.trim_start().len();
+/// let indent_str: String = line.chars().take(indent).collect();
+/// new_content.push_str(&format!("{}<key>: {}\n", indent_str, <value>));
+/// ```
+///
+/// modulo the per-site `<key>` literal / `<value>` expression / target
+/// buffer identifier:
+///
+/// - `commands/kenshi.rs::update_kustomization_image` — `newTag: {new_tag}`
+///   splice inside the kenshi image block of a cluster kustomization
+///   overlay.
+/// - `commands/kenshi_agent.rs::update_kustomization_image` — same
+///   `newTag: {new_tag}` splice, inside the kenshi-agent image block.
+/// - `commands/nix_builder.rs::update_kustomization_image` — same
+///   `newTag: {new_tag}` splice, inside the target-registry image block.
+/// - `commands/builder_pool_edit.rs::splice_builder_pool_field` — the
+///   sibling `{field_name}: {new_image}` splice against the
+///   `{agentImage,builderImage}` field of a builder-pool CRD.
+///
+/// Four occurrences past THEORY §VI.1's three-times-is-a-law threshold;
+/// PRIME DIRECTIVE duplication budget is zero.
+///
+/// # Indent preservation contract
+///
+/// The leading-whitespace prefix is `source_line.chars().take(N)` where
+/// `N = source_line.len() - source_line.trim_start().len()` — the same
+/// two-line computation every pre-lift site expressed inline. A tab-
+/// indented line rewrites with tabs, a two-space line rewrites with two
+/// spaces, and a mixed-indent line rewrites with the mixed prefix
+/// verbatim. `source_line.chars().take(N).collect::<String>()` (not
+/// `" ".repeat(N)`) is the deliberate choice: `.len() - trim_start().len()`
+/// counts BYTES (safe on ASCII whitespace), and `.chars().take(N)`
+/// preserves whichever ASCII whitespace bytes were leading — the
+/// pre-lift discipline the four sites shared.
+///
+/// # Trailing newline
+///
+/// The returned string ends in exactly one `'\n'`. Callers
+/// [`String::push_str`] the returned value into an accumulating buffer,
+/// so the terminator lands as-is — matching the pre-lift
+/// `push_str(&format!("{}<key>: {}\n", …))` shape at every site.
+///
+/// # Non-goals
+///
+/// - **Space-only indent widths.** `commands/rust_service.rs`'s
+///   `updated_content.push_str(&" ".repeat(indent))` splice around
+///   `image_tag: "{tag_suffix}"` uses BYTE-count `" ".repeat(indent)`
+///   which drops non-space bytes; that site accepts an ASCII-only
+///   whitespace-normalizing splice that this primitive intentionally
+///   does not provide (the char-preserving contract above is stricter
+///   and the four migrated sites all share it).
+///
+/// # Pinned invariants
+///
+/// The exact byte shape (`<verbatim-indent><key>: <value>\n`) is pinned
+/// by the sibling `#[cfg(test)]` cases below across the tab, two-space,
+/// eight-space, mixed-indent, and zero-indent input-space, so a future
+/// refinement of the indent-computation surface (a swap to
+/// [`str::char_indices`], a UTF-8-aware trim primitive, a
+/// perf-motivated `&str` slice) lands at one body and stays byte-for-
+/// byte compatible with every splice site.
+pub fn indent_preserving_kv_line(source_line: &str, key: &str, value: &str) -> String {
+    let indent = source_line.len() - source_line.trim_start().len();
+    let indent_str: String = source_line.chars().take(indent).collect();
+    format!("{}{}: {}\n", indent_str, key, value)
+}
+
 /// Run a command in a specific directory, restoring the original directory afterward
 ///
 /// # Arguments
@@ -10783,6 +10858,150 @@ mod tests {
              heading when the body iterator is empty — the pre-lift \
              `if !stdout.trim().is_empty()` guard is the caller's \
              responsibility, not the primitive's. Got: {buf:?}"
+        );
+    }
+
+    // ---- indent_preserving_kv_line ---------------------------------
+    //
+    // The four sibling pre-lift splice sites (three in
+    // `commands/{kenshi,kenshi_agent,nix_builder}.rs::
+    // update_kustomization_image` around `newTag: {new_tag}` and one in
+    // `commands/builder_pool_edit.rs::splice_builder_pool_field` around
+    // `{agentImage,builderImage}: {new_image}`) each spelled the same
+    // three-line
+    //
+    //     let indent = line.len() - line.trim_start().len();
+    //     let indent_str: String = line.chars().take(indent).collect();
+    //     new_content.push_str(&format!("{}<key>: {}\n", indent_str, <value>));
+    //
+    // stanza. These cases pin the exact byte shape the primitive
+    // returns across the tab, two-space, eight-space, mixed-indent, and
+    // zero-indent input spaces every kustomization / builder-pool YAML
+    // ships. Fail-before-pass-after: the primitive did not exist pre-
+    // lift; each case would have been a compile-error before the
+    // primitive landed and a passing shape assertion after.
+
+    #[test]
+    fn indent_preserving_kv_line_two_space_indent_matches_prelift_kenshi_shape() {
+        // Pre-lift `commands/kenshi.rs::update_kustomization_image` at
+        // the moment its `newTag:` splice landed on a two-space-indented
+        // input line: the resulting `push_str(&format!("{}newTag: {}\n",
+        // indent_str, new_tag))` yielded `"  newTag: amd64-abc123\n"`.
+        let line = "  newTag: amd64-oldsha";
+        let rendered = indent_preserving_kv_line(line, "newTag", "amd64-abc123");
+        assert_eq!(
+            rendered, "  newTag: amd64-abc123\n",
+            "two-space-indented `newTag:` splice must land with the \
+             leading two-space prefix preserved verbatim, a `key: value` \
+             body, and a single trailing `\\n`. Got: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn indent_preserving_kv_line_eight_space_indent_matches_prelift_builder_pool_shape() {
+        // Pre-lift
+        // `commands/builder_pool_edit.rs::splice_builder_pool_field`
+        // targeted the `agentImage:` field on a kenshi-agent builder-
+        // pool CRD line typically indented eight spaces under a nested
+        // `spec.template.spec.containers[0]` YAML tree. The splice
+        // yielded `"        agentImage: ghcr.io/org/kenshi-agent:amd64-\
+        // abc\n"`.
+        let line = "        agentImage: ghcr.io/org/kenshi-agent:amd64-oldsha";
+        let rendered =
+            indent_preserving_kv_line(line, "agentImage", "ghcr.io/org/kenshi-agent:amd64-abc");
+        assert_eq!(
+            rendered, "        agentImage: ghcr.io/org/kenshi-agent:amd64-abc\n",
+            "eight-space-indented `agentImage:` splice must land with \
+             the leading eight-space prefix preserved verbatim. Got: \
+             {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn indent_preserving_kv_line_zero_indent_lands_without_leading_whitespace() {
+        // A YAML document whose target line lives at column zero (a
+        // top-level scalar) must splice with an empty leading prefix.
+        // Pre-lift `line.len() - line.trim_start().len()` returned 0
+        // and `line.chars().take(0).collect::<String>()` returned "",
+        // so `format!("{}{}: {}\n", "", "newTag", "v1")` was
+        // `"newTag: v1\n"`.
+        let line = "newTag: v0";
+        let rendered = indent_preserving_kv_line(line, "newTag", "v1");
+        assert_eq!(
+            rendered, "newTag: v1\n",
+            "zero-indent splice must land with no leading prefix. Got: \
+             {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn indent_preserving_kv_line_tab_indent_preserves_tab_verbatim_not_normalized_to_spaces() {
+        // The `.chars().take(N).collect()` choice (not `" ".repeat(N)`)
+        // is the deliberate contract: a tab-indented input line
+        // rewrites with a tab, not with a byte-count of spaces. A
+        // pre-lift site fed a tab-indented line yielded
+        // `"\tbuilderImage: <img>\n"` — this case pins that behavior so
+        // a future refactor of the indent computation cannot silently
+        // normalize tabs into spaces.
+        let line = "\tbuilderImage: ghcr.io/org/nix-builder:amd64-oldsha";
+        let rendered =
+            indent_preserving_kv_line(line, "builderImage", "ghcr.io/org/nix-builder:amd64-new");
+        assert_eq!(
+            rendered, "\tbuilderImage: ghcr.io/org/nix-builder:amd64-new\n",
+            "tab-indented splice must preserve the leading `\\t` byte \
+             verbatim — NOT normalize it to spaces. Got: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn indent_preserving_kv_line_mixed_indent_preserves_full_prefix_verbatim() {
+        // A mixed tab+space leading prefix (a foot-gun a YAML editor
+        // sometimes leaves behind) must round-trip through the
+        // primitive unchanged: `.chars().take(N)` captures the full
+        // leading run of whitespace bytes and `format!("{}…")` re-emits
+        // them. This case pins the behavior on the mixed-indent axis.
+        let line = "  \t  newTag: v0";
+        let rendered = indent_preserving_kv_line(line, "newTag", "v1");
+        assert_eq!(
+            rendered, "  \t  newTag: v1\n",
+            "mixed-indent (space+tab+space) splice must preserve every \
+             leading whitespace byte verbatim. Got: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn indent_preserving_kv_line_appends_exactly_one_trailing_newline() {
+        // Every pre-lift site accumulated `new_content` via
+        // `push_str(&format!("{}<key>: {}\n", indent_str, value))` so
+        // the terminator was a single `'\n'`. A doubled terminator
+        // would produce blank lines between spliced entries and drift
+        // the byte-for-byte output the pre-lift sites shared.
+        let rendered = indent_preserving_kv_line("    newTag: old", "newTag", "new");
+        assert!(
+            rendered.ends_with('\n'),
+            "rendered line must end in `\\n`. Got: {rendered:?}"
+        );
+        assert!(
+            !rendered.ends_with("\n\n"),
+            "rendered line must NOT end in `\\n\\n` — a doubled \
+             terminator would drift the pre-lift byte-for-byte contract. \
+             Got: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn indent_preserving_kv_line_body_uses_single_space_after_colon() {
+        // The pre-lift `format!("{}<key>: {}\n", …)` sites all used a
+        // single space between the colon and value (canonical YAML
+        // `key: value` shape). A drift to two spaces or zero spaces
+        // would rewrite kustomization overlays and builder-pool CRDs
+        // into a non-canonical form the operator's diff tools would
+        // flag as noise.
+        let rendered = indent_preserving_kv_line("  k: v0", "k", "v1");
+        assert_eq!(
+            rendered, "  k: v1\n",
+            "body must render as exactly `{{indent}}{{key}}: {{value}}\\n` \
+             with ONE space between colon and value. Got: {rendered:?}"
         );
     }
 }
