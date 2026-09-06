@@ -273,7 +273,7 @@ pub async fn execute(
     // `tests::test_execute_routes_attic_push_through_attic_client_not_raw_command`
     // pins the delegation structurally against a future re-fusion.
     if push_attic {
-        info!("📤 Pushing to Attic cache...");
+        crate::info_attic_push!();
         let _ok = crate::infrastructure::attic::AtticClient::discover(attic_cache.clone())
             .push_optional(&image_path)
             .await;
