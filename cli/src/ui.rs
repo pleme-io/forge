@@ -2408,6 +2408,76 @@ pub fn write_arrow_item<W: std::io::Write>(w: &mut W, message: &str) -> std::io:
     writeln!(w, "  {} {}", "→".cyan(), message)
 }
 
+/// Prints the one-line `"   {} {}"` (three-space indent + dimmed `>>`
+/// digraph + `.cyan().bold()`-colored environment name) per-environment
+/// scope-open banner grammar 2 pre-lift consumer sites spelled inline
+/// as `println!("   {} {}", ">>".dimmed(), env_name.cyan().bold())`
+/// across `commands/{product_release, rollback}.rs`. Marks the opening
+/// of one iteration of the `for env_name in &environments { … }` loop
+/// that both product-release Phase 2 (deploy per environment) and
+/// rollback's "Deploying previous tags…" phase carry — a banner the
+/// operator scans to see which environment the pipeline is now working
+/// on inside the phase-scope loop.
+///
+/// # Distinct from the other `ui::print_*` primitives
+///
+/// [`print_arrow_item`] is a `  → <message>` two-space-indent
+/// `.cyan()`-colored forward-arrow narrative-marker grammar for
+/// step-inside-body enumeration. [`print_bullet_item`] is a `  • <msg>`
+/// two-space-indent bullet for a declarative list item.
+/// [`print_arrow_hint`] is a `    → <literal>` four-space-nested
+/// hint-suggestion grammar under an operator-troubleshooting checklist.
+/// This primitive carries a DISTINCT grammar the pre-lift sites paired
+/// exactly: a THREE-space (not two-space, not four-space) indent, a
+/// `>>` digraph (not `→` arrow, not `•` bullet, not `-` dash) that the
+/// operator has been trained to read as "we are now doing something for
+/// X", a `.dimmed()` palette on the digraph (so the eye follows the
+/// env-name it precedes rather than the marker itself), and a
+/// `.cyan().bold()` env-name (loud enough to anchor scan-back to the
+/// last env-scope open when the operator returns to the terminal after
+/// a long deploy). The composition is the invariant every pre-lift
+/// site paired — a re-order of the coloring (`.cyan()` alone on the
+/// digraph or `.bold()` alone on the env) at one site while the other
+/// kept the pair would drift the visual grammar the release / rollback
+/// orchestrators share.
+///
+/// # Compounding
+///
+/// Pre-lift 2 sibling sites each restated the `println!("   {} {}",
+/// ">>".dimmed(), env_name.cyan().bold())` grammar verbatim across
+/// `commands/{product_release, rollback}.rs` — the release and
+/// rollback orchestrators. A future palette adjustment (a swap of
+/// `>>` for `▶` glyph under a heavier per-env sigil, a promotion of
+/// `.cyan().bold()` to `.bright_cyan().bold()` under a louder banner,
+/// an OTLP `env_scope_open` observability event that emits alongside
+/// the print for release-orchestration telemetry, dropping the
+/// leading three-space indent under a leaner grammar, hoisting the
+/// digraph coloring into the whole line at a `format!` site) had to
+/// hit 2 sites in lockstep or drift the visual grammar the two
+/// orchestrators share; post-lift it hits ONE typed body. Delegates
+/// to [`write_env_scope_open`] against [`std::io::stdout()`]; the
+/// writer split exists so the fail-before-pass test can pin the
+/// three-space indent, the `>>` digraph, the `\x1b[2m` dim SGR
+/// sequence on the digraph alone, the `\x1b[36m` cyan + `\x1b[1m`
+/// bold SGR pair on the env-name alone, and the trailing `\n` by
+/// inspecting emitted bytes rather than shelling out and grepping
+/// stdout.
+pub fn print_env_scope_open(env_name: &str) {
+    let _ = write_env_scope_open(&mut std::io::stdout().lock(), env_name);
+}
+
+/// Writer-taking sibling to [`print_env_scope_open`]. Emits the single
+/// `   <>>.dimmed()> <env_name.cyan().bold()>` line via [`writeln!`]
+/// against the supplied writer. [`print_env_scope_open`] is the
+/// stdout adapter; this variant exists so tests can pin the one-line
+/// body, the three-space indent, the `>>` digraph, the `\x1b[2m` dim
+/// ANSI sequence on the digraph, and the `\x1b[36m` cyan +
+/// `\x1b[1m` bold ANSI sequences on the env-name (never the digraph)
+/// without capturing stdout.
+pub fn write_env_scope_open<W: std::io::Write>(w: &mut W, env_name: &str) -> std::io::Result<()> {
+    writeln!(w, "   {} {}", ">>".dimmed(), env_name.cyan().bold())
+}
+
 /// Prints the one-line `"  {} <message>"` (two-space indent + dimmed
 /// `□` hollow-square glyph + plain message) wider-body watch-item
 /// grammar every pre-lift consumer spelled inline as
@@ -15521,5 +15591,237 @@ mod tests {
              tenth caller without extending this shield's expected \
              count fails here. Found {forward_hits} forwarding hits."
         );
+    }
+
+    /// Fail-before-pass envelope for [`super::write_env_scope_open`].
+    /// Pins the exact one-line body every pre-lift consumer spelled
+    /// verbatim (`println!("   {} {}", ">>".dimmed(),
+    /// env_name.cyan().bold())`): a three-space indent, a
+    /// `.dimmed()`-colored `>>` digraph, a single space, then a
+    /// `.cyan().bold()`-colored environment name. A silent contract
+    /// drift a future rewrite might introduce — dropping the
+    /// three-space indent, swapping `>>` for `→` glyph (collapsing
+    /// this per-env scope-open primitive into a variant of the sibling
+    /// [`super::print_arrow_item`] narrative-marker grammar), swapping
+    /// `>>` for `▶` under a heavier per-env sigil, dropping `.dimmed()`
+    /// off the digraph (competing with the env-name for the operator's
+    /// eye), dropping `.bold()` off the env-name (softening the anchor
+    /// scan-back point), promoting `.cyan()` to `.bright_cyan()`
+    /// (`\x1b[96m` — drifting from the pre-lift `\x1b[36m` cyan SGR
+    /// contract), hoisting the coloring off the split spans onto the
+    /// whole line (`format!("   >> {}", env).cyan().bold()`) so the
+    /// digraph paints cyan at every site — flips this assertion rather
+    /// than compiling and silently diverging the 2 consumer sites'
+    /// visual grammar.
+    #[test]
+    fn write_env_scope_open_emits_dimmed_digraph_and_bold_cyan_env_name() {
+        // Force ANSI emission (colored auto-drops sequences on a
+        // non-tty stdout) and serialize against peer banner tests
+        // via [`AnsiOverrideForTest`]; its Drop restores colored's
+        // auto-detection on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`], closing the set-write-unset window
+        // without a manual [`colored::control::unset_override`] call
+        // that a future test author could omit.
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_env_scope_open(&mut buf, "staging")
+            .expect("write_env_scope_open against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_env_scope_open must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — the pre-lift stanza is one `println!`,
+        // not two, and carries no framing blank. A refactor that
+        // slips a leading or trailing blank into the primitive body
+        // fails here.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_env_scope_open must emit exactly one line — the \
+             pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The three-space indent reaches the rendered line before any
+        // ANSI escape — a fusion that hoisted the indent inside the
+        // coloring span (`"   >>".dimmed()`) or dropped it altogether
+        // (`println!("{} {}", ">>".dimmed(), env)`) fails here.
+        assert!(
+            lines[0].starts_with("   "),
+            "line 0 must begin with a three-space indent — every \
+             pre-lift consumer spelled `\"   {{}} {{}}\"` verbatim, \
+             so the indent must reach the writer OUTSIDE the coloring \
+             span; got {:?}",
+            lines[0]
+        );
+
+        // The `>>` digraph reaches the rendered line — a fusion that
+        // swapped `>>` for `→` (collapsing this per-env scope-open
+        // primitive into a variant of the sibling `print_arrow_item`
+        // narrative-marker) or `▶` (a heavier per-env sigil) fails
+        // here.
+        assert!(
+            lines[0].contains(">>"),
+            "line 0 must contain the `>>` digraph — every pre-lift \
+             consumer spelled `\">>\".dimmed()` on the marker; got \
+             {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('→'),
+            "line 0 must NOT contain the `→` glyph — that glyph \
+             belongs to the sibling `print_arrow_item` narrative-marker \
+             primitive, not this per-env scope-open primitive; got {:?}",
+            lines[0]
+        );
+
+        // The env-name text reaches the rendered line verbatim; a
+        // fusion that hoists the env-name off the parameter and pins
+        // it to a constant fails here.
+        assert!(
+            lines[0].contains("staging"),
+            "line 0 must carry the env-name verbatim; got {:?}",
+            lines[0]
+        );
+
+        // The `dim` SGR parameter (`2`) reaches line 0 on the digraph
+        // — every pre-lift consumer chained `.dimmed()` on the `>>`
+        // marker. Dropping `.dimmed()` (a "just print the digraph
+        // plain, it's shorter" cleanup) makes the digraph compete
+        // with the env-name for the operator's eye.
+        assert!(
+            lines[0].contains("\x1b[2m"),
+            "line 0 must carry the `dim` SGR parameter (`2`) — every \
+             pre-lift consumer chained `.dimmed()` on the `>>` \
+             digraph so the eye follows the env-name it precedes \
+             rather than the marker itself; got {:?}",
+            lines[0]
+        );
+
+        // The `cyan` SGR parameter (`36`) reaches line 0 on the
+        // env-name — every pre-lift consumer chained `.cyan().bold()`
+        // on the env. `colored` folds the `.cyan().bold()` pair into
+        // a single compound `\x1b[1;36m` SGR sequence (the
+        // two-parameter form of the CSI-`m` set-graphics-rendition
+        // escape). Assert for either the compound form or the split
+        // forms so a future colored release that changes the fold
+        // order (`\x1b[36;1m`) or splits the pair into two
+        // `\x1b[36m`/`\x1b[1m` sequences still passes — the contract
+        // is BOTH SGR parameters reach the wire, not which
+        // byte-encoding colored picks. A promotion to `.bright_cyan()`
+        // (`\x1b[96m`) would drift from the pre-lift SGR contract the
+        // two sites shared.
+        let carries_cyan = lines[0].contains("\x1b[36m")
+            || lines[0].contains("\x1b[1;36m")
+            || lines[0].contains("\x1b[36;1m");
+        assert!(
+            carries_cyan,
+            "line 0 must carry the `cyan` SGR parameter (`36`) — \
+             every pre-lift consumer chained `.cyan().bold()` on the \
+             env-name, and a promotion to `.bright_cyan()` \
+             (`\\x1b[96m`) would drift from the pre-lift SGR contract \
+             the two sites shared; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[96m"),
+            "line 0 must NOT carry the `bright_cyan` SGR parameter \
+             (`96`) — the pre-lift coloring on the env-name was \
+             `.cyan()` alone (never `.bright_cyan()`); got {:?}",
+            lines[0]
+        );
+
+        // The `bold` SGR parameter (`1`) reaches line 0 on the
+        // env-name — every pre-lift consumer chained `.bold()`
+        // alongside `.cyan()`. Dropping `.bold()` softens the anchor
+        // scan-back point the operator uses on returning to the
+        // terminal after a long deploy.
+        let carries_bold = lines[0].contains("\x1b[1m")
+            || lines[0].contains("\x1b[1;36m")
+            || lines[0].contains("\x1b[36;1m");
+        assert!(
+            carries_bold,
+            "line 0 must carry the `bold` SGR parameter (`1`) — every \
+             pre-lift consumer chained `.cyan().bold()` on the \
+             env-name, and dropping `.bold()` softens the anchor \
+             scan-back point the operator uses on returning to the \
+             terminal after a long deploy; got {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `println!` (not `print!`), so the newline is part of the
+        // contract. A fusion that swapped `writeln!` for `write!`
+        // fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_env_scope_open must emit a trailing `\\n` (the \
+             pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_env_scope_open`] no longer spell the
+    /// `println!("   {} {}", ">>".dimmed(), env_name.cyan().bold())`
+    /// shape inline. Structural regression shield — without it, a
+    /// future refactor could silently re-inline the one-liner (e.g. a
+    /// "just call `println!` directly, it's shorter" cleanup) and
+    /// reopen the 2-site duplication class this lift closed. Enforced
+    /// at the module bodies before their `#[cfg(test)]` regions so a
+    /// test-support mention of the raw shape does not defeat the
+    /// shield.
+    ///
+    /// The needle rejects any line that co-occurs `">>".dimmed()` with
+    /// `.cyan().bold()` — the two other in-repo `>>`.dimmed() call
+    /// sites in `commands/product_release.rs` (`run_forge_subcommand`
+    /// and `nix run` command-echo lines) DO NOT color the second
+    /// argument `.cyan().bold()` (they use `.dimmed()` on both spans),
+    /// so the composite needle uniquely identifies the per-env
+    /// scope-open stanza this lift closed.
+    #[test]
+    fn print_env_scope_open_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[
+            (
+                include_str!("commands/product_release.rs"),
+                "commands/product_release.rs",
+            ),
+            (include_str!("commands/rollback.rs"), "commands/rollback.rs"),
+        ];
+        for (source, module_path) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("\">>\".dimmed()") {
+                    continue;
+                }
+                if !line.contains(".cyan().bold()") {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} co-occurs `\">>\".dimmed()` \
+                     with `.cyan().bold()` — that shape spells the \
+                     pre-lift inline `println!(\"   {{}} {{}}\", \
+                     \">>\".dimmed(), env_name.cyan().bold())` per-env \
+                     scope-open stanza, which was lifted onto \
+                     `crate::ui::print_env_scope_open`. A re-inline \
+                     would silently reopen the 2-site duplication \
+                     class this shield exists to close. Offending \
+                     line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            assert!(
+                body.contains("crate::ui::print_env_scope_open("),
+                "{module_path} body must forward to \
+                 `crate::ui::print_env_scope_open(env_name)` — the \
+                 primitive body every three-space `>>.dimmed() + \
+                 env.cyan().bold()` per-env scope-open banner in the \
+                 crate now delegates through."
+            );
+        }
     }
 }

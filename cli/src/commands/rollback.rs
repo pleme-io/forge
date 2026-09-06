@@ -228,7 +228,7 @@ pub async fn execute(
     crate::ui::print_step_heading("Deploying previous tags...");
 
     for env_name in &environments {
-        println!("   {} {}", ">>".dimmed(), env_name.cyan().bold());
+        crate::ui::print_env_scope_open(env_name);
 
         for (i, entry) in entries.iter().enumerate() {
             let product_dir =
