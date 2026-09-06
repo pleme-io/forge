@@ -2,7 +2,6 @@ use anyhow::Result;
 use std::path::Path;
 use tracing::{info, warn};
 
-use crate::ui::{styled_spinner, SpinnerStyle};
 use crate::{cloudflare, commands, config::DeployConfig, flux_reconcile, git};
 
 pub async fn execute(
@@ -100,15 +99,18 @@ pub async fn execute(
     info!("📝 Updating ConfigMap with GIT_SHA...");
     git::update_configmap_git_sha(kustomization_path, &tag).await?;
 
-    // Commit and push
-    info!("📤 Committing to Git...");
-
-    let pb = styled_spinner(SpinnerStyle::Green, "Pushing to main...");
-
-    git::commit_and_push(kustomization_path, &old_tag, &tag)?;
-
-    pb.finish_with_message("✅ Pushed to main");
-    println!();
+    // Commit and push — the info-line preamble + green-spinner +
+    // git::commit_and_push + canonical finish-message + trailing
+    // blank line fusion now lives at ONE typed boundary at
+    // `commands::manifest_push::commit_and_push_manifest_with_progress`,
+    // shared with the sibling `commands/github_runner_ci.rs`
+    // consumer so a future re-branding of the push target flows to
+    // both flows from one edit.
+    commands::manifest_push::commit_and_push_manifest_with_progress(
+        kustomization_path,
+        &old_tag,
+        &tag,
+    )?;
 
     // Trigger FluxCD reconciliation
     // Note: Single-source architecture means infrastructure is applied directly by flux-system
