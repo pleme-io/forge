@@ -18,7 +18,7 @@ pub async fn execute(
 
     // Get full git SHA for version embedding
     let git_sha = crate::git::get_full_sha().context("Failed to get git SHA")?;
-    info!("📦 Git SHA: {}", git_sha);
+    crate::info_git_sha_field!(git_sha);
 
     // Configure Attic cache
     info!("🔧 Configuring Attic cache...");
