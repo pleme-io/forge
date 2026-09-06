@@ -29,6 +29,7 @@ pub mod kenshi_agent;
 pub mod kustomization_edit;
 pub mod local;
 pub mod manifest_configmap_git_sha_sync;
+pub mod manifest_current_tag;
 pub mod manifest_push;
 pub mod migration_new;
 pub mod migration_validation;

@@ -447,18 +447,15 @@ pub async fn execute(
 
     let manifest_path = std::path::Path::new(repo_root_str).join(&manifest);
 
-    // Read + parse manifest via the async YAML load primitive so the
-    // envelope carries the offending path in both arms.
-    let yaml: serde_yaml::Value = crate::repo::read_yaml_async(&manifest_path).await?;
-
-    let old_tag = yaml
-        .get("images")
-        .and_then(|images| images.as_sequence())
-        .and_then(|seq| seq.first())
-        .and_then(|img| img.get("newTag"))
-        .and_then(|tag| tag.as_str())
-        .ok_or_else(|| anyhow::anyhow!("Could not find images[0].newTag in manifest"))?
-        .to_string();
+    // Read the current `images[0].newTag` — the read+parse envelope
+    // AND the not-found envelope now live at ONE typed boundary at
+    // `commands::manifest_current_tag::read_current_new_tag`, shared
+    // with the sibling `commands/deploy.rs` consumer so a future
+    // drift on the walk shape, the not-found phrasing, or the
+    // caller's `path.display()` threading flows to both flows from
+    // one edit rather than through two diverging inline stanzas.
+    let old_tag =
+        crate::commands::manifest_current_tag::read_current_new_tag(&manifest_path).await?;
 
     info!("📝 Updating manifest...");
     info!("   Old: github-runner:{}", old_tag);
