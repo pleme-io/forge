@@ -465,12 +465,21 @@ pub async fn execute(
     info!("   New: github-runner:{}", git_sha);
     println!();
 
-    // Update manifest
-    git::update_manifest(&manifest_path, &old_tag, &git_sha).await?;
-
-    // Update ConfigMap with GIT_SHA
-    info!("📝 Updating ConfigMap with GIT_SHA...");
-    git::update_configmap_git_sha(&manifest_path, &git_sha).await?;
+    // Update `images[].newTag` AND the sibling ConfigMap's `data.GIT_SHA`
+    // as one atomic write pair — the update-manifest + info-line
+    // announcement + update-configmap-GIT_SHA fusion now lives at ONE
+    // typed boundary at
+    // `commands::manifest_configmap_git_sha_sync::sync_manifest_tag_and_configmap_git_sha`,
+    // shared with the sibling `commands/deploy.rs` consumer so the
+    // load-bearing `(newTag, GIT_SHA)` sync invariant — the SAME value
+    // lands in BOTH YAML fields — stays owned by the primitive rather
+    // than by a pair-of-locals convention at each call site.
+    crate::commands::manifest_configmap_git_sha_sync::sync_manifest_tag_and_configmap_git_sha(
+        &manifest_path,
+        &old_tag,
+        &git_sha,
+    )
+    .await?;
 
     // Commit and push — the info-line preamble + green-spinner +
     // git::commit_and_push + canonical finish-message + trailing
