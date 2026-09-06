@@ -3972,6 +3972,97 @@ pub fn write_next_steps_heading<W: std::io::Write>(w: &mut W) -> std::io::Result
     writeln!(w, "{}", NEXT_STEPS_HEADING_TEXT)
 }
 
+/// Literal heading text the [`print_generated_files_heading`] /
+/// [`write_generated_files_heading`] pair emits — every pre-lift
+/// consumer spelled this same sixteen-byte string
+/// (`"Generated files:"`) verbatim as the first argument to a `println!`
+/// above a bulleted or dashed list of the paths a codegen /
+/// regeneration step just produced. Pinned as a `pub const` so
+/// consumers that want to assert against the heading text (a fleet-wide
+/// sweep, a downstream log-shipper filtering on the label) read the
+/// same constant the writer emits rather than re-typing the string
+/// literal.
+pub const GENERATED_FILES_HEADING_TEXT: &str = "Generated files:";
+
+/// Prints the one-line `"Generated files:"` plain-text uncolored,
+/// unindented heading 3 pre-lift consumer sites spelled inline as
+/// `println!("Generated files:")` across 3 command modules
+/// (`commands/{codegen (×1), developer_tools (×1), web_service (×1)}.rs`).
+/// Marks the label above a bulleted or dashed list of the paths a
+/// codegen / regeneration step just produced — each pre-lift site
+/// follows this heading with two or three [`print_bullet_item`] rows
+/// (or bare `println!("  - <path>")` lines in the codegen consumer,
+/// which the caller keeps for now) enumerating the outputs the operator
+/// should inspect before committing.
+///
+/// # Distinct from every peer `ui::print_*` primitive
+///
+/// [`print_next_steps_heading`] carries the same plain-heading grammar
+/// but marks a post-completion "what to do next" instruction label
+/// above a numbered instruction list — a distinct role from this
+/// "what was just produced" file-manifest heading, which lists paths
+/// the tool WROTE rather than actions the operator should TAKE. The
+/// two headings frequently appear adjacent in the same
+/// `regenerate`-style completion body ("Generated files:" then bullet
+/// list, blank, "Next steps:" then numbered list) — keeping them as
+/// two distinct nullary primitives keeps each site's semantic role
+/// legible at the call site and makes a future palette shift on one
+/// grammar (e.g. dimming file lists while keeping instruction lists
+/// plain) a one-line edit rather than a needle-based grep. Every peer
+/// heading primitive ([`print_step_heading`] `.bold()`,
+/// [`print_phase_heading`] `.bold().underline()`,
+/// [`print_section_header`] `═`-rule frame,
+/// [`print_report_section_subheader`] title + dimmed rule) carries a
+/// different weight and role.
+///
+/// # No coloring, no bold, no indent
+///
+/// Pre-lift every consumer spelled the heading as a plain
+/// `println!("Generated files:")` with no `.dimmed()` / `.bold()` /
+/// `.italic()` chain and no leading whitespace — the heading reaches
+/// the terminal with the default palette so it recedes beneath the
+/// file-list rows that follow. The primitive preserves that: neither
+/// the label nor its trailing colon reaches the writer through any
+/// [`colored`] chain, so no `\x1b[<..>m` ANSI sequence appears in the
+/// rendered line. A future palette adjustment that wraps this
+/// primitive in `.bold()` or `.dimmed()` is a deliberate additive
+/// edit; the pre-lift shape reaches ONE typed boundary rather than 3
+/// literal sites.
+///
+/// # Compounding
+///
+/// Pre-lift 3 sibling sites each restated the
+/// `println!("Generated files:")` grammar verbatim, with the plain
+/// uncolored default palette, the `"Generated files:"` label text, and
+/// the trailing colon all spelled inline. A future adjustment (a swap
+/// of `"Generated files:"` for `"Wrote:"` under a leaner grammar, a
+/// promotion to `.bold()` under a friendlier "look here" emphasis, an
+/// OTLP `generated_files_heading_emitted` observability event wired
+/// alongside the print so a downstream dashboard can count how often
+/// each codegen path produces its manifest, a swap of the trailing
+/// colon for a middle dot) had to hit 3 sites in lockstep or drift the
+/// visual grammar; post-lift it hits ONE typed body. Delegates to
+/// [`write_generated_files_heading`] against [`std::io::stdout()`];
+/// the writer split exists so the fail-before-pass test can pin the
+/// one-line body, the exact `"Generated files:"` heading text, and
+/// the absence of every `\x1b[<..>m` ANSI palette sequence by
+/// inspecting emitted bytes rather than shelling out and grepping
+/// stdout.
+pub fn print_generated_files_heading() {
+    let _ = write_generated_files_heading(&mut std::io::stdout().lock());
+}
+
+/// Writer-taking sibling to [`print_generated_files_heading`]. Emits
+/// the single `Generated files:` line via [`writeln!`] against the
+/// supplied writer. [`print_generated_files_heading`] is the stdout
+/// adapter; this variant exists so tests can pin the one-line body,
+/// the exact heading text ([`GENERATED_FILES_HEADING_TEXT`]), and the
+/// absence of every `\x1b[<..>m` ANSI palette sequence without
+/// capturing stdout.
+pub fn write_generated_files_heading<W: std::io::Write>(w: &mut W) -> std::io::Result<()> {
+    writeln!(w, "{}", GENERATED_FILES_HEADING_TEXT)
+}
+
 /// Prints the one-line `"   {}"` (three-space indent + red-colored raw
 /// captured-output line body) diagnostic-stream error-line grammar 7
 /// pre-lift consumer sites spelled inline as `println!("   {}",
@@ -12993,6 +13084,245 @@ mod tests {
                 forward_hits, *expected_forwards,
                 "{module_path} body must forward to \
                  `crate::ui::print_next_steps_heading()` at exactly \
+                 {expected_forwards} site(s) — one per pre-lift \
+                 consumer in this module. A fusion that folded two \
+                 consumer sites into one call or dropped one of the \
+                 headings silently fails here. Found {forward_hits} \
+                 forwarding hits."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for
+    /// [`super::write_generated_files_heading`]. Pins the one-line
+    /// body every pre-lift consumer spelled verbatim
+    /// (`println!("Generated files:")`): the exact
+    /// [`super::GENERATED_FILES_HEADING_TEXT`] sixteen-byte heading
+    /// text and NO indent, NO leading whitespace, NO trailing
+    /// whitespace before the newline, NO coloring, NO bold. A silent
+    /// contract drift a future rewrite might introduce — swapping the
+    /// label text for a leaner grammar (`"Generated files:"` →
+    /// `"Wrote:"`), promoting the whole line to `.bold()` (making it
+    /// compete for weight with the bulleted file rows beneath),
+    /// promoting to `.dimmed()` (making it recede so far the reader
+    /// misses the section boundary), slipping a leading indent
+    /// (drifting the visual grammar off zero-indent), slipping a
+    /// trailing space before the newline, or fusing a leading or
+    /// trailing blank into the primitive body — flips this assertion
+    /// rather than compiling and silently diverging the 3 consumer
+    /// sites' visual grammar.
+    #[test]
+    fn write_generated_files_heading_emits_exactly_one_uncolored_plain_generated_files_label_line()
+    {
+        // Force ANSI-emission serialization against peer banner tests
+        // via [`AnsiOverrideForTest`] — even though this primitive
+        // emits NO ANSI sequences, the guard's presence pins the
+        // discipline: if a future refactor slips a `.bold()` /
+        // `.dimmed()` chain into the writer, the guard ensures the
+        // sequence actually reaches the buffer for detection here
+        // rather than being auto-stripped by [`colored`]'s non-tty
+        // fallback. The guard's Drop restores colored's auto-detection
+        // on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`].
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_generated_files_heading(&mut buf)
+            .expect("write_generated_files_heading against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf).expect(
+            "write_generated_files_heading must emit valid UTF-8 (the pre-lift println!s did)",
+        );
+
+        // Exactly one line — the pre-lift stanza is one `println!`
+        // carrying no framing blank.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_generated_files_heading must emit exactly one line — \
+             the pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The exact heading text reaches the rendered line verbatim.
+        // Compare against the pub const so a silent divergence between
+        // the constant and the writer's format string (a future edit
+        // to one but not the other) flips this.
+        assert_eq!(
+            lines[0],
+            super::GENERATED_FILES_HEADING_TEXT,
+            "line 0 must equal `GENERATED_FILES_HEADING_TEXT` verbatim — \
+             the pre-lift stanza was `println!(\"Generated files:\")` at \
+             every site, so the primitive's single-line body must carry \
+             the same sixteen-byte label with no indent, no coloring, \
+             and no trailing whitespace; got {:?}",
+            lines[0]
+        );
+
+        // NO leading indent — pre-lift every consumer spelled the
+        // heading at column zero (no `"  "`, `"    "`, or `"\t"`
+        // prefix). A fusion that added an indent would push the label
+        // away from the left margin and drift the visual grammar.
+        assert!(
+            !lines[0].starts_with(char::is_whitespace),
+            "line 0 must NOT begin with any leading whitespace — every \
+             pre-lift consumer spelled `println!(\"Generated files:\")` \
+             starting at column zero, so no `\" \"`, `\"\\t\"`, or any \
+             other whitespace may prefix the heading; got {:?}",
+            lines[0]
+        );
+
+        // NO trailing whitespace before the newline — the label ends
+        // at the colon, and the newline follows immediately.
+        assert!(
+            !lines[0].ends_with(char::is_whitespace),
+            "line 0 must NOT end with any trailing whitespace before \
+             the newline — the pre-lift `println!(\"Generated files:\")` \
+             ended at the colon; got {:?}",
+            lines[0]
+        );
+
+        // ABSENCE OF ALL PALETTE ANSI SEQUENCES — no coloring at all.
+        // A silent promotion to `.bold()` (making the label compete
+        // for weight with the bulleted file rows), `.dimmed()`
+        // (making it recede so far the reader misses the section
+        // boundary), or any color chain reaches the buffer as one of
+        // these sequences and flips the corresponding assertion.
+        for (ansi_seq, palette_label, colliding_primitive) in [
+            ("\x1b[1m", "bold", "print_step_heading (`.bold()`)"),
+            (
+                "\x1b[2m",
+                "dim",
+                "print_dimmed_dashed_marker (`.dimmed()` on the whole span)",
+            ),
+            (
+                "\x1b[4m",
+                "underline",
+                "print_phase_heading (`.bold().underline()`)",
+            ),
+            (
+                "\x1b[32m",
+                "green",
+                "print_step_success (`.green()` completion)",
+            ),
+            (
+                "\x1b[33m",
+                "yellow",
+                "print_step_warn (`.yellow()` warning)",
+            ),
+            ("\x1b[31m", "red", "print_step_failure (`.red()` failure)"),
+            ("\x1b[36m", "cyan", "print_arrow_item (`.cyan()` narrative)"),
+            (
+                "\x1b[34m",
+                "blue",
+                "print_numbered_check_heading (`.blue()` heading)",
+            ),
+        ] {
+            assert!(
+                !lines[0].contains(ansi_seq),
+                "line 0 must NOT carry the `{palette_label}` ANSI \
+                 sequence ({ansi_seq:?}) — every pre-lift consumer \
+                 spelled the heading as a plain `println!(\"Generated \
+                 files:\")` with NO coloring chain, so the label \
+                 recedes beneath the bulleted file rows that follow it. \
+                 A promotion to this palette would collide with \
+                 {colliding_primitive}. Got {:?}",
+                lines[0]
+            );
+        }
+        // Sanity: no ANSI escape byte at all in the rendered line.
+        assert!(
+            !lines[0].contains('\x1b'),
+            "line 0 must contain no ANSI escape byte (`\\x1b`) at all \
+             — this plain heading primitive emits no coloring; got {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `println!` (not `print!`), so the newline is part of the
+        // contract. A fusion that swapped `writeln!` for `write!`
+        // fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_generated_files_heading must emit a trailing `\\n` \
+             (the pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_generated_files_heading`] no longer spell the
+    /// `println!("Generated files:")` shape inline across
+    /// `commands/{codegen.rs, developer_tools.rs, web_service.rs}`.
+    /// Structural regression shield — a future refactor could silently
+    /// re-inline the one-liner (e.g. a "just call `println!` directly,
+    /// it's shorter" cleanup) and reopen the 3-site duplication class
+    /// this lift closed. Enforced against each module body BEFORE its
+    /// first `#[cfg(test)]` region so a test-support mention of the
+    /// raw shape does not defeat the shield.
+    ///
+    /// The exact-shape needle is `println!("Generated files:` — the
+    /// macro invocation with the opening quote and the heading label
+    /// prefix on the same source line. No allowlist is required
+    /// because every pre-lift occurrence in the crate belonged to this
+    /// class; a re-inline with any suffix completing the shape (e.g.
+    /// `println!("Generated files:")` verbatim, or a hypothetical
+    /// `println!("Generated files: {}", ...)` widening) flips the
+    /// shield.
+    ///
+    /// The positive count is pinned per-module at the pre-lift site
+    /// count (`codegen.rs` ×1, `developer_tools.rs` ×1,
+    /// `web_service.rs` ×1). A fusion that folded two consumer sites
+    /// into one call or dropped one of the headings silently fails
+    /// here — the negative half above would still pass, but the
+    /// positive count would fall below the pre-lift census.
+    #[test]
+    fn print_generated_files_heading_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str, usize)] = &[
+            (
+                include_str!("commands/codegen.rs"),
+                "commands/codegen.rs",
+                1,
+            ),
+            (
+                include_str!("commands/developer_tools.rs"),
+                "commands/developer_tools.rs",
+                1,
+            ),
+            (
+                include_str!("commands/web_service.rs"),
+                "commands/web_service.rs",
+                1,
+            ),
+        ];
+        for (source, module_path, expected_forwards) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("println!(\"Generated files:") {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `println!(\"Generated files:\")` plain-text \
+                     post-completion generated-file-list section \
+                     heading — that shape was lifted onto \
+                     `crate::ui::print_generated_files_heading`. A \
+                     re-inline would silently reopen the 3-site \
+                     duplication class this shield exists to close. \
+                     Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            let forward_hits = body
+                .matches("crate::ui::print_generated_files_heading(")
+                .count();
+            assert_eq!(
+                forward_hits, *expected_forwards,
+                "{module_path} body must forward to \
+                 `crate::ui::print_generated_files_heading()` at exactly \
                  {expected_forwards} site(s) — one per pre-lift \
                  consumer in this module. A fusion that folded two \
                  consumer sites into one call or dropped one of the \

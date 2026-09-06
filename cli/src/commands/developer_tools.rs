@@ -339,7 +339,7 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
     // Success summary
     print_success_banner(80, "✅ REGENERATION COMPLETE");
     println!();
-    println!("Generated files:");
+    crate::ui::print_generated_files_heading();
     crate::ui::print_bullet_item(&format!("{}", cargo_lock.display()));
     crate::ui::print_bullet_item(&format!("{}", workspace_root.join("Cargo.nix").display()));
     println!();
