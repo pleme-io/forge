@@ -136,7 +136,7 @@ pub async fn execute(
 
     // Get git SHA for tagging
     let git_sha = git::get_short_sha()?;
-    info!("📦 Git SHA: {}", git_sha);
+    crate::info_git_sha_field!(git_sha);
     info!("🎯 Target: {}:{}", registry, git_sha);
     println!();
 

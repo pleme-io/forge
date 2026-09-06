@@ -61,6 +61,7 @@ mod version;
 // Legacy modules (to be migrated)
 mod cloudflare;
 mod git;
+mod git_sha_field;
 mod hermetic_scratch;
 mod indented_success_step;
 mod k8s;
