@@ -632,7 +632,7 @@ pub async fn product_release(
     }
 
     for env_name in &environments {
-        println!("   {} {}", ">>".dimmed(), env_name.cyan().bold());
+        crate::ui::print_env_scope_open(env_name);
 
         for svc in &product_config.services {
             let svc_release =
