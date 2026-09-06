@@ -67,18 +67,14 @@ pub async fn execute(
     // The manifest parameter should point to kustomization.yaml
     let kustomization_path = Path::new(&manifest);
 
-    // Read + parse kustomization via the async YAML load primitive so
-    // the envelope carries the offending path in both arms.
-    let yaml: serde_yaml::Value = crate::repo::read_yaml_async(kustomization_path).await?;
-
-    let old_tag = yaml
-        .get("images")
-        .and_then(|images| images.as_sequence())
-        .and_then(|seq| seq.first())
-        .and_then(|image| image.get("newTag"))
-        .and_then(|tag_val| tag_val.as_str())
-        .ok_or_else(|| anyhow::anyhow!("Could not find images[0].newTag in kustomization.yaml"))?
-        .to_string();
+    // Read the current `images[0].newTag` — the read+parse envelope
+    // AND the not-found envelope now live at ONE typed boundary at
+    // `commands::manifest_current_tag::read_current_new_tag`, shared
+    // with the sibling `commands/github_runner_ci.rs` consumer so a
+    // future drift on the walk shape, the not-found phrasing, or the
+    // caller's `path.display()` threading flows to both flows from
+    // one edit rather than through two diverging inline stanzas.
+    let old_tag = commands::manifest_current_tag::read_current_new_tag(kustomization_path).await?;
 
     // Extract the image name from the registry (last component)
     let image_name = registry
