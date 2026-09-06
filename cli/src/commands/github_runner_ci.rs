@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use colored::Colorize;
 use std::time::Duration;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
@@ -131,26 +130,10 @@ pub async fn execute(
     skip_push: bool,
     watch: bool,
 ) -> Result<()> {
-    println!();
-    println!(
-        "{}",
-        "╔════════════════════════════════════════════════════════════╗"
-            .bright_cyan()
-            .bold()
+    crate::ui::print_boxed_banner(
+        crate::ui::BoxedBannerStyle::CyanBold,
+        "GitHub Runner CI Workflow",
     );
-    println!(
-        "{}",
-        "║  GitHub Runner CI Workflow                                ║"
-            .bright_cyan()
-            .bold()
-    );
-    println!(
-        "{}",
-        "╚════════════════════════════════════════════════════════════╝"
-            .bright_cyan()
-            .bold()
-    );
-    println!();
 
     // Get git SHA for tagging
     let git_sha = git::get_short_sha()?;
@@ -760,26 +743,10 @@ pub async fn execute(
         info!("⏭️  Skipping rollout watch (use --watch to enable)");
     }
 
-    println!();
-    println!(
-        "{}",
-        "╔════════════════════════════════════════════════════════════╗"
-            .bright_green()
-            .bold()
+    crate::ui::print_boxed_banner(
+        crate::ui::BoxedBannerStyle::GreenBold,
+        "✅ GitHub Runner CI Complete!",
     );
-    println!(
-        "{}",
-        "║  ✅ GitHub Runner CI Complete!                             ║"
-            .bright_green()
-            .bold()
-    );
-    println!(
-        "{}",
-        "╚════════════════════════════════════════════════════════════╝"
-            .bright_green()
-            .bold()
-    );
-    println!();
     println!("📦 Deployed: {}:{}", registry, git_sha);
     println!("🎯 Namespace: {}", namespace);
     println!("🚀 StatefulSet: {}", name);

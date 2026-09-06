@@ -846,6 +846,120 @@ pub fn print_header(title: &str) {
     println!();
 }
 
+/// Palette+weight variant [`write_boxed_banner`] / [`print_boxed_banner`]
+/// paint the three `╔`-boxed body lines in. Pre-lift the four sibling
+/// stanzas in `commands/{deploy, github_runner_ci}.rs` each spelled the
+/// same 20-line `println!("{}", "╔═…═╗".bright_<cyan|green>().bold())` +
+/// padded title middle line + closing border verbatim, differing only in
+/// palette (`cyan`/`green`) and the title text. The color choice is closed
+/// to the two dialects those stanzas actually spell — cyan-bold for the
+/// command-intro banner ("Nexus Deploy - GitOps Workflow", "GitHub Runner
+/// CI Workflow") and green-bold for the terminal-completion banner
+/// ("✅ Deployment Complete!", "✅ GitHub Runner CI Complete!") — so a new
+/// palette is a deliberate additive edit, not an open call-site choice.
+///
+/// # Compounding
+///
+/// Pre-lift each of the four sites hard-coded the palette+weight pair
+/// inline via three separate `.bright_<color>().bold()` chains (once per
+/// box line); a rename that misspells `.bright_cyan` as `.bright_cyn`
+/// would compile against the middle line only, silently drifting the box's
+/// top and bottom borders to the crate's default color while the title
+/// stayed cyan. Post-lift the mapping [`BoxedBannerStyle`] → palette+weight
+/// lives in ONE match arm; the enum is closed, so a future variant added
+/// without an arm fails the exhaustiveness check at build time — the
+/// three per-line paints stay coupled to one palette choice by construction.
+///
+/// # Distinct from the [`print_header`] palette
+///
+/// [`print_header`] emits its box in `.bright_blue()` (no bold) — the
+/// canonical top-of-command header used by every workflow whose intro
+/// stanza migrated onto that primitive earlier. This enum's [`CyanBold`]
+/// variant is a distinct dialect the pre-lift `commands/{deploy,
+/// github_runner_ci}.rs` intro stanzas spelled inline against a
+/// `.bright_cyan().bold()` chain; those two consumers stayed off
+/// [`print_header`] specifically because their color contract is
+/// different, and unifying them under this typed enum lets the palette
+/// choice live at one named boundary without homogenizing the two
+/// dialects into one.
+///
+/// [`CyanBold`]: BoxedBannerStyle::CyanBold
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoxedBannerStyle {
+    /// Command-intro banner palette (`.bright_cyan().bold()` on each of
+    /// the three box lines). Pre-lift sites: `commands/deploy.rs`
+    /// ("Nexus Deploy - GitOps Workflow"), `commands/github_runner_ci.rs`
+    /// ("GitHub Runner CI Workflow").
+    CyanBold,
+    /// Terminal-completion banner palette (`.bright_green().bold()` on
+    /// each of the three box lines). Pre-lift sites: `commands/deploy.rs`
+    /// ("✅ Deployment Complete!"), `commands/github_runner_ci.rs`
+    /// ("✅ GitHub Runner CI Complete!").
+    GreenBold,
+}
+
+impl BoxedBannerStyle {
+    /// Paint a single body line in this style's palette+weight pair.
+    /// One code path per line-per-style; the enum's closed exhaustiveness
+    /// means a new palette must add both the variant AND the arm.
+    fn paint(self, s: &str) -> colored::ColoredString {
+        match self {
+            Self::CyanBold => s.bright_cyan().bold(),
+            Self::GreenBold => s.bright_green().bold(),
+        }
+    }
+}
+
+/// Writer-taking sibling to [`print_boxed_banner`]. Emits the three body
+/// lines of the `╔═…═╗` boxed-banner grammar — top border, indented+
+/// padded title middle line, bottom border — in the palette+weight
+/// [`BoxedBannerStyle`] names, via [`writeln!`] against the supplied
+/// writer. The leading and trailing framing blank lines the pre-lift
+/// stanzas each carried live on [`print_boxed_banner`], not on this
+/// writer sibling — so a test that pins the box's body-line count and
+/// border-vs-body width parity can inspect emitted bytes rather than
+/// shelling out and grepping stdout, matching the [`write_header`]
+/// contract exactly.
+///
+/// The middle-line padding uses the shared [`BOXED_HEADER_TITLE_WIDTH`]
+/// `{:<58}` min-width spec so the right-side `║` lines up with the
+/// top border's right-side `╗` — the same off-by-one fix
+/// [`write_header`]'s docstring names for the `commands/pangea.rs` and
+/// `commands/bootstrap.rs` local helpers is inherited here by
+/// construction.
+pub fn write_boxed_banner<W: std::io::Write>(
+    w: &mut W,
+    style: BoxedBannerStyle,
+    title: &str,
+) -> std::io::Result<()> {
+    writeln!(w, "{}", style.paint(BOXED_HEADER_TOP))?;
+    writeln!(
+        w,
+        "{}",
+        style.paint(&format!(
+            "║  {:<width$}║",
+            title,
+            width = BOXED_HEADER_TITLE_WIDTH
+        ))
+    )?;
+    writeln!(w, "{}", style.paint(BOXED_HEADER_BOTTOM))?;
+    Ok(())
+}
+
+/// Prints the leading blank, the [`write_boxed_banner`] three-line box in
+/// [`BoxedBannerStyle`]'s palette+weight, and the trailing blank via
+/// [`writeln!`] against [`std::io::stdout()`]; the writer split exists so
+/// the fail-before-pass test can pin the emitted bytes and the SGR
+/// sequences per line against a `Vec<u8>` buffer without capturing
+/// stdout. Mirrors [`print_header`]'s exact leading-blank + box +
+/// trailing-blank framing so a caller migrating between the two
+/// primitives cannot silently drift the outer whitespace.
+pub fn print_boxed_banner(style: BoxedBannerStyle, title: &str) {
+    println!();
+    let _ = write_boxed_banner(&mut std::io::stdout().lock(), style, title);
+    println!();
+}
+
 pub fn print_success(message: &str) {
     let _ = write_success(&mut std::io::stdout().lock(), message);
 }
@@ -5427,6 +5541,209 @@ mod tests {
             offenders.is_empty(),
             "boxed-header stanza reintroduced inline in command \
              module(s); call `crate::ui::print_header(title)` instead:\n  {}",
+            offenders.join("\n  ")
+        );
+    }
+
+    /// Fail-before-pass envelope for [`super::write_boxed_banner`] with
+    /// the [`super::BoxedBannerStyle::CyanBold`] palette. Pins the exact
+    /// three body lines the pre-lift four sibling stanzas (across
+    /// `commands/deploy.rs` intro + `commands/github_runner_ci.rs` intro
+    /// under the cyan-bold dialect) each spelled inline as sibling
+    /// `println!("{}", "╔══…══╗".bright_cyan().bold())` + padded title +
+    /// closing border. A silent drift a future rewrite might introduce —
+    /// dropping `.bold()` on one line only, promoting one border to
+    /// `bright_blue` while leaving the middle line cyan, misspelling
+    /// `bright_cyan` on one of the three paints so two lines drift —
+    /// flips these assertions rather than compiling and silently
+    /// diverging the four migrated call sites' visual grammar.
+    #[test]
+    fn write_boxed_banner_cyan_bold_emits_three_body_lines_with_cyan_and_bold_seqs() {
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_boxed_banner(
+            &mut buf,
+            super::BoxedBannerStyle::CyanBold,
+            "Nexus Deploy - GitOps Workflow",
+        )
+        .expect("write_boxed_banner against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_boxed_banner must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly three body lines — top+middle+bottom, three writeln!s.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            3,
+            "write_boxed_banner must emit exactly three body lines \
+             (top border, title, bottom border); got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // Each of the three lines must carry BOTH the `bright_cyan` ANSI
+        // sequence (`96`) AND the `bold` weight sequence (`1`) — the
+        // pre-lift stanzas spelled `.bright_cyan().bold()` on each of
+        // the three lines explicitly, and the primitive must preserve
+        // that per-line palette+weight contract so a bare `.bright_cyan`
+        // (no bold) downgrade of one line does not slip in silently.
+        // Each of the three lines must carry the combined `bold` +
+        // `bright_cyan` ANSI SGR sequence — `colored` splices the two
+        // parameters into one `\x1b[1;96m` open escape per line. The
+        // pre-lift stanzas spelled `.bright_cyan().bold()` on each of
+        // the three lines explicitly, and the primitive must preserve
+        // that per-line palette+weight contract so a bare `.bright_cyan`
+        // (no bold) downgrade of one line, or a palette misspelling on
+        // one border only, does not slip in silently.
+        for (i, line) in lines.iter().enumerate() {
+            assert!(
+                line.contains("\x1b[1;96m"),
+                "line {} must carry the combined bold+bright_cyan ANSI \
+                 SGR sequence (`\\x1b[1;96m`) — the pre-lift stanza \
+                 spelled `.bright_cyan().bold()` on each of the three \
+                 lines; got {:?}",
+                i,
+                line
+            );
+        }
+
+        // Border framing invariants — lines 0/2 carry `╔`/`╚`
+        // corners, line 1 carries the padded title framed by `║`.
+        // A rewrite that reordered the writeln!s fails here.
+        assert!(
+            lines[0].contains('╔') && lines[0].contains('╗'),
+            "line 0 must be the top border framed by `╔`…`╗`; got {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[2].contains('╚') && lines[2].contains('╝'),
+            "line 2 must be the bottom border framed by `╚`…`╝`; got {:?}",
+            lines[2]
+        );
+        assert!(
+            lines[1].contains("Nexus Deploy - GitOps Workflow"),
+            "line 1 must carry the title verbatim; got {:?}",
+            lines[1]
+        );
+    }
+
+    /// Fail-before-pass envelope for [`super::write_boxed_banner`] with
+    /// the [`super::BoxedBannerStyle::GreenBold`] palette. Sibling of
+    /// [`write_boxed_banner_cyan_bold_emits_three_body_lines_with_cyan_and_bold_seqs`]
+    /// pinning the SECOND palette dialect the two pre-lift completion
+    /// stanzas (across `commands/deploy.rs` + `commands/github_runner_ci.rs`
+    /// terminal completion) spelled inline against `.bright_green().bold()`.
+    /// Enforces the `92` bright-green ANSI parameter appears on each of
+    /// the three lines, matching the cyan-bold sibling's shape.
+    #[test]
+    fn write_boxed_banner_green_bold_emits_three_body_lines_with_green_and_bold_seqs() {
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_boxed_banner(
+            &mut buf,
+            super::BoxedBannerStyle::GreenBold,
+            "✅ Deployment Complete!",
+        )
+        .expect("write_boxed_banner against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_boxed_banner must emit valid UTF-8 (the pre-lift println!s did)");
+
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            3,
+            "write_boxed_banner must emit exactly three body lines \
+             (top border, title, bottom border); got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // Combined bold+bright_green SGR sequence: `\x1b[1;92m`.
+        // Sibling of the cyan-bold assertion above.
+        for (i, line) in lines.iter().enumerate() {
+            assert!(
+                line.contains("\x1b[1;92m"),
+                "line {} must carry the combined bold+bright_green ANSI \
+                 SGR sequence (`\\x1b[1;92m`) — the pre-lift stanza \
+                 spelled `.bright_green().bold()` on each of the three \
+                 lines; got {:?}",
+                i,
+                line
+            );
+        }
+
+        assert!(
+            lines[0].contains('╔') && lines[0].contains('╗'),
+            "line 0 must be the top border framed by `╔`…`╗`; got {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[2].contains('╚') && lines[2].contains('╝'),
+            "line 2 must be the bottom border framed by `╚`…`╝`; got {:?}",
+            lines[2]
+        );
+        assert!(
+            lines[1].contains("✅ Deployment Complete!"),
+            "line 1 must carry the title verbatim; got {:?}",
+            lines[1]
+        );
+    }
+
+    /// Shield test — grep-based assertion that no command module still
+    /// carries the boxed-banner stanza inline as three sibling
+    /// `println!("{}", "╔══…══╗".bright_<cyan|green>().bold())` +
+    /// padded title + closing border lines. Pre-lift four consumers
+    /// (`commands/deploy.rs` intro+completion, `commands/github_runner_ci.rs`
+    /// intro+completion) each spelled a byte-identical 20-line stanza
+    /// against a 60-inner `╔`-boxed literal; all four now delegate to
+    /// [`super::print_boxed_banner`]. This shield fires if a future
+    /// rewrite reintroduces the inline stanza in ANY command module
+    /// rather than calling the primitive, keeping the box color+weight
+    /// contract at ONE typed boundary alongside its
+    /// [`print_header_callers_delegate_through_primitive`] sibling.
+    #[test]
+    fn print_boxed_banner_callers_delegate_through_primitive() {
+        let commands_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands");
+
+        // The pre-lift needles: the exact top-border literal in
+        // `bright_cyan()` and `bright_green()`. If a command module
+        // carries either literal it means the boxed-banner stanza was
+        // reintroduced inline rather than routed through
+        // [`super::print_boxed_banner`].
+        const NEEDLES: &[&str] = &[
+            "\"╔════════════════════════════════════════════════════════════╗\".bright_cyan()",
+            "\"╔════════════════════════════════════════════════════════════╗\".bright_green()",
+        ];
+
+        let mut offenders: Vec<String> = Vec::new();
+        let entries = std::fs::read_dir(&commands_dir)
+            .expect("commands/ dir must exist under CARGO_MANIFEST_DIR/src");
+        for entry in entries {
+            let entry = entry.expect("read_dir entry");
+            let path = entry.path();
+            if !crate::repo::path_has_extension(&path, "rs") {
+                continue;
+            }
+            let content = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+            for needle in NEEDLES {
+                if content.contains(needle) {
+                    offenders.push(format!("{} :: {}", path.display(), needle));
+                }
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "boxed-banner stanza reintroduced inline in command \
+             module(s); call `crate::ui::print_boxed_banner(\
+             BoxedBannerStyle::CyanBold|GreenBold, title)` instead:\n  {}",
             offenders.join("\n  ")
         );
     }
