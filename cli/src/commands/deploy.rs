@@ -1,5 +1,4 @@
 use anyhow::Result;
-use colored::Colorize;
 use std::path::Path;
 use tracing::{info, warn};
 
@@ -18,26 +17,10 @@ pub async fn execute(
     cache_url: String,
     cache_name: String,
 ) -> Result<()> {
-    println!();
-    println!(
-        "{}",
-        "╔════════════════════════════════════════════════════════════╗"
-            .bright_cyan()
-            .bold()
+    crate::ui::print_boxed_banner(
+        crate::ui::BoxedBannerStyle::CyanBold,
+        "Nexus Deploy - GitOps Workflow",
     );
-    println!(
-        "{}",
-        "║  Nexus Deploy - GitOps Workflow                           ║"
-            .bright_cyan()
-            .bold()
-    );
-    println!(
-        "{}",
-        "╚════════════════════════════════════════════════════════════╝"
-            .bright_cyan()
-            .bold()
-    );
-    println!();
 
     info!("🎯 Target: {}:{}", registry, tag);
     info!("📦 Namespace: {}", namespace);
@@ -185,25 +168,10 @@ pub async fn execute(
         }
     }
 
-    println!(
-        "{}",
-        "╔════════════════════════════════════════════════════════════╗"
-            .bright_green()
-            .bold()
+    crate::ui::print_boxed_banner(
+        crate::ui::BoxedBannerStyle::GreenBold,
+        "✅ Deployment Complete!",
     );
-    println!(
-        "{}",
-        "║  ✅ Deployment Complete!                                   ║"
-            .bright_green()
-            .bold()
-    );
-    println!(
-        "{}",
-        "╚════════════════════════════════════════════════════════════╝"
-            .bright_green()
-            .bold()
-    );
-    println!();
     println!("📦 Deployed: {}:{}", registry, tag);
     println!("🎯 Strategy: FluxCD GitOps");
     println!();
