@@ -62,6 +62,7 @@ mod version;
 mod cloudflare;
 mod git;
 mod hermetic_scratch;
+mod indented_success_step;
 mod k8s;
 mod nix;
 mod nix_hooks;

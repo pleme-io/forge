@@ -568,7 +568,7 @@ pub async fn release(
             git.add(&[&kustomization_path.to_string_lossy()]).await?;
             git.commit(&commit_message).await?;
             git.push().await?;
-            info!("   ✅ Committed: {}", commit_message);
+            crate::info_indented_success!("Committed: {}", commit_message);
         }
     }
 

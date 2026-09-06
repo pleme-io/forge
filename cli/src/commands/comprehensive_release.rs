@@ -623,7 +623,7 @@ pub async fn execute(
 
                     match migrate_result {
                         Ok(status) if status.success() => {
-                            info!("   ✅ Migrations applied successfully");
+                            crate::info_indented_success!("Migrations applied successfully");
                         }
                         Ok(status) => {
                             warn!(

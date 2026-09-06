@@ -91,7 +91,9 @@ pub async fn commit_cluster_overlay_release(
         .stage_commit_push_release(files, &commit_msg, "main")
         .await?;
     match outcome {
-        CommitPushOutcome::Pushed => info!("   ✅ Changes committed and pushed"),
+        CommitPushOutcome::Pushed => {
+            crate::info_indented_success!("Changes committed and pushed")
+        }
         CommitPushOutcome::NoChangesStaged => {
             info!("   No changes to commit (already at this version)")
         }
