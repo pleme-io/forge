@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::path::Path;
 use tracing::{info, warn};
 
-use crate::{cloudflare, commands, config::DeployConfig, git};
+use crate::{cloudflare, commands, config::DeployConfig};
 
 pub async fn execute(
     manifest: String,
@@ -92,12 +92,21 @@ pub async fn execute(
     info!("   New tag: {}", tag);
     println!();
 
-    // Update kustomization.yaml's images[].newTag
-    git::update_manifest(kustomization_path, &old_tag, &tag).await?;
-
-    // Update ConfigMap with GIT_SHA
-    info!("📝 Updating ConfigMap with GIT_SHA...");
-    git::update_configmap_git_sha(kustomization_path, &tag).await?;
+    // Update `images[].newTag` AND the sibling ConfigMap's `data.GIT_SHA`
+    // as one atomic write pair — the update-manifest + info-line
+    // announcement + update-configmap-GIT_SHA fusion now lives at ONE
+    // typed boundary at
+    // `commands::manifest_configmap_git_sha_sync::sync_manifest_tag_and_configmap_git_sha`,
+    // shared with the sibling `commands/github_runner_ci.rs` consumer
+    // so the load-bearing `(newTag, GIT_SHA)` sync invariant — the SAME
+    // value lands in BOTH YAML fields — stays owned by the primitive
+    // rather than by a pair-of-locals convention at each call site.
+    commands::manifest_configmap_git_sha_sync::sync_manifest_tag_and_configmap_git_sha(
+        kustomization_path,
+        &old_tag,
+        &tag,
+    )
+    .await?;
 
     // Commit and push — the info-line preamble + green-spinner +
     // git::commit_and_push + canonical finish-message + trailing
