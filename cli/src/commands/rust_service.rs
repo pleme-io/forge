@@ -513,7 +513,9 @@ pub async fn build_rust_service(
     let arm64_build: Option<tokio::process::Child> = if should_build_arm64 {
         println!();
         println!("📦 {}", "Building ARM64 image...".bold());
-        println!("   ⚠️  Warning: ARM64 packages not yet exposed in root flake, skipping");
+        crate::ui::print_plain_step_warn(
+            "Warning: ARM64 packages not yet exposed in root flake, skipping",
+        );
         println!("   To add ARM64 support:");
         println!(
             "   1. Add {}-{}-arm64 package to root flake.nix",

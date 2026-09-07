@@ -565,12 +565,15 @@ pub async fn rust_dev(
                     crate::ui::print_step_pass("Migrations applied");
                 }
                 Ok(_) => {
-                    println!(
-                        "   ⚠️  Migration failed (database may not be ready or already migrated)"
+                    crate::ui::print_plain_step_warn(
+                        "Migration failed (database may not be ready or already migrated)",
                     );
                 }
                 Err(e) => {
-                    println!("   ⚠️  sqlx not found: {} (skipping migrations)", e);
+                    crate::ui::print_plain_step_warn(&format!(
+                        "sqlx not found: {} (skipping migrations)",
+                        e
+                    ));
                 }
             }
         } else {

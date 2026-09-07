@@ -3246,6 +3246,129 @@ pub fn write_step_warn<W: std::io::Write>(w: &mut W, message: &str) -> std::io::
     writeln!(w, "   {} {}", "⚠️".yellow(), message)
 }
 
+/// Prints the single `"   ⚠️  <message>"` (three-space indent + UNCOLORED
+/// `⚠️` emoji glyph + TWO ASCII spaces + caller-supplied plain message)
+/// stdout-routed in-body step-warn grammar 7 pre-lift consumer sites
+/// spelled inline as `println!("   ⚠️  <fmt>", <args>)` across
+/// `commands/{rust_service (×1: ARM64 skipping warning inside the
+/// per-arch build orchestrator), migrations (×4: configured-secret-not-
+/// found guard + Shinka `Failed|CheckingHealth` phase auto-reset marker +
+/// two `Failed to set expected-tag annotation (non-fatal)` post-annotate
+/// error routes), developer_tools (×2: sqlx migration-run stdout-warn +
+/// `not-found` fallback)}.rs`, each marking an in-body irregularity a
+/// `forge <cmd>` invocation continues past — a conditional build arm the
+/// caller has decided to skip, a discovered secret whose lookup missed
+/// but the enclosing pipeline still proceeds under a degraded contract,
+/// a Kubernetes annotation set-op that failed but must not abort the
+/// enclosing rollout.
+///
+/// # Distinct from every peer `ui::*` warn primitive
+///
+/// [`print_step_warn`] shares the three-space body indent and the `⚠️`
+/// glyph but wears a `.yellow()`-COLORED glyph followed by ONE space
+/// rather than the plain glyph + TWO spaces this primitive carries. The
+/// coloring difference is load-bearing: the pre-lift `println!("   ⚠️
+/// …")` sites at `rust_service.rs:516`, `migrations.rs:461` /
+/// `:797-800` / `:1317-1320` / `:1323-1326`, and
+/// `developer_tools.rs:568-570` / `:573` deliberately spelled the marker
+/// as the bare emoji rather than routing through `.yellow()`, so a
+/// terminal without `\x1b[33m` interpretation (a CI log renderer, a
+/// downstream `grep`-in-logs pipeline, a plain-text runbook capture)
+/// reads the pre-lift bytes verbatim. A collapse into `print_step_warn`
+/// would silently paint the glyph yellow at every site — a shift in the
+/// visual grammar the seven pre-lift authors chose not to make.
+///
+/// [`eprint_step_warn`] shares the UNCOLORED `⚠️` glyph, the two-space
+/// post-glyph gap, and the `writeln!` output shape but routes through
+/// STDERR (not stdout) and takes a MANDATORY `err: &dyn Display` tail
+/// after a literal `: ` connective. Its consumer sites bind a caught
+/// error at the failure boundary and interpolate it after the message;
+/// this primitive's consumer sites carry a self-contained sentence with
+/// no error tail. The stdout/stderr split is an observable behavior
+/// contract (a downstream consumer piping stdout while leaving stderr
+/// on the terminal, a log-shipper tagging streams differently); folding
+/// this class into the stderr primitive would silently shift these
+/// stdout warnings out of the stdout channel operators pipe separately
+/// to release runbooks.
+///
+/// [`print_nonfatal_warn`] shares the stderr routing (and this primitive
+/// does NOT — it is stdout), the mandatory error tail (and this primitive
+/// does NOT — it is message-only), and wears the `"WARN".yellow()`
+/// TEXTUAL prefix rather than the `⚠️` emoji glyph. Consumer sites there
+/// mark a non-fatal FAILURE inside the release pipeline with the fixed
+/// `<label> failed (non-fatal): <err>` template; this primitive carries a
+/// caller-composed plain message with no such structural template.
+///
+/// # UNCOLORED `⚠️` glyph, TWO ASCII spaces
+///
+/// Pre-lift every consumer spelled the marker as the bare `⚠️` glyph
+/// inside the format string literal followed by TWO ASCII spaces before
+/// the message text — with NO `.yellow()` styling applied. The extra
+/// space (vs. the one-space [`print_step_warn`] emits after its
+/// `.yellow()`-colored glyph) is load-bearing: the `⚠️` grapheme cluster
+/// (U+26A0 WARNING SIGN + U+FE0F VARIATION SELECTOR-16) renders as an
+/// East Asian Wide (two-column) glyph on emoji-aware terminals but as a
+/// one-column ASCII fallback (`⚠`) on plain-text renderers. The two-space
+/// post-glyph gap keeps the message column-aligned across both rendering
+/// modes: on a wide-emoji terminal one space visually consumes the
+/// second column of the glyph, leaving one visible space before the
+/// message; on a one-column-fallback renderer both spaces remain visible
+/// so the message still lands two columns after the glyph. A collapse to
+/// a single space would misalign the message on emoji-aware terminals
+/// (the message would abut the glyph's second column), which is why the
+/// pre-lift `.yellow()`-decorated [`print_step_warn`] emits one space —
+/// the ANSI sequence already advances the cursor past the glyph — while
+/// the UNCOLORED pre-lift stanzas need the second space to preserve
+/// alignment.
+///
+/// # stdout, not stderr
+///
+/// Every pre-lift consumer routed through `println!` (stdout), not
+/// `eprintln!` (stderr) — a runbook capture piping `forge <cmd> > log.txt`
+/// records these in-body warnings alongside the success narration, and
+/// an operator watching stderr for release-abort signals sees only the
+/// terminal `anyhow::bail!` bubbles. The primitive preserves that
+/// routing; a future refinement (routing through `tracing::info!` with a
+/// `warn`-level target so structured observability picks the class up,
+/// promoting to a `.yellow()`-tinted glyph under a palette-consistency
+/// grammar, folding both stdout and stderr variants under a single
+/// stream-parameterized primitive) lands at ONE typed body and reaches
+/// this consumer by construction.
+///
+/// # Compounding
+///
+/// Pre-lift 7 sibling sites each restated the `println!("   ⚠️  <fmt>",
+/// <args>)` grammar verbatim, with the three-space indent, the plain
+/// `⚠️` emoji glyph, the two ASCII spaces, and the caller-composed
+/// message tail all spelled inline. A future adjustment — routing them
+/// through `tracing::info!(target: "forge::pipeline", …)` for structured
+/// observability so a downstream OTLP subscriber counts in-body stdout
+/// warnings per pipeline stage, promoting the glyph to `.yellow()` under
+/// a palette-consistency grammar with the [`print_step_warn`] sibling,
+/// shifting the two-space post-glyph gap to a single-space grammar under
+/// a lower-emoji-density readout — had to hit 7 sites in lockstep or
+/// drift the surface. Post-lift the glyph, spacing, and destination
+/// stream live in ONE writer body; the sites carry only the message.
+/// Delegates to [`write_plain_step_warn`] against [`std::io::stdout()`];
+/// the writer split exists so the fail-before-pass test can pin the
+/// one-line body, the three-space indent, the plain (no ANSI) `⚠️`
+/// glyph, the two-space post-glyph gap, and the trailing newline by
+/// inspecting emitted bytes rather than shelling out and grepping stdout.
+pub fn print_plain_step_warn(message: &str) {
+    let _ = write_plain_step_warn(&mut std::io::stdout().lock(), message);
+}
+
+/// Writer-taking sibling to [`print_plain_step_warn`]. Emits the single
+/// `"   ⚠️  <message>"` line via [`writeln!`] against the supplied
+/// writer. [`print_plain_step_warn`] is the stdout adapter; this variant
+/// exists so tests can pin the one-line body, the three-space indent,
+/// the UNCOLORED `⚠️` emoji glyph (never `.yellow()` — that grammar
+/// belongs to [`write_step_warn`]), the two-space post-glyph gap, and
+/// the trailing newline without capturing stdout.
+pub fn write_plain_step_warn<W: std::io::Write>(w: &mut W, message: &str) -> std::io::Result<()> {
+    writeln!(w, "   \u{26A0}\u{FE0F}  {}", message)
+}
+
 /// Prints the one-line `"   {} {} failed (non-fatal): {}"` (three-space
 /// indent + `"WARN".yellow()` textual prefix + verb-phrase label +
 /// literal ` failed (non-fatal): ` connective + [`std::fmt::Display`]
@@ -11394,6 +11517,197 @@ mod tests {
                  primitive body every three-space-indented `⚠️.yellow()` \
                  in-body step-warn in the crate now delegates \
                  through."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_plain_step_warn`].
+    /// Pins the one-line body every pre-lift consumer spelled verbatim
+    /// (`println!("   ⚠️  <fmt>", <args>)`): a three-space indent, the
+    /// UNCOLORED `⚠️` grapheme cluster (U+26A0 WARNING SIGN followed by
+    /// U+FE0F VARIATION SELECTOR-16), two ASCII spaces after the glyph,
+    /// then the caller-composed plain message, then a trailing `\n`. A
+    /// silent contract drift a future rewrite might introduce — dropping
+    /// the three-space indent (a "tighter body spacing" cleanup),
+    /// collapsing the two post-glyph spaces to one (a "match the
+    /// `print_step_warn` cadence" cleanup — but the [`super::print_step_warn`]
+    /// one-space is compensating for the `\x1b[33m` prefix that this
+    /// primitive lacks), painting the glyph via `.yellow()` (a "match
+    /// the sibling `print_step_warn` palette" cleanup which would erase
+    /// the deliberate uncolored-glyph choice pre-lift authors made for
+    /// CI-log and plain-text-renderer legibility), dropping the U+FE0F
+    /// variation selector so the glyph renders as monochrome `⚠` on
+    /// emoji-aware terminals — flips this assertion rather than
+    /// compiling and silently diverging the 7 consumer sites' visual
+    /// grammar.
+    #[test]
+    fn write_plain_step_warn_emits_exactly_one_uncolored_indented_line() {
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_plain_step_warn(&mut buf, "Configured secret not found: postgres")
+            .expect("write_plain_step_warn against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_plain_step_warn must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — the pre-lift stanza is one `println!`, not
+        // two, and carries no framing blank. A refactor that slips a
+        // leading or trailing blank into the primitive body fails here.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_plain_step_warn must emit exactly one line — the \
+             pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The three-space indent lands first — a fusion that dropped
+        // the indent altogether or padded it to four spaces (under a
+        // "align with nested sub-bullets" cleanup) fails here.
+        assert!(
+            lines[0].starts_with("   "),
+            "line 0 must begin with a three-space indent — every \
+             pre-lift consumer spelled `\"   ⚠️  <fmt>\"` verbatim; \
+             got {:?}",
+            lines[0]
+        );
+
+        // The `⚠️` grapheme cluster (U+26A0 + U+FE0F) reaches the
+        // rendered line verbatim. A fusion that dropped the variation
+        // selector (rendering `⚠` monochrome on emoji-aware terminals)
+        // or swapped for a different marker (`!`, `WARN`) fails here.
+        assert!(
+            lines[0].contains("\u{26A0}\u{FE0F}"),
+            "line 0 must contain the `⚠️` grapheme cluster \
+             (U+26A0 WARNING SIGN + U+FE0F VARIATION SELECTOR-16) — \
+             the variation selector requests emoji presentation and \
+             every pre-lift consumer spelled the full grapheme; got {:?}",
+            lines[0]
+        );
+
+        // The TWO ASCII spaces between the glyph and the message reach
+        // the rendered line — a fusion that collapsed to one space
+        // (matching the sibling `write_step_warn` cadence which is
+        // itself compensating for the `\x1b[33m` prefix this primitive
+        // lacks) would misalign the message column on emoji-aware
+        // terminals. Verify by locating the glyph and confirming two
+        // spaces follow before the message text.
+        let glyph_end = lines[0]
+            .find("\u{26A0}\u{FE0F}")
+            .expect("glyph must be present")
+            + "\u{26A0}\u{FE0F}".len();
+        let after_glyph = &lines[0][glyph_end..];
+        assert!(
+            after_glyph.starts_with("  "),
+            "line 0 must carry exactly TWO ASCII spaces after the \
+             `⚠️` glyph — the second space compensates for the East \
+             Asian Wide emoji presentation on emoji-aware terminals \
+             where the `.yellow()` ANSI on the sibling `print_step_warn` \
+             is absent here; got {:?} (after glyph: {:?})",
+            lines[0],
+            after_glyph
+        );
+
+        // The message text reaches the rendered line verbatim; a
+        // fusion that hoisted the message off the parameter and pinned
+        // it to a constant fails here.
+        assert!(
+            lines[0].contains("Configured secret not found: postgres"),
+            "line 0 must carry the message verbatim; got {:?}",
+            lines[0]
+        );
+
+        // NO ANSI escape reaches the rendered line — this primitive
+        // deliberately spells the glyph PLAIN. A fusion that promoted
+        // the glyph to `.yellow()` (collapsing into the sibling
+        // `print_step_warn` palette) or painted the whole line under
+        // any color fails here. The `\x1b[` escape sequence introducer
+        // is the diagnostic — its absence proves no ANSI decoration
+        // was applied by the writer.
+        assert!(
+            !lines[0].contains("\x1b["),
+            "line 0 must NOT carry any ANSI escape sequence — this \
+             primitive is the UNCOLORED sibling of `write_step_warn`, \
+             deliberately spelling the `⚠️` glyph plain so a CI log \
+             renderer, a `grep`-in-logs pipeline, or a plain-text \
+             runbook capture reads the pre-lift bytes verbatim. Every \
+             pre-lift consumer spelled the marker inside the format \
+             literal without `.yellow()` styling; got {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `println!` (not `print!`), so the newline is part of the
+        // contract. A fusion that swapped `writeln!` for `write!`
+        // fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_plain_step_warn must emit a trailing `\\n` (the \
+             pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_plain_step_warn`] no longer spell the
+    /// `println!("   ⚠️  <fmt>", <args>)` shape inline. Structural
+    /// regression shield — without it, a future refactor could silently
+    /// re-inline the one-liner (a "just call `println!` directly, it's
+    /// shorter" cleanup) and reopen the 7-site duplication class this
+    /// lift closed. Enforced at the module bodies before their
+    /// `#[cfg(test)]` regions so a test-support mention of the raw
+    /// shape does not defeat the shield.
+    ///
+    /// The exact-shape needle is `println!("   ⚠️  ` appearing anywhere
+    /// in the module body — the three-space indent + plain `⚠️`
+    /// grapheme cluster + two ASCII spaces uniquely identifies the
+    /// pre-lift stdout stanza and separates it from the sibling
+    /// `println!("   {} <fmt>", "⚠️".yellow(), …)` grammar (which lives
+    /// under `write_step_warn` and passes its glyph through a slot
+    /// rather than spelling it inline) and from the `eprintln!("   ⚠️  ` /
+    /// `warn!("   ⚠️  ` sibling grammars (different output stream / log
+    /// target).
+    #[test]
+    fn print_plain_step_warn_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[
+            (
+                include_str!("commands/rust_service.rs"),
+                "commands/rust_service.rs",
+            ),
+            (
+                include_str!("commands/migrations.rs"),
+                "commands/migrations.rs",
+            ),
+            (
+                include_str!("commands/developer_tools.rs"),
+                "commands/developer_tools.rs",
+            ),
+        ];
+        for (source, module_path) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("println!(\"   \u{26A0}\u{FE0F}  ") {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `println!(\"   ⚠️  <fmt>\", <args>)` stdout \
+                     step-warn stanza — that shape was lifted onto \
+                     `crate::ui::print_plain_step_warn`. A re-inline \
+                     would silently reopen the 7-site duplication class \
+                     this shield exists to close. Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            assert!(
+                body.contains("crate::ui::print_plain_step_warn("),
+                "{module_path} body must forward to \
+                 `crate::ui::print_plain_step_warn(<MSG>)` — the \
+                 primitive body every three-space-indented uncolored \
+                 `⚠️  ` in-body stdout step-warn in the crate now \
+                 delegates through."
             );
         }
     }
