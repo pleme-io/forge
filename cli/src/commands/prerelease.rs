@@ -927,17 +927,11 @@ async fn run_integration_gate(config: &PreReleaseConfig) -> Result<bool> {
     match output {
         Ok(Ok(output)) => {
             if output.status.success() {
-                crate::ui::print_step_pass(&crate::repo::msg_with_secs_1(
-                    "Integration tests passed",
-                    duration,
-                ));
+                crate::ui::print_step_pass_timed("Integration tests passed", duration);
                 Ok(true)
             } else {
                 let (stdout, stderr) = crate::repo::utf8_lossy_streams(&output);
-                crate::ui::print_step_failure(&crate::repo::msg_with_secs_1(
-                    "Integration tests failed",
-                    duration,
-                ));
+                crate::ui::print_step_failure_timed("Integration tests failed", duration);
                 for line in stderr.lines().chain(stdout.lines()).take(15) {
                     if line.contains("FAILED") || line.contains("panicked") {
                         crate::ui::print_diagnostic_error_line(line);
@@ -1096,17 +1090,11 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
             let _ = e2e::cleanup_e2e_images();
 
             if output.status.success() {
-                crate::ui::print_step_pass(&crate::repo::msg_with_secs_1(
-                    "E2E tests passed",
-                    duration,
-                ));
+                crate::ui::print_step_pass_timed("E2E tests passed", duration);
                 Ok(true)
             } else {
                 let (stdout, stderr) = crate::repo::utf8_lossy_streams(&output);
-                crate::ui::print_step_failure(&crate::repo::msg_with_secs_1(
-                    "E2E tests failed",
-                    duration,
-                ));
+                crate::ui::print_step_failure_timed("E2E tests failed", duration);
 
                 // Show all test output for debugging
                 println!();
@@ -1206,17 +1194,11 @@ async fn run_cargo_check(backend_dir: &Path) -> Result<bool> {
     let duration = start.elapsed();
 
     if output.status.success() {
-        crate::ui::print_step_pass(&crate::repo::msg_with_secs_1(
-            "Compilation check passed",
-            duration,
-        ));
+        crate::ui::print_step_pass_timed("Compilation check passed", duration);
         Ok(true)
     } else {
         let stderr = crate::repo::utf8_lossy_borrow(&output.stderr);
-        crate::ui::print_step_failure(&crate::repo::msg_with_secs_1(
-            "Compilation check failed",
-            duration,
-        ));
+        crate::ui::print_step_failure_timed("Compilation check failed", duration);
         // Show first few errors
         for line in stderr.lines().take(10) {
             if line.contains("error") {
@@ -1279,10 +1261,7 @@ async fn run_cargo_fmt_check(backend_dir: &Path) -> Result<bool> {
 
     if !fix_output.status.success() {
         let stderr = crate::repo::utf8_lossy_borrow(&fix_output.stderr);
-        crate::ui::print_step_failure(&crate::repo::msg_with_secs_1(
-            "cargo fmt failed",
-            start.elapsed(),
-        ));
+        crate::ui::print_step_failure_timed("cargo fmt failed", start.elapsed());
         for line in stderr.lines().take(5) {
             crate::ui::print_diagnostic_line(line);
         }
@@ -1296,10 +1275,7 @@ async fn run_cargo_fmt_check(backend_dir: &Path) -> Result<bool> {
     let duration = start.elapsed();
 
     if check_output.status.success() {
-        crate::ui::print_step_pass(&crate::repo::msg_with_secs_1(
-            "Code formatting applied and verified",
-            duration,
-        ));
+        crate::ui::print_step_pass_timed("Code formatting applied and verified", duration);
         Ok(true)
     } else {
         // This shouldn't happen after auto-fix, but handle it
@@ -1352,7 +1328,7 @@ async fn run_cargo_test(backend_dir: &Path) -> Result<bool> {
         Ok(true)
     } else {
         let stderr = crate::repo::utf8_lossy_borrow(&output.stderr);
-        crate::ui::print_step_failure(&crate::repo::msg_with_secs_1("Tests failed", duration));
+        crate::ui::print_step_failure_timed("Tests failed", duration);
         println!();
         // Show full stdout (cargo test writes results there)
         if !stdout.trim().is_empty() {

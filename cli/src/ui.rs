@@ -5640,6 +5640,167 @@ pub fn write_bold_titled_phase_open<W: std::io::Write>(
     writeln!(w, "{} {}", emoji, title.bold())
 }
 
+/// Prints the one-line `   {} <message> ({:.1}s)` (three-space indent +
+/// green `✅` glyph + plain message + parenthesized one-decimal seconds
+/// tail) step-pass-with-elapsed grammar 6 pre-lift consumer sites
+/// spelled inline as
+/// `crate::ui::print_step_pass(&crate::repo::msg_with_secs_1(<msg>,
+/// <duration>))` across 2 command modules (`commands/{prerelease (×4:
+/// Integration-tests-passed, E2E-tests-passed, Compilation-check-passed,
+/// Code-formatting-applied-and-verified), frontend_validation (×2:
+/// Type-check-passed, Biome-lint-applied-and-verified)}.rs`). A fusion
+/// of [`print_step_pass`] with the pre-lift
+/// `crate::repo::msg_with_secs_1(<msg>, <duration>)` composition every
+/// consumer hand-spelled — the same fixed grammar, one typed body,
+/// with the [`Duration`] argument delivered STRUCTURED at the primitive
+/// boundary (never pre-projected into an `f64` via `.as_secs_f64()` or
+/// pre-formatted into an owned [`String`]).
+///
+/// # Distinct from the base [`print_step_pass`] primitive
+///
+/// [`print_step_pass`] takes ONE `&str` message and writes it verbatim;
+/// callers that carried the elapsed-time tail had to compose the
+/// `crate::repo::msg_with_secs_1(<msg>, <duration>)` call inline at
+/// every site, re-restating the tail-composition idiom across 6 sibling
+/// step-pass stanzas. This fusion carries the `message: &str` and the
+/// `duration: Duration` typed arguments separately, calls
+/// [`crate::repo::msg_with_secs_1`] ONCE in its body, and delegates
+/// to [`write_step_pass`] — the same `   ✅.green() <msg> ({:.1}s)`
+/// byte-for-byte payload the pre-lift composition produced, minus the
+/// 6-site copy-and-paste.
+///
+/// # Compounding
+///
+/// Pre-lift 6 sibling sites each restated the
+/// `crate::repo::msg_with_secs_1(<msg>, <duration>)` composition INSIDE
+/// the `print_step_pass(&…)` call, so the tail-format convention (a
+/// parenthesized surround, a one-decimal-place seconds pin, a single
+/// leading space between message and tail) reached the primitive
+/// pre-composed. A future refinement of the tail grammar (a swap of
+/// `({:.1}s)` for ` in {:.1}s` under the sibling
+/// `msg_completed_in_secs_1` dialect, a lift of the seconds precision
+/// to `{:.2}s` under a finer readout, an OTLP `step_passed`
+/// observability event wired alongside the print that carries the
+/// message + duration as SEPARATE structured attributes rather than a
+/// pre-composed string) had to hit 6 sites in lockstep or drift the
+/// step-timing readout; post-lift it hits ONE typed body. The
+/// `duration: Duration` typed argument stays a STRUCTURED value at
+/// the primitive boundary — the observability change lands in one
+/// place and every consumer picks it up by construction.
+///
+/// Delegates to [`write_step_pass_timed`] against [`std::io::stdout()`];
+/// the writer split exists so the fail-before-pass test can pin the
+/// one-line body, the three-space indent, the `✅ ` glyph, the
+/// `\x1b[32m` green ANSI palette on the glyph alone, the
+/// parenthesized `({:.1}s)` tail's byte-for-byte reproduction, and
+/// the caller-supplied [`Duration`]'s one-decimal-place seconds
+/// projection by inspecting emitted bytes rather than shelling out
+/// and grepping stdout.
+pub fn print_step_pass_timed(message: &str, duration: Duration) {
+    let _ = write_step_pass_timed(&mut std::io::stdout().lock(), message, duration);
+}
+
+/// Writer-taking sibling to [`print_step_pass_timed`]. Emits the single
+/// `   <✅.green()> <message> ({:.1}s)` line via [`write_step_pass`]
+/// against the supplied writer, delegating the parenthesized seconds
+/// tail's composition to [`crate::repo::msg_with_secs_1`].
+/// [`print_step_pass_timed`] is the stdout adapter; this variant exists
+/// so tests can pin the one-line body, the three-space indent, the
+/// `✅ ` glyph, the `\x1b[32m` green ANSI sequence around the glyph
+/// (never the message, never the tail), the literal ` (` and `)` tail
+/// delimiters, and the caller-supplied [`Duration`]'s one-decimal-place
+/// seconds projection without capturing stdout.
+pub fn write_step_pass_timed<W: std::io::Write>(
+    w: &mut W,
+    message: &str,
+    duration: Duration,
+) -> std::io::Result<()> {
+    write_step_pass(w, &crate::repo::msg_with_secs_1(message, duration))
+}
+
+/// Prints the one-line `   {} <message> ({:.1}s)` (three-space indent +
+/// red `❌` glyph + plain message + parenthesized one-decimal seconds
+/// tail) step-failure-with-elapsed grammar 8 pre-lift consumer sites
+/// spelled inline as
+/// `crate::ui::print_step_failure(&crate::repo::msg_with_secs_1(<msg>,
+/// <duration>))` across 2 command modules (`commands/{prerelease (×5:
+/// Integration-tests-failed, E2E-tests-failed, Compilation-check-failed,
+/// cargo-fmt-failed, Tests-failed), frontend_validation (×3:
+/// Biome-auto-fix-failed, Unit-tests-failed, Test-execution-failed)}.rs`).
+/// A fusion of [`print_step_failure`] with the pre-lift
+/// `crate::repo::msg_with_secs_1(<msg>, <duration>)` composition every
+/// consumer hand-spelled — the same fixed grammar, one typed body,
+/// with the [`Duration`] argument delivered STRUCTURED at the primitive
+/// boundary (never pre-projected into an `f64` via `.as_secs_f64()` or
+/// pre-formatted into an owned [`String`]).
+///
+/// # Distinct from the base [`print_step_failure`] primitive
+///
+/// [`print_step_failure`] takes ONE `&str` message and writes it
+/// verbatim; callers that carried the elapsed-time tail had to compose
+/// the `crate::repo::msg_with_secs_1(<msg>, <duration>)` call inline at
+/// every site, re-restating the tail-composition idiom across 8 sibling
+/// step-failure stanzas. This fusion carries the `message: &str` and
+/// the `duration: Duration` typed arguments separately, calls
+/// [`crate::repo::msg_with_secs_1`] ONCE in its body, and delegates
+/// to [`write_step_failure`] — the same `   ❌.red() <msg> ({:.1}s)`
+/// byte-for-byte payload the pre-lift composition produced, minus the
+/// 8-site copy-and-paste.
+///
+/// # Distinct from [`print_step_failure_with_error`]
+///
+/// [`print_step_failure_with_error`] fuses `print_step_failure` with a
+/// SEPARATE `format!("<label>: {}", <err>)` composition — the pre-lift
+/// stanza there carried a colon-space connective and a `Display`
+/// error interpolation, not the `msg_with_secs_1` parenthesized-seconds
+/// tail. The two fusions cover disjoint pre-lift shapes and share the
+/// `print_step_failure` base primitive; a site that carries BOTH the
+/// `Display` error and the elapsed-time tail is not covered by either
+/// fusion and stays inline until measured against a third distinct
+/// pre-lift consumer count.
+///
+/// # Compounding
+///
+/// Pre-lift 8 sibling sites each restated the
+/// `crate::repo::msg_with_secs_1(<msg>, <duration>)` composition INSIDE
+/// the `print_step_failure(&…)` call, so the tail-format convention
+/// reached the primitive pre-composed. A future refinement of the
+/// tail grammar (as documented on [`print_step_pass_timed`]) had to
+/// hit 8 sites in lockstep or drift the step-timing readout; post-lift
+/// it hits ONE typed body. The `duration: Duration` typed argument
+/// stays a STRUCTURED value at the primitive boundary.
+///
+/// Delegates to [`write_step_failure_timed`] against
+/// [`std::io::stdout()`]; the writer split exists so the
+/// fail-before-pass test can pin the one-line body, the three-space
+/// indent, the `❌ ` glyph, the `\x1b[31m` red ANSI palette on the
+/// glyph alone, the parenthesized `({:.1}s)` tail's byte-for-byte
+/// reproduction, and the caller-supplied [`Duration`]'s
+/// one-decimal-place seconds projection by inspecting emitted bytes
+/// rather than shelling out and grepping stdout.
+pub fn print_step_failure_timed(message: &str, duration: Duration) {
+    let _ = write_step_failure_timed(&mut std::io::stdout().lock(), message, duration);
+}
+
+/// Writer-taking sibling to [`print_step_failure_timed`]. Emits the
+/// single `   <❌.red()> <message> ({:.1}s)` line via
+/// [`write_step_failure`] against the supplied writer, delegating the
+/// parenthesized seconds tail's composition to
+/// [`crate::repo::msg_with_secs_1`]. [`print_step_failure_timed`] is
+/// the stdout adapter; this variant exists so tests can pin the
+/// one-line body, the three-space indent, the `❌ ` glyph, the
+/// `\x1b[31m` red ANSI sequence around the glyph (never the message,
+/// never the tail), the literal ` (` and `)` tail delimiters, and the
+/// caller-supplied [`Duration`]'s one-decimal-place seconds projection
+/// without capturing stdout.
+pub fn write_step_failure_timed<W: std::io::Write>(
+    w: &mut W,
+    message: &str,
+    duration: Duration,
+) -> std::io::Result<()> {
+    write_step_failure(w, &crate::repo::msg_with_secs_1(message, duration))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{styled_spinner, SpinnerStyle, SPINNER_TICK};
@@ -18546,6 +18707,350 @@ mod tests {
                  consumer sites into one call or dropped one of the \
                  phase-open banners silently fails here. Found \
                  {forward_hits} forwarding hits."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_step_pass_timed`].
+    /// Pins the one-line body every pre-lift consumer spelled verbatim
+    /// (`crate::ui::print_step_pass(&crate::repo::msg_with_secs_1(<msg>,
+    /// <duration>))`): a three-space indent, a `.green()`-colored `✅`
+    /// glyph, a single space, the caller-supplied message, then the
+    /// parenthesized ` ({:.1}s)` one-decimal-place seconds tail. A
+    /// silent contract drift a future rewrite might introduce —
+    /// swapping the delegation base from [`write_step_pass`] to a
+    /// leaner [`write_step_success`] (dropping the three-space indent
+    /// and painting the message green), inlining the tail composition
+    /// with a divergent format string (e.g. `" ({:.2}s)"`, `" (took
+    /// {:.1}s)"`, `" [{:.1}s]"`), swapping [`crate::repo::msg_with_secs_1`]
+    /// for the sibling [`crate::repo::msg_completed_in_secs_1`]
+    /// dialect (which produces `<msg> completed in {:.1}s`, no
+    /// parentheses) — flips this assertion rather than compiling and
+    /// silently diverging the 6 consumer sites' visual grammar.
+    #[test]
+    fn write_step_pass_timed_emits_step_pass_with_paren_secs_1_tail() {
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_step_pass_timed(&mut buf, "Type check passed", Duration::from_millis(3400))
+            .expect("write_step_pass_timed against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_step_pass_timed must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — the pre-lift stanza is one
+        // `print_step_pass(&msg_with_secs_1(...))` call carrying no
+        // framing blank. A refactor that slips a leading or trailing
+        // blank into the primitive body fails here.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_step_pass_timed must emit exactly one line — the \
+             pre-lift stanza was one `print_step_pass` call carrying \
+             no framing blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The three-space indent reaches the rendered line before any
+        // ANSI escape — the fusion delegates to `write_step_pass`,
+        // which emits the indent OUTSIDE the coloring span.
+        assert!(
+            lines[0].starts_with("   "),
+            "line 0 must begin with a three-space indent — the fusion \
+             delegates to `write_step_pass`, which emits the indent \
+             OUTSIDE the coloring span; got {:?}",
+            lines[0]
+        );
+
+        // The `✅ ` glyph reaches the rendered line.
+        assert!(
+            lines[0].contains('✅'),
+            "line 0 must contain the `✅` glyph — the fusion delegates \
+             to `write_step_pass`, which spells `\"✅\".green()` on the \
+             marker; got {:?}",
+            lines[0]
+        );
+
+        // The `.green()` ANSI sequence (`\x1b[32m`) reaches the
+        // rendered line.
+        assert!(
+            lines[0].contains("\x1b[32m"),
+            "line 0 must carry the `.green()` ANSI sequence \
+             (`\\x1b[32m`) — the fusion delegates to `write_step_pass`, \
+             which spells `.green()` on the glyph; got {:?}",
+            lines[0]
+        );
+
+        // The caller's message reaches the rendered line VERBATIM.
+        assert!(
+            lines[0].contains("Type check passed"),
+            "line 0 must carry the caller-supplied message verbatim; \
+             got {:?}",
+            lines[0]
+        );
+
+        // The parenthesized ` (3.4s)` one-decimal-place seconds tail
+        // reaches the rendered line — the fusion calls
+        // `crate::repo::msg_with_secs_1(msg, duration)`, which
+        // produces the `<msg> ({:.1}s)` shape. A refactor that swapped
+        // the delegation for `msg_completed_in_secs_1` (`<msg>
+        // completed in {:.1}s`, no parens) or pinned the seconds
+        // precision differently (e.g. `{:.2}s`) fails here.
+        assert!(
+            lines[0].contains(" (3.4s)"),
+            "line 0 must carry the parenthesized ` (3.4s)` \
+             one-decimal-place seconds tail — the fusion delegates the \
+             tail composition to `crate::repo::msg_with_secs_1`, whose \
+             `<msg> ({{:.1}}s)` grammar every pre-lift consumer relied \
+             on; got {:?}",
+            lines[0]
+        );
+
+        // The tail follows the message, not the other way around.
+        let msg_pos = lines[0]
+            .find("Type check passed")
+            .expect("message must be present");
+        let tail_pos = lines[0].find(" (3.4s)").expect("tail must be present");
+        assert!(
+            msg_pos < tail_pos,
+            "the ` ({{:.1}}s)` tail must follow the message, not \
+             precede it — the pre-lift `msg_with_secs_1(msg, d)` \
+             composition places the tail AFTER the message; got \
+             msg={msg_pos}, tail={tail_pos} in line {:?}",
+            lines[0]
+        );
+
+        // Byte-for-byte equivalence with the pre-lift composition
+        // — the fusion MUST produce the exact same bytes as
+        // `write_step_pass(w, &msg_with_secs_1(msg, d))` for every
+        // (msg, d) input. This is the primary structural invariant
+        // the lift preserves.
+        let mut oracle: Vec<u8> = Vec::new();
+        super::write_step_pass(
+            &mut oracle,
+            &crate::repo::msg_with_secs_1("Type check passed", Duration::from_millis(3400)),
+        )
+        .expect("oracle write must succeed");
+        assert_eq!(
+            out.as_bytes(),
+            oracle.as_slice(),
+            "write_step_pass_timed must emit byte-for-byte the same \
+             bytes as `write_step_pass(w, &msg_with_secs_1(msg, d))` — \
+             the fusion's contract is `msg_with_secs_1` composition \
+             delegated to `write_step_pass`, unchanged"
+        );
+
+        // The trailing `\n` reaches the writer.
+        assert!(
+            out.ends_with('\n'),
+            "write_step_pass_timed must emit a trailing `\\n` (the \
+             pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_step_pass_timed`] no longer spell the
+    /// `crate::ui::print_step_pass(&crate::repo::msg_with_secs_1(<msg>,
+    /// <duration>))` shape inline in `commands/{prerelease,
+    /// frontend_validation}.rs`. Structural regression shield —
+    /// without it a future refactor could silently re-inline the
+    /// composition (e.g. a "one call site, not worth the fusion"
+    /// cleanup) and reopen the 6-site duplication class this lift
+    /// closed.
+    #[test]
+    fn print_step_pass_timed_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str, usize)] = &[
+            (
+                include_str!("commands/prerelease.rs"),
+                "commands/prerelease.rs",
+                4,
+            ),
+            (
+                include_str!("commands/frontend_validation.rs"),
+                "commands/frontend_validation.rs",
+                2,
+            ),
+        ];
+        // Pre-lift needle: a `print_step_pass(&…)` call whose argument
+        // opens with `&crate::repo::msg_with_secs_1(`. Split across
+        // two substrings joined at runtime so the shield's own source
+        // does not contain the composed literal it forbids.
+        const PRE_LIFT_HEAD: &str = "print_step_pass(";
+        const PRE_LIFT_TAIL: &str = "&crate::repo::msg_with_secs_1(";
+        for (source, module_path, expected_forwards) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            let composed = format!("{PRE_LIFT_HEAD}{PRE_LIFT_TAIL}");
+            assert!(
+                !body.contains(&composed),
+                "{module_path} body still spells the pre-lift inline \
+                 `{composed}<msg>, <duration>))` step-pass-with-elapsed \
+                 composition — that shape was lifted onto \
+                 `crate::ui::print_step_pass_timed(<msg>, <duration>)`. \
+                 A re-inline would silently reopen the 6-site \
+                 duplication class this shield exists to close."
+            );
+            let forwards = body.matches("crate::ui::print_step_pass_timed(").count();
+            assert_eq!(
+                forwards, *expected_forwards,
+                "{module_path} body must forward to \
+                 `crate::ui::print_step_pass_timed(<msg>, <duration>)` \
+                 at the pre-lift site count ({expected_forwards}) — a \
+                 fusion that dropped one of the step-pass prints or \
+                 folded two into a single call fails here; got \
+                 {forwards}"
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for
+    /// [`super::write_step_failure_timed`]. Pins the one-line body
+    /// every pre-lift consumer spelled verbatim
+    /// (`crate::ui::print_step_failure(&crate::repo::msg_with_secs_1(<msg>,
+    /// <duration>))`): a three-space indent, a `.red()`-colored `❌`
+    /// glyph, a single space, the caller-supplied message, then the
+    /// parenthesized ` ({:.1}s)` one-decimal-place seconds tail. A
+    /// silent contract drift a future rewrite might introduce —
+    /// swapping [`crate::repo::msg_with_secs_1`] for the sibling
+    /// [`crate::repo::msg_completed_in_secs_1`] dialect, pinning the
+    /// seconds precision differently, dropping the tail entirely, or
+    /// promoting the `.red()` palette to `.bright_red()` — flips
+    /// this assertion rather than compiling and silently diverging
+    /// the 8 consumer sites' visual grammar.
+    #[test]
+    fn write_step_failure_timed_emits_step_failure_with_paren_secs_1_tail() {
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_step_failure_timed(
+            &mut buf,
+            "Integration tests failed",
+            Duration::from_millis(12500),
+        )
+        .expect("write_step_failure_timed against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_step_failure_timed must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_step_failure_timed must emit exactly one line — the \
+             pre-lift stanza was one `print_step_failure` call carrying \
+             no framing blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The three-space indent.
+        assert!(
+            lines[0].starts_with("   "),
+            "line 0 must begin with a three-space indent; got {:?}",
+            lines[0]
+        );
+
+        // The `❌` glyph.
+        assert!(
+            lines[0].contains('❌'),
+            "line 0 must contain the `❌` glyph; got {:?}",
+            lines[0]
+        );
+
+        // The `.red()` ANSI sequence (`\x1b[31m`).
+        assert!(
+            lines[0].contains("\x1b[31m"),
+            "line 0 must carry the `.red()` ANSI sequence \
+             (`\\x1b[31m`); got {:?}",
+            lines[0]
+        );
+
+        // The caller's message reaches the rendered line VERBATIM.
+        assert!(
+            lines[0].contains("Integration tests failed"),
+            "line 0 must carry the caller-supplied message verbatim; \
+             got {:?}",
+            lines[0]
+        );
+
+        // The parenthesized ` (12.5s)` one-decimal-place seconds tail.
+        assert!(
+            lines[0].contains(" (12.5s)"),
+            "line 0 must carry the parenthesized ` (12.5s)` \
+             one-decimal-place seconds tail; got {:?}",
+            lines[0]
+        );
+
+        // Byte-for-byte equivalence with the pre-lift composition.
+        let mut oracle: Vec<u8> = Vec::new();
+        super::write_step_failure(
+            &mut oracle,
+            &crate::repo::msg_with_secs_1("Integration tests failed", Duration::from_millis(12500)),
+        )
+        .expect("oracle write must succeed");
+        assert_eq!(
+            out.as_bytes(),
+            oracle.as_slice(),
+            "write_step_failure_timed must emit byte-for-byte the same \
+             bytes as `write_step_failure(w, &msg_with_secs_1(msg, d))` \
+             — the fusion's contract is `msg_with_secs_1` composition \
+             delegated to `write_step_failure`, unchanged"
+        );
+
+        // The trailing `\n` reaches the writer.
+        assert!(
+            out.ends_with('\n'),
+            "write_step_failure_timed must emit a trailing `\\n`; got \
+             {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_step_failure_timed`] no longer spell the
+    /// `crate::ui::print_step_failure(&crate::repo::msg_with_secs_1(<msg>,
+    /// <duration>))` shape inline in `commands/{prerelease,
+    /// frontend_validation}.rs`. Structural regression shield.
+    #[test]
+    fn print_step_failure_timed_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str, usize)] = &[
+            (
+                include_str!("commands/prerelease.rs"),
+                "commands/prerelease.rs",
+                5,
+            ),
+            (
+                include_str!("commands/frontend_validation.rs"),
+                "commands/frontend_validation.rs",
+                3,
+            ),
+        ];
+        const PRE_LIFT_HEAD: &str = "print_step_failure(";
+        const PRE_LIFT_TAIL: &str = "&crate::repo::msg_with_secs_1(";
+        for (source, module_path, expected_forwards) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            let composed = format!("{PRE_LIFT_HEAD}{PRE_LIFT_TAIL}");
+            assert!(
+                !body.contains(&composed),
+                "{module_path} body still spells the pre-lift inline \
+                 `{composed}<msg>, <duration>))` step-failure-with-elapsed \
+                 composition — that shape was lifted onto \
+                 `crate::ui::print_step_failure_timed(<msg>, <duration>)`. \
+                 A re-inline would silently reopen the 8-site \
+                 duplication class this shield exists to close."
+            );
+            let forwards = body.matches("crate::ui::print_step_failure_timed(").count();
+            assert_eq!(
+                forwards, *expected_forwards,
+                "{module_path} body must forward to \
+                 `crate::ui::print_step_failure_timed(<msg>, <duration>)` \
+                 at the pre-lift site count ({expected_forwards}) — a \
+                 fusion that dropped one of the step-failure prints or \
+                 folded two into a single call fails here; got \
+                 {forwards}"
             );
         }
     }
