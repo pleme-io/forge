@@ -318,6 +318,26 @@ pub enum HeavyRuleStyle {
     /// echo the `service.bright_cyan()` mid-line) happens at ONE
     /// arm rather than dragging the peer grammars along by accident.
     TestSectionBlue60,
+    /// Integration-test-section rule (uncolored × 60 `━` glyphs). 5
+    /// pre-lift sites in `commands/integration_tests.rs`, all spelled
+    /// inline as `println!("━━━…━━━")` at a 60-glyph literal — the
+    /// UNSTYLED sibling of [`Self::TestSectionBlue60`]. The 5 pre-lift
+    /// sites: opening + closing rule around the `❌ Failed Test Suite:
+    /// {}` per-failure detail block in the failure-reporting loop
+    /// (:666, :671), and opening + middle + closing rule around the
+    /// `📊 Pre-Deployment Test Summary for '{}'` pre-deploy summary
+    /// section (:1548, :1550, :1565). Kept as its own variant rather
+    /// than folded into [`Self::TestSectionBlue60`] because the
+    /// pre-lift grammar is deliberately unstyled — the surrounding
+    /// mid-line already carries `.bright_yellow()` /
+    /// `.bright_cyan()` / `.bright_green()` accents on the failing
+    /// suite name and summary counts, and painting the rule under
+    /// them would compound the color load rather than frame it. A
+    /// promotion to a colored rule (say, `.dimmed()` for a leaner
+    /// framing, or `.bright_blue()` to unify with the sibling
+    /// test-section grammar in `commands/test.rs`) happens at ONE
+    /// arm here rather than the five pre-lift call sites.
+    IntegrationTestSectionPlain60,
 }
 
 impl HeavyRuleStyle {
@@ -333,6 +353,7 @@ impl HeavyRuleStyle {
             HeavyRuleStyle::SummaryBlue80 => 80,
             HeavyRuleStyle::PushCompleteGreen60 => 60,
             HeavyRuleStyle::TestSectionBlue60 => 60,
+            HeavyRuleStyle::IntegrationTestSectionPlain60 => 60,
         }
     }
 }
@@ -369,6 +390,7 @@ pub fn write_heavy_rule<W: std::io::Write>(
         HeavyRuleStyle::SummaryBlue80 => writeln!(w, "{}", bar.as_str().bright_blue()),
         HeavyRuleStyle::PushCompleteGreen60 => writeln!(w, "{}", bar.as_str().bright_green()),
         HeavyRuleStyle::TestSectionBlue60 => writeln!(w, "{}", bar.as_str().bright_blue()),
+        HeavyRuleStyle::IntegrationTestSectionPlain60 => writeln!(w, "{}", bar),
     }
 }
 
@@ -15720,6 +15742,197 @@ mod tests {
                  consumer in this module. A fusion that folded two \
                  consumer sites into one call or dropped one of the \
                  rule lines silently fails here. Found \
+                 {forward_hits} forwarding hits."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_heavy_rule`] under
+    /// the [`super::HeavyRuleStyle::IntegrationTestSectionPlain60`]
+    /// variant. Pins the single-line body every pre-lift consumer in
+    /// `commands/integration_tests.rs` spelled inline as
+    /// `println!("━━━…━━━")` at a 60-glyph literal (no
+    /// `.bright_blue()` / `.bright_green()` / `.dimmed()` coloring
+    /// call): exactly one line, exactly 60 `━` glyphs, NO ANSI
+    /// escape sequence anywhere on the line, and a trailing `\n`.
+    /// Peer to
+    /// [`write_heavy_rule_test_section_blue_60_emits_one_bright_blue_bar_line_of_60_glyphs`]
+    /// (same 60-glyph width, DIFFERENT — colored — palette for
+    /// `commands/test.rs`'s test-section rule) — pins the fourth
+    /// pre-lift `(palette, width)` pairing the enum carries so a
+    /// fusion that dropped `IntegrationTestSectionPlain60` on the
+    /// assumption "callers can pass `TestSectionBlue60`" silently
+    /// paints the `commands/integration_tests.rs` per-failure and
+    /// summary rules bright blue and compounds the color load against
+    /// the already-accented mid-line
+    /// (`suite_name.bright_yellow()` / `passed.green()` /
+    /// `failed.red()`) the pre-lift stanza deliberately framed with
+    /// an unstyled rule.
+    #[test]
+    fn write_heavy_rule_integration_test_section_plain_60_emits_one_uncolored_bar_line_of_60_glyphs(
+    ) {
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_heavy_rule(
+            &mut buf,
+            super::HeavyRuleStyle::IntegrationTestSectionPlain60,
+        )
+        .expect("write_heavy_rule against a Vec<u8> writer must succeed");
+        let out = String::from_utf8(buf)
+            .expect("write_heavy_rule must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — every pre-lift stanza is one `println!`
+        // carrying no framing blank.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_heavy_rule must emit exactly one line — every \
+             pre-lift stanza in `commands/integration_tests.rs` is one \
+             `println!` carrying no framing blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The rule width reaches `String::repeat` at the enum-mapped
+        // 60 — a fusion that hoisted the width off the variant and
+        // pinned it to a fresh literal (say, widening to 80 to match
+        // the summary-section grammar) fails here. Every pre-lift
+        // consumer inlined the 60-glyph literal, which produces
+        // byte-for-byte the same output as `"━".repeat(60)` — the
+        // primitive's body pins the equivalence.
+        let bar_glyph_count = lines[0].chars().filter(|c| *c == '━').count();
+        assert_eq!(
+            bar_glyph_count, 60,
+            "line 0 must contain exactly 60 `━` glyphs (byte-for-byte \
+             matching the pre-lift 60-glyph inline literal); got {}",
+            bar_glyph_count
+        );
+
+        // The palette contract: the rule carries NO ANSI escape
+        // sequence — the pre-lift stanza spelled the literal without
+        // any coloring call, deliberately leaving the framing rule
+        // uncolored so the accented mid-line
+        // (`suite_name.bright_yellow()` / `passed.green()` /
+        // `failed.red()`) is the only color on the section. A silent
+        // promotion to `.bright_blue()` / `.dimmed()` / any other
+        // color call trips this assertion.
+        assert!(
+            !lines[0].contains('\x1b'),
+            "line 0 must carry NO ANSI escape sequence — the pre-lift \
+             stanza spelled the rule literal without any coloring \
+             call; got {:?}",
+            lines[0]
+        );
+
+        // Additional palette shield: exactly the 60-glyph bar with no
+        // other bytes on the line — a fusion that snuck a leading
+        // space, a trailing marker (`.dimmed()` would emit
+        // `\x1b[2m…\x1b[0m` — already caught above, but this pins the
+        // stricter "bare bar, nothing else" contract).
+        assert_eq!(
+            lines[0],
+            "\u{2501}".repeat(60),
+            "line 0 must be exactly 60 `━` glyphs and nothing else; \
+             got {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza
+        // used `println!` (not `print!`), so the newline is part of
+        // the contract.
+        assert!(
+            out.ends_with('\n'),
+            "write_heavy_rule must emit a trailing `\\n` (the \
+             pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the 5 callers in `commands/integration_tests.rs`
+    /// migrated onto [`super::print_heavy_rule`] under
+    /// [`super::HeavyRuleStyle::IntegrationTestSectionPlain60`] no
+    /// longer spell the `println!("━━━…━━━")` inline
+    /// 60-glyph-literal shape (distinct from the
+    /// [`print_heavy_rule_test_section_callers_delegate_through_primitive`]
+    /// shield's `"━━━…━━━".bright_blue()` needle, which
+    /// `commands/test.rs`'s pre-lift stanzas used but
+    /// `integration_tests.rs`'s did not — the latter's rule is
+    /// deliberately uncolored). Structural regression shield —
+    /// without it, a future refactor could silently re-inline the
+    /// literal (e.g. a "just spell out the bar, it's clearer"
+    /// cleanup) and reopen the 5-site duplication class this lift
+    /// closed. Enforced against the module body BEFORE its first
+    /// `#[cfg(test)]` region so a test-support mention of the raw
+    /// shape does not defeat the shield.
+    ///
+    /// The exact-shape needle is the full `println!` invocation with
+    /// the 60-glyph bar literal and NO trailing coloring call
+    /// (`println!("━━━…━━━");`). A sibling shape carrying a coloring
+    /// call (`println!("━━━…━━━".bright_blue())`) is OUT of scope
+    /// here by construction — that shape is the peer shield's job
+    /// (and is caught upstream by that shield's own needle, which
+    /// requires the `.bright_blue()` suffix). A sibling shape
+    /// carrying a different glyph (`"═━━━…"`), or a different width
+    /// (a 40-glyph literal) is also OUT of scope — the needle's
+    /// exact 60-`━` glyph sequence rejects both.
+    ///
+    /// The positive count is pinned at the pre-lift 5-site census
+    /// (`integration_tests.rs` ×5). A fusion that folded two rule
+    /// sites into one call or dropped one of the rules silently
+    /// fails here — the negative half above would still pass, but
+    /// the positive count would fall below the pre-lift census.
+    #[test]
+    fn print_heavy_rule_integration_test_section_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str, usize)] = &[(
+            include_str!("commands/integration_tests.rs"),
+            "commands/integration_tests.rs",
+            5,
+        )];
+        // The exact 60-glyph `━` bar literal every pre-lift consumer
+        // spelled inline. Composed via `str::repeat` at test-composition
+        // time so this shield does NOT itself spell the pre-lift
+        // 60-glyph literal (which would trigger the negative half
+        // against `ui.rs` if a future author widened the shield to
+        // cover this file too).
+        let bar_60 = "\u{2501}".repeat(60);
+        // Needle: `println!("<60 ━>");` — no coloring call between the
+        // closing `"` and the `);`, distinguishing it from the peer
+        // `println!("<60 ━>".bright_blue())` shape the sibling shield
+        // guards.
+        let inline_needle = format!("println!(\"{}\");", bar_60);
+        for (source, module_path, expected_forwards) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains(&inline_needle) {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `println!(\"\u{2501}\u{2501}\u{2501}…\u{2501}\u{2501}\u{2501}\");` \
+                     60-glyph plain-literal heavy-rule stanza — that \
+                     shape was lifted onto `crate::ui::print_heavy_rule` \
+                     under `HeavyRuleStyle::IntegrationTestSectionPlain60`. \
+                     A re-inline would silently reopen the 5-site \
+                     duplication class this shield exists to close. \
+                     Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            let forward_hits = body
+                .matches(
+                    "crate::ui::print_heavy_rule(crate::ui::HeavyRuleStyle::IntegrationTestSectionPlain60)",
+                )
+                .count();
+            assert_eq!(
+                forward_hits, *expected_forwards,
+                "{module_path} body must forward to \
+                 `crate::ui::print_heavy_rule(crate::ui::HeavyRuleStyle::IntegrationTestSectionPlain60)` \
+                 at exactly {expected_forwards} site(s) — one per \
+                 pre-lift consumer in this module. A fusion that folded \
+                 two consumer sites into one call or dropped one of \
+                 the rule lines silently fails here. Found \
                  {forward_hits} forwarding hits."
             );
         }
