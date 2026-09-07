@@ -281,35 +281,47 @@ mod tests {
     #[test]
     fn every_prelift_module_forwards_through_info_success_macro() {
         use std::path::PathBuf;
-        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src")
-            .join("commands");
-        // (module basename, minimum forward count from the pre-lift census)
+        let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        // (module path relative to `src/`, minimum forward count from
+        // the pre-lift census)
         //
         // `deploy.rs` and `github_runner_ci.rs` each shed ONE forward
         // when `commands/flux_system_reconcile.rs` lifted the
         // `"FluxCD reconciliation <triggered|complete>"` success line
         // into its own `announce_and_reconcile_flux_system` fusion —
         // the primitive itself now carries the pre-lift call, and
-        // its own module is pinned as a `("flux_system_reconcile.rs", 1)`
-        // row so a future drop of THAT call would still be caught.
+        // its own module is pinned as a
+        // `("commands/flux_system_reconcile.rs", 1)` row so a future
+        // drop of THAT call would still be caught.
+        //
+        // `build.rs` and `github_runner_ci.rs` each shed ONE further
+        // forward when `attic_configure_step.rs` lifted the
+        // `"Attic configured"` success line into its own
+        // `use_cache_and_announce_success` fusion — the primitive
+        // itself now carries the pre-lift call, and its own module is
+        // pinned as a `("attic_configure_step.rs", 1)` row so a
+        // future drop of THAT call would still be caught. The row
+        // form is a path relative to `src/` so a crate-root
+        // fusion-owner sibling (`attic_configure_step.rs`) sits
+        // alongside the `commands/`-scoped consumers under one shield.
         let expectations: &[(&str, usize)] = &[
-            ("build.rs", 3),
-            ("comprehensive_release.rs", 1),
-            ("deploy.rs", 1),
-            ("flux_system_reconcile.rs", 1),
-            ("github_runner_ci.rs", 5),
-            ("integration_tests.rs", 1),
-            ("nix_builder.rs", 6),
-            ("rollout.rs", 1),
+            ("attic_configure_step.rs", 1),
+            ("commands/build.rs", 2),
+            ("commands/comprehensive_release.rs", 1),
+            ("commands/deploy.rs", 1),
+            ("commands/flux_system_reconcile.rs", 1),
+            ("commands/github_runner_ci.rs", 4),
+            ("commands/integration_tests.rs", 1),
+            ("commands/nix_builder.rs", 6),
+            ("commands/rollout.rs", 1),
         ];
-        for (basename, min_count) in expectations {
-            let path = commands_dir.join(basename);
+        for (rel_path, min_count) in expectations {
+            let path = src_dir.join(rel_path);
             let source = std::fs::read_to_string(&path).unwrap();
             let forwards = source.matches("crate::info_success!(").count();
             assert!(
                 forwards >= *min_count,
-                "{basename} must forward at least {min_count} success \
+                "{rel_path} must forward at least {min_count} success \
                  acknowledgement site(s) through `crate::info_success!(`; \
                  found {forwards}. A dropped call would leave the negative \
                  raw-shape scan satisfied by absence.",

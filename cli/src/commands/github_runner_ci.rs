@@ -304,12 +304,11 @@ pub async fn execute(
         // (99aab8b). The regression-shield
         // `tests::test_execute_routes_attic_use_through_attic_client_not_helper`
         // pins the delegation structurally against a future re-fusion.
-        crate::infrastructure::attic::AtticClient::new(cache_name.clone())
-            .use_cache(&attic_server)
-            .await?;
-
-        crate::info_success!("Attic configured");
-        println!();
+        crate::attic_configure_step::use_cache_and_announce_success(
+            cache_name.clone(),
+            &attic_server,
+        )
+        .await?;
 
         info!("🔨 Building runner image with Nix...");
         info!("   Working directory: {}", working_dir);

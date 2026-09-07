@@ -117,12 +117,8 @@ pub async fn execute(
     // `push_optional`. The regression-shield
     // `tests::test_execute_routes_attic_use_through_attic_client_not_raw_command`
     // pins the delegation structurally against a future re-fusion.
-    crate::infrastructure::attic::AtticClient::new(cache_name.clone())
-        .use_cache(&attic_server)
+    crate::attic_configure_step::use_cache_and_announce_success(cache_name.clone(), &attic_server)
         .await?;
-
-    crate::info_success!("Attic configured");
-    println!();
 
     // Discover nix-hooks for per-derivation caching
     let nix_hooks = crate::nix_hooks::NixHooks::discover().await.ok();
