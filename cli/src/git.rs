@@ -1228,7 +1228,8 @@ mod tests {
     use crate::error::GitError;
 
     use crate::test_support::{
-        make_executable_shim, make_seeded_work_and_bare_origin, GitBinScope, GIT_BIN_ENV_LOCK,
+        make_executable_shim, make_seeded_work_and_bare_origin, seed_push_work_main_to_origin,
+        GitBinScope, GIT_BIN_ENV_LOCK,
     };
 
     /// Write an executable shim that pretends to be `git`. Delegates to
@@ -1920,12 +1921,7 @@ mod tests {
         // `commit_and_push_in` opens with `git pull origin main`, which
         // requires the bare to already carry a `main` branch — so pre-push
         // the seed commit onto origin before invoking the tested primitive.
-        let seed_push = git_command_sync()
-            .args(["push", "-u", "origin", "main"])
-            .current_dir(&work)
-            .status()
-            .expect("seed push spawn");
-        assert!(seed_push.success(), "seed push to bare origin must succeed");
+        seed_push_work_main_to_origin(&work);
 
         let manifest = work.join("kustomization.yaml");
         std::fs::write(&manifest, "images: []\n").expect("write manifest");
@@ -1957,12 +1953,7 @@ mod tests {
         // Same pre-push discipline as the single-file sibling above —
         // `commit_and_push_in`'s opening `git pull origin main` needs
         // a `main` branch on origin to fast-forward against.
-        let seed_push = git_command_sync()
-            .args(["push", "-u", "origin", "main"])
-            .current_dir(&work)
-            .status()
-            .expect("seed push spawn");
-        assert!(seed_push.success(), "seed push to bare origin must succeed");
+        seed_push_work_main_to_origin(&work);
 
         let manifest = work.join("kustomization.yaml");
         let config_map = work.join("svc-config.yaml");
