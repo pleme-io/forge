@@ -170,7 +170,7 @@ pub async fn run_type_check(web_dir: &Path) -> Result<(bool, Vec<String>)> {
     let duration = start.elapsed();
 
     if output.status.success() {
-        crate::ui::print_step_pass(&crate::repo::msg_with_secs_1("Type check passed", duration));
+        crate::ui::print_step_pass_timed("Type check passed", duration);
         Ok((true, Vec::new()))
     } else {
         let (stdout, stderr) = crate::repo::utf8_lossy_streams(&output);
@@ -290,10 +290,10 @@ async fn run_biome_lint(web_dir: &Path) -> Result<(bool, Vec<String>)> {
         let stderr = crate::repo::utf8_lossy_borrow(&fix_output.stderr);
         // Check if it's a real error or just unfixable issues
         if stderr.contains("Could not resolve") || stderr.contains("ENOENT") {
-            crate::ui::print_step_failure(&crate::repo::msg_with_secs_1(
+            crate::ui::print_step_failure_timed(
                 "Biome auto-fix failed - biome may not be installed",
                 start.elapsed(),
-            ));
+            );
             for line in stderr.lines().take(5) {
                 crate::ui::print_diagnostic_line(line);
             }
@@ -318,10 +318,7 @@ async fn run_biome_lint(web_dir: &Path) -> Result<(bool, Vec<String>)> {
     let duration = start.elapsed();
 
     if check_output.status.success() {
-        crate::ui::print_step_pass(&crate::repo::msg_with_secs_1(
-            "Biome lint applied and verified",
-            duration,
-        ));
+        crate::ui::print_step_pass_timed("Biome lint applied and verified", duration);
         Ok((true, Vec::new()))
     } else {
         let combined = crate::repo::utf8_lossy_streams_joined(&check_output);
@@ -398,10 +395,7 @@ pub async fn run_unit_tests(web_dir: &Path) -> Result<(bool, Option<usize>, Vec<
             // Consider no tests as passing (not all projects have tests)
             Ok((true, Some(0), Vec::new()))
         } else if has_failures {
-            crate::ui::print_step_failure(&crate::repo::msg_with_secs_1(
-                "Unit tests failed",
-                duration,
-            ));
+            crate::ui::print_step_failure_timed("Unit tests failed", duration);
 
             // Collect failure lines for summary details
             let mut details = Vec::new();
@@ -416,10 +410,7 @@ pub async fn run_unit_tests(web_dir: &Path) -> Result<(bool, Option<usize>, Vec<
             Ok((false, test_count, details))
         } else {
             // Unknown error
-            crate::ui::print_step_failure(&crate::repo::msg_with_secs_1(
-                "Test execution failed",
-                duration,
-            ));
+            crate::ui::print_step_failure_timed("Test execution failed", duration);
             let details: Vec<String> = combined.lines().take(10).map(|l| l.to_string()).collect();
             println!("   {}", details.join("\n   "));
             Ok((false, test_count, details))
