@@ -188,12 +188,17 @@ pub async fn update_kustomization(
         crate::git::git_commit_idempotent(&commit_msg, "Failed to commit kustomization.yaml")
             .await?;
 
-        // Git push — route through `retry::run_inherited_status` so a
-        // denied push (auth, branch protection, conflict) bails loudly with
-        // the structural record rather than silently returning Ok and
-        // letting the caller proceed to "Kustomization committed and
-        // pushed" against an unpushed branch.
-        crate::git::git_run_inherited_status(["push", "origin", "main"], "git push")
+        // Git push — route through the shared `git_push_origin_main`
+        // fusion primitive so a denied push (auth, branch protection,
+        // conflict) bails loudly with the canonical
+        // `"git push origin main"` op-label envelope rather than silently
+        // returning Ok and letting the caller proceed to "Kustomization
+        // committed and pushed" against an unpushed branch. The op label
+        // and the fixed `["push", "origin", "main"]` argv now live at
+        // ONE typed body at `crate::git::git_push_origin_main` so a
+        // future drift (label back to `"git push"`, argv to `HEAD` or
+        // a different remote) trips the shield rather than shipping.
+        crate::git::git_push_origin_main()
             .await
             .context("Failed to push kustomization changes to git")?;
 

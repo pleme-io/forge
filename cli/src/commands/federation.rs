@@ -528,7 +528,7 @@ pub async fn update_federation(
             .context("Git commit failed for supergraph changes")?;
 
         println!("📤 Pushing to remote...");
-        crate::git::git_run_inherited_status(["push", "origin", "main"], "git push origin main")
+        crate::git::git_push_origin_main()
             .await
             .context("Git push failed for supergraph changes")?;
 
