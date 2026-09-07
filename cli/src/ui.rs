@@ -8094,12 +8094,36 @@ mod tests {
     /// pre-lift `println!("{}", "✅ <MSG>".bright_green().bold());`
     /// straggler at `commands/{bootstrap.rs, build.rs, push.rs}` was
     /// the exact inline expansion of [`super::print_success`]'s one-line
-    /// body — three sites hand-rolling the primitive that already
-    /// existed. A future re-inline (a "one-liner, may as well spell it
-    /// out" cleanup) would silently reopen the three-site duplication
-    /// class this shield exists to close; this test scans each
-    /// consumer module's body-before-first-`cfg(test)` for the pre-lift
-    /// needle and asserts the migrated primitive call is present.
+    /// body — six sites hand-rolling the primitive that already existed
+    /// (three collapsed at the original lift; three regressed at
+    /// `commands/bootstrap.rs` in the milestone-completion stanzas
+    /// covering `push_single` (line ~285), `push_all` (line ~325), and
+    /// `regenerate_cargo` (line ~645), each spelling the pre-lift
+    /// grammar in rustfmt's multi-line spread — a form the pre-lift
+    /// per-line needle-check did NOT catch, because no single line
+    /// carried both the `"✅ ` literal AND the `.bright_green().bold()`
+    /// method chain: rustfmt split the string literal onto one line and
+    /// the method chain onto the two following ones). A future re-inline
+    /// (a "one-liner, may as well spell it out" cleanup, or any rustfmt
+    /// spread of a hand-inlined single-line form) would silently reopen
+    /// the duplication class this shield exists to close; this test
+    /// scans each consumer module's body-before-first-`cfg(test)` for
+    /// BOTH the single-line and the whitespace-splayed forms of the
+    /// pre-lift needle and asserts the migrated primitive call is
+    /// present.
+    ///
+    /// # The multi-line detector
+    ///
+    /// The single-line check `line.contains("\"✅ ") &&
+    /// line.contains(".bright_green().bold()")` misses the rustfmt-
+    /// splayed shape by construction. The added detector normalizes the
+    /// entire body's whitespace (`split_whitespace().join(" ")`) so a
+    /// splayed stanza collapses onto a single logical line, then further
+    /// strips the ASCII space rustfmt inserts before each leading `.`
+    /// of a method-chain continuation line (`" ."` → `"."`). Under that
+    /// normalization the multi-line form and the single-line form
+    /// reduce to the same substring, and one `contains(...)` call
+    /// catches both.
     #[test]
     fn print_success_callers_delegate_through_primitive() {
         const CALLERS: &[(&str, &str)] = &[
@@ -8112,19 +8136,46 @@ mod tests {
         ];
         for (source, module_path) in CALLERS {
             let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+
+            // Single-line form catch: preserved for its precise per-line
+            // reporting when the stanza fits on one line (a hand-written
+            // one-liner, or a future rustfmt setting that packs the
+            // chain back onto one line).
             for (i, line) in body.lines().enumerate() {
                 assert!(
                     !(line.contains("\"✅ ") && line.contains(".bright_green().bold()")),
                     "{module_path}:{lineno} spells the pre-lift inline \
                      `println!(\"{{}}\", \"✅ <MSG>\".bright_green().bold());` \
-                     milestone-completion stanza — that one-liner was \
-                     lifted onto `crate::ui::print_success`. A \
-                     re-inline would silently reopen the three-site \
-                     duplication class this shield exists to close. \
-                     Offending line: {line:?}",
+                     milestone-completion stanza (single-line form) — \
+                     that one-liner was lifted onto \
+                     `crate::ui::print_success`. A re-inline would \
+                     silently reopen the duplication class this shield \
+                     exists to close. Offending line: {line:?}",
                     lineno = i + 1
                 );
             }
+
+            // Multi-line form catch: normalize whitespace so a rustfmt-
+            // splayed stanza collapses to the same substring as the
+            // single-line form. The `" ."` → `"."` pass strips the
+            // ASCII space rustfmt inserts before each leading `.` of a
+            // method-chain continuation.
+            let normalized: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+            let normalized = normalized.replace(" .", ".");
+            assert!(
+                !(normalized.contains("\"✅ ") && normalized.contains(".bright_green().bold()")),
+                "{module_path} body carries the pre-lift \
+                 `println!(\"{{}}\", \"✅ <MSG>\".bright_green().bold());` \
+                 milestone-completion stanza in a whitespace-splayed \
+                 (rustfmt multi-line) shape — the same duplication the \
+                 single-line detector above catches, expressed across \
+                 three lines instead of one. Lift the stanza onto \
+                 `crate::ui::print_success(\"<MSG>\")` (dropping the \
+                 leading `✅ ` prefix — the primitive prepends it \
+                 inside the coloring span, producing byte-identical \
+                 output per `write_success`'s docstring)."
+            );
+
             assert!(
                 body.contains("crate::ui::print_success("),
                 "{module_path} body must forward to \
