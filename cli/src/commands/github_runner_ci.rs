@@ -7,7 +7,7 @@ use crate::git;
 use crate::infrastructure::kubectl::kubectl_command_async;
 use crate::repo::get_tool_path;
 use crate::retry::{debug_log_capture_streams, retry_command_logged, RetryPolicy};
-use crate::ui::{styled_progress_bar, styled_spinner, SpinnerStyle};
+use crate::ui::styled_progress_bar;
 
 /// The typed exponential-backoff policy for the StatefulSet rollout-watch
 /// pod-status-poll cadence in [`execute`]'s `--watch` branch — `initial_backoff`
@@ -316,7 +316,7 @@ pub async fn execute(
         info!("   Architecture: x86_64-linux");
         println!();
 
-        let spinner = styled_spinner(SpinnerStyle::Green, "Building with Nix...");
+        let spinner = crate::nix_build_spinner::nix_build_spinner();
 
         // Route the status-only `nix build` spawn through the canonical
         // `crate::retry::run_inherited_status` primitive so the pre-lift

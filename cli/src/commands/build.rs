@@ -3,7 +3,6 @@ use tokio::process::Command;
 use tracing::info;
 
 use crate::repo::get_tool_path;
-use crate::ui::{styled_spinner, SpinnerStyle};
 
 pub async fn execute(
     flake_attr: String,
@@ -138,7 +137,7 @@ pub async fn execute(
     }
     println!();
 
-    let spinner = styled_spinner(SpinnerStyle::Green, "Building with Nix...");
+    let spinner = crate::nix_build_spinner::nix_build_spinner();
 
     // Use relative .# to avoid git+file:// protocol issues
     let flake_ref = format!(".#{}", flake_attr);

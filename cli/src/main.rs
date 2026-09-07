@@ -69,6 +69,7 @@ mod hermetic_scratch;
 mod indented_success_step;
 mod k8s;
 mod nix;
+mod nix_build_spinner;
 mod nix_hooks;
 mod nonfatal_warning;
 mod observability;
