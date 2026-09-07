@@ -458,7 +458,7 @@ async fn run_migration_job(
             println!("   ✓ Configured secret: {}", secret);
             valid_secrets.push(secret.clone());
         } else {
-            println!("   ⚠️  Configured secret not found: {}", secret);
+            crate::ui::print_plain_step_warn(&format!("Configured secret not found: {}", secret));
         }
     }
 
@@ -794,10 +794,10 @@ pub async fn check_and_reset_shinka_migration(
             let phase = phase.trim();
 
             if phase == "Failed" || phase == "CheckingHealth" {
-                println!(
-                    "   ⚠️  Shinka migration {} is in {} phase, auto-resetting...",
+                crate::ui::print_plain_step_warn(&format!(
+                    "Shinka migration {} is in {} phase, auto-resetting...",
                     migration_name, phase
-                );
+                ));
 
                 // Reset the migration and clean up jobs
                 reset_migration(&migration_name, namespace, false).await?;
@@ -1314,16 +1314,16 @@ async fn set_expected_tag_annotation(migration_name: &str, namespace: &str, expe
         }
         Ok(o) => {
             let stderr = crate::repo::utf8_lossy_borrow(&o.stderr);
-            println!(
-                "   ⚠️  Failed to set expected-tag annotation (non-fatal): {}",
+            crate::ui::print_plain_step_warn(&format!(
+                "Failed to set expected-tag annotation (non-fatal): {}",
                 stderr.trim()
-            );
+            ));
         }
         Err(e) => {
-            println!(
-                "   ⚠️  Failed to set expected-tag annotation (non-fatal): {}",
+            crate::ui::print_plain_step_warn(&format!(
+                "Failed to set expected-tag annotation (non-fatal): {}",
                 e
-            );
+            ));
         }
     }
 }
