@@ -577,17 +577,9 @@ pub async fn push_with_retry(
             // already backs off exponentially while telling transient failures
             // apart from permanent ones (a 401 does not burn the budget).
             Command::new(&doca)
-                .args([
-                    "push",
-                    "--tarball",
-                    image_path,
-                    "--registry",
-                    &host,
-                    "--image",
-                    &image,
-                    "--tag",
-                    tag,
-                ])
+                .args(crate::infrastructure::registry::doca_push_argv(
+                    image_path, &host, &image, tag,
+                ))
                 .env("INPUT_DEST_USER", &organization)
                 .env("INPUT_DEST_PASS", token)
                 .stdout(Stdio::null())

@@ -289,17 +289,7 @@ impl RegistryClient {
                 // off exponentially while distinguishing transient failures
                 // from permanent ones (a 401 does not burn the budget).
                 Command::new(&doca)
-                    .args([
-                        "push",
-                        "--tarball",
-                        image_path,
-                        "--registry",
-                        &host,
-                        "--image",
-                        &image,
-                        "--tag",
-                        tag,
-                    ])
+                    .args(doca_push_argv(image_path, &host, &image, tag))
                     .env("INPUT_DEST_USER", &self.credentials.organization)
                     .env("INPUT_DEST_PASS", &self.credentials.token)
                     .stdout(Stdio::null())
@@ -655,6 +645,71 @@ pub fn split_composed_registry_base(registry: &str) -> Result<(&str, &str)> {
     registry.split_once('/').ok_or_else(|| {
         anyhow::anyhow!("registry {registry:?} has no '/', cannot split host from image")
     })
+}
+
+/// The 9-element `doca push --tarball <image_path> --registry <host> --image
+/// <image> --tag <tag>` argv slice used at every doca-push spawn site across
+/// the crate.
+///
+/// # Pre-lift census — four sibling stanzas, byte-identical
+///
+/// Four consumer sites each spelled the same 9-element `Command::args([...])`
+/// literal verbatim:
+///
+/// 1. [`RegistryClient::push_with_retries`] (this module, retry-driven auth push)
+/// 2. `commands/push.rs::push_with_retry` (retry-driven auth push, free fn)
+/// 3. `commands/github_runner_ci.rs::push_with_retry` (retry-driven auth push
+///    with `safe_mode`-partitioned policy and per-attempt debug tee)
+/// 4. `commands/image_release.rs::push_image` (sync ambient-auth push)
+///
+/// A doca argv drift — a `--tarball` re-brand, an argv-order swap, a new
+/// required flag, a positional/named change — pre-lift had to hit four sites
+/// in lockstep or diverge; post-lift it hits ONE typed body and every
+/// consumer inherits the change from `Command::args(doca_push_argv(...))`.
+///
+/// # Why an argv slice, not a `Command` builder
+///
+/// The four consumers differ AFTER the argv slice on three axes:
+///
+/// - **Auth mode.** Sites 1–3 attach `INPUT_DEST_USER` / `INPUT_DEST_PASS`
+///   env vars carrying credentials (doca reads from env, not argv — the
+///   `--dest-creds=<org>:<token>` pre-migration shape put the token in
+///   `/proc/<pid>/cmdline`). Site 4 relies on ambient docker config
+///   (no env), matching skopeo's pre-migration behavior at the same site.
+/// - **Stdio capture.** Sites 1–3 pipe stderr for the retry classifier
+///   / debug tee; site 4 inherits stdio through `run_inherited_status_sync`.
+/// - **Async vs sync.** Sites 1–3 use `tokio::process::Command::output()`;
+///   site 4 uses `run_inherited_status_sync` (a `std::process` wrapper).
+///
+/// A `Command`-builder primitive would have to expose all three axes as
+/// parameters; the argv slice owns only the shape both `tokio::process`
+/// and `std::process` `Command`s' `.args()` consume identically.
+///
+/// # Distinct from `RegistryClient::push_with_retries`
+///
+/// The full [`RegistryClient::push_with_retries`] fusion primitive owns the
+/// pre-loop local-file-exists check, the (host, image) split, the retry
+/// policy composition, the typed `RegistryError` dispatch, and the env-cred
+/// routing. This primitive owns ONLY the 9-element argv shape — usable by
+/// the sync ambient-auth `image_release.rs::push_image` site as well as the
+/// three retry-driven auth sites.
+pub fn doca_push_argv<'a>(
+    image_path: &'a str,
+    host: &'a str,
+    image: &'a str,
+    tag: &'a str,
+) -> [&'a str; 9] {
+    [
+        "push",
+        "--tarball",
+        image_path,
+        "--registry",
+        host,
+        "--image",
+        image,
+        "--tag",
+        tag,
+    ]
 }
 
 /// Generate architecture-prefixed tags
@@ -1106,6 +1161,184 @@ mod tests {
     /// assertion. Both positive assertions route through
     /// [`crate::test_support::code_line_hits`] to preserve the
     /// anti-docstring-self-match discipline.
+    /// Byte-oracle: [`doca_push_argv`] returns the pre-lift 9-element
+    /// `["push", "--tarball", <image_path>, "--registry", <host>,
+    /// "--image", <image>, "--tag", <tag>]` slice verbatim, in that
+    /// order. Every doca CLI drift (a `--tarball` re-brand, an argv-
+    /// order swap, a new required flag, a positional/named change)
+    /// pre-lift had to hit the four sibling `Command::args([...])`
+    /// literals across `infrastructure/registry.rs::push_with_retries`,
+    /// `commands/push.rs::push_with_retry`, `commands/
+    /// github_runner_ci.rs::push_with_retry`, and `commands/
+    /// image_release.rs::push_image` in lockstep or diverge; post-lift
+    /// the shape is pinned by this oracle so a drift surfaces as ONE
+    /// localized test failure at this site.
+    #[test]
+    fn test_doca_push_argv_emits_pre_lift_nine_element_slice() {
+        let argv = doca_push_argv(
+            "/tmp/result-amd64/image.tar",
+            "ghcr.io",
+            "pleme-io/forge",
+            "amd64-abc1234",
+        );
+        assert_eq!(
+            argv,
+            [
+                "push",
+                "--tarball",
+                "/tmp/result-amd64/image.tar",
+                "--registry",
+                "ghcr.io",
+                "--image",
+                "pleme-io/forge",
+                "--tag",
+                "amd64-abc1234",
+            ]
+        );
+    }
+
+    /// Byte-oracle: the returned slice is compile-time fixed at 9
+    /// elements. A future edit that grew the slice (a new flag) or
+    /// shrank it (a dropped flag) must lift the arity at the primitive
+    /// AND land in every consumer's `Command::args(...)` — the array
+    /// type binds arity at the type level so the compiler catches an
+    /// arity drift at every call site rather than at run-time from an
+    /// argv-order misparse by doca.
+    #[test]
+    fn test_doca_push_argv_returns_fixed_arity_nine() {
+        let argv: [&str; 9] = doca_push_argv("p", "h", "i", "t");
+        assert_eq!(argv.len(), 9);
+    }
+
+    /// Byte-oracle: the returned `&str` slices borrow from the caller's
+    /// inputs — no allocation. Pins that the primitive stays a
+    /// zero-cost argv-shape helper (the four consumers each drove the
+    /// pre-lift literal array with borrows into locals; a future
+    /// migration that regressed to `Vec<String>` would silently
+    /// allocate at every push-retry attempt).
+    #[test]
+    fn test_doca_push_argv_slices_borrow_from_inputs() {
+        let image_path = String::from("/tmp/img.tar");
+        let host = String::from("ghcr.io");
+        let image = String::from("pleme-io/forge");
+        let tag = String::from("amd64-abc1234");
+        let argv = doca_push_argv(&image_path, &host, &image, &tag);
+        // The variadic slots (indexes 2, 4, 6, 8) must point back into
+        // the caller's own byte buffers, not into a fresh allocation.
+        assert!(std::ptr::eq(argv[2].as_ptr(), image_path.as_ptr()));
+        assert!(std::ptr::eq(argv[4].as_ptr(), host.as_ptr()));
+        assert!(std::ptr::eq(argv[6].as_ptr(), image.as_ptr()));
+        assert!(std::ptr::eq(argv[8].as_ptr(), tag.as_ptr()));
+    }
+
+    /// Caller shield: no source line under `cli/src/commands/` may
+    /// still spell the pre-lift `.args([\n"push",\n "--tarball",\n
+    /// <image_path>,\n "--registry",\n <host>,\n "--image",\n
+    /// <image>,\n "--tag",\n <tag>,\n])` inline array literal. Every
+    /// doca-push spawn site must route through [`doca_push_argv`] so
+    /// a future argv drift lands at ONE typed body rather than four
+    /// inline literals.
+    ///
+    /// The forbidden shape is uniquely identified by the ordered pair
+    /// of adjacent literal strings `"push"` immediately followed on
+    /// the next non-blank code line by `"--tarball"` — both pre-lift
+    /// sibling literals opened with exactly this pair, and no other
+    /// spawn site in the crate spells the two literals in that order
+    /// (attic push, git push, kubectl rollout, etc.). The needle is
+    /// reconstructed from bare `"push"` / `"--tarball"` fragments at
+    /// test time via `format!` so this shield's own source text does
+    /// not false-match itself.
+    ///
+    /// `infrastructure/registry.rs` — where the primitive itself
+    /// lives — is deliberately EXCLUDED from the negative scan: the
+    /// primitive's body legitimately carries the 9-element literal
+    /// array as the ONE typed body every consumer routes through, so
+    /// scanning this module would false-match against its own
+    /// definition. The positive-half shield below still asserts that
+    /// this module forwards through `doca_push_argv(` from
+    /// `push_with_retries` — the consumer half of the same module.
+    #[test]
+    fn test_doca_push_argv_routes_through_primitive_not_inline_literal_array() {
+        use std::path::PathBuf;
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let sites = [
+            ("commands/push.rs", "commands/push.rs"),
+            (
+                "commands/github_runner_ci.rs",
+                "commands/github_runner_ci.rs",
+            ),
+            ("commands/image_release.rs", "commands/image_release.rs"),
+        ];
+        let push_literal = format!("{}{}{}", "\"", "push", "\"");
+        let tarball_literal = format!("{}{}{}", "\"", "--tarball", "\"");
+        for (relpath, label) in sites {
+            let source = std::fs::read_to_string(manifest_dir.join(relpath)).unwrap();
+            let lines: Vec<&str> = source.lines().collect();
+            for (idx, line) in lines.iter().enumerate() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                    continue;
+                }
+                if trimmed != push_literal.as_str()
+                    && trimmed != format!("{},", push_literal).as_str()
+                {
+                    continue;
+                }
+                let next_body = lines.iter().skip(idx + 1).find(|l| {
+                    let t = l.trim_start();
+                    !t.is_empty() && !t.starts_with("//") && !t.starts_with("///")
+                });
+                if let Some(next) = next_body {
+                    let n = next.trim_start();
+                    if n == tarball_literal.as_str()
+                        || n == format!("{},", tarball_literal).as_str()
+                    {
+                        panic!(
+                            "`{label}` line {} still spells the pre-lift inline \
+                             `.args([\"push\", \"--tarball\", ...])` doca push \
+                             argv literal — route through \
+                             `crate::infrastructure::registry::doca_push_argv(\
+                             image_path, host, image, tag)` instead so the \
+                             9-element argv shape is pinned at ONE typed body.",
+                            idx + 1
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Positive half of the caller shield: each pre-lift consumer
+    /// module MUST forward through the primitive at least once, so a
+    /// migration that dropped a call site outright leaves the negative
+    /// "no raw inline shape" scan trivially satisfied by absence but
+    /// the positive count still fails.
+    #[test]
+    fn test_doca_push_argv_forwarded_by_every_prelift_consumer() {
+        use std::path::PathBuf;
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        // Reconstruct the call-site needle via `format!` so this
+        // shield's own source text does not false-match itself.
+        let needle = format!("{}(", "doca_push_argv");
+        let expectations: &[(&str, usize)] = &[
+            ("infrastructure/registry.rs", 1),
+            ("commands/push.rs", 1),
+            ("commands/github_runner_ci.rs", 1),
+            ("commands/image_release.rs", 1),
+        ];
+        for (relpath, min_count) in expectations {
+            let source = std::fs::read_to_string(manifest_dir.join(relpath)).unwrap();
+            let forwards = source.matches(needle.as_str()).count();
+            assert!(
+                forwards >= *min_count,
+                "{relpath} must forward at least {min_count} doca-push \
+                 spawn site(s) through `doca_push_argv(`; found \
+                 {forwards}. A dropped call would leave the negative \
+                 raw-shape scan satisfied by absence."
+            );
+        }
+    }
+
     #[test]
     fn test_registry_routes_doca_through_doca_bin_sigil_not_raw_resolve() {
         let body = crate::test_support::module_body_before_tests(
