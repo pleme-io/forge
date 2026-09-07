@@ -151,6 +151,57 @@ pub async fn open_for_update(kustomization_path: &str) -> Result<(&Path, String)
     Ok((path, content))
 }
 
+/// Emit the canonical trailing-newline-normalized closing bytes of a
+/// kustomization overlay to `w`: `unfinalized.trim_end() + "\n"`,
+/// byte-for-byte identical to the two-line `let final_content = <var>
+/// .trim_end().to_string() + "\n"; write_text_async(path, &final_content)
+/// .await?;` closure the four `update_*` helpers each spelled inline
+/// before invoking [`crate::info_indented_success!`].
+///
+/// The direct-writer variant exists so the fail-before-pass tests can
+/// pin the exact emitted bytes (the trim of every trailing ASCII
+/// whitespace character, then exactly one U+000A `\n`) without touching
+/// the filesystem or racing an ambient logger — the same split
+/// [`write_kustomization_update_announcement`] carries against
+/// [`open_for_update`].
+#[allow(dead_code)] // Byte-oracle peer of `finalize_and_announce`: see
+                    // the module docs for the writer/tracing split.
+pub fn write_finalized_content_bytes<W: io::Write>(w: &mut W, unfinalized: &str) -> io::Result<()> {
+    w.write_all(unfinalized.trim_end().as_bytes())?;
+    w.write_all(b"\n")
+}
+
+/// Close a kustomization overlay after update: normalize the caller's
+/// unfinalized content (`unfinalized.trim_end() + "\n"`), write the file
+/// through [`crate::repo::write_text_async`], and emit the operator-
+/// facing `"   ✅ <message>"` sub-step success acknowledgement via
+/// [`crate::info_indented_success!`]. The natural closing sibling of
+/// [`open_for_update`]: every kustomization-overlay `update_*` helper
+/// opens with `open_for_update` and closes with `finalize_and_announce`.
+///
+/// # Grammar pinned by the byte-oracle sibling
+///
+/// The trim-then-append-newline finalize step is pinned by
+/// [`write_finalized_content_bytes`] under `#[cfg(test)]`; a drift here
+/// (a `.trim()` that also removes leading whitespace, a `\r\n` line-
+/// ending flavor, a dropped trailing newline) surfaces as a localized
+/// test failure at one site, not as silent trailing-whitespace drift
+/// across four kustomization-edit flows.
+///
+/// The announcement grammar (`"   ✅ <message>\n"`) is inherited from
+/// [`crate::info_indented_success!`] and byte-pinned in
+/// `crate::indented_success_step::tests`.
+pub async fn finalize_and_announce(
+    path: &Path,
+    unfinalized: &str,
+    success_message: &str,
+) -> Result<()> {
+    let final_content = unfinalized.trim_end().to_string() + "\n";
+    crate::repo::write_text_async(path, &final_content).await?;
+    crate::info_indented_success!("{}", success_message);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,6 +357,169 @@ mod tests {
              `crate::commands::kustomization_edit::open_for_update` instead:\n{:#?}",
             offenders
         );
+    }
+
+    /// Pin the exact finalized-content bytes: every trailing ASCII
+    /// whitespace character (spaces, tabs, and every flavor of newline)
+    /// stripped from the input, then exactly one U+000A `\n` appended.
+    /// A future refactor that swapped `.trim_end()` for `.trim()` (which
+    /// also strips leading whitespace and would destroy YAML indentation
+    /// of the first line), dropped the trailing newline, or added a
+    /// `\r` before it regresses this assertion at one site rather than
+    /// silently across the four kustomization-edit consumers.
+    #[test]
+    fn write_finalized_content_bytes_trims_trailing_ws_and_appends_single_newline() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_finalized_content_bytes(
+            &mut buf,
+            "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\n\n\n",
+        )
+        .unwrap();
+        assert_eq!(
+            buf,
+            b"apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\n"
+        );
+    }
+
+    /// Leading whitespace on the first line MUST be preserved verbatim
+    /// — `.trim_end()` is asymmetric on purpose. A drift to `.trim()`
+    /// would silently destroy YAML block indentation and pass every
+    /// end-of-file test; this test pins the negative side.
+    #[test]
+    fn write_finalized_content_bytes_preserves_leading_indent() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_finalized_content_bytes(&mut buf, "    - name: kenshi\n      newTag: amd64-abc\n\n")
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "    - name: kenshi\n      newTag: amd64-abc\n"
+        );
+    }
+
+    /// The primitive MUST append exactly one `\n` even when the caller's
+    /// unfinalized content ends with no newline at all — the pre-lift
+    /// shape `<var>.trim_end().to_string() + "\n"` unconditionally
+    /// appends. A drift to a conditional append (e.g. only when the
+    /// input does not already end with `\n`) would leave a
+    /// double-newline on some inputs and no-newline on others.
+    #[test]
+    fn write_finalized_content_bytes_appends_newline_when_input_has_none() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_finalized_content_bytes(&mut buf, "kind: Kustomization").unwrap();
+        assert_eq!(buf, b"kind: Kustomization\n");
+    }
+
+    /// The `finalize_and_announce` primitive MUST write the finalized
+    /// bytes returned by the byte-oracle sibling to the target file
+    /// path, then return `Ok(())` — the pre-lift shape every call site
+    /// spelled with `let final_content = ...; write_text_async(...); ..
+    /// info_indented_success!(...); Ok(())`.
+    #[tokio::test]
+    async fn finalize_and_announce_writes_finalized_content_and_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("kustomization.yaml");
+        // Seed a file that the primitive will overwrite; the seeded
+        // content is a decoy so a mistakenly no-op write would leave
+        // the decoy behind rather than the finalized content.
+        tokio::fs::write(&file, "seeded-decoy").await.unwrap();
+
+        finalize_and_announce(&file, "kind: Kustomization\n\n\n", "Kustomization updated")
+            .await
+            .unwrap();
+
+        let written = tokio::fs::read_to_string(&file).await.unwrap();
+        assert_eq!(written, "kind: Kustomization\n");
+    }
+
+    /// Whole-module shield: no source line under `cli/src/commands/`
+    /// (excluding this module) may spell the pre-lift 2-line closing
+    /// stanza `let final_content = <var>.trim_end().to_string() + "\n"`
+    /// inline any more. Every kustomization-overlay finalize+write must
+    /// route through [`finalize_and_announce`] so a future refinement
+    /// of the trailing-newline contract (a `\r\n` flavor, a no-newline
+    /// variant, a canonical two-newline separator) reaches all four
+    /// consumers by construction.
+    #[test]
+    fn no_command_module_still_spells_raw_trim_end_finalize_stanza() {
+        use std::path::PathBuf;
+        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands");
+        let mut offenders: Vec<(PathBuf, usize, String)> = Vec::new();
+        for entry in std::fs::read_dir(&commands_dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            // Skip the primitive's own home module — its body and its
+            // doc-comment prose legitimately quote the pre-lift stanza.
+            if path.file_name().and_then(|n| n.to_str()) == Some("kustomization_edit.rs") {
+                continue;
+            }
+            // Skip `builder_pool_edit.rs` — its
+            // `splice_builder_pool_field` returns finalized content
+            // through a `BuilderPoolSpliceOutcome { content, .. }`
+            // struct field for a caller that writes the file and
+            // announces success separately (the fusion primitive
+            // `update_builder_pool_field` in the same module owns the
+            // write + announce steps). The normalization step there
+            // sits inside a pure content-transform, NOT the
+            // write+announce closing stanza this shield targets.
+            if path.file_name().and_then(|n| n.to_str()) == Some("builder_pool_edit.rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            for (idx, line) in source.lines().enumerate() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                    continue;
+                }
+                if line.contains(".trim_end().to_string() + \"\\n\"") {
+                    offenders.push((path.clone(), idx + 1, line.to_string()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "raw `<var>.trim_end().to_string() + \"\\n\"` closing stanza(s) survive under \
+             `commands/` — route each through \
+             `crate::commands::kustomization_edit::finalize_and_announce` instead:\n{:#?}",
+            offenders
+        );
+    }
+
+    /// Positive half of the closing-stanza shield: the three pre-lift
+    /// files under `commands/` MUST each forward through
+    /// `crate::commands::kustomization_edit::finalize_and_announce(` at
+    /// least the pre-lift count of times, so a migration that dropped a
+    /// call site outright leaves the negative raw-stanza scan trivially
+    /// satisfied by absence but the positive count still fails.
+    #[test]
+    fn every_prelift_module_forwards_through_finalize_and_announce() {
+        use std::path::PathBuf;
+        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands");
+        // (module basename, minimum forward count from the pre-lift census)
+        let expectations: &[(&str, usize)] = &[
+            ("kenshi.rs", 1),
+            ("kenshi_agent.rs", 1),
+            ("nix_builder.rs", 2),
+        ];
+        for (basename, min_count) in expectations {
+            let path = commands_dir.join(basename);
+            let source = std::fs::read_to_string(&path).unwrap();
+            let forwards = source
+                .matches("kustomization_edit::finalize_and_announce(")
+                .count();
+            assert!(
+                forwards >= *min_count,
+                "{basename} must forward at least {min_count} kustomization edit-finalize \
+                 site(s) through `crate::commands::kustomization_edit::finalize_and_announce(`; \
+                 found {forwards}. A dropped call would leave the negative raw-stanza scan \
+                 satisfied by absence.",
+            );
+        }
     }
 
     /// Positive half of the shield: the four pre-lift files under

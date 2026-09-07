@@ -253,11 +253,24 @@ mod tests {
     // builder_pool_edit.rs::update_builder_pool_field` extraction moved
     // one `info_indented_success!("Builder pool updated")` site out of
     // `commands/kenshi_agent.rs::update_builder_pool_agent_image` and
-    // one out of `commands/nix_builder.rs::update_builder_pool_builder_image`)
-    // subtracts from the pre-lift count on its source file(s) and adds
-    // a row on the new primitive's file, preserving the fleet-wide
-    // total. That is the correct maintenance shape for this census —
-    // never lower a count without booking the moved site's new home.
+    // one out of `commands/nix_builder.rs::update_builder_pool_builder_image`;
+    // the `commands/kustomization_edit.rs::finalize_and_announce`
+    // extraction moved one `info_indented_success!("Kustomization
+    // updated")` site out of `commands/kenshi.rs::
+    // update_kustomization_image`, one out of `commands/kenshi_agent.rs
+    // ::update_kustomization_image`, one out of `commands/nix_builder.rs
+    // ::update_kustomization_image`, and one out of `commands/
+    // nix_builder.rs::update_kenshi_builder_image` — the four sites now
+    // reach the primitive's ONE `info_indented_success!("{}",
+    // success_message)` body) subtracts from the pre-lift count on its
+    // source file(s) and adds a row on the new primitive's file. The
+    // fleet-wide TOTAL naturally decreases across such a fusion (four
+    // consumer sites collapse to ONE emission at the primitive body) —
+    // that is the whole point of a `commands/kustomization_edit.rs`-
+    // style fusion — but the invariant this shield fences is per-file
+    // and specifically: never lower a per-file count without booking
+    // the moved site's new home so an accidental deletion cannot hide
+    // behind the fusion accounting.
     #[test]
     fn every_prelift_module_forwards_through_info_indented_success_macro() {
         use std::path::PathBuf;
@@ -269,9 +282,13 @@ mod tests {
             ("bootstrap.rs", 1),
             ("builder_pool_edit.rs", 1),
             ("comprehensive_release.rs", 1),
-            ("kenshi.rs", 1),
-            ("kenshi_agent.rs", 1),
-            ("nix_builder.rs", 2),
+            // kenshi.rs, kenshi_agent.rs, and nix_builder.rs each lost
+            // their pre-lift `info_indented_success!("Kustomization
+            // updated")` (nix_builder.rs additionally lost the sibling
+            // `"Kenshi kustomization updated"` site) to the
+            // `kustomization_edit::finalize_and_announce` fusion — the
+            // new home is booked one row below.
+            ("kustomization_edit.rs", 1),
             ("push.rs", 2),
             ("release_commit.rs", 1),
         ];
