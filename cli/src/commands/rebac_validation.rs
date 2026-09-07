@@ -500,38 +500,31 @@ async fn check_redis_connectivity(
                 "Connection successful",
             );
 
-            // Count keys
-            let rel_glob = format!("{}:rel:*", config.redis_key_prefix);
-            let keys_output = Command::new(&redis_cli)
-                .args(["-u", &redis_url, "KEYS", &rel_glob])
-                .output()
-                .await;
+            // Count keys — both KEYS-glob probes route through the typed
+            // `probe_and_report_rebac_key_count` fusion primitive, which
+            // owns the 12-line `format! + Command::args + KEYS + count
+            // non-empty lines + println! under a quiet-gate` stanza. The
+            // (glob-infix, report-description) pair is closed under the
+            // `RebacKeyKind` enum so a future third family (session,
+            // cache, …) is a single-variant edit rather than a fourth
+            // inline copy.
+            crate::rebac_keys_probe::probe_and_report_rebac_key_count(
+                &redis_cli,
+                &redis_url,
+                &config.redis_key_prefix,
+                crate::rebac_keys_probe::RebacKeyKind::Relation,
+                config.quiet,
+            )
+            .await;
 
-            if let Ok(keys) = keys_output {
-                let key_count = String::from_utf8_lossy(&keys.stdout)
-                    .lines()
-                    .filter(|l| !l.is_empty())
-                    .count();
-                if !config.quiet {
-                    println!("   Found {} relation keys", key_count);
-                }
-            }
-
-            let perm_glob = format!("{}:perm:*", config.redis_key_prefix);
-            let perm_output = Command::new(&redis_cli)
-                .args(["-u", &redis_url, "KEYS", &perm_glob])
-                .output()
-                .await;
-
-            if let Ok(keys) = perm_output {
-                let key_count = String::from_utf8_lossy(&keys.stdout)
-                    .lines()
-                    .filter(|l| !l.is_empty())
-                    .count();
-                if !config.quiet {
-                    println!("   Found {} permission cache keys", key_count);
-                }
-            }
+            crate::rebac_keys_probe::probe_and_report_rebac_key_count(
+                &redis_cli,
+                &redis_url,
+                &config.redis_key_prefix,
+                crate::rebac_keys_probe::RebacKeyKind::Permission,
+                config.quiet,
+            )
+            .await;
         }
         Ok(_) => {
             log_warning(
