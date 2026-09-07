@@ -75,7 +75,7 @@ fn verify_no_hardcoded_urls(dist_dir: &Path) -> Result<()> {
         }
     }
 
-    println!("   {} No hardcoded API URLs found", "✅".bright_green());
+    crate::ui::print_bright_step_pass("No hardcoded API URLs found");
     Ok(())
 }
 
@@ -140,10 +140,7 @@ fn verify_bundle_consistency(dist_dir: &Path) -> Result<()> {
     // 3. Worker scripts (separate entry points)
     // These are legitimate bundles that won't be directly referenced in index.html
 
-    println!(
-        "   {} Bundle references verified (index.html → assets)",
-        "✅".bright_green()
-    );
+    crate::ui::print_bright_step_pass("Bundle references verified (index.html → assets)");
     Ok(())
 }
 
@@ -176,10 +173,7 @@ fn verify_cache_policy(dist_dir: &Path) -> Result<()> {
         || index_html_content.contains("\"/env.js?t=' + Date.now()");
 
     if has_cache_busting {
-        println!(
-            "   {} env.js uses cache-busting query parameter",
-            "✅".bright_green()
-        );
+        crate::ui::print_bright_step_pass("env.js uses cache-busting query parameter");
     } else if index_html_content.contains("/env.js") {
         bail!(
             "❌ CACHE POLICY VIOLATION: env.js loaded without cache-busting!\n\
@@ -199,10 +193,7 @@ fn verify_cache_policy(dist_dir: &Path) -> Result<()> {
 
     // CHECK 2: Verify version.json uses cache-busting
     if index_html_content.contains("fetch('/version.json?t=' + Date.now()") {
-        println!(
-            "   {} version.json uses cache-busting query parameter",
-            "✅".bright_green()
-        );
+        crate::ui::print_bright_step_pass("version.json uses cache-busting query parameter");
     } else if index_html_content.contains("/version.json") {
         bail!(
             "❌ CACHE POLICY VIOLATION: version.json fetched without cache-busting!\n\
@@ -237,10 +228,7 @@ fn verify_cache_policy(dist_dir: &Path) -> Result<()> {
             }
         }
     }
-    println!(
-        "   {} No problematic cache-control meta tags in HTML",
-        "✅".bright_green()
-    );
+    crate::ui::print_bright_step_pass("No problematic cache-control meta tags in HTML");
 
     // CHECK 4: Verify asset hashing strategy
     let assets_dir = dist_dir.join("assets");
@@ -278,28 +266,22 @@ fn verify_cache_policy(dist_dir: &Path) -> Result<()> {
             }
 
             if non_hashed_count == 0 {
-                println!(
-                    "   {} All {} asset files use content hashing (immutable cache safe)",
-                    "✅".bright_green(),
+                crate::ui::print_bright_step_pass(&format!(
+                    "All {} asset files use content hashing (immutable cache safe)",
                     hashed_count
-                );
+                ));
             } else {
-                println!(
-                    "   {} {} hashed assets (immutable cache), {} non-hashed (short cache)",
-                    "✅".bright_green(),
-                    hashed_count,
-                    non_hashed_count
-                );
+                crate::ui::print_bright_step_pass(&format!(
+                    "{} hashed assets (immutable cache), {} non-hashed (short cache)",
+                    hashed_count, non_hashed_count
+                ));
             }
         }
     } else {
         warn!("⚠️  Assets directory not found");
     }
 
-    println!(
-        "   {} Cache policy verification passed",
-        "✅".bright_green()
-    );
+    crate::ui::print_bright_step_pass("Cache policy verification passed");
     Ok(())
 }
 
@@ -353,14 +335,8 @@ fn copy_and_compress_env_template(dist_dir: &Path, template_path: &Path) -> Resu
         );
     }
 
-    println!(
-        "   {} Template env.js present (will be replaced by ConfigMap)",
-        "✅".bright_green()
-    );
-    println!(
-        "   {} No compressed runtime config files (prevents caching bugs)",
-        "✅".bright_green()
-    );
+    crate::ui::print_bright_step_pass("Template env.js present (will be replaced by ConfigMap)");
+    crate::ui::print_bright_step_pass("No compressed runtime config files (prevents caching bugs)");
 
     Ok(())
 }
