@@ -11,6 +11,7 @@ use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use std::io::Write;
 
+use crate::commands::cluster_overlay_release_preamble::format_amd64_release_tag;
 use crate::config::DeployConfig;
 use crate::infrastructure::registry::{extract_organization, RegistryClient};
 
@@ -85,7 +86,7 @@ pub async fn execute(
         let client = RegistryClient::discover(None, org)
             .context("Failed to discover registry credentials for image verification")?;
 
-        let rollback_tag = format!("amd64-{}", entry.previous_tag);
+        let rollback_tag = format_amd64_release_tag(&entry.previous_tag);
         match client
             .verify_tag_exists(&entry.registry_url, &rollback_tag)
             .await
