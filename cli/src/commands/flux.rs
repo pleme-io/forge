@@ -318,7 +318,7 @@ async fn check_health_status() -> Result<(usize, usize), (usize, usize, Vec<Stri
 ///
 /// Flow: reconcile_source() → reconcile_kustomization() → reconcile_product_chain()
 pub async fn reconcile(namespace: String) -> Result<()> {
-    println!("🔄 {}", "Forcing Flux reconcile...".bold());
+    crate::ui::print_bold_titled_phase_open("🔄", "Forcing Flux reconcile...");
 
     // Step 1: Reconcile the git source so Flux fetches the latest commit
     reconcile_source().await?;

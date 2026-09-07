@@ -310,7 +310,7 @@ pub async fn build_rust_service(
     );
 
     // Pre-flight checks
-    println!("🔍 {}", "Pre-flight checks...".bold());
+    crate::ui::print_bold_titled_phase_open("🔍", "Pre-flight checks...");
     check_cargo_nix_exists()?;
 
     // Check ATTIC_TOKEN from environment (set by Nix wrapper)
@@ -385,7 +385,7 @@ pub async fn build_rust_service(
     println!();
 
     // Build AMD64 (always)
-    println!("📦 {}", "Building AMD64 image...".bold());
+    crate::ui::print_bold_titled_phase_open("📦", "Building AMD64 image...");
 
     // Construct full cache URL with cache name (Attic serves caches at {url}/{cache-name})
     let full_cache_url = format!("{}/{}", cache_url.trim_end_matches('/'), cache_name);
@@ -512,7 +512,7 @@ pub async fn build_rust_service(
     // Note: ARM64 packages not yet exposed in root flake, skip for now
     let arm64_build: Option<tokio::process::Child> = if should_build_arm64 {
         println!();
-        println!("📦 {}", "Building ARM64 image...".bold());
+        crate::ui::print_bold_titled_phase_open("📦", "Building ARM64 image...");
         crate::ui::print_plain_step_warn(
             "Warning: ARM64 packages not yet exposed in root flake, skipping",
         );

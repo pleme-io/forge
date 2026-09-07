@@ -109,7 +109,7 @@ pub async fn update_federation(
     deploy_config: &DeployConfig,
 ) -> Result<()> {
     println!();
-    println!("🔄 {}", "Updating Hive Router federation...".bold());
+    crate::ui::print_bold_titled_phase_open("🔄", "Updating Hive Router federation...");
 
     // Skip federation update if GraphQL is not enabled for this service
     if !deploy_config.service.graphql.enabled {
@@ -560,7 +560,7 @@ pub async fn update_federation(
         .or_else(|| deploy_config.global.federation.bff_admin_url.as_ref())
     {
         println!();
-        println!("🔔 {}", "Notifying BFF to reload supergraph...".bold());
+        crate::ui::print_bold_titled_phase_open("🔔", "Notifying BFF to reload supergraph...");
         match notify_bff_supergraph_reload(bff_url).await {
             Ok(result) => {
                 crate::ui::print_success_line("BFF supergraph reloaded successfully");
