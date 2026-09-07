@@ -1222,6 +1222,71 @@ pub async fn git_commit_idempotent(commit_msg: &str, spawn_context: &str) -> any
     Ok(())
 }
 
+/// `git push origin main` under the shared inherited-stdio, bail-on-non-
+/// zero envelope — the fused delegation three sibling post-commit push
+/// sites now share.
+///
+/// # Pre-lift census — three call sites, drifting op label
+///
+/// `commands/federation.rs::deploy_federation` (post-supergraph-commit),
+/// `commands/push.rs::update_kustomization` (post-kustomization-commit),
+/// and `commands/rollback.rs::execute` (post-rollback-commit) each spelled
+///
+/// ```ignore
+/// crate::git::git_run_inherited_status(["push", "origin", "main"], "git push[ origin main]")
+///     .await
+///     .context("<per-site context>")?;
+/// ```
+///
+/// verbatim — same argv, same delegation, same `.await.context(...)?`
+/// tail. The `op` label drifted between two forms: federation spelled the
+/// informative `"git push origin main"`, while push and rollback spelled
+/// the terser `"git push"`. Both surface through
+/// [`crate::retry::classify_inherited_status`]'s
+/// `"Failed to run {op}"` / `"{op} failed (exit {code})"` envelopes and
+/// end up in the operator's error log, so the pre-lift shape had the same
+/// mutation observed under two different labels — one drift class the
+/// fusion primitive closes by decision, not by convention.
+///
+/// # One canonical op label
+///
+/// [`git_push_origin_main`] pins the op label at `"git push origin main"`
+/// — the branch-carrying, argv-mirroring form federation already used —
+/// so every consumer's `RetryError`, `RetryError::Failed`, and structured
+/// tracing field carries the same identifier. A future consumer reaching
+/// for the primitive inherits the shared label by construction rather
+/// than by convention.
+///
+/// # Fixed argv — `["push", "origin", "main"]`
+///
+/// The argv slice is a hardcoded `["push", "origin", "main"]` matching
+/// the three pre-lift sites exactly. Callers targeting a different remote
+/// or branch (a `--refspec`-driven push, a `origin/<feature>` push) reach
+/// for the raw [`git_run_inherited_status`] surface instead — this
+/// primitive owns exactly the post-commit-to-`origin/main` shape the
+/// three pre-lift sites shared.
+///
+/// # Failure envelope inherits from [`git_run_inherited_status`]
+///
+/// Spawn failure raises `"Failed to run git push origin main"` through
+/// [`crate::retry::classify_inherited_status`]; non-zero exit raises
+/// `"git push origin main failed (exit {code})"`; signal termination
+/// raises `"git push origin main failed (killed by signal)"`. Callers
+/// attach per-site context with `.await.context(...)?` (or the equivalent
+/// `.with_context(|| ...)?`) on the outer chain — the primitive itself
+/// does not layer a `.context(...)` so the caller retains full control
+/// over the outer message.
+///
+/// # `GIT_BIN` env override
+///
+/// The `git` binary resolves through the delegated
+/// [`git_run_inherited_status`] → [`git_command_async`] chain so a
+/// Nix-hermetic runner's `GIT_BIN` override wins over ambient `PATH` —
+/// same discipline every git-mutation site in forge honors.
+pub async fn git_push_origin_main() -> anyhow::Result<()> {
+    git_run_inherited_status(["push", "origin", "main"], "git push origin main").await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2452,6 +2517,204 @@ mod tests {
              as an operator-actionable error rather than a silent success \
              downstream against an uncommitted tree. got: {msg:?}"
         );
+    }
+
+    /// [`git_push_origin_main`] MUST forward the fixed
+    /// `["push", "origin", "main"]` argv slice verbatim to the
+    /// GIT_BIN-resolved shim. Pins the branch-carrying pre-lift argv
+    /// three sibling post-commit push sites
+    /// (`commands/federation.rs::deploy_federation`,
+    /// `commands/push.rs::update_kustomization`,
+    /// `commands/rollback.rs::execute`) each hand-spelled — a
+    /// regression that dropped `"origin"`, reordered elements, or
+    /// swapped `"main"` for `"HEAD"` would silently redirect the git
+    /// mutation every deploy-frontier consumer depends on for control
+    /// flow.
+    ///
+    /// Runs under [`GIT_BIN_ENV_LOCK`] to serialize against every
+    /// other test that either mutates `GIT_BIN` or invokes a no-bin
+    /// production entry point that reads it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_git_push_origin_main_forwards_fixed_argv_and_returns_ok_on_zero_exit() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let argv_log = crate::test_support::ArgvLog::reserve();
+        let (_shim_dir, shim) = make_git_shim(&argv_log.shim_body(""));
+        let _scope = GitBinScope::set(&shim);
+
+        git_push_origin_main()
+            .await
+            .expect("zero-exit shim must surface as Ok(())");
+
+        let logged = argv_log.read_argv_log();
+        let lines: Vec<&str> = logged.lines().collect();
+        assert_eq!(
+            lines,
+            vec!["push", "origin", "main"],
+            "git_push_origin_main must forward the fixed \
+             `[\"push\", \"origin\", \"main\"]` argv verbatim to the \
+             GIT_BIN-resolved shim — proves the primitive delegates \
+             through `git_run_inherited_status` with exactly the \
+             pre-lift three-element argv and does not silently drop, \
+             reorder, or substitute any element"
+        );
+    }
+
+    /// [`git_push_origin_main`] MUST surface a non-zero shim exit
+    /// through the canonical `"{op} failed (exit {code})"` envelope
+    /// with the op label pinned to `"git push origin main"` — the
+    /// informative branch-carrying label federation already used and
+    /// the fusion primitive standardizes across every consumer. A
+    /// regression that dropped the label back to a terser `"git push"`
+    /// (the pre-lift push.rs / rollback.rs form) or dropped the
+    /// delegation to [`crate::retry::run_inherited_status`] for a bare
+    /// `.status().await?` fails this test.
+    ///
+    /// Runs under [`GIT_BIN_ENV_LOCK`] to serialize against every
+    /// other test that either mutates `GIT_BIN` or invokes a no-bin
+    /// production entry point that reads it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_git_push_origin_main_non_zero_exit_carries_canonical_op_label() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let (_shim_dir, shim) = make_git_shim(
+            "#!/bin/sh\necho 'SIGIL_ROUTED_VIA_GIT_PUSH_ORIGIN_MAIN_9d2e70' 1>&2\nexit 17\n",
+        );
+        let _scope = GitBinScope::set(&shim);
+
+        let err = git_push_origin_main().await.expect_err("shim exits 17");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("git push origin main"),
+            "git_push_origin_main must surface `\"git push origin \
+             main\"` as the op label via the anyhow message — proves \
+             the primitive delegates to `git_run_inherited_status` \
+             with the pinned informative label federation already \
+             used, not the pre-lift terser `\"git push\"` form; \
+             got: {msg:?}"
+        );
+        assert!(
+            msg.contains("exit 17"),
+            "git_push_origin_main must surface the shim's exit code \
+             via the anyhow message — proves the primitive delegates \
+             through `retry::run_inherited_status`'s \
+             `classify_inherited_status` envelope, not a bare \
+             `.status().await?` that silently drops the exit code; \
+             got: {msg:?}"
+        );
+    }
+
+    /// A spawn `Err` (`GIT_BIN` resolves to a nonexistent path) MUST
+    /// bail with the canonical `"Failed to run git push origin main"`
+    /// envelope — the SPAWN arm of
+    /// [`crate::retry::classify_inherited_status`]. Pins the shape
+    /// every consumer site depends on for the "developer has no `git`
+    /// on PATH / GIT_BIN points at an absent Nix derivation"
+    /// precondition to surface as an operator-actionable error rather
+    /// than a downstream silent-success against an unpushed tree.
+    ///
+    /// Runs under [`GIT_BIN_ENV_LOCK`] to serialize against every
+    /// other test that either mutates `GIT_BIN` or invokes a no-bin
+    /// production entry point that reads it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_git_push_origin_main_spawn_error_carries_canonical_op_label() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _scope = GitBinScope::set(
+            "/nonexistent/dir/absolutely-not-a-git-binary-forge-push-origin-main-shim",
+        );
+
+        let err = git_push_origin_main()
+            .await
+            .expect_err("unresolvable GIT_BIN must produce Err");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Failed to run git push origin main"),
+            "git_push_origin_main must surface the canonical \
+             spawn-failure envelope `\"Failed to run git push origin \
+             main\"` from `retry::classify_inherited_status` — proves \
+             the primitive delegates through the shared envelope and \
+             the op label pins to the branch-carrying form; \
+             got: {msg:?}"
+        );
+    }
+
+    /// Caller shield: no source file under `cli/src/commands/` may
+    /// still spell the raw
+    /// `git_run_inherited_status(["push", "origin", "main"], ...)`
+    /// shape — every post-commit push to `origin/main` MUST route
+    /// through [`git_push_origin_main`] so the canonical op label
+    /// (`"git push origin main"`) and the fixed argv contract stay
+    /// owned by ONE primitive rather than by three per-site
+    /// conventions.
+    ///
+    /// A future consumer that spells the raw shape trips this shield
+    /// even before it can drift the op label back to `"git push"`.
+    #[test]
+    fn no_command_module_still_spells_raw_git_push_origin_main_argv() {
+        use std::path::PathBuf;
+        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands");
+        let mut offenders: Vec<(PathBuf, usize, String)> = Vec::new();
+        for entry in std::fs::read_dir(&commands_dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            for (idx, line) in source.lines().enumerate() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                    continue;
+                }
+                if line.contains("git_run_inherited_status([\"push\", \"origin\", \"main\"]") {
+                    offenders.push((path.clone(), idx + 1, line.to_string()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "raw \
+             `git_run_inherited_status([\"push\", \"origin\", \
+             \"main\"], ...)` stanza(s) survive under `commands/` — \
+             route each through `crate::git::git_push_origin_main()` \
+             instead so the canonical op label stays pinned at ONE \
+             body:\n{:#?}",
+            offenders
+        );
+    }
+
+    /// Positive half of the shield: the three pre-lift files under
+    /// `commands/` MUST each forward through
+    /// `crate::git::git_push_origin_main(` at least once, so a
+    /// migration that dropped a call site outright leaves the
+    /// negative "no raw argv" scan trivially satisfied by absence but
+    /// the positive count still fails.
+    #[test]
+    fn every_prelift_module_forwards_through_git_push_origin_main() {
+        use std::path::PathBuf;
+        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands");
+        // (module basename, minimum forward count from the pre-lift census)
+        let expectations: &[(&str, usize)] =
+            &[("federation.rs", 1), ("push.rs", 1), ("rollback.rs", 1)];
+        for (basename, min_count) in expectations {
+            let path = commands_dir.join(basename);
+            let source = std::fs::read_to_string(&path).unwrap();
+            let forwards = source.matches("git_push_origin_main(").count();
+            assert!(
+                forwards >= *min_count,
+                "{basename} must forward at least {min_count} \
+                 post-commit `git push origin main` site(s) through \
+                 `crate::git::git_push_origin_main(`; found {forwards}. \
+                 A dropped call would leave the negative raw-argv scan \
+                 satisfied by absence.",
+            );
+        }
     }
 
     /// [`git_command_sync`] MUST resolve the `git` binary through

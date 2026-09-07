@@ -360,7 +360,7 @@ pub async fn execute(
         // call by construction rather than by convention.
         crate::git::git_commit_idempotent(&commit_msg, "Failed to commit rollback tags").await?;
 
-        crate::git::git_run_inherited_status(["push", "origin", "main"], "git push")
+        crate::git::git_push_origin_main()
             .await
             .context("Failed to push rollback tags")?;
 
