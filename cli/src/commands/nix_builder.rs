@@ -409,12 +409,12 @@ async fn update_kustomization_image(
         );
     }
 
-    // Write back (remove trailing newline from loop)
-    let final_content = new_content.trim_end().to_string() + "\n";
-    crate::repo::write_text_async(path, &final_content).await?;
-
-    crate::info_indented_success!("Kustomization updated");
-    Ok(())
+    crate::commands::kustomization_edit::finalize_and_announce(
+        path,
+        &new_content,
+        "Kustomization updated",
+    )
+    .await
 }
 
 /// Update kenshi kustomization.yaml BUILDER_IMAGE configMap literal
@@ -475,12 +475,12 @@ async fn update_kenshi_builder_image(
         );
     }
 
-    // Write back
-    let final_content = new_content.trim_end().to_string() + "\n";
-    crate::repo::write_text_async(path, &final_content).await?;
-
-    crate::info_indented_success!("Kenshi kustomization updated");
-    Ok(())
+    crate::commands::kustomization_edit::finalize_and_announce(
+        path,
+        &new_content,
+        "Kenshi kustomization updated",
+    )
+    .await
 }
 
 #[cfg(test)]
