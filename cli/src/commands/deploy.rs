@@ -159,7 +159,20 @@ pub async fn execute(
                     .collect();
 
                 info!("🧹 Purging Cloudflare cache...");
-                info!("   Zone ID: {}***", &zone_id[..8]);
+                // The masked-zone-ID readout — three-ASCII-space indent
+                // + `Zone ID:` label + up-to-8-char prefix + `***` marker
+                // — is one primitive shared with the sibling
+                // `cloudflare.rs::purge_cache` pre-request preamble. The
+                // pre-lift stanza here was
+                // `info!("   Zone ID: {}***", &zone_id[..8])`, which
+                // PANICS the process any time the operator's configured
+                // `deploy.yaml` `cloudflare.zone_id` is shorter than 8
+                // bytes (`byte index 8 is out of bounds`). The lifted
+                // `info_zone_id_field!` + `zone_id_masked_prefix`
+                // primitive is char-boundary safe on every input, so
+                // this whole flow's panic edge is closed and the
+                // divergence with the `cloudflare.rs` sibling is gone.
+                crate::info_zone_id_field!(zone_id);
                 info!("   Files: {}", urls.join(", "));
                 println!();
 

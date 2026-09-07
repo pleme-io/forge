@@ -52,7 +52,18 @@ struct PurgeRequest {
 /// ```
 pub async fn purge_cache(zone_id: &str, api_token: &str, urls: &[String]) -> Result<()> {
     info!("☁️  Purging Cloudflare cache");
-    info!("   Zone ID: {}***", &zone_id[..8.min(zone_id.len())]);
+    // The masked-zone-ID readout — three-ASCII-space indent + `Zone ID:`
+    // label + up-to-`ZONE_ID_MASKED_PREFIX_LEN`-char prefix + `***`
+    // marker — is one primitive shared with the sibling
+    // `commands/deploy.rs` pre-purge preamble. The pre-lift stanza here
+    // was `info!("   Zone ID: {}***", &zone_id[..8.min(zone_id.len())])`,
+    // bounds-safe on length but still panicky if byte 8 lands
+    // mid-UTF-8-scalar; the deploy.rs sibling was `&zone_id[..8]`,
+    // panicky on both. The lifted `info_zone_id_field!` +
+    // `zone_id_masked_prefix` primitive is char-boundary safe on every
+    // input (empty, short, exactly the prefix width, and multi-byte),
+    // and the divergence between the two sites is gone.
+    crate::info_zone_id_field!(zone_id);
 
     let client = reqwest::Client::new();
 
