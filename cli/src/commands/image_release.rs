@@ -200,17 +200,9 @@ fn push_image(doca: &str, image_path: &str, registry: &str, tag: &str) -> Result
     let (host, image) = crate::infrastructure::registry::split_composed_registry_base(registry)?;
 
     let mut push = Command::new(doca);
-    push.args([
-        "push",
-        "--tarball",
-        image_path,
-        "--registry",
-        host,
-        "--image",
-        image,
-        "--tag",
-        tag,
-    ]);
+    push.args(crate::infrastructure::registry::doca_push_argv(
+        image_path, host, image, tag,
+    ));
     run_inherited_status_sync(push, &format!("doca push for {}:{}", registry, tag))?;
 
     Ok(())

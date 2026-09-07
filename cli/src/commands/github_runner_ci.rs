@@ -853,17 +853,9 @@ async fn push_with_retry(
             // doca's push_with_retry backs off and distinguishes transient from
             // permanent failures.
             let outcome = Command::new(&doca)
-                .args([
-                    "push",
-                    "--tarball",
-                    image_path,
-                    "--registry",
-                    &host,
-                    "--image",
-                    &image,
-                    "--tag",
-                    tag,
-                ])
+                .args(crate::infrastructure::registry::doca_push_argv(
+                    image_path, &host, &image, tag,
+                ))
                 .env("INPUT_DEST_USER", &organization)
                 .env("INPUT_DEST_PASS", token)
                 .stdout(std::process::Stdio::piped())
