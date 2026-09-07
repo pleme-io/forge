@@ -204,15 +204,27 @@ mod tests {
     }
 
     /// Whole-module shield: no raw `format!("amd64-{}", ...)` may live
-    /// in the three consumer modules (`commands/{kenshi,kenshi_agent,
-    /// nix_builder}.rs`). Every `amd64-<sha>` tag rendered by a
-    /// cluster-overlay release flow must resolve through
-    /// [`format_amd64_release_tag`] so a future drift to a new tag
-    /// convention flows to all three flows from one edit.
+    /// in ANY release-tag-emitting consumer module. The pre-lift census
+    /// covered eight sites — three cluster-overlay flows
+    /// (`commands/{kenshi,kenshi_agent,nix_builder}.rs`) and five
+    /// product-level flows (`commands/product_release.rs` × 3 —
+    /// prebuilt-push deploy tag, image-attestation image tag,
+    /// should-build-artifact deploy tag; `commands/rollback.rs` × 1 —
+    /// rollback verification tag; `commands/image_release.rs` × 1 —
+    /// multi-arch push amd64 tag). Every `amd64-<sha>` tag rendered by
+    /// forge must resolve through [`format_amd64_release_tag`] so a
+    /// future drift to a new tag convention (a `linux/amd64-` prefix,
+    /// an architecture-parametric form, an embedded date stamp) flows
+    /// to all eight sites from one edit and downstream
+    /// `docker manifest inspect ghcr.io/.../amd64-<sha>` audit queries
+    /// continue to resolve against a single canonical shape.
     ///
-    /// The three forbidden shapes are reconstructed at test time via
-    /// `format!` from the bare string `"amd64-"` so this shield's own
-    /// source text does not false-match itself.
+    /// The forbidden shape is reconstructed at test time via `format!`
+    /// from the bare string `"amd64-"` so this shield's own source text
+    /// does not false-match itself. The exception is
+    /// [`format_amd64_release_tag`] itself (in this same module), which
+    /// is the ONE site allowed to spell the raw shape — that site is
+    /// what every consumer delegates through.
     #[test]
     fn amd64_tag_render_routes_through_format_helper_not_raw_format_literal() {
         let forbidden = format!("{}{{}}", "\"amd64-");
@@ -220,6 +232,15 @@ mod tests {
             ("commands/kenshi.rs", include_str!("kenshi.rs")),
             ("commands/kenshi_agent.rs", include_str!("kenshi_agent.rs")),
             ("commands/nix_builder.rs", include_str!("nix_builder.rs")),
+            (
+                "commands/product_release.rs",
+                include_str!("product_release.rs"),
+            ),
+            ("commands/rollback.rs", include_str!("rollback.rs")),
+            (
+                "commands/image_release.rs",
+                include_str!("image_release.rs"),
+            ),
         ] {
             assert!(
                 !source.contains(&forbidden),
@@ -227,6 +248,43 @@ mod tests {
                  route through `crate::commands::cluster_overlay_release_preamble::\
                  format_amd64_release_tag` instead (the byte-oracle-covered \
                  canonical tag renderer)"
+            );
+        }
+    }
+
+    /// Positive delegation shield: each of the five product-level
+    /// consumer modules newly added to the shield above MUST carry a
+    /// call to `format_amd64_release_tag` — a re-inline that also
+    /// silently dropped the primitive call would evade the "no raw
+    /// format literal" scan but is caught here.
+    ///
+    /// Three cluster-overlay consumers are already covered by the
+    /// sibling `cluster_overlay_release_preamble_callers_delegate_...`
+    /// discipline in the preamble surface (they call the fusion
+    /// primitive `announce_release_start_and_compute_tag` rather than
+    /// `format_amd64_release_tag` directly), so they are not
+    /// re-checked here — the negative shield above is sufficient for
+    /// them.
+    #[test]
+    fn product_level_amd64_tag_callers_delegate_through_format_helper() {
+        for (path, source) in [
+            (
+                "commands/product_release.rs",
+                include_str!("product_release.rs"),
+            ),
+            ("commands/rollback.rs", include_str!("rollback.rs")),
+            (
+                "commands/image_release.rs",
+                include_str!("image_release.rs"),
+            ),
+        ] {
+            assert!(
+                source.contains("format_amd64_release_tag("),
+                "`{path}` MUST call `format_amd64_release_tag(...)` at least once — \
+                 it is on the census of product-level `amd64-<sha>` tag-emitting sites \
+                 the shield covers. A re-inline that dropped both the raw literal AND \
+                 the delegation call would silently remove the tag from the fleet \
+                 without this positive check."
             );
         }
     }

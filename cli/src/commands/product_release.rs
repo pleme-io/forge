@@ -18,6 +18,7 @@ use tokio::process::Command;
 
 #[cfg(feature = "attestation")]
 use crate::commands::attestation;
+use crate::commands::cluster_overlay_release_preamble::format_amd64_release_tag;
 use crate::config::DeployConfig;
 use crate::infrastructure::git::{CommitPushOutcome, GitClient};
 use crate::infrastructure::kubectl::kubectl_command_async;
@@ -420,7 +421,7 @@ pub async fn product_release(
                     ">>".dimmed(),
                     svc.name.cyan()
                 );
-                let deploy_tag = format!("amd64-{}", git_sha);
+                let deploy_tag = format_amd64_release_tag(&git_sha);
                 push_prebuilt_image(&local_image, &registry_url, &deploy_tag).await?;
             } else {
                 // Fallback: build via Nix (when --skip-gates or no local image)
@@ -514,7 +515,7 @@ pub async fn product_release(
 
             let registry_url =
                 DeployConfig::load_service_registry_url(&product, &svc.path, &repo_root)?;
-            let image_tag = format!("amd64-{}", git_sha);
+            let image_tag = format_amd64_release_tag(&git_sha);
             match attestation::compute_image_attestation(&registry_url, &image_tag).await {
                 Ok(att) => {
                     image_atts.push(att);
@@ -641,7 +642,7 @@ pub async fn product_release(
             // Resolve image tag: for build environments use arch-prefixed git_sha (pushed in Phase 1),
             // for deploy-only environments use the stored artifact tag from deploy.yaml.
             let image_tag = if svc_release.should_build_artifact(env_name) {
-                format!("amd64-{}", git_sha)
+                format_amd64_release_tag(&git_sha)
             } else {
                 svc_release
                     .artifact

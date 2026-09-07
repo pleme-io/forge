@@ -12,6 +12,7 @@ use std::path::Path;
 use std::process::Command;
 use tracing::info;
 
+use crate::commands::cluster_overlay_release_preamble::format_amd64_release_tag;
 use crate::git;
 use crate::nix::build_flake_attr_in;
 use crate::retry::run_inherited_status_sync;
@@ -82,7 +83,7 @@ pub async fn execute(
         info!("Verifying {} (amd64) image loader before push...", name);
         verify_image_arch(&doca, &amd64_path, "amd64")?;
     }
-    let amd64_tag = format!("amd64-{}", sha);
+    let amd64_tag = format_amd64_release_tag(&sha);
     info!("Pushing {} (amd64) as {}:{}...", name, registry, amd64_tag);
     push_image(&doca, &amd64_path, registry, &amd64_tag)?;
     push_image(&doca, &amd64_path, registry, "amd64-latest")?;
