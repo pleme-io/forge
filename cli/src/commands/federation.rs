@@ -479,7 +479,7 @@ pub async fn update_federation(
         bail!("Federation directory not found at: {}", federation_path);
     }
 
-    crate::git::git_run_inherited_status(["add", federation_path.as_str()], "git add")
+    crate::git::git_add_path(federation_path.as_str())
         .await
         .with_context(|| format!("Failed to stage federation files at: {}", federation_path))?;
 
@@ -489,7 +489,7 @@ pub async fn update_federation(
     }
 
     // Also stage the hive-router supergraph copy
-    crate::git::git_run_inherited_status(["add", hive_router_path.as_str()], "git add")
+    crate::git::git_add_path(hive_router_path.as_str())
         .await
         .with_context(|| {
             format!(
@@ -501,7 +501,7 @@ pub async fn update_federation(
     // Also stage the hive-router deployment (contains updated supergraph hash annotation)
     let router_deployment_rel_path = paths.to_relative_string(&router_deployment_path);
 
-    crate::git::git_run_inherited_status(["add", router_deployment_rel_path.as_str()], "git add")
+    crate::git::git_add_path(router_deployment_rel_path.as_str())
         .await
         .with_context(|| {
             format!(

@@ -332,7 +332,7 @@ pub async fn execute(
     // "commit with nothing to commit returns non-zero" no-op.
     if !modified_files.is_empty() {
         for file in &modified_files {
-            crate::git::git_run_inherited_status(["add", file.as_str()], "git add")
+            crate::git::git_add_path(file.as_str())
                 .await
                 .context("Failed to stage rollback artifact.json")?;
         }
@@ -455,15 +455,21 @@ mod tests {
         );
         assert!(
             fn_body.contains("crate::git::git_run_inherited_status(")
+                || fn_body.contains("crate::git::git_add_path(")
+                || fn_body.contains("crate::git::git_push_origin_main(")
                 || fn_body.contains("crate::retry::run_inherited_status"),
             "execute() must dispatch `git add` / `git push` through \
              the structural `(op, exit_code)`-envelope surface — either \
              the async fusion primitive \
              `crate::git::git_run_inherited_status(&[...], \"git …\")` \
              (which internally delegates through \
-             `crate::retry::run_inherited_status`) or directly through \
-             `crate::retry::run_inherited_status`. Neither delegation \
-             string was found in execute()."
+             `crate::retry::run_inherited_status`), the fixed-argv \
+             single-path staging primitive `crate::git::git_add_path(&path)` \
+             or the fixed-argv post-commit push primitive \
+             `crate::git::git_push_origin_main()` (both of which also \
+             delegate through `git_run_inherited_status`), or directly \
+             through `crate::retry::run_inherited_status`. None of these \
+             delegation strings was found in execute()."
         );
     }
 }

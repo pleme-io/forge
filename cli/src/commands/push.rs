@@ -162,7 +162,7 @@ pub async fn update_kustomization(
         // `commands/codegen_validation.rs` git-mutation sites honor and
         // the same class of bug the free-function-`git` / `GitClient`
         // migrations at 818ed9a / badcdf4 / 8653403 redeemed.
-        crate::git::git_run_inherited_status(["add", kustomization_path], "git add")
+        crate::git::git_add_path(kustomization_path)
             .await
             .context("Failed to stage kustomization.yaml")?;
 
