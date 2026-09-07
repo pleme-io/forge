@@ -301,9 +301,7 @@ pub async fn seed(working_dir: &Path, env: &str, dry_run: bool) -> Result<()> {
     let sql = generate_seed_sql(&profiles, &email_domain);
 
     if dry_run {
-        println!("--- DRY RUN SQL ---");
-        println!("{}", sql);
-        println!("--- END DRY RUN ---");
+        crate::ui::print_dry_run_sql_dump(&sql);
         return Ok(());
     }
 
@@ -343,9 +341,7 @@ pub async fn unseed(working_dir: &Path, env: &str, dry_run: bool) -> Result<()> 
     let sql = generate_unseed_sql(&email_domain);
 
     if dry_run {
-        println!("--- DRY RUN SQL ---");
-        println!("{}", sql);
-        println!("--- END DRY RUN ---");
+        crate::ui::print_dry_run_sql_dump(&sql);
         return Ok(());
     }
 
