@@ -113,7 +113,7 @@ pub async fn execute(backend_dir: &Path, web_dir: &Path) -> Result<CodegenResult
     // for the spawn-arm diagnostic.
     let mut install_cmd = Command::new(&bun);
     install_cmd
-        .args(["install", "--frozen-lockfile"])
+        .args(crate::bun_argv::bun_install_frozen_lockfile_argv())
         .current_dir(web_dir);
     crate::retry::run_capture_anyhow(install_cmd, "bun install")
         .await

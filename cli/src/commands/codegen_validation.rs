@@ -133,7 +133,7 @@ pub async fn validate_codegen_with_autocommit(
     // First ensure dependencies are installed
     let bun = bun_bin();
     let install_output = Command::new(&bun)
-        .args(["install", "--frozen-lockfile"])
+        .args(crate::bun_argv::bun_install_frozen_lockfile_argv())
         .current_dir(web_dir)
         .output()
         .await

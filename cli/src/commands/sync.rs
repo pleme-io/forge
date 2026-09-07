@@ -209,7 +209,7 @@ pub async fn execute_drift_check(working_dir: &Path) -> Result<DriftCheckResult>
     // Install deps first
     let bun = bun_bin();
     let install_output = Command::new(&bun)
-        .args(["install", "--frozen-lockfile"])
+        .args(crate::bun_argv::bun_install_frozen_lockfile_argv())
         .current_dir(&config.web_dir)
         .output()
         .await
