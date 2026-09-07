@@ -61,6 +61,7 @@ mod version;
 // Legacy modules (to be migrated)
 mod attic_configure_step;
 mod attic_push_step;
+mod bun_argv;
 mod cloudflare;
 mod deploy_target_field;
 mod git;

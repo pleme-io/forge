@@ -475,7 +475,7 @@ pub async fn validate_frontend_with_config(
     // Ensure dependencies are installed
     crate::ui::print_step_heading("Ensuring dependencies are installed...");
     let install = bun_output_at(
-        &["install", "--frozen-lockfile"],
+        &crate::bun_argv::bun_install_frozen_lockfile_argv(),
         web_dir,
         "bun install --frozen-lockfile",
     )
