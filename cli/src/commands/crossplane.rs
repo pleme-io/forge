@@ -146,19 +146,17 @@ pub fn function_release(
         .arg(&examples);
     run_inherited_status_sync(build, "crossplane xpkg build")?;
 
-    let dest = crate::oci_manifest::image_reference(package_ref.trim_end_matches('/'), tag);
-    info!("crossplane xpkg push → {}", dest);
-    // `xpkg push <package> -f <files>`: the tag is the positional <package>; the
-    // file flag's long form is `--package-files` (plural — verified against the
-    // crossplane CLI, NOT the singular `--package-file` that `build` uses).
-    let mut push = Command::new(&crossplane);
-    push.args(["xpkg", "push", "--package-files"])
-        .arg(&out)
-        .arg(&dest);
-    run_inherited_status_sync(push, &format!("crossplane xpkg push {}", dest))?;
-
-    info!("Function package published: {}", dest);
-    Ok(())
+    // Fused announce-push-report stanza — see
+    // [`crate::commands::crossplane_xpkg_push`] for the correlated-
+    // adjective enum + byte-oracle grammar shared with
+    // `configuration_release`.
+    crate::commands::crossplane_xpkg_push::xpkg_push_and_report(
+        &crossplane,
+        &out,
+        package_ref,
+        tag,
+        crate::commands::crossplane_xpkg_push::CrossplanePackageKind::Function,
+    )
 }
 
 /// Build + push a Crossplane **Configuration** package (an XRD + Composition
@@ -190,15 +188,17 @@ pub fn configuration_release(package_root: &str, package_ref: &str, tag: &str) -
         .arg("--examples-root")
         .arg(&examples);
     run_inherited_status_sync(build, "crossplane xpkg build")?;
-    let dest = crate::oci_manifest::image_reference(package_ref.trim_end_matches('/'), tag);
-    info!("crossplane xpkg push → {}", dest);
-    let mut push = Command::new(&crossplane);
-    push.args(["xpkg", "push", "--package-files"])
-        .arg(&out)
-        .arg(&dest);
-    run_inherited_status_sync(push, &format!("crossplane xpkg push {}", dest))?;
-    info!("Configuration package published: {}", dest);
-    Ok(())
+    // Fused announce-push-report stanza — see
+    // [`crate::commands::crossplane_xpkg_push`] for the correlated-
+    // adjective enum + byte-oracle grammar shared with
+    // `function_release`.
+    crate::commands::crossplane_xpkg_push::xpkg_push_and_report(
+        &crossplane,
+        &out,
+        package_ref,
+        tag,
+        crate::commands::crossplane_xpkg_push::CrossplanePackageKind::Configuration,
+    )
 }
 
 /// Render a composite against its Composition + functions (`crossplane render`) —
@@ -346,23 +346,33 @@ mod tests {
     /// canonical `"{op} failed (exit {code})"` envelope is emitted by
     /// construction at the primitive's ONE body.
     ///
+    /// Post-`crossplane_xpkg_push`-lift: the two xpkg push spawns
+    /// migrated into
+    /// [`crate::commands::crossplane_xpkg_push::xpkg_push_and_report`],
+    /// where the fusion primitive still routes through
+    /// `run_inherited_status_sync`. Four in-module status-only spawns
+    /// remain here (`function_release` xpkg build, `configuration_release`
+    /// xpkg build, `render` crossplane render, `validate` crossplane beta
+    /// validate); the push shield lives in the new module's own tests.
+    ///
     /// Negative side: the inline `.status()` builder-terminator must not
     /// reappear at any code line in the module body (a re-inlined spawn
     /// would bypass the primitive and re-drop the exit code). Positive
-    /// side: the delegation call must appear at ≥6 code lines (one per
-    /// pre-lift spawn), so a regression that deleted every primitive call
-    /// cannot leave the negative scan trivially satisfied by absence.
-    /// Both hits route through `code_line_hits` for anti-docstring-self-
-    /// match discipline. Same scan boundary (first `#[cfg(test)]` marker)
-    /// the sigil shield above uses.
+    /// side: the delegation call must appear at ≥4 code lines (one per
+    /// remaining in-module spawn), so a regression that deleted every
+    /// primitive call cannot leave the negative scan trivially satisfied
+    /// by absence. Both hits route through `code_line_hits` for anti-
+    /// docstring-self-match discipline. Same scan boundary (first
+    /// `#[cfg(test)]` marker) the sigil shield above uses.
     #[test]
     fn test_crossplane_status_spawns_route_through_run_inherited_status_sync() {
         crate::test_support::assert_source_routes_status_only_spawns_through_run_inherited_status_sync(
             include_str!("crossplane.rs"),
             "commands/crossplane.rs",
-            6,
-            "all six crossplane spawns (`function_release` build+push, \
-             `configuration_release` build+push, `render`, `validate`)",
+            4,
+            "the four remaining in-module crossplane spawns \
+             (`function_release` xpkg build, `configuration_release` \
+             xpkg build, `render`, `validate`)",
         );
     }
 
