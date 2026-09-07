@@ -5552,6 +5552,94 @@ pub fn write_dry_run_sql_dump<W: std::io::Write>(w: &mut W, sql: &str) -> std::i
     writeln!(w, "--- END DRY RUN ---")
 }
 
+/// Prints the one-line `"<emoji> <title>.bold()"` bold-titled phase-open
+/// banner 6 pre-lift consumer sites across `commands/{federation
+/// (×2: `🔄 Updating Hive Router federation...` + `🔔 Notifying BFF to
+/// reload supergraph...`), flux (×1: `🔄 Forcing Flux reconcile...`),
+/// rust_service (×3: `🔍 Pre-flight checks...` +
+/// `📦 Building AMD64 image...` + `📦 Building ARM64 image...`)}.rs`
+/// spelled inline as `println!("<emoji> {}", "<title>".bold())` — a
+/// caller-picked emoji glyph, one space, then the caller-picked title
+/// literal painted `.bold()`. Marks the leading edge of a long-running
+/// phase (federation update, Flux reconcile, per-arch image build,
+/// pre-flight check batch) whose title carries a trailing ellipsis
+/// (`...`) to signal the in-progress verb aspect. The bold-only palette
+/// (no color, no framing rule) sits ONE weight below the
+/// [`print_command_intro_banner`] fused emoji-verb-subject-detail
+/// command-level intro banner and ONE weight above the plain
+/// [`print_next_steps_heading`] post-completion section heading — a
+/// mid-command phase marker, not a top-level milestone.
+///
+/// # Distinct from the other `ui::print_*` primitives
+///
+/// [`print_command_intro_banner`] carries a FUSED four-argument stanza
+/// (emoji, `.bold()` verb, `.cyan()` subject, `.dimmed()` detail)
+/// followed by an ASCII title underline — a command-level intro that
+/// dominates the first screen of output. This primitive carries the
+/// LEANEST bold-titled phase-open (emoji, one space, `.bold()` title,
+/// no underline, no colored subject, no dimmed detail); every pre-lift
+/// consumer used it inside a command's pipeline as a mid-body phase
+/// boundary weaker than the command's own intro banner.
+/// [`print_step_heading`] carries the `━━━ <title> ━━━` heavy-rule
+/// step-heading grammar and marks a numbered pipeline step; the
+/// bold-only shape here carries no rule and marks a per-verb phase,
+/// not a numbered step. [`print_section_header`] wears a `═`-rule
+/// frame at the top-level section grammar; this primitive wears no
+/// frame and sits one grammar level nested underneath.
+///
+/// # `.bold()` on the title, plain on the emoji
+///
+/// Pre-lift every consumer spelled the coloring as `"<title>".bold()`
+/// on the TITLE literal alone, never on the composed line
+/// (`format!("<emoji> {}", title).bold()`) and never on the emoji glyph
+/// (`"<emoji>".bold()`). The primitive preserves that split: the
+/// `\x1b[1m` bold ANSI sequence wraps the title, the emoji reaches the
+/// writer uncolored, and the single ASCII space between them is emitted
+/// OUTSIDE both spans — so a terminal without color renders
+/// `<emoji> <title>` with the emoji visually distinct from a
+/// bold-weight title. A re-lift that hoisted the bold onto the whole
+/// line would embolden the emoji glyph (many terminals render bold
+/// emoji as heavier variants of the same code point) and drift the
+/// visual grammar silently.
+///
+/// # Compounding
+///
+/// Pre-lift 6 sibling sites each restated the `println!("<emoji> {}",
+/// "<title>".bold())` grammar verbatim, with the emoji glyph inline in
+/// the format string, the single-space separator, and the `.bold()`
+/// coloring on the title literal all spelled inline. A future palette
+/// adjustment (a promotion of `.bold()` to `.bold().cyan()` under a
+/// phase-open recoloring, an OTLP `phase_opened` observability event
+/// wired alongside the print, a swap of the trailing `...` for `…` U+2026
+/// under a typography pass, a leading blank line lifted into the
+/// primitive body under a "visually separate every phase" pass) had
+/// to hit 6 sites in lockstep or drift the visual grammar; post-lift
+/// it hits ONE typed body. Delegates to
+/// [`write_bold_titled_phase_open`] against [`std::io::stdout()`]; the
+/// writer split exists so the fail-before-pass test can pin the
+/// one-line body, the emoji + space + title layout, the `\x1b[1m` bold
+/// ANSI palette contract, and the absence of any coloring on the emoji
+/// by inspecting emitted bytes rather than shelling out and grepping
+/// stdout.
+pub fn print_bold_titled_phase_open(emoji: &str, title: &str) {
+    let _ = write_bold_titled_phase_open(&mut std::io::stdout().lock(), emoji, title);
+}
+
+/// Writer-taking sibling to [`print_bold_titled_phase_open`]. Emits the
+/// single `<emoji> <title.bold()>` line via [`writeln!`] against the
+/// supplied writer. [`print_bold_titled_phase_open`] is the stdout
+/// adapter; this variant exists so tests can pin the one-line body,
+/// the caller-supplied emoji glyph, the single-space separator, and
+/// the `\x1b[1m` bold ANSI sequence around the title (never the emoji,
+/// never the space) without capturing stdout.
+pub fn write_bold_titled_phase_open<W: std::io::Write>(
+    w: &mut W,
+    emoji: &str,
+    title: &str,
+) -> std::io::Result<()> {
+    writeln!(w, "{} {}", emoji, title.bold())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{styled_spinner, SpinnerStyle, SPINNER_TICK};
@@ -18258,6 +18346,206 @@ mod tests {
                  call or dropped one of the deployed image-ref rows \
                  silently fails here. Found {forward_hits} forwarding \
                  hits."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for
+    /// [`super::write_bold_titled_phase_open`]. Pins the one-line body
+    /// every pre-lift consumer across `commands/{federation, flux,
+    /// rust_service}.rs` spelled verbatim (`println!("<emoji> {}",
+    /// "<title>".bold())`): the caller-supplied emoji glyph
+    /// uncolored, a single ASCII space, then the caller-supplied
+    /// title painted `.bold()` (`\x1b[1m` begin-span before the
+    /// title's first byte, `\x1b[0m` end-span after its last byte).
+    /// A silent contract drift a future rewrite might introduce —
+    /// hoisting the `.bold()` onto the whole line (so the emoji
+    /// glyph would embolden alongside the title, changing how many
+    /// terminals render it), demoting `.bold()` to `.dimmed()`
+    /// (collapsing the phase-open marker into the sibling
+    /// [`super::print_dimmed_dashed_marker`] diagnostic-boundary
+    /// grammar), promoting to `.bold().cyan()` (colliding with the
+    /// heavier [`super::print_command_intro_banner`] four-part
+    /// command-intro grammar), slipping a leading blank line into
+    /// the primitive body (fusing the phase-open banner into an
+    /// unrelated visual-separation stanza), swapping the single ASCII
+    /// space for a middle-dot ` · ` under a typography pass, or
+    /// dropping the trailing `\n` — flips this assertion rather than
+    /// compiling and silently diverging the 6 consumer sites' visual
+    /// grammar.
+    #[test]
+    fn write_bold_titled_phase_open_emits_exactly_one_bold_titled_emoji_line() {
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_bold_titled_phase_open(&mut buf, "📦", "Building AMD64 image...")
+            .expect("write_bold_titled_phase_open against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf).expect(
+            "write_bold_titled_phase_open must emit valid UTF-8 (the pre-lift println!s did)",
+        );
+
+        // Exactly one line — the pre-lift stanza is one `println!`
+        // carrying no framing blank on either side. A refactor that
+        // slips a leading blank (to visually separate the phase-open
+        // from prior output) or a trailing blank (to lift the
+        // in-progress work off the marker below) into the primitive
+        // body would silently change the six callers' output at once.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_bold_titled_phase_open must emit exactly one line — \
+             the pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The emoji reaches the rendered line at the head, followed
+        // by a single ASCII space, followed by the title text.
+        assert!(
+            lines[0].starts_with("📦 "),
+            "line 0 must begin with the caller-supplied emoji glyph \
+             `📦` and a single ASCII space — every pre-lift consumer \
+             spelled the emoji inline in the format string as \
+             `\"<emoji> {{}}\"`, so the emoji-plus-space prefix must \
+             reach the writer OUTSIDE any coloring span; got {:?}",
+            lines[0]
+        );
+
+        // The title text reaches the rendered line verbatim; a
+        // fusion that hoisted the title off the parameter and pinned
+        // it to a constant fails here.
+        assert!(
+            lines[0].contains("Building AMD64 image..."),
+            "line 0 must carry the title verbatim; got {:?}",
+            lines[0]
+        );
+
+        // The `bold` ANSI sequence (`\x1b[1m`) reaches the rendered
+        // line; a fusion that demoted the palette to `.dimmed()`
+        // (collapsing this phase-open marker into the sibling
+        // `print_dimmed_dashed_marker` diagnostic-boundary grammar)
+        // or dropped the coloring entirely fails here.
+        assert!(
+            lines[0].contains("\x1b[1m"),
+            "line 0 must carry the `bold` ANSI sequence (`\\x1b[1m`) \
+             — every pre-lift consumer spelled `.bold()` on the title \
+             literal; got {:?}",
+            lines[0]
+        );
+
+        // The `.bold()` coloring wraps the TITLE alone, never the
+        // emoji glyph — the `\x1b[1m` begin-span must open AFTER the
+        // emoji-plus-space prefix. Pre-lift every consumer spelled
+        // `"<title>".bold()` on the title literal alone (never
+        // `format!("<emoji> {}", title).bold()` on the whole line);
+        // hoisting the bold onto the emoji would embolden its glyph
+        // on terminals that render bold emoji as heavier variants
+        // and drift the visual grammar silently.
+        let emoji_pos = lines[0].find("📦").expect("emoji glyph must be present");
+        let bold_pos = lines[0]
+            .find("\x1b[1m")
+            .expect("bold begin-span must be present");
+        let title_pos = lines[0]
+            .find("Building AMD64 image...")
+            .expect("title must be present");
+        assert!(
+            emoji_pos < bold_pos && bold_pos < title_pos,
+            "the `\\x1b[1m` bold begin-span must open AFTER the emoji \
+             glyph and BEFORE the title begins — every pre-lift \
+             consumer spelled `.bold()` on the title literal alone, \
+             never on the emoji or the whole line. Got positions \
+             emoji={emoji_pos}, bold={bold_pos}, title={title_pos} \
+             in line {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza
+        // used `println!` (not `print!`), so the newline is part of
+        // the contract. A fusion that swapped `writeln!` for
+        // `write!` fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_bold_titled_phase_open must emit a trailing `\\n` \
+             (the pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_bold_titled_phase_open`] no longer spell the
+    /// `println!("<emoji> {}", "<title>".bold())` shape inline in
+    /// `commands/{federation, flux, rust_service}.rs`. Structural
+    /// regression shield — without it a future refactor could
+    /// silently re-inline the one-liner (e.g. a "just spell the
+    /// `println!` here, one call is fine" cleanup) and reopen the
+    /// 6-site duplication class this lift closed.
+    ///
+    /// The per-site needle is the exact `"<emoji> {}", "<title>"`
+    /// format-string + literal-argument fragment every pre-lift
+    /// stanza carried — a re-inline reintroduces that exact fragment
+    /// verbatim, and the post-lift `print_bold_titled_phase_open(
+    /// "<emoji>", "<title>")` call spells neither the `{}` template
+    /// nor the format-string-comma-then-quote boundary that the
+    /// needle keys on. Enforced against the module body BEFORE its
+    /// `#[cfg(test)]` region so a test-support mention of the raw
+    /// shape does not defeat the shield.
+    #[test]
+    fn print_bold_titled_phase_open_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str, usize, &[&str])] = &[
+            (
+                include_str!("commands/federation.rs"),
+                "commands/federation.rs",
+                2,
+                &[
+                    "\"🔄 {}\", \"Updating Hive Router federation...\"",
+                    "\"🔔 {}\", \"Notifying BFF to reload supergraph...\"",
+                ],
+            ),
+            (
+                include_str!("commands/flux.rs"),
+                "commands/flux.rs",
+                1,
+                &["\"🔄 {}\", \"Forcing Flux reconcile...\""],
+            ),
+            (
+                include_str!("commands/rust_service.rs"),
+                "commands/rust_service.rs",
+                3,
+                &[
+                    "\"🔍 {}\", \"Pre-flight checks...\"",
+                    "\"📦 {}\", \"Building AMD64 image...\"",
+                    "\"📦 {}\", \"Building ARM64 image...\"",
+                ],
+            ),
+        ];
+        for (source, module_path, expected_forwards, needles) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for needle in *needles {
+                assert!(
+                    !body.contains(needle),
+                    "{module_path} body still spells the pre-lift inline \
+                     `println!({needle}.bold())` bold-titled phase-open \
+                     marker — that shape was lifted onto \
+                     `crate::ui::print_bold_titled_phase_open`. A \
+                     re-inline would silently reopen the 6-site \
+                     duplication class this shield exists to close."
+                );
+            }
+            let forward_hits = body
+                .matches("crate::ui::print_bold_titled_phase_open(")
+                .count();
+            assert_eq!(
+                forward_hits, *expected_forwards,
+                "{module_path} body must forward to \
+                 `crate::ui::print_bold_titled_phase_open(...)` at \
+                 exactly {expected_forwards} site(s) — one per pre-lift \
+                 consumer in this module. A fusion that folded two \
+                 consumer sites into one call or dropped one of the \
+                 phase-open banners silently fails here. Found \
+                 {forward_hits} forwarding hits."
             );
         }
     }
