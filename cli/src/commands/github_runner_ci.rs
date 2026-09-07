@@ -514,7 +514,7 @@ pub async fn execute(
     if watch {
         println!();
         info!("👀 Watching StatefulSet rollout...");
-        info!("   Namespace: {}", namespace);
+        crate::info_namespace_field!(namespace);
         info!("   StatefulSet: {}", name);
         println!();
 
