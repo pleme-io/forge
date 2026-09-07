@@ -9,6 +9,7 @@ pub mod codegen;
 pub mod codegen_validation;
 pub mod comprehensive_release;
 pub mod crossplane;
+pub mod crossplane_xpkg_push;
 pub mod dashboards;
 pub mod deploy;
 pub mod developer_tools;
