@@ -52,6 +52,7 @@ pub mod seed;
 pub mod service_config;
 pub mod sessions;
 pub mod status;
+pub mod supergraph_composition_phase;
 pub mod supergraph_verification;
 pub mod sync;
 pub mod test;

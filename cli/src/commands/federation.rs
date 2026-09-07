@@ -138,7 +138,12 @@ pub async fn update_federation(
         run_post_composition_checks, run_pre_composition_checks,
     };
 
-    println!("🔍 Running pre-composition validation...");
+    use crate::commands::supergraph_composition_phase::{
+        announce_composition_phase_pass, announce_composition_phase_start,
+        SupergraphCompositionPhase,
+    };
+
+    announce_composition_phase_start(SupergraphCompositionPhase::Pre);
     let subgraphs_dir = PathBuf::from("subgraphs");
 
     let pre_check = run_pre_composition_checks(&subgraphs_dir).await?;
@@ -156,7 +161,7 @@ pub async fn update_federation(
         bail!("Pre-composition validation failed. Cannot proceed with composition.");
     }
 
-    crate::ui::print_step_success("Pre-composition validation passed");
+    announce_composition_phase_pass(SupergraphCompositionPhase::Pre);
     println!();
 
     // Generate supergraph config YAML from subgraph schemas
@@ -247,7 +252,7 @@ pub async fn update_federation(
     println!();
 
     // POST-COMPOSITION VALIDATION
-    println!("🔍 Running post-composition validation...");
+    announce_composition_phase_start(SupergraphCompositionPhase::Post);
 
     let post_check = run_post_composition_checks(&supergraph_path, &subgraphs_dir).await?;
 
@@ -266,7 +271,7 @@ pub async fn update_federation(
         bail!("Post-composition validation failed. Supergraph may be invalid.");
     }
 
-    crate::ui::print_step_success("Post-composition validation passed");
+    announce_composition_phase_pass(SupergraphCompositionPhase::Post);
     println!(
         "   Supergraph size: {} KB",
         post_check.supergraph_size / 1024
