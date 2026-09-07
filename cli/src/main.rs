@@ -76,6 +76,7 @@ mod nix_hooks;
 mod nonfatal_warning;
 mod observability;
 mod path_builder;
+mod probe_dump;
 mod pushed_image_ref_list;
 mod rebac_keys_probe;
 mod registry_field;
