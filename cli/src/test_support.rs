@@ -598,6 +598,73 @@ pub fn make_seeded_work_and_bare_origin() -> (tempfile::TempDir, PathBuf, PathBu
     (parent, bare, work)
 }
 
+/// Seed-push the work-tree's `main` up to its `origin` bare via
+/// `git push -u origin main`, panicking on either a failed spawn or
+/// a non-zero exit. Consumed by every test-fixture site that seeds a
+/// bare with the work-tree's initial commit so a downstream operation
+/// (`commit_and_push_in`, `commit_and_push`, the read-side probes
+/// [`clone_bare_and_read_head_subject`] all consume) can `git pull
+/// origin main` and fast-forward.
+///
+/// # Why centralized
+///
+/// Six sibling `#[test]` bodies across the crate each re-spelled the
+/// same five-line stanza VERBATIM:
+///
+/// ```ignore
+/// let push = git_command_sync()
+///     .args(["push", "-u", "origin", "main"])
+///     .current_dir(&work)
+///     .status()
+///     .expect("git push spawn");
+/// assert!(push.success(), "push to bare origin must succeed");
+/// ```
+///
+/// - `git.rs::tests::test_commit_and_push_in_lands_manifest_on_origin_main`
+///   (seed-push preamble ahead of the single-file `commit_and_push_in`
+///   round-trip)
+/// - `git.rs::tests::test_commit_and_push_in_stages_every_file_in_slice`
+///   (seed-push preamble ahead of the multi-file `commit_and_push_in`
+///   round-trip)
+/// - [`tests::test_add_bare_origin_round_trips_push_then_clone`]
+///   (self-test of [`add_bare_origin`])
+/// - [`tests::test_make_seeded_work_and_bare_origin_round_trips_seed_push_then_clone`]
+///   (self-test of [`make_seeded_work_and_bare_origin`])
+/// - [`tests::test_clone_bare_and_read_head_subject_round_trips_seed_commit`]
+///   (self-test of [`clone_bare_and_read_head_subject`])
+/// - [`tests::test_clone_bare_and_read_head_subject_returns_trimmed_string`]
+///   (self-test of [`clone_bare_and_read_head_subject`])
+///
+/// Six identically-shaped copies past THEORY.md §VI.1's
+/// three-times-is-a-law threshold ("two occurrences is a coincidence;
+/// three is a law"). Same law-redeeming consolidation shape as the
+/// sibling [`make_seeded_work_and_bare_origin`] carries for the six
+/// tempdir/mkdir/init/add-origin preambles.
+///
+/// # Panics
+///
+/// Panics on either a failed spawn or a non-zero exit — every consumer
+/// is a `#[test]` that treats seed-push failure as a fixture bug, not
+/// a runtime error. Same loud-panic discipline as [`add_bare_origin`],
+/// [`init_repo_with_one_commit`], and [`read_head_subject`].
+///
+/// # Env-var lock discipline
+///
+/// Does NOT acquire [`GIT_BIN_ENV_LOCK`] internally —
+/// `std::sync::Mutex` is not re-entrant, and every consumer sits inside
+/// a test body that already holds the lock across the seed-push, the
+/// tested production entry point, and the read-side verification
+/// spawns. Same caller-holds-lock contract as [`read_head_subject`]
+/// and [`clone_bare_and_read_head_subject`].
+pub fn seed_push_work_main_to_origin(work: &Path) {
+    let push = git_command_sync()
+        .args(["push", "-u", "origin", "main"])
+        .current_dir(work)
+        .status()
+        .expect("git push spawn");
+    assert!(push.success(), "seed push to bare origin must succeed");
+}
+
 /// Read and return the trimmed subject line of the HEAD commit at
 /// `dir` via `git log -1 --pretty=%s`. The spawn routes through
 /// [`crate::git::git_command_sync`] so a `GIT_BIN` env-var override
@@ -4726,12 +4793,7 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         // (push, clone, log) read `GIT_BIN` under serialization.
         let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
-        let push = git_command_sync()
-            .args(["push", "-u", "origin", "main"])
-            .current_dir(&work)
-            .status()
-            .expect("git push spawn");
-        assert!(push.success(), "push to fixture's bare origin must succeed");
+        seed_push_work_main_to_origin(&work);
 
         let probe = parent.path().join("probe");
         let clone = git_command_sync()
@@ -4828,21 +4890,40 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         // Hold the lock across the push + clone so a concurrent
         // env-var-mutating test cannot redirect either spawn.
         let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let push = git_command_sync()
-            .args(["push", "-u", "origin", "main"])
-            .current_dir(&work)
-            .status()
-            .expect("git push spawn");
-        assert!(
-            push.success(),
-            "seed push to composed-fixture bare origin must succeed"
-        );
+        seed_push_work_main_to_origin(&work);
 
         let probe = parent.path().join("probe");
         let subject = clone_bare_and_read_head_subject(&bare, &probe);
         assert_eq!(
             subject, "seed",
             "probe-clone of composed-fixture bare must resolve HEAD to `seed`"
+        );
+    }
+
+    /// [`seed_push_work_main_to_origin`] lands the work-tree's seed
+    /// commit onto the bare's `main` — a probe-clone of the bare
+    /// resolves `HEAD` to the canonical `"seed"` subject after the
+    /// helper returns. Byte-oracle for the lift-onto-primitive:
+    /// six pre-lift sibling sites each open with a five-line
+    /// `git_command_sync().args(["push", "-u", "origin", "main"])`
+    /// stanza, and any drift on the argv slice (`--force` toggle, a
+    /// remote/branch rename, a dropped `-u` upstream flag) or on the
+    /// spawn/status check now surfaces at this one primitive's
+    /// end-to-end pin instead of six independent regressions.
+    #[test]
+    fn test_seed_push_work_main_to_origin_lands_seed_on_bare_main() {
+        let (parent, bare, work) = make_seeded_work_and_bare_origin();
+
+        // Hold the lock across the seed-push and the probe-clone so a
+        // concurrent env-var-mutating test cannot redirect either spawn.
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        seed_push_work_main_to_origin(&work);
+
+        let probe = parent.path().join("probe");
+        let subject = clone_bare_and_read_head_subject(&bare, &probe);
+        assert_eq!(
+            subject, "seed",
+            "seed-push must land the canonical seed commit on origin/main"
         );
     }
 
@@ -5131,12 +5212,7 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         // probe so a concurrently-running shim test cannot mutate
         // `GIT_BIN` mid-round-trip.
         let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let push = git_command_sync()
-            .args(["push", "-u", "origin", "main"])
-            .current_dir(&work)
-            .status()
-            .expect("git push spawn");
-        assert!(push.success(), "push to bare origin must succeed");
+        seed_push_work_main_to_origin(&work);
 
         let probe = parent.path().join("probe");
         let subject = clone_bare_and_read_head_subject(&bare, &probe);
@@ -5165,12 +5241,7 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
         add_bare_origin(&work, &bare);
 
         let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let push = git_command_sync()
-            .args(["push", "-u", "origin", "main"])
-            .current_dir(&work)
-            .status()
-            .expect("git push spawn");
-        assert!(push.success(), "push to bare origin must succeed");
+        seed_push_work_main_to_origin(&work);
 
         let probe = parent.path().join("probe");
         let subject = clone_bare_and_read_head_subject(&bare, &probe);
