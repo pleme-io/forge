@@ -961,20 +961,16 @@ fn print_e2e_diagnostics(backend_dir: &Path) {
 
     // Docker containers still running
     println!("\n   Docker containers (running):");
-    if let Some(stdout) = crate::retry::probe_stdout_capture_sync(
+    crate::probe_dump::probe_and_dump_or_none_sync(
         &docker_bin(),
         &["ps", "--format", "     {{.Names}}\t{{.Status}}\t{{.Ports}}"],
-    ) {
-        if stdout.trim().is_empty() {
-            println!("     (none)");
-        } else {
-            print!("{}", stdout);
-        }
-    }
+        crate::probe_dump::DiagSink::Stdout,
+        "     ",
+    );
 
     // Recently exited containers
     println!("\n   Docker containers (recently exited):");
-    if let Some(stdout) = crate::retry::probe_stdout_capture_sync(
+    crate::probe_dump::probe_and_dump_or_none_sync(
         &docker_bin(),
         &[
             "ps",
@@ -986,13 +982,9 @@ fn print_e2e_diagnostics(backend_dir: &Path) {
             "--format",
             "     {{.Names}}\t{{.Status}}\t{{.Image}}",
         ],
-    ) {
-        if stdout.trim().is_empty() {
-            println!("     (none)");
-        } else {
-            print!("{}", stdout);
-        }
-    }
+        crate::probe_dump::DiagSink::Stdout,
+        "     ",
+    );
 
     // E2E images
     println!("\n   E2E Docker images:");
@@ -1820,8 +1812,23 @@ mod tests {
             SOURCE,
             "commands/prerelease.rs",
         );
-        let needle = format!("probe_stdout_capture_{}(", "sync");
-        let hits = crate::test_support::code_line_hits(body, &needle);
+        // The three diagnostic probes route through the shared
+        // `crate::retry::probe_stdout_capture_sync` primitive: two
+        // (docker ps / docker ps -a --since=15m --filter status=exited)
+        // reach it INDIRECTLY through the
+        // `crate::probe_dump::probe_and_dump_or_none_sync` fusion
+        // primitive that owns the `if trim().is_empty() { (none) } else
+        // { dump }` ternary, and one (docker images inside
+        // `print_e2e_diagnostics_on_failure`) reaches it DIRECTLY
+        // because that probe filters its output line-by-line rather
+        // than dumping whole. Both delegation shapes route through the
+        // shared primitive at the byte level; the count floor is the
+        // sum of the two, and the shield accepts either shape as a
+        // valid delegation.
+        let direct_needle = format!("probe_stdout_capture_{}(", "sync");
+        let fusion_needle = format!("probe_and_dump_or_none_{}(", "sync");
+        let mut hits = crate::test_support::code_line_hits(body, &direct_needle);
+        hits.extend(crate::test_support::code_line_hits(body, &fusion_needle));
         assert!(
             hits.len() >= 3,
             "commands/prerelease.rs must delegate its three \
@@ -1829,14 +1836,17 @@ mod tests {
              docker ps -a --since=15m --filter status=exited / docker \
              images inside `print_e2e_diagnostics`) through the \
              shared `crate::retry::probe_stdout_capture_sync` \
-             primitive — found {} delegation(s) in the top-of-file \
-             body, expected at least 3. A regression that reintroduces \
-             the pre-lift `if let Ok(output) = \
-             std::process::Command::new(docker_bin()).args(...)\
-             .output() {{ let stdout = String::from_utf8_lossy(\
-             &output.stdout); ... }}` stanza re-establishes the \
-             six-copy duplication this commit closes. Offending hits: \
-             {hits:?}",
+             primitive — either directly or through the sibling \
+             `crate::probe_dump::probe_and_dump_or_none_sync` fusion \
+             primitive that owns the `(none)`-or-dump ternary and calls \
+             `probe_stdout_capture_sync` internally. Found {} \
+             delegation(s) in the top-of-file body, expected at least 3. \
+             A regression that reintroduces the pre-lift `if let \
+             Ok(output) = std::process::Command::new(docker_bin())\
+             .args(...).output() {{ let stdout = \
+             String::from_utf8_lossy(&output.stdout); ... }}` stanza \
+             re-establishes the six-copy duplication this commit \
+             closes. Offending hits: {hits:?}",
             hits.len(),
         );
     }
