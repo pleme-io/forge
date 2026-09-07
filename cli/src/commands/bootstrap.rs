@@ -281,12 +281,7 @@ pub async fn push_single(
 
     // Success message
     println!();
-    println!(
-        "{}",
-        "✅ Bootstrap image pushed successfully!"
-            .bright_green()
-            .bold()
-    );
+    crate::ui::print_success("Bootstrap image pushed successfully!");
     crate::pushed_image_ref_list::print_pushed_image_ref_list(&registry, &tags);
 
     Ok(())
@@ -321,12 +316,7 @@ pub async fn push_all(token: Option<String>, retries: u32, parallel: bool) -> Re
 
     // Print summary
     println!();
-    println!(
-        "{}",
-        "✅ All bootstrap images pushed successfully!"
-            .bright_green()
-            .bold()
-    );
+    crate::ui::print_success("All bootstrap images pushed successfully!");
     for result in &results {
         println!("   📦 {}:", result.binary);
         for tag in &result.tags {
@@ -641,12 +631,7 @@ pub async fn regenerate() -> Result<()> {
     .await?;
 
     println!();
-    println!(
-        "{}",
-        "✅ Bootstrap Cargo.nix regenerated successfully!"
-            .bright_green()
-            .bold()
-    );
+    crate::ui::print_success("Bootstrap Cargo.nix regenerated successfully!");
     println!("   Don't forget to commit the updated Cargo.lock and Cargo.nix files.");
     println!();
 
