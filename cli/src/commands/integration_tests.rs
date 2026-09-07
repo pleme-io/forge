@@ -663,12 +663,12 @@ pub async fn execute(
         // Print detailed output for all failed tests
         for result in results.iter().filter(|r| !r.success) {
             println!();
-            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            crate::ui::print_heavy_rule(crate::ui::HeavyRuleStyle::IntegrationTestSectionPlain60);
             println!(
                 "❌ Failed Test Suite: {}",
                 result.suite_name.bright_yellow()
             );
-            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            crate::ui::print_heavy_rule(crate::ui::HeavyRuleStyle::IntegrationTestSectionPlain60);
             if !result.output.is_empty() {
                 println!();
                 for line in result.output.lines() {
@@ -1545,9 +1545,9 @@ pub async fn execute_pre_deployment_tests(
 
     // Summary
     println!();
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    crate::ui::print_heavy_rule(crate::ui::HeavyRuleStyle::IntegrationTestSectionPlain60);
     println!("📊 Pre-Deployment Test Summary for '{}'", service_name);
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    crate::ui::print_heavy_rule(crate::ui::HeavyRuleStyle::IntegrationTestSectionPlain60);
 
     let passed = all_results.iter().filter(|r| r.success).count();
     let failed = all_results.iter().filter(|r| !r.success).count();
@@ -1562,7 +1562,7 @@ pub async fn execute_pre_deployment_tests(
         },
         total_duration.as_secs_f64()
     );
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    crate::ui::print_heavy_rule(crate::ui::HeavyRuleStyle::IntegrationTestSectionPlain60);
     println!();
 
     // Handle failure
