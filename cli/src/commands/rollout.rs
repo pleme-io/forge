@@ -25,7 +25,7 @@ pub async fn execute(
     // If rollback requested, perform rollback and exit
     if rollback {
         info!("🔄 Performing rollback...");
-        info!("   Namespace: {}", namespace);
+        crate::info_namespace_field!(namespace);
         info!("   Deployment: {}", name);
         println!();
 
