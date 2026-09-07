@@ -27,7 +27,10 @@ use crate::repo::get_tool_path;
 /// Run a forge subcommand by re-invoking the current binary.
 pub(crate) async fn run_forge_subcommand(args: &[&str]) -> Result<()> {
     let exe = std::env::current_exe().context("Failed to get current executable path")?;
-    println!("   {} forge {}", ">>".dimmed(), args.join(" ").dimmed());
+    crate::commands::subcommand_invocation::print_subcommand_invocation(
+        crate::commands::subcommand_invocation::SubcommandTool::Forge,
+        args,
+    );
 
     let mut cmd = Command::new(exe);
     cmd.args(args);
@@ -52,7 +55,10 @@ async fn run_nix_release_app(
     let mut args = vec!["run", &app, "--"];
     args.extend_from_slice(extra_args);
 
-    println!("   {} nix {}", ">>".dimmed(), args.join(" ").dimmed());
+    crate::commands::subcommand_invocation::print_subcommand_invocation(
+        crate::commands::subcommand_invocation::SubcommandTool::Nix,
+        &args,
+    );
 
     let nix_bin = get_tool_path("NIX_BIN", "nix");
     let mut cmd = Command::new(&nix_bin);
