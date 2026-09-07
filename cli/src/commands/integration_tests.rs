@@ -924,11 +924,10 @@ async fn execute_suite(
         match result {
             Ok(Ok((success, output))) => {
                 if success {
-                    println!(
-                        "   {} Test suite completed in {:.2}s",
-                        "✅".bright_green(),
+                    crate::ui::print_bright_step_pass(&format!(
+                        "Test suite completed in {:.2}s",
                         duration.as_secs_f64()
-                    );
+                    ));
 
                     // Parse test counts from output
                     let test_counts = parse_test_counts(&output);

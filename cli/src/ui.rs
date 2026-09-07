@@ -3089,6 +3089,88 @@ pub fn write_summary_pass<W: std::io::Write>(w: &mut W, message: &str) -> std::i
     writeln!(w, "  {} {}", "✅".bright_green(), message)
 }
 
+/// Prints the one-line `"   {} <message>"` (three-space indent +
+/// `bright_green`-colored `✅` glyph + plain message) in-body
+/// verification-check-pass grammar 11 pre-lift consumer sites in
+/// `commands/{web_build_verify (×10), integration_tests (×1)}.rs`
+/// spelled inline as `println!("   {} <fmt>", "✅".bright_green(),
+/// <args>)`. Marks the passing outcome of a sub-check inside a
+/// running verification body ("No hardcoded API URLs found", "Bundle
+/// references verified (index.html → assets)", "env.js uses
+/// cache-busting query parameter", "Test suite completed in 1.23s", …)
+/// — the exact-shape brighter-palette peer of [`print_step_pass`] one
+/// palette shade up: the same three-space in-body indent and the same
+/// `✅` filled-emoji glyph, but painted `.bright_green()` (`\x1b[92m`)
+/// rather than `.green()` (`\x1b[32m`) so a mid-stream check-pass
+/// reads distinct from the LEAN per-step-pass sibling.
+///
+/// # Distinct from the other `ui::print_*` primitives
+///
+/// [`print_step_pass`] carries the three-space `✅.green()` in-body
+/// per-step pass — same three-space indent, same `✅` glyph, but
+/// DIFFERENT palette (`\x1b[32m` green vs. `\x1b[92m` bright_green)
+/// and DIFFERENT semantic role (a per-step outcome in the leaner
+/// green shade vs. a per-check-pass in the brighter shade the
+/// `web_build_verify` and `integration_tests` bodies reserve to
+/// mark). [`print_summary_pass`] carries the two-space
+/// `✅.bright_green()` summary-pass — same `.bright_green()` palette
+/// and same `✅` glyph, but DIFFERENT indent (two-space vs.
+/// three-space) and DIFFERENT semantic role (the closing summary of
+/// a whole test suite/run vs. a per-check inside a running body).
+/// [`print_success`] carries the zero-indent
+/// `✅.bright_green().bold()` milestone-level completion sigil —
+/// DIFFERENT indent (zero vs. three spaces), DIFFERENT palette
+/// weight (`.bright_green().bold()` with the message painted too vs.
+/// glyph-only `.bright_green()` on a plain message). Folding this
+/// primitive into any of the three would collapse the
+/// step-vs-check-pass, summary-vs-check-pass, or milestone-vs-check-
+/// pass visual distinction at every site the operator has been
+/// trained to read.
+///
+/// # `.bright_green()` on the glyph, plain on the message
+///
+/// Pre-lift every consumer spelled the coloring as
+/// `"✅".bright_green()` on the GLYPH alone, never on the composed
+/// line (`format!("   ✅ {}", msg).bright_green()`). The primitive
+/// preserves that split: the `\x1b[92m` bright_green ANSI sequence
+/// wraps the glyph, the message reaches the writer uncolored, and
+/// the three-space indent is emitted OUTSIDE both spans — so a
+/// terminal without color renders `   ✅ <msg>` legibly.
+///
+/// # Compounding
+///
+/// Pre-lift 11 sibling sites each restated the `println!("   {}
+/// <fmt>", "✅".bright_green(), <args>)` grammar verbatim, with the
+/// three-space indent, the `✅` glyph, the `.bright_green()`
+/// coloring on the glyph, and the plain-message tail all spelled
+/// inline. A future palette adjustment (a swap of `✅` for `✓ ` under
+/// a CI-log-friendly grammar, a demotion of `.bright_green()` to
+/// `.green()` under a leaner palette pass, an OTLP
+/// `verify_check_passed` observability event wired alongside the
+/// print, a shift of the three-space indent to two- or four-space
+/// under a standardized body-indent) had to hit 11 sites in lockstep
+/// or drift the visual grammar; post-lift it hits ONE typed body.
+/// Delegates to [`write_bright_step_pass`] against
+/// [`std::io::stdout()`]; the writer split exists so the fail-before-
+/// pass test can pin the one-line body, the three-space indent, the
+/// `✅` glyph, and the `\x1b[92m` bright_green ANSI palette contract
+/// by inspecting emitted bytes rather than shelling out and grepping
+/// stdout.
+pub fn print_bright_step_pass(message: &str) {
+    let _ = write_bright_step_pass(&mut std::io::stdout().lock(), message);
+}
+
+/// Writer-taking sibling to [`print_bright_step_pass`]. Emits the
+/// single `   <✅.bright_green()> <message>` line via [`writeln!`]
+/// against the supplied writer. [`print_bright_step_pass`] is the
+/// stdout adapter; this variant exists so tests can pin the one-line
+/// body, the three-space indent, the `✅` glyph, and the `\x1b[92m`
+/// bright_green ANSI sequence around the glyph (never the message)
+/// without capturing stdout.
+pub fn write_bright_step_pass<W: std::io::Write>(w: &mut W, message: &str) -> std::io::Result<()> {
+    writeln!(w, "   {} {}", "✅".bright_green(), message)
+}
+
 /// Prints the one-line `"── <label> ──"` dashed-label section-marker
 /// 4 pre-lift consumer sites in `commands/prerelease.rs` spelled inline
 /// as `println!("{}", "── <label> ──".dimmed())` — a `── ` prefix, a
@@ -13671,6 +13753,239 @@ mod tests {
                  primitive body every two-space-indented \
                  `✅.bright_green()` summary-pass line in the crate \
                  now delegates through."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_bright_step_pass`].
+    /// Pins the one-line body every pre-lift consumer in
+    /// `commands/{web_build_verify, integration_tests}.rs` spelled
+    /// verbatim (`println!("   {} <fmt>", "✅".bright_green(),
+    /// <args>)`): a THREE-space indent, a `.bright_green()`-colored
+    /// `✅` glyph, a single space, then the plain (uncolored)
+    /// message. A silent contract drift a future rewrite might
+    /// introduce — dropping the three-space indent (a "tighter body
+    /// spacing" cleanup), demoting to the two-space
+    /// [`super::print_summary_pass`] summary-pass indent, demoting
+    /// `.bright_green()` to `.green()` (`\x1b[32m` — the sibling
+    /// [`super::print_step_pass`] palette that collapses the visual
+    /// hierarchy pre-lift consumers reserved bright_green to mark),
+    /// promoting the whole line's coloring (`format!("   ✅ {}",
+    /// msg).bright_green()`) so the message text paints bright_green
+    /// at every site, swapping `✅` for `✓` under a CI-log-friendly
+    /// grammar (would collide with the sibling
+    /// [`super::print_report_item`] per-row grammar), slipping a
+    /// trailing blank line into the primitive body — flips this
+    /// assertion rather than compiling and silently diverging the 11
+    /// consumer sites' visual grammar.
+    #[test]
+    fn write_bright_step_pass_emits_exactly_one_bright_green_check_prefixed_three_indented_line() {
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_bright_step_pass(&mut buf, "No hardcoded API URLs found")
+            .expect("write_bright_step_pass against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_bright_step_pass must emit valid UTF-8 (the pre-lift println!s did)");
+
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_bright_step_pass must emit exactly one line — the \
+             pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // Three-space indent, NOT two-space (which is the sibling
+        // `print_summary_pass` closing-summary grammar) and NOT
+        // four-or-more.
+        assert!(
+            lines[0].starts_with("   "),
+            "line 0 must begin with a three-space indent — every \
+             pre-lift consumer in `commands/web_build_verify.rs` and \
+             `commands/integration_tests.rs` spelled `\"   {{}} \
+             <fmt>\"` verbatim; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].starts_with("    "),
+            "line 0 must NOT begin with a four-space indent — the \
+             pre-lift consumer sites all used exactly three spaces; \
+             got {:?}",
+            lines[0]
+        );
+        // Explicitly reject the two-space `print_summary_pass`
+        // sibling grammar: byte at index 2 must be a space (a
+        // two-space-indented emit would put the ANSI-escape's
+        // opening `\x1b` byte there instead).
+        assert_eq!(
+            lines[0].as_bytes().get(2).copied(),
+            Some(b' '),
+            "line 0 byte at index 2 must be a space — a two-space \
+             `print_summary_pass`-shaped emit would put the ANSI \
+             escape's opening `\\x1b` byte at that offset; got {:?}",
+            lines[0]
+        );
+
+        // The `✅` glyph reaches the rendered line — NOT `✓`.
+        assert!(
+            lines[0].contains('✅'),
+            "line 0 must contain the `✅` glyph — every pre-lift \
+             consumer spelled `\"✅\".bright_green()` on the marker; \
+             got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('✓'),
+            "line 0 must NOT contain the `✓` thin-checkmark glyph — \
+             that glyph belongs to the sibling `print_report_item` \
+             per-row grammar; got {:?}",
+            lines[0]
+        );
+
+        // Message text reaches the writer verbatim.
+        assert!(
+            lines[0].contains("No hardcoded API URLs found"),
+            "line 0 must carry the message verbatim; got {:?}",
+            lines[0]
+        );
+
+        // The `bright_green` ANSI sequence (`\x1b[92m`) reaches the
+        // rendered line — a fusion that demoted the palette to
+        // `.green()` (`\x1b[32m` — the sibling `print_step_pass`
+        // per-step palette) collapses the visual hierarchy pre-lift
+        // consumers reserved bright_green to mark and fails here.
+        assert!(
+            lines[0].contains("\x1b[92m"),
+            "line 0 must carry the `bright_green` ANSI sequence \
+             (`\\x1b[92m`) — every pre-lift consumer spelled \
+             `.bright_green()` (never `.green()` or \
+             `.bright_green().bold()`) on the glyph; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[32m"),
+            "line 0 must NOT carry the `green` ANSI sequence \
+             (`\\x1b[32m`) — that palette belongs to the sibling \
+             `print_step_pass` per-step grammar; got {:?}",
+            lines[0]
+        );
+
+        // The `.bright_green()` coloring wraps the GLYPH alone, never
+        // the message text — the `\x1b[0m` reset must close the
+        // bright_green span BEFORE the message begins.
+        let check_pos = lines[0].find('✅').expect("glyph must be present");
+        let reset_pos = lines[0]
+            .find("\x1b[0m")
+            .expect("reset must be present after the glyph");
+        let msg_pos = lines[0]
+            .find("No hardcoded API URLs found")
+            .expect("message must be present");
+        assert!(
+            check_pos < reset_pos && reset_pos < msg_pos,
+            "the `\\x1b[0m` reset must close the bright_green span \
+             BEFORE the message begins — every pre-lift consumer \
+             spelled `.bright_green()` on the `✅` glyph alone, never \
+             on the message. Got positions check={check_pos}, \
+             reset={reset_pos}, msg={msg_pos} in line {:?}",
+            lines[0]
+        );
+
+        // Trailing `\n` reaches the writer — pre-lift stanza used
+        // `println!` (not `print!`), so the newline is part of the
+        // contract.
+        assert!(
+            out.ends_with('\n'),
+            "write_bright_step_pass must emit a trailing `\\n` (the \
+             pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_bright_step_pass`] no longer spell the
+    /// `"✅".bright_green()` shape inline in
+    /// `commands/{web_build_verify, integration_tests}.rs`.
+    /// Structural regression shield — without it a future refactor
+    /// could silently re-inline the one-liner (e.g. a "just call
+    /// `println!` directly, it's shorter" cleanup) and reopen the
+    /// 11-site duplication class this lift closed. Enforced at each
+    /// module body BEFORE its `#[cfg(test)]` region so a test-support
+    /// mention of the raw shape does not defeat the shield.
+    #[test]
+    fn print_bright_step_pass_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[
+            (
+                include_str!("commands/web_build_verify.rs"),
+                "commands/web_build_verify.rs",
+            ),
+            (
+                include_str!("commands/integration_tests.rs"),
+                "commands/integration_tests.rs",
+            ),
+        ];
+        for (source, module_path) in CALLERS {
+            // `web_build_verify.rs` carries no `#[cfg(test)]` block —
+            // fall back to the whole source there so the shield still
+            // covers the production body; `integration_tests.rs`
+            // slices at its first `#[cfg(test)]` marker so the
+            // shield's own docstring mentions inside test blocks are
+            // out of scope.
+            let body: &str = if source.contains("\n#[cfg(test)]\n") {
+                crate::test_support::module_body_before_first_cfg_test(source, module_path)
+            } else {
+                source
+            };
+            for (i, line) in body.lines().enumerate() {
+                // The `web_build_verify.rs` opener at line 18 spells
+                // `"✅ Web build verification passed".bright_green()`
+                // — a whole-message paint (glyph + literal message
+                // together), not the glyph-only `"✅".bright_green()`
+                // this shield polices. Skip it.
+                if line.contains("\"✅ ") {
+                    continue;
+                }
+                if !line.contains("\"✅\".bright_green()") {
+                    continue;
+                }
+                // Icon-selector expressions in match/if-let arms
+                // spell `"✅".bright_green()` as a bare rvalue (no
+                // trailing `,` or `);` continuation) — the site is
+                // assigning to a `status_icon` binding, NOT feeding
+                // a `println!("   {} ...", ...)` argument list. The
+                // canonical example is
+                // `commands/integration_tests.rs:1130` inside the
+                // per-suite report row. The lifted stanza always
+                // ends with a `,` (multi-line spread) or `);`
+                // (single-line closer); reject only those two.
+                let trimmed = line.trim_end();
+                if !trimmed.ends_with("\"✅\".bright_green(),")
+                    && !trimmed.ends_with("\"✅\".bright_green());")
+                {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `\"✅\".bright_green()` three-space \
+                     verification-check-pass marker — that shape was \
+                     lifted onto `crate::ui::print_bright_step_pass`. \
+                     A re-inline would silently reopen the 11-site \
+                     duplication class this shield exists to close. \
+                     Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            assert!(
+                body.contains("crate::ui::print_bright_step_pass("),
+                "{module_path} body must forward to \
+                 `crate::ui::print_bright_step_pass(\"<MSG>\")` — the \
+                 primitive body every three-space-indented \
+                 `✅.bright_green()` verification-check-pass line in \
+                 the crate now delegates through."
             );
         }
     }
