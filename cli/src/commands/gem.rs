@@ -138,6 +138,34 @@ fn find_version_file(dir: &Path, gem_name: &str) -> Result<std::path::PathBuf> {
 static SEMVER_EXACT: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"^\d+\.\d+\.\d+$").expect("static regex"));
 
+/// The `VERSION = %(X.Y.Z).freeze` matcher — compiled once at module load,
+/// then handed to every `VersionLiteral::find` iteration by reference.
+/// Sibling of [`SEMVER_EXACT`] and of every module-scope `LazyLock<Regex>`
+/// the sibling ecosystem locators (`CHART_TOP_VERSION`,
+/// `CHART_DEP_ENTRY_VERSION`, `CHART_DEP_ENTRY_REPOSITORY` in
+/// `crate::version`) hold: the pattern text is structurally invariant,
+/// the compiled machine it produces is a pure function of that text, so
+/// the compilation belongs at ONE site (this static) rather than inside
+/// the per-call `find` loop that re-derived it up to three times per
+/// invocation — and `find` runs at least twice per `bump` (initial
+/// locate + reverify inside [`crate::version::splice_and_verify`]'s seal).
+static PERCENT_FREEZE_VERSION_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"VERSION\s*=\s*%\((\d+\.\d+\.\d+)\)\.freeze").expect("static regex")
+    });
+
+/// The `VERSION = "X.Y.Z"` matcher — see [`PERCENT_FREEZE_VERSION_RE`].
+static DOUBLE_QUOTED_VERSION_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"VERSION\s*=\s*"(\d+\.\d+\.\d+)""#).expect("static regex")
+    });
+
+/// The `VERSION = 'X.Y.Z'` matcher — see [`PERCENT_FREEZE_VERSION_RE`].
+static SINGLE_QUOTED_VERSION_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"VERSION\s*=\s*'(\d+\.\d+\.\d+)'").expect("static regex")
+    });
+
 /// Which literal form a gem's `version.rb` uses for its `VERSION` constant.
 ///
 /// A CLOSED enum on purpose: these are the three forms present across the
@@ -167,11 +195,34 @@ impl VersionLiteralForm {
         }
     }
 
-    fn pattern(self) -> &'static str {
+    /// The module-scope [`regex::Regex`] compiled from this form's pattern.
+    ///
+    /// A pure lookup that dispatches to one of three module-scope
+    /// [`std::sync::LazyLock<regex::Regex>`]s
+    /// ([`PERCENT_FREEZE_VERSION_RE`], [`DOUBLE_QUOTED_VERSION_RE`],
+    /// [`SINGLE_QUOTED_VERSION_RE`]) — the compilation runs once at
+    /// module load and the returned `&'static Regex` is shared across
+    /// every [`VersionLiteral::find`] iteration.
+    ///
+    /// Pre-lift the accessor returned the pattern STRING and
+    /// [`VersionLiteral::find`] fed it to `regex::Regex::new` on every
+    /// iteration — up to 3 regex compilations per `find` call, and
+    /// `find` runs at least twice per `bump` (initial locate + reverify
+    /// inside [`crate::version::splice_and_verify`]'s seal), so a
+    /// worst-case bump paid for 6 regex compilations of patterns whose
+    /// text is a `const &'static str`. Every sibling ecosystem locator
+    /// in the writer family
+    /// (`CHART_TOP_VERSION`/`CHART_DEP_ENTRY_VERSION`/`CHART_DEP_ENTRY_REPOSITORY`
+    /// in `crate::version`) already holds its pattern in a module-scope
+    /// `LazyLock<Regex>`; this method closes the last outlier that
+    /// still re-parsed at every call — the exact class of duplication
+    /// THEORY.md §VI.1's "regenerating an artifact produces a
+    /// byte-identical result given the same inputs" hoists to one site.
+    fn regex(self) -> &'static regex::Regex {
         match self {
-            Self::PercentFreeze => r"VERSION\s*=\s*%\((\d+\.\d+\.\d+)\)\.freeze",
-            Self::DoubleQuoted => r#"VERSION\s*=\s*"(\d+\.\d+\.\d+)""#,
-            Self::SingleQuoted => r"VERSION\s*=\s*'(\d+\.\d+\.\d+)'",
+            Self::PercentFreeze => &PERCENT_FREEZE_VERSION_RE,
+            Self::DoubleQuoted => &DOUBLE_QUOTED_VERSION_RE,
+            Self::SingleQuoted => &SINGLE_QUOTED_VERSION_RE,
         }
     }
 
@@ -192,8 +243,7 @@ struct VersionLiteral {
 impl VersionLiteral {
     fn find(content: &str) -> Option<Self> {
         for form in VersionLiteralForm::ALL {
-            let re = regex::Regex::new(form.pattern()).expect("static regex");
-            if let Some(caps) = re.captures(content) {
+            if let Some(caps) = form.regex().captures(content) {
                 let whole = caps.get(0)?;
                 return Some(Self {
                     form,
@@ -839,6 +889,73 @@ mod tests {
         );
         assert!(!spliced.contains("0.1.0"), "the old version is gone");
         assert_ne!(spliced, content, "the file genuinely changed");
+    }
+
+    #[test]
+    fn form_regex_is_module_scope_lazy_lock_shared_across_calls() {
+        // Every sibling ecosystem locator in the writer family
+        // (`CHART_TOP_VERSION`, `CHART_DEP_ENTRY_VERSION`,
+        // `CHART_DEP_ENTRY_REPOSITORY` in `crate::version`, and the
+        // `SEMVER_EXACT` sibling in this very file) holds its pattern
+        // in a module-scope `LazyLock<Regex>` — the pattern text is a
+        // structurally-invariant `const &'static str`, so its compiled
+        // machine is a pure function of that text and belongs at ONE
+        // site (a module static), not inside a per-call loop that
+        // re-derives it. Pre-lift `VersionLiteral::find` ran
+        // `regex::Regex::new(form.pattern())` per iteration, paying up
+        // to 3 compilations per `find` and up to 6 per `bump`
+        // (initial locate + reverify inside
+        // `crate::version::splice_and_verify`'s seal).
+        //
+        // The shield the accessor's typed name earns: two calls to
+        // `.regex()` on the same form MUST return the SAME
+        // `&'static Regex` (pointer-equal), and distinct forms MUST
+        // return distinct instances. A future body that re-derives the
+        // regex per call (`regex::Regex::new(form.pattern())` inline,
+        // or a `pattern()` accessor re-introduced above the seal)
+        // breaks pointer identity across calls and this shield fires.
+        // THEORY.md §VI.1 — "regenerating an artifact produces a
+        // byte-identical result given the same inputs" — hoisted from
+        // per-call re-derivation to a one-time module-load derivation.
+        let a = super::VersionLiteralForm::PercentFreeze.regex();
+        let b = super::VersionLiteralForm::PercentFreeze.regex();
+        assert_eq!(
+            a as *const _, b as *const _,
+            "PercentFreeze regex must be memoized at module scope"
+        );
+
+        let c = super::VersionLiteralForm::DoubleQuoted.regex();
+        let d = super::VersionLiteralForm::DoubleQuoted.regex();
+        assert_eq!(
+            c as *const _, d as *const _,
+            "DoubleQuoted regex must be memoized at module scope"
+        );
+
+        let e = super::VersionLiteralForm::SingleQuoted.regex();
+        let f = super::VersionLiteralForm::SingleQuoted.regex();
+        assert_eq!(
+            e as *const _, f as *const _,
+            "SingleQuoted regex must be memoized at module scope"
+        );
+
+        assert_ne!(
+            a as *const _, c as *const _,
+            "PercentFreeze != DoubleQuoted"
+        );
+        assert_ne!(c as *const _, e as *const _, "DoubleQuoted != SingleQuoted");
+        assert_ne!(
+            a as *const _, e as *const _,
+            "PercentFreeze != SingleQuoted"
+        );
+
+        // The exact pattern text each memoized regex holds — proves the
+        // module-scope `LazyLock` static feeds the same three needles
+        // the closed-enum `VersionLiteralForm::render` is the inverse
+        // of, so `detect(form.regex()) → render(form)` still round-trips
+        // by construction after the lift.
+        assert_eq!(a.as_str(), r"VERSION\s*=\s*%\((\d+\.\d+\.\d+)\)\.freeze");
+        assert_eq!(c.as_str(), r#"VERSION\s*=\s*"(\d+\.\d+\.\d+)""#);
+        assert_eq!(e.as_str(), r"VERSION\s*=\s*'(\d+\.\d+\.\d+)'");
     }
 
     #[test]
