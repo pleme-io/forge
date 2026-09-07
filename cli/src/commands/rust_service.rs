@@ -1964,7 +1964,7 @@ pub async fn deploy_rust_service_with_tag(
         // (f6be190), `commands/rollback.rs` (8a1958e),
         // `commands/codegen_validation.rs` (81d7486), and
         // `commands/federation.rs` (8653403) git-mutation sites honor.
-        crate::git::git_run_inherited_status(["add", &manifest], "git add")
+        crate::git::git_add_path(&manifest)
             .await
             .context("Failed to stage manifest")?;
 

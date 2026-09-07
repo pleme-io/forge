@@ -1287,6 +1287,69 @@ pub async fn git_push_origin_main() -> anyhow::Result<()> {
     git_run_inherited_status(["push", "origin", "main"], "git push origin main").await
 }
 
+/// `git add <path>` under the shared inherited-stdio, bail-on-non-zero
+/// envelope — the fused delegation six sibling pre-commit staging sites
+/// now share.
+///
+/// # Pre-lift census — six call sites, one shape
+///
+/// `commands/federation.rs::deploy_federation` (three consecutive
+/// stagings: `federation_path`, `hive_router_path`,
+/// `router_deployment_rel_path`), `commands/push.rs::update_kustomization`
+/// (staging `kustomization_path`), `commands/rollback.rs::execute`
+/// (staging each modified `file`), and
+/// `commands/rust_service.rs::commit_and_push_manifest` (staging
+/// `manifest`) each spelled
+///
+/// ```ignore
+/// crate::git::git_run_inherited_status(["add", <path>], "git add")
+///     .await
+///     .context("Failed to stage <thing>")?;
+/// ```
+///
+/// verbatim — same argv, same op label, same delegation, same
+/// `.await.<with_>context(...)?` tail. Six sites, one shape; the fusion
+/// primitive owns the fixed argv and the canonical op label at ONE body.
+///
+/// # Fixed argv — `["add", path]`
+///
+/// The primitive hardcodes the leading `"add"` verb and forwards the
+/// caller's `path` as the second (and only variable) argv element. A
+/// caller reaching for `git add -A`, `git add -p`, or any multi-path
+/// staging form reaches for the raw [`git_run_inherited_status`] surface
+/// instead — this primitive owns exactly the single-path pre-commit
+/// staging shape the six pre-lift sites shared.
+///
+/// # Canonical op label
+///
+/// The op label pins at `"git add"` — the exact spelling every pre-lift
+/// site already used. A future consumer that reaches for this primitive
+/// inherits the shared label by construction rather than by convention,
+/// so its `RetryError`, `RetryError::Failed`, and structured tracing
+/// field carry the same identifier as the six pre-lift sites.
+///
+/// # Failure envelope inherits from [`git_run_inherited_status`]
+///
+/// Spawn failure raises `"Failed to run git add"` through
+/// [`crate::retry::classify_inherited_status`]; non-zero exit raises
+/// `"git add failed (exit {code})"`; signal termination raises
+/// `"git add failed (killed by signal)"`. Callers attach per-site
+/// context with `.await.context(...)?` (or the equivalent
+/// `.with_context(|| ...)?`) on the outer chain — the primitive itself
+/// does not layer a `.context(...)` so the caller retains full control
+/// over the outer message (each pre-lift site already carried its own
+/// "Failed to stage <thing>" per-site context that survives verbatim).
+///
+/// # `GIT_BIN` env override
+///
+/// The `git` binary resolves through the delegated
+/// [`git_run_inherited_status`] → [`git_command_async`] chain so a
+/// Nix-hermetic runner's `GIT_BIN` override wins over ambient `PATH` —
+/// same discipline every git-mutation site in forge honors.
+pub async fn git_add_path(path: &str) -> anyhow::Result<()> {
+    git_run_inherited_status(["add", path], "git add").await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2712,6 +2775,199 @@ mod tests {
                  post-commit `git push origin main` site(s) through \
                  `crate::git::git_push_origin_main(`; found {forwards}. \
                  A dropped call would leave the negative raw-argv scan \
+                 satisfied by absence.",
+            );
+        }
+    }
+
+    /// [`git_add_path`] MUST forward the fixed leading `"add"` verb
+    /// followed by the caller's `path` as the second argv element to the
+    /// GIT_BIN-resolved shim. Pins the two-element pre-lift argv the six
+    /// sibling pre-commit staging sites each hand-spelled
+    /// (`commands/federation.rs::deploy_federation` ×3,
+    /// `commands/push.rs::update_kustomization`,
+    /// `commands/rollback.rs::execute`,
+    /// `commands/rust_service.rs::commit_and_push_manifest`) — a
+    /// regression that dropped `"add"`, swapped it for `"stage"`, or
+    /// re-tokenized the caller's `path` on a path separator or whitespace
+    /// would silently redirect the git mutation every deploy-frontier
+    /// consumer depends on for the pre-commit staging contract.
+    ///
+    /// Runs under [`GIT_BIN_ENV_LOCK`] to serialize against every other
+    /// test that either mutates `GIT_BIN` or invokes a no-bin production
+    /// entry point that reads it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_git_add_path_forwards_fixed_verb_and_path_and_returns_ok_on_zero_exit() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let argv_log = crate::test_support::ArgvLog::reserve();
+        let (_shim_dir, shim) = make_git_shim(&argv_log.shim_body(""));
+        let _scope = GitBinScope::set(&shim);
+
+        git_add_path("deploy/service.artifact.json")
+            .await
+            .expect("zero-exit shim must surface as Ok(())");
+
+        let logged = argv_log.read_argv_log();
+        let lines: Vec<&str> = logged.lines().collect();
+        assert_eq!(
+            lines,
+            vec!["add", "deploy/service.artifact.json"],
+            "git_add_path must forward the fixed leading `\"add\"` \
+             verb followed by the caller's path verbatim to the \
+             GIT_BIN-resolved shim — proves the primitive delegates \
+             through `git_run_inherited_status` with exactly the \
+             pre-lift two-element argv and does not silently drop, \
+             reorder, or re-tokenize either element on whitespace or \
+             path separators"
+        );
+    }
+
+    /// [`git_add_path`] MUST surface a non-zero shim exit through the
+    /// canonical `"{op} failed (exit {code})"` envelope with the op
+    /// label pinned to `"git add"` — the exact spelling every pre-lift
+    /// site already used. A regression that dropped the label (or drifted
+    /// it to `"git stage"` / `"git add {path}"`) or dropped the delegation
+    /// to [`crate::retry::run_inherited_status`] for a bare
+    /// `.status().await?` fails this test.
+    ///
+    /// Runs under [`GIT_BIN_ENV_LOCK`] to serialize against every other
+    /// test that either mutates `GIT_BIN` or invokes a no-bin production
+    /// entry point that reads it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_git_add_path_non_zero_exit_carries_canonical_op_label() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let (_shim_dir, shim) =
+            make_git_shim("#!/bin/sh\necho 'SIGIL_ROUTED_VIA_GIT_ADD_PATH_1c7f4a' 1>&2\nexit 23\n");
+        let _scope = GitBinScope::set(&shim);
+
+        let err = git_add_path("deploy/service.artifact.json")
+            .await
+            .expect_err("shim exits 23");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("git add"),
+            "git_add_path must surface `\"git add\"` as the op label \
+             via the anyhow message — proves the primitive delegates to \
+             `git_run_inherited_status` with the pinned canonical label \
+             every pre-lift site already used; got: {msg:?}"
+        );
+        assert!(
+            msg.contains("exit 23"),
+            "git_add_path must surface the shim's exit code via the \
+             anyhow message — proves the primitive delegates through \
+             `retry::run_inherited_status`'s `classify_inherited_status` \
+             envelope, not a bare `.status().await?` that silently drops \
+             the exit code; got: {msg:?}"
+        );
+    }
+
+    /// A spawn `Err` (`GIT_BIN` resolves to a nonexistent path) MUST
+    /// bail with the canonical `"Failed to run git add"` envelope — the
+    /// SPAWN arm of [`crate::retry::classify_inherited_status`]. Pins
+    /// the shape every consumer site depends on for the "developer has
+    /// no `git` on PATH / GIT_BIN points at an absent Nix derivation"
+    /// precondition to surface as an operator-actionable error rather
+    /// than a downstream silent-success against an unstaged tree.
+    ///
+    /// Runs under [`GIT_BIN_ENV_LOCK`] to serialize against every other
+    /// test that either mutates `GIT_BIN` or invokes a no-bin production
+    /// entry point that reads it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_git_add_path_spawn_error_carries_canonical_op_label() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _scope =
+            GitBinScope::set("/nonexistent/dir/absolutely-not-a-git-binary-forge-add-path-shim");
+
+        let err = git_add_path("deploy/service.artifact.json")
+            .await
+            .expect_err("unresolvable GIT_BIN must produce Err");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Failed to run git add"),
+            "git_add_path must surface the canonical spawn-failure \
+             envelope `\"Failed to run git add\"` from \
+             `retry::classify_inherited_status` — proves the primitive \
+             delegates through the shared envelope and the op label \
+             pins to the canonical spelling; got: {msg:?}"
+        );
+    }
+
+    /// Caller shield: no source file under `cli/src/commands/` may still
+    /// spell the raw `git_run_inherited_status(["add", …], "git add")`
+    /// shape — every pre-commit `git add <path>` MUST route through
+    /// [`git_add_path`] so the fixed `["add", path]` argv contract and
+    /// the canonical `"git add"` op label stay owned by ONE primitive
+    /// rather than by six per-site conventions.
+    ///
+    /// A future consumer that spells the raw shape trips this shield
+    /// even before it can drift the op label back to a per-site spelling.
+    #[test]
+    fn no_command_module_still_spells_raw_git_add_argv() {
+        use std::path::PathBuf;
+        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands");
+        let mut offenders: Vec<(PathBuf, usize, String)> = Vec::new();
+        for entry in std::fs::read_dir(&commands_dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            for (idx, line) in source.lines().enumerate() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                    continue;
+                }
+                if line.contains("git_run_inherited_status([\"add\",") {
+                    offenders.push((path.clone(), idx + 1, line.to_string()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "raw `git_run_inherited_status([\"add\", …], \"git add\")` \
+             stanza(s) survive under `commands/` — route each through \
+             `crate::git::git_add_path(<path>)` instead so the canonical \
+             op label and fixed `[\"add\", path]` argv stay pinned at \
+             ONE body:\n{:#?}",
+            offenders
+        );
+    }
+
+    /// Positive half of the shield: the four pre-lift files under
+    /// `commands/` MUST each forward through `crate::git::git_add_path(`
+    /// at least the pre-lift count of times, so a migration that dropped
+    /// a call site outright leaves the negative "no raw argv" scan
+    /// trivially satisfied by absence but the positive count still fails.
+    #[test]
+    fn every_prelift_module_forwards_through_git_add_path() {
+        use std::path::PathBuf;
+        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands");
+        // (module basename, minimum forward count from the pre-lift census)
+        let expectations: &[(&str, usize)] = &[
+            ("federation.rs", 3),
+            ("push.rs", 1),
+            ("rollback.rs", 1),
+            ("rust_service.rs", 1),
+        ];
+        for (basename, min_count) in expectations {
+            let path = commands_dir.join(basename);
+            let source = std::fs::read_to_string(&path).unwrap();
+            let forwards = source.matches("git_add_path(").count();
+            assert!(
+                forwards >= *min_count,
+                "{basename} must forward at least {min_count} \
+                 pre-commit `git add <path>` site(s) through \
+                 `crate::git::git_add_path(`; found {forwards}. A \
+                 dropped call would leave the negative raw-argv scan \
                  satisfied by absence.",
             );
         }
