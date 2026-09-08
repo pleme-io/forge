@@ -1791,6 +1791,84 @@ pub fn write_success_line<W: std::io::Write>(w: &mut W, message: &str) -> std::i
     writeln!(w, "✅ {}", message)
 }
 
+/// Prints the one-line `"✅ <message>"` phase-completion grammar 3
+/// pre-lift consumer sites spelled inline as `println!("{}", "✅
+/// <LITERAL>".green().bold())` across 3 command modules
+/// (`commands/{sync (×1: "✅ No drift detected. All files in sync."),
+/// prerelease (×1: "✅ All gates passed! Ready for release."),
+/// post_deploy_verification (×1: "✅ Post-deploy verification
+/// passed!")}.rs`). Marks a discrete verification-phase completion —
+/// a drift-check phase clean, a pre-release gate battery all-passed,
+/// a post-deploy verification battery all-passed — one rung UNDER the
+/// milestone-level [`print_success`] top-of-command banner and one
+/// rung OVER the in-body [`print_step_success`] step-completion mark.
+///
+/// # Distinct from [`print_success`], [`print_step_success`], [`print_success_line`]
+///
+/// [`print_success`] is a `bright_green().bold()` `✅ <msg>` line — the
+/// heaviest palette in the success family, reserved for milestone-level
+/// completion banners at the top-of-command level (`commands/{bootstrap,
+/// build, push}.rs`). [`print_step_success`] is a `green()` `✅ <msg>`
+/// line where ONLY the message carries the color (the `✅ ` glyph
+/// stays outside the ANSI span). [`print_success_line`] carries no
+/// styling at all. This primitive carries the third rung —
+/// `.green().bold()` applied to the WHOLE `✅ <MSG>` line (glyph AND
+/// message inside the coloring span), yielding a bolder-than-step but
+/// dimmer-than-milestone visual weight the three pre-lift consumers
+/// converged on for verification-phase pass banners specifically. A
+/// caller that promoted a phase-success onto [`print_success`] would
+/// silently paint every verification pass with the milestone palette
+/// and flatten the four-rung phase / step / milestone / plain contrast
+/// this primitive exists to preserve; a caller that demoted a
+/// milestone onto this writer would strip the `.bright_` from the
+/// palette and blend the milestone into the phase noise floor.
+///
+/// # Byte-identical to the pre-lift stanzas
+///
+/// The pre-lift consumers spelled the emit as `println!("{}", "✅
+/// <LITERAL>".green().bold())` — the `✅ ` prefix baked INSIDE the
+/// string literal, then `.green().bold()` chained on the whole thing.
+/// This primitive delegates to [`write_phase_success`], which is
+/// `writeln!(w, "{}", format!("✅ {}", message).green().bold())` — the
+/// prefix prepended dynamically then colored/bolded identically. Both
+/// shapes wrap identical UTF-8 payloads with identical `.green().bold()`
+/// ANSI sequences (`\x1b[1;32m…\x1b[0m` or the semicolon-swapped
+/// `\x1b[32;1m…\x1b[0m` — [`colored`] emits one of the two compound
+/// forms) and produce byte-identical output.
+///
+/// # Compounding
+///
+/// Pre-lift 3 sibling sites each restated the `println!("{}", "✅
+/// <LITERAL>".green().bold())` grammar verbatim. A future palette
+/// adjustment (a promotion to `.bright_green().bold()` under a unified
+/// success-family palette, a swap of the `✅ ` glyph for `✓ ` under a
+/// CI-log-friendly grammar, an OTLP `phase_complete` observability
+/// event wired alongside the print, a fusion with a preceding blank
+/// line so the primitive owns the phase-boundary spacing too) had to
+/// hit 3 sites in lockstep or drift the visual grammar; post-lift it
+/// hits ONE typed body. Delegates to [`write_phase_success`] against
+/// [`std::io::stdout()`]; the writer split exists so the fail-before-
+/// pass test can pin the single-line body, the leading `✅ ` prefix,
+/// the compound `.green().bold()` ANSI sequence (`\x1b[1;32m` or
+/// `\x1b[32;1m`), and the absence of the milestone-level
+/// `.bright_green()` (`\x1b[92m`) palette by inspecting emitted bytes
+/// rather than shelling out and grepping stdout.
+pub fn print_phase_success(message: &str) {
+    let _ = write_phase_success(&mut std::io::stdout().lock(), message);
+}
+
+/// Writer-taking sibling to [`print_phase_success`]. Emits the single
+/// `✅ <message>` line, the whole line (glyph AND message inside the
+/// coloring span) colored `.green().bold()`, via [`writeln!`] against
+/// the supplied writer. [`print_phase_success`] is the stdout adapter;
+/// this variant exists so tests can pin the one-line body, the `✅ `
+/// prefix, the compound `.green().bold()` ANSI sequence, and the
+/// absence of the `.bright_green()` (`\x1b[92m`) milestone palette
+/// without capturing stdout.
+pub fn write_phase_success<W: std::io::Write>(w: &mut W, message: &str) -> std::io::Result<()> {
+    writeln!(w, "{}", format!("✅ {}", message).green().bold())
+}
+
 /// Prints the one-line `"   {} <message>"` (three-space indent + red
 /// `❌` glyph + plain message) in-body step-failure grammar 40 pre-lift
 /// consumer sites spelled inline as `println!("   {} <fmt>",
@@ -8883,6 +8961,226 @@ mod tests {
                  primitive body every one-line unstyled `println!(\"✅ \
                  <literal>\")` success-acknowledgement in the crate now \
                  delegates through."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_phase_success`].
+    /// Pins the one-line body 3 pre-lift consumer sites spelled
+    /// verbatim as `println!("{}", "✅ <LITERAL>".green().bold())`
+    /// across 3 command modules (`commands/{sync, prerelease,
+    /// post_deploy_verification}.rs`): exactly one rendered line, the
+    /// `✅ ` glyph prefix, the message text verbatim, the compound
+    /// `.green().bold()` ANSI sequence (`\x1b[1;32m` or `\x1b[32;1m`),
+    /// the absence of the milestone-level `.bright_green()`
+    /// (`\x1b[92m`) palette, and the trailing `\n`. A silent contract
+    /// drift a future rewrite might introduce — dropping the `✅ `
+    /// glyph, promoting the palette to `.bright_green().bold()`
+    /// (`\x1b[1;92m` — the milestone-level [`super::write_success`]
+    /// palette) and collapsing the phase / milestone contrast this
+    /// primitive exists to preserve, demoting to `.green()` alone
+    /// (`\x1b[32m`) and losing the bold weight the pre-lift consumers
+    /// spelled, swapping `writeln!` for `write!` and dropping the
+    /// trailing newline — flips this assertion rather than compiling
+    /// and silently diverging the three consumer sites' visual
+    /// grammar.
+    #[test]
+    fn write_phase_success_emits_one_check_prefixed_green_bold_line() {
+        // Force ANSI emission (colored auto-drops sequences on a
+        // non-tty stdout) and serialize against peer banner tests via
+        // [`AnsiOverrideForTest`]; its Drop restores colored's
+        // auto-detection on scope exit AFTER releasing the shared
+        // [`ANSI_OVERRIDE_LOCK`], closing the set-write-unset window
+        // without a manual [`colored::control::unset_override`] call
+        // that a future test author could omit.
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_phase_success(&mut buf, "All gates passed! Ready for release.")
+            .expect("write_phase_success against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_phase_success must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — the pre-lift stanza is one `println!`,
+        // not two, and carries no framing blank. A refactor that slips
+        // a leading or trailing blank into the primitive body fails
+        // here.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_phase_success must emit exactly one line — the \
+             pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The `✅ ` glyph reaches the rendered line — every pre-lift
+        // consumer spelled it INSIDE the string literal
+        // (`"✅ <LIT>".green().bold()`). This primitive prepends it
+        // via `format!("✅ {}", message)` before coloring; a fusion
+        // that dropped the checkmark (a "the color already signals
+        // success" cleanup) fails here.
+        assert!(
+            lines[0].contains("✅ "),
+            "line 0 must carry the `✅ ` glyph — every pre-lift \
+             consumer spelled it inside the string literal; got {:?}",
+            lines[0]
+        );
+
+        // The message text reaches the rendered line verbatim; a
+        // fusion that hoists the message off the parameter and pins
+        // it to a constant fails here.
+        assert!(
+            lines[0].contains("All gates passed! Ready for release."),
+            "line 0 must carry the message verbatim; got {:?}",
+            lines[0]
+        );
+
+        // The compound `.green().bold()` ANSI sequence reaches the
+        // rendered line — every pre-lift consumer spelled `.green()`
+        // followed by `.bold()` on the whole `"✅ <MSG>"` string.
+        // [`colored`] fuses `.green().bold()` into one compound
+        // sequence on this toolchain (`\x1b[1;32m` — bold-then-green,
+        // or the semicolon-swapped `\x1b[32;1m` a future colored
+        // version could emit); the check accepts either shape. The
+        // three pre-lift sites' visual weight lives HERE — a demotion
+        // to plain `.green()` alone (`\x1b[32m` without the `1;` or
+        // `;1` compound) fails this assertion.
+        assert!(
+            lines[0].contains("\x1b[1;32m") || lines[0].contains("\x1b[32;1m"),
+            "line 0 must carry the compound `.green().bold()` ANSI \
+             sequence (`\\x1b[1;32m` or `\\x1b[32;1m`) — every \
+             pre-lift consumer spelled `.green().bold()` (never \
+             `.green()` alone, never `.bright_green()`) on the whole \
+             `\"✅ <MSG>\"` string; got {:?}",
+            lines[0]
+        );
+
+        // The milestone-level `.bright_green()` (`\x1b[92m`) palette
+        // MUST NOT reach the rendered line — that palette belongs to
+        // [`super::write_success`], the heaviest rung in the success
+        // family (`commands/{bootstrap, build, push}.rs` milestone
+        // banners). A promotion here would collapse the three-rung
+        // milestone / phase / step contrast the family carries.
+        assert!(
+            !lines[0].contains("\x1b[92m")
+                && !lines[0].contains("\x1b[1;92m")
+                && !lines[0].contains("\x1b[92;1m"),
+            "line 0 must NOT carry the `bright_green` ANSI code \
+             (`92`) — that palette belongs to the milestone-level \
+             [`super::write_success`] top-of-command banner, not this \
+             phase-completion body; got {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `println!` (not `print!`), so the newline is part of the
+        // contract. A fusion that swapped `writeln!` for `write!`
+        // fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_phase_success must terminate with `\\n` — pre-lift \
+             stanza used `println!`, not `print!`; got {:?}",
+            out
+        );
+    }
+
+    /// Callers-delegate shield for [`super::print_phase_success`]. Every
+    /// pre-lift `println!("{}", "✅ <LITERAL>".green().bold());`
+    /// verification-phase completion at `commands/{sync,
+    /// prerelease, post_deploy_verification}.rs` was the exact inline
+    /// expansion of [`super::print_phase_success`]'s one-line body —
+    /// three sites hand-rolling the primitive that now exists. A future
+    /// re-inline (a "one-liner, may as well spell it out" cleanup, or
+    /// a rustfmt spread of the hand-inlined single-line form) would
+    /// silently reopen the duplication class this shield exists to
+    /// close; this test scans each consumer module's body-before-first-
+    /// `cfg(test)` for BOTH the single-line and the whitespace-splayed
+    /// forms of the pre-lift needle and asserts the migrated primitive
+    /// call is present.
+    ///
+    /// # The multi-line detector
+    ///
+    /// The single-line check `line.contains("\"✅ ") &&
+    /// line.contains(".green().bold()")` misses the rustfmt-splayed
+    /// shape (where the string literal, `.green()`, and `.bold()`
+    /// spread across three lines) by construction. The added detector
+    /// normalizes the entire body's whitespace
+    /// (`split_whitespace().join(" ")`) so a splayed stanza collapses
+    /// onto a single logical line, then further strips the ASCII space
+    /// rustfmt inserts before each leading `.` of a method-chain
+    /// continuation line (`" ."` → `"."`). Under that normalization
+    /// the multi-line form and the single-line form reduce to the same
+    /// substring, and one `contains(...)` call catches both. The check
+    /// deliberately anchors on the `"✅ ` string-literal prefix so it
+    /// distinguishes the phase-success needle from unrelated
+    /// `.green().bold()` calls on non-`✅` strings.
+    #[test]
+    fn print_phase_success_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[
+            (include_str!("commands/sync.rs"), "commands/sync.rs"),
+            (
+                include_str!("commands/prerelease.rs"),
+                "commands/prerelease.rs",
+            ),
+            (
+                include_str!("commands/post_deploy_verification.rs"),
+                "commands/post_deploy_verification.rs",
+            ),
+        ];
+        for (source, module_path) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+
+            // Single-line form catch: preserved for its precise
+            // per-line reporting when the stanza fits on one line (a
+            // hand-written one-liner, or a future rustfmt setting that
+            // packs the chain back onto one line).
+            for (i, line) in body.lines().enumerate() {
+                assert!(
+                    !(line.contains("\"✅ ") && line.contains(".green().bold()")),
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `println!(\"{{}}\", \"✅ <MSG>\".green().bold());` \
+                     phase-completion stanza (single-line form) — that \
+                     one-liner was lifted onto \
+                     `crate::ui::print_phase_success`. A re-inline \
+                     would silently reopen the duplication class this \
+                     shield exists to close. Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+
+            // Multi-line form catch: normalize whitespace so a
+            // rustfmt-splayed stanza collapses to the same substring
+            // as the single-line form. The `" ."` → `"."` pass strips
+            // the ASCII space rustfmt inserts before each leading `.`
+            // of a method-chain continuation.
+            let normalized: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+            let normalized = normalized.replace(" .", ".");
+            assert!(
+                !(normalized.contains("\"✅ ") && normalized.contains(".green().bold()")),
+                "{module_path} body carries the pre-lift \
+                 `println!(\"{{}}\", \"✅ <MSG>\".green().bold());` \
+                 phase-completion stanza in a whitespace-splayed \
+                 (rustfmt multi-line) shape — the same duplication the \
+                 single-line detector above catches, expressed across \
+                 three or four lines instead of one. Lift the stanza \
+                 onto `crate::ui::print_phase_success(\"<MSG>\")` \
+                 (dropping the leading `✅ ` prefix — the primitive \
+                 prepends it inside the coloring span, producing \
+                 byte-identical output per `write_phase_success`'s \
+                 docstring)."
+            );
+
+            assert!(
+                body.contains("crate::ui::print_phase_success("),
+                "{module_path} body must forward to \
+                 `crate::ui::print_phase_success(\"<MSG>\")` — the \
+                 primitive body every `println!(\"{{}}\", \"✅ \
+                 <MSG>\".green().bold())` phase-completion straggler \
+                 in the crate now delegates through."
             );
         }
     }

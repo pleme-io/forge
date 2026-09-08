@@ -261,10 +261,7 @@ pub async fn execute_drift_check(working_dir: &Path) -> Result<DriftCheckResult>
     crate::ui::print_step_check("Codegen in sync");
 
     println!();
-    println!(
-        "{}",
-        "✅ No drift detected. All files in sync.".green().bold()
-    );
+    crate::ui::print_phase_success("No drift detected. All files in sync.");
 
     Ok(DriftCheckResult {
         schema_drift: false,
