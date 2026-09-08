@@ -457,16 +457,19 @@ mod tests {
             fn_body.contains("crate::git::git_run_inherited_status(")
                 || fn_body.contains("crate::git::git_add_path(")
                 || fn_body.contains("crate::git::git_push_origin_main(")
+                || fn_body.contains("crate::git::git_commit_or_bail(")
                 || fn_body.contains("crate::retry::run_inherited_status"),
-            "execute() must dispatch `git add` / `git push` through \
-             the structural `(op, exit_code)`-envelope surface — either \
-             the async fusion primitive \
+            "execute() must dispatch `git add` / `git commit -m` / \
+             `git push` through the structural `(op, exit_code)`-\
+             envelope surface — either the async fusion primitive \
              `crate::git::git_run_inherited_status(&[...], \"git …\")` \
              (which internally delegates through \
              `crate::retry::run_inherited_status`), the fixed-argv \
-             single-path staging primitive `crate::git::git_add_path(&path)` \
-             or the fixed-argv post-commit push primitive \
-             `crate::git::git_push_origin_main()` (both of which also \
+             single-path staging primitive `crate::git::git_add_path(&path)`, \
+             the fixed-argv bail-on-failure commit primitive \
+             `crate::git::git_commit_or_bail(&msg)`, or the fixed-argv \
+             post-commit push primitive \
+             `crate::git::git_push_origin_main()` (all of which also \
              delegate through `git_run_inherited_status`), or directly \
              through `crate::retry::run_inherited_status`. None of these \
              delegation strings was found in execute()."

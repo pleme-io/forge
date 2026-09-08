@@ -1969,7 +1969,7 @@ pub async fn deploy_rust_service_with_tag(
             .context("Failed to stage manifest")?;
 
         let commit_msg = format!("Deploy {} {}", service, tag_suffix);
-        crate::git::git_run_inherited_status(["commit", "-m", &commit_msg], "git commit")
+        crate::git::git_commit_or_bail(&commit_msg)
             .await
             .context("Failed to commit manifest")?;
 
