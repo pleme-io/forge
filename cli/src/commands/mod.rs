@@ -59,6 +59,7 @@ pub mod supergraph_verification;
 pub mod sync;
 pub mod test;
 pub mod test_ci;
+pub mod test_suite_failure_banner;
 pub mod tool;
 pub mod typescript;
 pub mod web_build_verify;
