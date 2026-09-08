@@ -3,6 +3,7 @@ pub mod attestation;
 pub mod bootstrap;
 pub mod build;
 pub mod builder_pool_edit;
+pub mod chart_release_phase_failure;
 pub mod cluster_overlay_release_postamble;
 pub mod cluster_overlay_release_preamble;
 pub mod cluster_overlay_release_push_step;
