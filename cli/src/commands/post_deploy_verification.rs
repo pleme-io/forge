@@ -8,9 +8,8 @@
 //! These gates verify that the deployment was successful and the service
 //! is responding correctly.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use colored::Colorize;
-use reqwest::Client;
 use std::time::{Duration, Instant};
 
 use crate::retry::RetryPolicy;
@@ -148,11 +147,7 @@ pub async fn verify_health_endpoint(
 ) -> Result<(bool, Option<u64>)> {
     crate::ui::print_step_heading("G12: Health endpoint check");
 
-    let client = Client::builder()
-        .timeout(timeout)
-        .danger_accept_invalid_certs(true) // For staging self-signed certs
-        .build()
-        .context("Failed to build HTTP client")?;
+    let client = crate::post_deploy_http_client::build_post_deploy_http_client(timeout)?;
 
     for attempt in 0..=retries {
         let start = Instant::now();
@@ -210,11 +205,7 @@ pub async fn verify_graphql_endpoint(
 ) -> Result<(bool, Option<u64>)> {
     crate::ui::print_step_heading("G13: GraphQL introspection check");
 
-    let client = Client::builder()
-        .timeout(timeout)
-        .danger_accept_invalid_certs(true)
-        .build()
-        .context("Failed to build HTTP client")?;
+    let client = crate::post_deploy_http_client::build_post_deploy_http_client(timeout)?;
 
     // Simple introspection query
     let query = serde_json::json!({
@@ -293,11 +284,7 @@ pub async fn verify_smoke_queries(
 ) -> Result<(bool, Vec<SmokeQueryResult>)> {
     crate::ui::print_step_heading("G15: Smoke query validation");
 
-    let client = Client::builder()
-        .timeout(timeout)
-        .danger_accept_invalid_certs(true)
-        .build()
-        .context("Failed to build HTTP client")?;
+    let client = crate::post_deploy_http_client::build_post_deploy_http_client(timeout)?;
 
     let mut results = Vec::new();
     let mut all_passed = true;
@@ -490,10 +477,8 @@ pub async fn verify_deployment(config: &PostDeployConfig) -> Result<PostDeployRe
 
 /// Quick health check without full verification
 pub async fn quick_health_check(url: &str) -> Result<bool> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(10))
-        .danger_accept_invalid_certs(true)
-        .build()?;
+    let client =
+        crate::post_deploy_http_client::build_post_deploy_http_client(Duration::from_secs(10))?;
 
     match client.get(url).send().await {
         Ok(response) => Ok(response.status().is_success()),
