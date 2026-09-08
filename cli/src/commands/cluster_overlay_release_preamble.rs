@@ -139,7 +139,7 @@ pub async fn announce_release_start_and_compute_tag(
     registry: &str,
 ) -> Result<String> {
     info!("🚀 Starting {} release", release_name);
-    info!("   Image: {}", image_path);
+    crate::info_image_field!(image_path);
     info!("   Registry: {}", registry);
     println!();
 
