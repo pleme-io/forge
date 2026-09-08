@@ -680,7 +680,9 @@ spec:
         }
 
         // Clean up failed job to prevent cluster pollution
-        println!("🧹 Cleaning up failed migration job...");
+        crate::commands::migration_cleanup_announcement::print_migration_cleanup_announcement(
+            "failed migration job",
+        );
         let _ = kubectl_command_async()
             .args(&[
                 "delete",
@@ -886,7 +888,9 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
     crate::ui::print_step_pass("Reset status to Pending (retryCount: 0)");
 
     // Always clean up existing migration jobs to prevent "already exists" errors
-    println!("🧹 Cleaning up existing migration jobs...");
+    crate::commands::migration_cleanup_announcement::print_migration_cleanup_announcement(
+        "existing migration jobs",
+    );
 
     // First, find and delete any migration jobs for this service
     // This is critical because Shinka will fail with "already exists" if old jobs remain
@@ -929,7 +933,9 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
 
     // Also clean up any orphaned pods
     if cleanup_jobs {
-        println!("🧹 Cleaning up orphaned migration pods...");
+        crate::commands::migration_cleanup_announcement::print_migration_cleanup_announcement(
+            "orphaned migration pods",
+        );
 
         let cleanup_pods = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
             &[
