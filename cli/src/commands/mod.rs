@@ -14,6 +14,7 @@ pub mod crossplane;
 pub mod crossplane_xpkg_push;
 pub mod dashboards;
 pub mod deploy;
+pub mod developer_tool_phase_open;
 pub mod developer_tools;
 pub mod e2e;
 pub mod federation;
