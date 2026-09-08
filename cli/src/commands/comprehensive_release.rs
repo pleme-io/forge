@@ -345,11 +345,10 @@ pub async fn execute(
 
         let step_duration = step_start.elapsed();
         println!();
-        info!(
-            "{}",
-            crate::repo::msg_took_secs_1("✅ Unit tests passed".green().bold(), step_duration,)
+        crate::commands::comprehensive_release_step_pass_timed::info_step_pass_timed(
+            "Unit tests passed",
+            step_duration,
         );
-        println!();
     } else {
         crate::info_skipping!("unit tests");
     }
@@ -376,14 +375,10 @@ pub async fn execute(
         .await?;
 
         let step_duration = step_start.elapsed();
-        info!(
-            "{}",
-            crate::repo::msg_took_secs_1(
-                "✅ Docker image built successfully".green().bold(),
-                step_duration,
-            )
+        crate::commands::comprehensive_release_step_pass_timed::info_step_pass_timed(
+            "Docker image built successfully",
+            step_duration,
         );
-        println!();
     } else {
         crate::info_skipping!("build step");
     }
@@ -701,14 +696,10 @@ pub async fn execute(
 
                 let step_duration = step_start.elapsed();
                 println!();
-                info!(
-                    "{}",
-                    crate::repo::msg_took_secs_1(
-                        "✅ Integration tests passed".green().bold(),
-                        step_duration,
-                    )
+                crate::commands::comprehensive_release_step_pass_timed::info_step_pass_timed(
+                    "Integration tests passed",
+                    step_duration,
                 );
-                println!();
             }
         } else {
             crate::step_header::announce_step_header(3, 5, "Integration Testing");
@@ -744,14 +735,10 @@ pub async fn execute(
         .await?;
 
         let step_duration = step_start.elapsed();
-        info!(
-            "{}",
-            crate::repo::msg_took_secs_1(
-                "✅ Image pushed successfully".green().bold(),
-                step_duration,
-            )
+        crate::commands::comprehensive_release_step_pass_timed::info_step_pass_timed(
+            "Image pushed successfully",
+            step_duration,
         );
-        println!();
     } else {
         crate::info_skipping!("push step");
     }
@@ -785,11 +772,10 @@ pub async fn execute(
         .await?;
 
         let step_duration = step_start.elapsed();
-        info!(
-            "{}",
-            crate::repo::msg_took_secs_1("✅ Deployment complete".green().bold(), step_duration,)
+        crate::commands::comprehensive_release_step_pass_timed::info_step_pass_timed(
+            "Deployment complete",
+            step_duration,
         );
-        println!();
     } else {
         crate::info_skipping!("deploy step");
     }

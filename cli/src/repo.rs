@@ -10480,11 +10480,13 @@ mod tests {
     /// [`msg_took_secs_1`] must OWN the projection from [`Duration`] to
     /// seconds on the closed `commands/comprehensive_release.rs` sites
     /// — no site re-inlines the pre-lift
-    /// `format!("{} (took {:.1}s)", <msg>, d.as_secs_f64())` grammar.
-    /// The shield walks the closed literal spellings and refuses any
-    /// occurrence, so a silent respell that reintroduces the inline
-    /// `(took {:.1}s)` grammar at these sites fails at this test rather
-    /// than propagating.
+    /// `format!("{} (took {:.1}s)", <msg>, d.as_secs_f64())` grammar,
+    /// and every one of the 5 pre-lift step-completion messages still
+    /// reaches the release orchestrator (as the `<message>` arg to
+    /// [`crate::commands::comprehensive_release_step_pass_timed::info_step_pass_timed`],
+    /// which threads it into the primitive body's `format!("✅ {}",
+    /// message).green().bold()` composition and hands the composed
+    /// ColoredString to [`msg_took_secs_1`]).
     ///
     /// `commands/comprehensive_release.rs` is the ONE file this lift
     /// closes, and every occurrence of the `(took {:.1}s)` tag in that
@@ -10499,6 +10501,22 @@ mod tests {
     /// fleet map (they bake the message into the format-string literal
     /// rather than passing it as a `{}` arg — see the primitive's
     /// non-goals list), so this shield does not govern them.
+    ///
+    /// # Post-lift caller shape
+    ///
+    /// The 5 closed sites no longer spell the pre-lift `"✅ <MSG>"
+    /// .green().bold()` composition inline — the `✅ ` glyph opener
+    /// and the whole-message `.green().bold()` palette now live in
+    /// the fusion primitive at
+    /// [`crate::commands::comprehensive_release_step_pass_timed::info_step_pass_timed`],
+    /// which passes the composed ColoredString to
+    /// [`msg_took_secs_1`]. The five closed messages appear in the
+    /// file as bare (unadorned) string literals — the anchor list
+    /// below matches those bare spellings, which the fusion
+    /// primitive's positive-delegation shield
+    /// ([`crate::commands::comprehensive_release_step_pass_timed::tests::comprehensive_release_module_delegates_through_primitive_at_least_five_times`])
+    /// separately requires each to reach through
+    /// `info_step_pass_timed(...)`.
     #[test]
     fn msg_took_secs_1_closed_sites_do_not_reinline_the_primitive_shape() {
         let path = "src/commands/comprehensive_release.rs";
@@ -10512,19 +10530,24 @@ mod tests {
 
         // The five pre-lift consumer messages — each was wrapped in
         // `"{} (took {:.1}s)"` with a `.green().bold()` ColoredString
-        // holding the message. Post-lift these all pass through
-        // `crate::repo::msg_took_secs_1(...)`; a silent re-inline of
-        // the pre-lift `"{} (took {:.1}s)"` format-string tag at any
-        // of these sites is refused by the belt-and-braces check below.
+        // holding the message. Post the fusion lift onto
+        // `commands/comprehensive_release_step_pass_timed::info_step_pass_timed`
+        // the `✅ ` glyph opener and the whole-message
+        // `.green().bold()` palette live in the fusion primitive
+        // body; the 5 closed messages appear in this file as bare
+        // (unadorned) string literals passed as the primitive's
+        // `<message>` arg. A missing needle here signals an
+        // incomplete or lost lift.
         let closed_msg_literals: &[&str] = &[
-            "\"✅ Unit tests passed\"",
-            "\"✅ Docker image built successfully\"",
-            "\"✅ Integration tests passed\"",
-            "\"✅ Image pushed successfully\"",
-            "\"✅ Deployment complete\"",
+            "\"Unit tests passed\"",
+            "\"Docker image built successfully\"",
+            "\"Integration tests passed\"",
+            "\"Image pushed successfully\"",
+            "\"Deployment complete\"",
         ];
         // Sanity: each closed message still appears in the file
-        // (as the first arg to `msg_took_secs_1(...)`). A missing
+        // (as the `<message>` arg to
+        // `info_step_pass_timed(<message>, <duration>)`). A missing
         // needle would signal an incomplete or lost lift.
         for needle in closed_msg_literals {
             assert!(
@@ -10552,8 +10575,27 @@ mod tests {
              `msg_with_secs_1` dialect) or a precision-drift respell \
              ({{:.0}}, {{:.2}}) at any of these sites reopens the \
              very drift paths the primitive body pins at ONE place. \
-             Route the value through `crate::repo::msg_took_secs_1(...)` \
-             instead."
+             Route the value through \
+             `crate::commands::comprehensive_release_step_pass_timed::\
+             info_step_pass_timed(<message>, <duration>)` instead."
+        );
+
+        // Belt-and-braces: no bare `.green().bold()` ANSI palette
+        // application survives anywhere in the file — the fusion
+        // primitive owns the whole-message coloring at ONE body.
+        // A survivor would signal that a lifted site drifted back
+        // to spelling the pre-lift `"✅ <MSG>".green().bold()`
+        // composition inline.
+        assert!(
+            !content.contains(".green().bold()"),
+            "shield refuses re-inline: `{path}` still contains a \
+             `.green().bold()` ColoredString composition inline. The \
+             fusion lift onto `comprehensive_release_step_pass_timed` \
+             moved every release-step-completion palette decision into \
+             the primitive body; a surviving inline application signals \
+             a silent re-inline of the pre-lift stanza. Route the \
+             message through `info_step_pass_timed(<message>, \
+             <duration>)` instead."
         );
     }
 

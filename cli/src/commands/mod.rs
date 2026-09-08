@@ -9,6 +9,7 @@ pub mod cluster_overlay_release_push_step;
 pub mod codegen;
 pub mod codegen_validation;
 pub mod comprehensive_release;
+pub mod comprehensive_release_step_pass_timed;
 pub mod crossplane;
 pub mod crossplane_xpkg_push;
 pub mod dashboards;
