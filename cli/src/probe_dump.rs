@@ -136,6 +136,82 @@ pub fn probe_and_dump_or_none_sync(bin: &str, args: &[&str], sink: DiagSink, ind
     dump_captured_or_none(&captured, sink, indent);
 }
 
+/// Build the docker `--format` template every pre-lift diagnostic
+/// caller passed inline: `{indent}{{.Names}}\t{{.Status}}\t{{.<col>}}`.
+///
+/// Both diagnostic sub-commands ([`probe_and_dump_docker_ps_running`]
+/// with `col = "Ports"`, [`probe_and_dump_docker_ps_exited_since_15m`]
+/// with `col = "Image"`) share the leading `{{.Names}}\t{{.Status}}\t`
+/// prefix and diverge only on the third column — a single template
+/// builder pins that shared prefix at ONE body, so a future drift to
+/// a different separator (`|`, `;`) or a fourth column
+/// (`{{.CreatedAt}}`) reaches both sub-commands from one edit.
+///
+/// The leading `indent` matches the surrounding section indent every
+/// pre-lift caller passed as its own `indent` argument to
+/// [`probe_and_dump_or_none_sync`] — docker echoes the template
+/// verbatim per row, so aligning the two indents keeps the dumped
+/// rows under the section heading.
+fn docker_ps_diag_format(indent: &str, third_column: &str) -> String {
+    format!("{indent}{{{{.Names}}}}\t{{{{.Status}}}}\t{{{{.{third_column}}}}}")
+}
+
+/// Diagnostic probe: run `docker ps --format` with the fixed
+/// (Names, Status, Ports) three-column table indented by `indent`,
+/// dump the captured stdout to `sink`, or emit `"{indent}(none)"`
+/// when docker returned no rows. A probe failure (spawn error,
+/// non-existent `docker` binary) is silently skipped — same contract
+/// as [`probe_and_dump_or_none_sync`].
+///
+/// # Pre-lift census
+///
+/// Both `commands/e2e.rs::print_failure_diagnostics` (`DiagSink::Stderr`,
+/// `"  "` indent) and `commands/prerelease.rs::print_e2e_diagnostics`
+/// (`DiagSink::Stdout`, `"     "` indent) restated the same 6-line
+/// [`probe_and_dump_or_none_sync`] stanza with a copy-pasted
+/// `"{indent}{{.Names}}\t{{.Status}}\t{{.Ports}}"` `--format` template
+/// — two sites past THEORY §VI.1's recurring-shape threshold when
+/// paired with the sibling [`probe_and_dump_docker_ps_exited_since_15m`]
+/// (four docker-ps diagnostic stanzas total sharing the same
+/// three-column template family). Post-lift each site collapses to a
+/// single call to one of the two typed fusion primitives, and the
+/// `--format` template lives at ONE body inside [`docker_ps_diag_format`].
+pub fn probe_and_dump_docker_ps_running(docker_bin: &str, sink: DiagSink, indent: &str) {
+    let template = docker_ps_diag_format(indent, "Ports");
+    probe_and_dump_or_none_sync(docker_bin, &["ps", "--format", &template], sink, indent);
+}
+
+/// Diagnostic probe: run `docker ps -a --filter status=exited
+/// --since 15m --format` with the fixed (Names, Status, Image)
+/// three-column table indented by `indent`, dump the captured
+/// stdout to `sink`, or emit `"{indent}(none)"` when docker returned
+/// no rows. Sibling of [`probe_and_dump_docker_ps_running`], same
+/// contract on spawn-failure (silent skip) and same
+/// (Names, Status, `<3rd>`) template family.
+///
+/// The `--since 15m` window matches the pre-lift discipline both
+/// diagnostic callers spelled inline; a future adjustment to the
+/// retention horizon (`5m` for a faster CI hop, `1h` for slower
+/// e2e stacks) lands at this one body rather than at two sites.
+pub fn probe_and_dump_docker_ps_exited_since_15m(docker_bin: &str, sink: DiagSink, indent: &str) {
+    let template = docker_ps_diag_format(indent, "Image");
+    probe_and_dump_or_none_sync(
+        docker_bin,
+        &[
+            "ps",
+            "-a",
+            "--filter",
+            "status=exited",
+            "--since",
+            "15m",
+            "--format",
+            &template,
+        ],
+        sink,
+        indent,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,10 +357,19 @@ mod tests {
     }
 
     /// Positive half of the shield: the two pre-lift files MUST each
-    /// forward through `crate::probe_dump::probe_and_dump_or_none_sync(`
-    /// at least twice, so a migration that dropped a call site outright
-    /// leaves the negative "no raw ternary" scan trivially satisfied by
-    /// absence but the positive count still fails.
+    /// forward through the shared probe-dump primitive family
+    /// (`probe_and_dump_or_none_sync` OR one of the specialized
+    /// docker-ps wrappers below) at least twice, so a migration that
+    /// dropped a call site outright leaves the negative "no raw
+    /// ternary" scan trivially satisfied by absence but the positive
+    /// count still fails.
+    ///
+    /// Both new specialized wrappers ([`probe_and_dump_docker_ps_running`],
+    /// [`probe_and_dump_docker_ps_exited_since_15m`]) delegate through
+    /// [`probe_and_dump_or_none_sync`] internally, so a caller that
+    /// spells the specialized name still routes through the shared
+    /// `(none)`-or-dump ternary at the byte level — the count floor
+    /// accepts either shape as a valid delegation.
     #[test]
     fn every_prelift_module_forwards_through_probe_and_dump_primitive() {
         use std::path::PathBuf;
@@ -294,19 +379,121 @@ mod tests {
         // (module basename, minimum forward count from the pre-lift
         // census — 2 stanzas per file).
         let expectations: &[(&str, usize)] = &[("e2e.rs", 2), ("prerelease.rs", 2)];
+        let needles: &[&str] = &[
+            "crate::probe_dump::probe_and_dump_or_none_sync(",
+            "crate::probe_dump::probe_and_dump_docker_ps_running(",
+            "crate::probe_dump::probe_and_dump_docker_ps_exited_since_15m(",
+        ];
         for (basename, min_count) in expectations {
             let path = commands_dir.join(basename);
             let source = std::fs::read_to_string(&path).unwrap();
-            let forwards = source
-                .matches("crate::probe_dump::probe_and_dump_or_none_sync(")
-                .count();
+            let forwards: usize = needles.iter().map(|n| source.matches(n).count()).sum();
             assert!(
                 forwards >= *min_count,
                 "{basename} must forward at least {min_count} probe-dump-or-none \
-                 site(s) through `crate::probe_dump::probe_and_dump_or_none_sync(`; \
+                 site(s) through one of \
+                 `crate::probe_dump::probe_and_dump_or_none_sync(` or its \
+                 specialized docker-ps wrappers \
+                 (`probe_and_dump_docker_ps_running`, \
+                 `probe_and_dump_docker_ps_exited_since_15m`); \
                  found {forwards}. A dropped call would leave the negative \
                  raw-ternary scan satisfied by absence.",
             );
         }
+    }
+
+    // ── docker_ps_diag_format — byte-oracle over the shared template ──
+
+    /// Byte-oracle: [`docker_ps_diag_format`] with the pre-lift
+    /// 2-space indent and `"Ports"` third column emits the byte-form
+    /// `commands/e2e.rs::print_failure_diagnostics` spelled inline
+    /// pre-lift, verbatim. A drift that changed the separator from
+    /// TAB to any other byte, or that reordered the columns, regresses
+    /// this assertion — both hidden failure modes at the docker-ps
+    /// consumer where the column ordering is a load-bearing contract
+    /// downstream parsers rely on.
+    #[test]
+    fn docker_ps_diag_format_two_space_indent_ports_matches_pre_lift() {
+        let template = docker_ps_diag_format("  ", "Ports");
+        assert_eq!(template, "  {{.Names}}\t{{.Status}}\t{{.Ports}}");
+    }
+
+    /// Byte-oracle: [`docker_ps_diag_format`] with the pre-lift
+    /// 5-space indent and `"Image"` third column emits the byte-form
+    /// `commands/prerelease.rs::print_e2e_diagnostics` spelled inline
+    /// pre-lift for the `docker ps -a --filter status=exited --since
+    /// 15m --format` sub-command, verbatim.
+    #[test]
+    fn docker_ps_diag_format_five_space_indent_image_matches_pre_lift() {
+        let template = docker_ps_diag_format("     ", "Image");
+        assert_eq!(template, "     {{.Names}}\t{{.Status}}\t{{.Image}}");
+    }
+
+    /// Byte-oracle: [`docker_ps_diag_format`] with an empty indent
+    /// still emits the fixed three-column template — pins that the
+    /// indent parameter is a leading prefix rather than a required
+    /// non-empty token, so a future caller aligning against a
+    /// zero-indent section heading (a top-level failure report) does
+    /// not have to pre-slice or workaround.
+    #[test]
+    fn docker_ps_diag_format_empty_indent_emits_bare_template() {
+        assert_eq!(
+            docker_ps_diag_format("", "Ports"),
+            "{{.Names}}\t{{.Status}}\t{{.Ports}}"
+        );
+    }
+
+    /// Caller shield: no source line under `cli/src/commands/` may
+    /// spell either of the two pre-lift docker-ps `--format` template
+    /// literals inline any more. The four pre-lift sites
+    /// (`commands/e2e.rs` × 2, `commands/prerelease.rs` × 2) migrated;
+    /// any future consumer that wants the same three-column diagnostic
+    /// template reaches for one of the specialized docker-ps wrappers
+    /// (which route through [`docker_ps_diag_format`] internally) on
+    /// first grep, not by copy-pasting the raw literal from an
+    /// existing command module. Mirrors the negative half of the
+    /// sibling `no_command_module_still_spells_raw_probe_dump_or_none_ternary`
+    /// shield above.
+    #[test]
+    fn no_command_module_still_spells_raw_docker_ps_diag_format_literal() {
+        use std::path::PathBuf;
+        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands");
+        let mut offenders: Vec<(PathBuf, usize, String)> = Vec::new();
+        for entry in std::fs::read_dir(&commands_dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            for (idx, line) in source.lines().enumerate() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                    continue;
+                }
+                // Anchor on the fixed `{{.Names}}\t{{.Status}}\t` head
+                // that both pre-lift template shapes share, plus one
+                // of the two third-column variants — a stanza that
+                // spelled the pre-lift template verbatim always carried
+                // this exact sequence, and no post-lift consumer will
+                // (the typed primitives own the template inside their
+                // bodies, generated at runtime via `format!`).
+                if line.contains("{{.Names}}\\t{{.Status}}\\t{{.Ports}}")
+                    || line.contains("{{.Names}}\\t{{.Status}}\\t{{.Image}}")
+                {
+                    offenders.push((path.clone(), idx + 1, line.to_string()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "raw docker-ps `--format` template literal(s) survive \
+             under `commands/` — route each through \
+             `crate::probe_dump::probe_and_dump_docker_ps_running(...)` \
+             or `crate::probe_dump::probe_and_dump_docker_ps_exited_since_15m(...)` \
+             instead:\n{:#?}",
+            offenders
+        );
     }
 }

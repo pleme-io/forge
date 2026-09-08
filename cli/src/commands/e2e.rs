@@ -1046,27 +1046,16 @@ fn print_failure_diagnostics() {
 
     // Docker container status
     eprintln!("\nDocker containers (running):");
-    crate::probe_dump::probe_and_dump_or_none_sync(
+    crate::probe_dump::probe_and_dump_docker_ps_running(
         &docker_bin(),
-        &["ps", "--format", "  {{.Names}}\t{{.Status}}\t{{.Ports}}"],
         crate::probe_dump::DiagSink::Stderr,
         "  ",
     );
 
     // Recently exited containers (testcontainers that died)
     eprintln!("\nDocker containers (recently exited):");
-    crate::probe_dump::probe_and_dump_or_none_sync(
+    crate::probe_dump::probe_and_dump_docker_ps_exited_since_15m(
         &docker_bin(),
-        &[
-            "ps",
-            "-a",
-            "--filter",
-            "status=exited",
-            "--since",
-            "15m",
-            "--format",
-            "  {{.Names}}\t{{.Status}}\t{{.Image}}",
-        ],
         crate::probe_dump::DiagSink::Stderr,
         "  ",
     );
@@ -1556,18 +1545,31 @@ mod docker_bin_routing_tests {
         // `crate::retry::probe_stdout_capture_sync` primitive: two
         // (docker ps / docker ps -a --since=15m --filter status=exited)
         // reach it INDIRECTLY through the
-        // `crate::probe_dump::probe_and_dump_or_none_sync` fusion primitive
-        // that owns the `if trim().is_empty() { (none) } else { dump }`
-        // ternary, and one (docker images inside
-        // `print_failure_diagnostics`) reaches it DIRECTLY because that
-        // probe filters its output line-by-line rather than dumping
-        // whole. Both delegation shapes route through the shared
-        // primitive at the byte level; the count floor is the sum of the
-        // two, and the shield accepts either shape as a valid delegation.
+        // `crate::probe_dump::probe_and_dump_docker_ps_running` and
+        // `crate::probe_dump::probe_and_dump_docker_ps_exited_since_15m`
+        // specialized fusion wrappers (which delegate to
+        // `probe_and_dump_or_none_sync` at the byte level, owning the
+        // `--format` template as well as the `(none)`-or-dump ternary),
+        // and one (docker images inside `print_failure_diagnostics`)
+        // reaches it DIRECTLY because that probe filters its output
+        // line-by-line rather than dumping whole. All delegation
+        // shapes route through the shared primitive at the byte level;
+        // the count floor is the sum of the three, and the shield
+        // accepts any shape as a valid delegation.
         let direct_needle = format!("probe_stdout_capture_{}(", "sync");
         let fusion_needle = format!("probe_and_dump_or_none_{}(", "sync");
+        let docker_ps_running_needle = format!("probe_and_dump_docker_ps_{}(", "running");
+        let docker_ps_exited_needle = format!("probe_and_dump_docker_ps_exited_since_{}(", "15m");
         let mut hits = crate::test_support::code_line_hits(body, &direct_needle);
         hits.extend(crate::test_support::code_line_hits(body, &fusion_needle));
+        hits.extend(crate::test_support::code_line_hits(
+            body,
+            &docker_ps_running_needle,
+        ));
+        hits.extend(crate::test_support::code_line_hits(
+            body,
+            &docker_ps_exited_needle,
+        ));
         assert!(
             hits.len() >= 3,
             "commands/e2e.rs must delegate its three best-effort \
