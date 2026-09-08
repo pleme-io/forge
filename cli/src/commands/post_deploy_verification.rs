@@ -464,7 +464,7 @@ pub async fn verify_deployment(config: &PostDeployConfig) -> Result<PostDeployRe
     // Print summary
     println!();
     if result.is_valid() {
-        println!("{}", "✅ Post-deploy verification passed!".green().bold());
+        crate::ui::print_phase_success("Post-deploy verification passed!");
     } else {
         println!("{}", "❌ Post-deploy verification failed!".red().bold());
         for error in &result.errors {

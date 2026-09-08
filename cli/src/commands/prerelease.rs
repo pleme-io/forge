@@ -290,10 +290,7 @@ impl GateSummary {
         println!();
 
         if self.all_passed() {
-            println!(
-                "{}",
-                "✅ All gates passed! Ready for release.".green().bold()
-            );
+            crate::ui::print_phase_success("All gates passed! Ready for release.");
         } else {
             println!(
                 "{}",
