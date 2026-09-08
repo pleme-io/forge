@@ -353,9 +353,9 @@ pub async fn execute(
         spinner.finish_and_clear();
 
         if let Err(err) = outcome {
-            println!();
-            println!("{}", "✗ Unit tests failed".red().bold());
-            println!();
+            crate::commands::test_suite_failure_banner::print_suite_failure_banner(
+                crate::commands::test_suite_failure_banner::TestSuiteFailureKind::Unit,
+            );
             return Err(err.context("aborting release"));
         }
 
@@ -674,9 +674,9 @@ pub async fn execute(
 
                 // If tests failed, show service logs BEFORE cleanup
                 if tests_failed {
-                    println!();
-                    println!("{}", "✗ Integration tests failed".red().bold());
-                    println!();
+                    crate::commands::test_suite_failure_banner::print_suite_failure_banner(
+                        crate::commands::test_suite_failure_banner::TestSuiteFailureKind::Integration,
+                    );
 
                     info!("📋 Dumping service logs for debugging...");
                     println!();

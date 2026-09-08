@@ -1656,12 +1656,9 @@ pub async fn orchestrate_release(
                                             println!();
                                         }
                                         Err(e) => {
-                                            println!();
-                                            println!(
-                                                "{}",
-                                                "✗ Integration tests failed".red().bold()
+                                            crate::commands::test_suite_failure_banner::print_suite_failure_banner(
+                                                crate::commands::test_suite_failure_banner::TestSuiteFailureKind::Integration,
                                             );
-                                            println!();
                                             return Err(e);
                                         }
                                     }
