@@ -62,6 +62,7 @@ mod version;
 mod advisory_warning;
 mod attic_configure_step;
 mod attic_push_step;
+mod bookmark_git_sha_field;
 mod bun_argv;
 mod cargo_test_argv;
 mod cloudflare;
