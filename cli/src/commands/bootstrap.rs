@@ -248,7 +248,7 @@ pub async fn push_single(
 
     // Get git SHA for tagging
     let tags = generate_auto_tags(DEFAULT_ARCH).await?;
-    info!("🔖 Git SHA: {}", &tags[0]);
+    crate::info_bookmark_git_sha_field!(&tags[0]);
 
     // Build or use provided image path
     let image_path = if skip_build {
@@ -303,7 +303,7 @@ pub async fn push_all(token: Option<String>, retries: u32, parallel: bool) -> Re
 
     // Get git SHA for tagging (once, for consistency across all binaries)
     let tags = generate_auto_tags(DEFAULT_ARCH).await?;
-    info!("🔖 Git SHA: {}", &tags[0]);
+    crate::info_bookmark_git_sha_field!(&tags[0]);
 
     // Get GHCR token (once, for all pushes)
     let ghcr_token = discover_ghcr_token(token)?;
