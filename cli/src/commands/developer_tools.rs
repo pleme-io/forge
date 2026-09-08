@@ -340,8 +340,8 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
     print_success_banner(80, "✅ REGENERATION COMPLETE");
     println!();
     crate::ui::print_generated_files_heading();
-    crate::ui::print_bullet_item(&format!("{}", cargo_lock.display()));
-    crate::ui::print_bullet_item(&format!("{}", workspace_root.join("Cargo.nix").display()));
+    crate::ui::print_bullet_path(&cargo_lock);
+    crate::ui::print_bullet_path(&workspace_root.join("Cargo.nix"));
     println!();
     crate::ui::print_next_steps_heading();
     crate::ui::print_next_step(1, "Review the changes: git diff");
@@ -408,8 +408,8 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
     print_success_banner(80, "✅ UPDATE COMPLETE");
     println!();
     println!("Updated files:");
-    crate::ui::print_bullet_item(&format!("{}", workspace_root.join("Cargo.lock").display()));
-    crate::ui::print_bullet_item(&format!("{}", workspace_root.join("Cargo.nix").display()));
+    crate::ui::print_bullet_path(&workspace_root.join("Cargo.lock"));
+    crate::ui::print_bullet_path(&workspace_root.join("Cargo.nix"));
     println!();
     crate::ui::print_next_steps_heading();
     crate::ui::print_next_step(1, "Review the changes: git diff");

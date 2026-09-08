@@ -189,8 +189,8 @@ pub async fn web_regenerate(product: String, service: String, repo_root: String)
     print_success_banner(80, "✅ REGENERATION COMPLETE");
     println!();
     crate::ui::print_generated_files_heading();
-    crate::ui::print_bullet_item(&format!("{}", service_dir.join("deps.nix").display()));
-    crate::ui::print_bullet_item(&format!("{}", hanabi_dir.join("Cargo.nix").display()));
+    crate::ui::print_bullet_path(&service_dir.join("deps.nix"));
+    crate::ui::print_bullet_path(&hanabi_dir.join("Cargo.nix"));
     println!();
     crate::ui::print_next_steps_heading();
     crate::ui::print_next_step(1, "Review the changes: git diff");
@@ -281,8 +281,8 @@ pub async fn web_cargo_update(product: String, service: String, repo_root: Strin
     print_success_banner(80, "✅ UPDATE COMPLETE");
     println!();
     println!("Updated files:");
-    crate::ui::print_bullet_item(&format!("{}", hanabi_dir.join("Cargo.lock").display()));
-    crate::ui::print_bullet_item(&format!("{}", hanabi_dir.join("Cargo.nix").display()));
+    crate::ui::print_bullet_path(&hanabi_dir.join("Cargo.lock"));
+    crate::ui::print_bullet_path(&hanabi_dir.join("Cargo.nix"));
     println!();
     crate::ui::print_next_steps_heading();
     crate::ui::print_next_step(1, "Review the changes: git diff");

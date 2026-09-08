@@ -2776,6 +2776,85 @@ pub fn write_bullet_item<W: std::io::Write>(w: &mut W, message: &str) -> std::io
     writeln!(w, "  • {}", message)
 }
 
+/// Prints a single `"  • {path.display()}"` (two-space indent + U+2022 `•`
+/// BULLET glyph + single space + [`std::path::Path::display`]-projected
+/// path) bullet-list entry for a file-catalog readout under a preceding
+/// [`print_generated_files_heading`] or a `println!("Updated files:")`
+/// section head.
+///
+/// # Compounding
+///
+/// Pre-lift 8 sibling consumer sites across
+/// `commands/{developer_tools (×4: rust_regenerate `cargo_lock` +
+/// `Cargo.nix` + rust_cargo_update `Cargo.lock` + `Cargo.nix`),
+/// web_service (×4: web_regenerate `deps.nix` + `Cargo.nix` +
+/// web_cargo_update `Cargo.lock` + `Cargo.nix`)}.rs` each restated the
+/// same shape verbatim:
+///
+/// ```ignore
+/// crate::ui::print_bullet_item(&format!("{}", <path>.display()));
+/// ```
+///
+/// — a `Path::display()` projection wrapped through
+/// `format!("{}", ...)` into a `&str` allocation, then handed to the
+/// wider-body [`print_bullet_item`] sibling. Every one of the 8 sites
+/// was byte-identical (modulo the `<path>` expression that resolved to a
+/// [`std::path::Path`] / [`std::path::PathBuf`]); a future adjustment
+/// (a swap of `.display()` for a canonicalized-path projection, a
+/// promotion of the raw display string to a repo-relative rewrite, an
+/// OTLP `generated_file_reported` observability event alongside the
+/// print, a fusion with `print_generated_files_heading` so the heading
+/// and its catalog rows emit together) had to hit 8 sites in lockstep
+/// or drift the path-catalog grammar the two `regenerate` /
+/// `cargo_update` flows share; post-lift it hits ONE typed body.
+///
+/// # Distinct from every peer bullet primitive
+///
+/// [`print_bullet_item`] is the sibling underlying primitive this
+/// delegates through, carrying the same two-space indent, U+2022 `•`
+/// BULLET glyph, single-space gap, plain uncolored palette, and one
+/// `writeln!` line. The split is deliberate: this primitive owns the
+/// `Path`-shaped file-catalog entry (the message is always a rendered
+/// path with no label or connective around it), while
+/// [`print_bullet_item`] owns the free-form message entry (a
+/// pre-formatted label-`{value}` string the caller composed elsewhere).
+/// A `Path`-shaped caller that reaches for [`print_bullet_item`] and
+/// spells `&format!("{}", <path>.display())` inline reopens the 8-site
+/// duplication class this primitive exists to close; the caller shield
+/// [`print_bullet_path_callers_do_not_spell_format_display_inline`]
+/// catches that regression.
+///
+/// # Delegating through [`write_bullet_item`]
+///
+/// The writer body forwards through the sibling [`write_bullet_item`]
+/// primitive rather than inlining a second `writeln!(w, "  • {{}}", …)`
+/// stanza, so both bullet-primitive families share ONE owner for the
+/// two-space indent + `• ` prefix + trailing-newline grammar. A future
+/// adjustment to that grammar (indent width, glyph, spacing) lands at
+/// [`write_bullet_item`] and both `print_bullet_item` /
+/// `print_bullet_path` inherit it without drift.
+pub fn print_bullet_path(path: &std::path::Path) {
+    let _ = write_bullet_path(&mut std::io::stdout().lock(), path);
+}
+
+/// Writer-taking sibling to [`print_bullet_path`]. Emits the single
+/// `"  • {path.display()}"` line via [`write_bullet_item`] against the
+/// supplied writer. [`print_bullet_path`] is the stdout adapter; this
+/// variant exists so tests can pin the one-line body, the two-space
+/// indent, the U+2022 `•` BULLET glyph, and the byte-for-byte
+/// [`std::path::Path::display`] projection without capturing stdout.
+///
+/// Delegates through [`write_bullet_item`] so the two-space indent +
+/// `• ` prefix + trailing-newline grammar owns ONE body across both
+/// bullet-primitive families — a shift of that grammar at
+/// [`write_bullet_item`] flows to both siblings from one edit.
+pub fn write_bullet_path<W: std::io::Write>(
+    w: &mut W,
+    path: &std::path::Path,
+) -> std::io::Result<()> {
+    write_bullet_item(w, &path.display().to_string())
+}
+
 /// Prints the one-line `"    • <message>"` (four-space indent + U+2022
 /// `•` BULLET glyph + single space + plain uncolored message) nested
 /// sub-bullet grammar every pre-lift consumer in
@@ -11203,16 +11282,176 @@ mod tests {
                     lineno = i + 1
                 );
             }
-            let forward_hits = body.matches("crate::ui::print_bullet_item(").count();
+            // A follow-up lift split the `<path>.display()`-shaped file-
+            // catalog consumers off the wider-body free-form
+            // `print_bullet_item` message consumers onto the sibling
+            // `print_bullet_path` primitive (see
+            // `print_bullet_path_callers_do_not_spell_format_display_inline`
+            // below). Both siblings emit through `write_bullet_item` at
+            // the underlying grammar layer, so the per-module count of
+            // "sites that emit a two-space bullet row" is the SUM of the
+            // two forwarding call surfaces — a drop of one row from
+            // either surface still shows up here.
+            let bullet_item_hits = body.matches("crate::ui::print_bullet_item(").count();
+            let bullet_path_hits = body.matches("crate::ui::print_bullet_path(").count();
+            let forward_hits = bullet_item_hits + bullet_path_hits;
             assert_eq!(
                 forward_hits, *expected_forwards,
                 "{module_path} body must forward to \
-                 `crate::ui::print_bullet_item(\"<MSG>\")` at exactly \
-                 {expected_forwards} site(s) — one per pre-lift \
+                 `crate::ui::print_bullet_item(\"<MSG>\")` + \
+                 `crate::ui::print_bullet_path(<path>)` at exactly \
+                 {expected_forwards} site(s) combined — one per pre-lift \
                  consumer in this module. A fusion that folded two \
                  consumer sites into one call or dropped one of the \
                  bullet rows silently fails here. Found \
+                 {bullet_item_hits} `print_bullet_item(` + \
+                 {bullet_path_hits} `print_bullet_path(` = \
                  {forward_hits} forwarding hits."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_bullet_path`]. Pins
+    /// that the writer emits the `Path::display()`-projected path body
+    /// under the `write_bullet_item` grammar (two-space indent + U+2022
+    /// `•` glyph + single space + trailing newline). A silent contract
+    /// drift a future rewrite might introduce — inlining a second
+    /// `writeln!(w, "  • {}", …)` stanza that skips the shared
+    /// `write_bullet_item` sibling, swapping `Path::display()` for a
+    /// canonicalized-path projection that walks the filesystem, wrapping
+    /// the path in `.dimmed()` / `.cyan()` — flips this assertion.
+    #[test]
+    fn write_bullet_path_emits_path_display_under_write_bullet_item_grammar() {
+        use std::path::Path;
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_bullet_path(&mut buf, Path::new("pkgs/products/hakobi/Cargo.nix"))
+            .expect("write_bullet_path against a Vec<u8> writer must succeed");
+        let out = String::from_utf8(buf).expect("write_bullet_path must emit valid UTF-8");
+        assert_eq!(
+            out, "  • pkgs/products/hakobi/Cargo.nix\n",
+            "write_bullet_path must render `  • <path.display()>\\n` \
+             verbatim — the pre-lift stanza was \
+             `print_bullet_item(&format!(\"{{}}\", <path>.display()))` \
+             wrapped through the wider-body sibling and this primitive \
+             preserves that grammar exactly; got {out:?}"
+        );
+    }
+
+    /// Delegation invariant: [`super::write_bullet_path`] must forward
+    /// through [`super::write_bullet_item`] — the pre-lift stanza was
+    /// literally `print_bullet_item(&format!("{}", <path>.display()))`,
+    /// and the primitive's contract is byte-for-byte equivalence with
+    /// that pre-lift shape. A future refactor that inlined a second
+    /// `writeln!(w, "  • {{}}", …)` stanza inside `write_bullet_path`
+    /// would silently diverge whenever `write_bullet_item`'s grammar
+    /// shifts (indent width, glyph, spacing, trailing newline). Pin the
+    /// equivalence explicitly by comparing byte-for-byte against the
+    /// sibling on a plain-ASCII path where `Path::display().to_string()`
+    /// coincides with the `&str` form.
+    #[test]
+    fn write_bullet_path_delegates_through_write_bullet_item_byte_for_byte() {
+        use std::path::Path;
+        let plain = "workspace/Cargo.lock";
+        let mut via_path: Vec<u8> = Vec::new();
+        super::write_bullet_path(&mut via_path, Path::new(plain)).unwrap();
+        let mut via_item: Vec<u8> = Vec::new();
+        super::write_bullet_item(&mut via_item, plain).unwrap();
+        assert_eq!(
+            via_path, via_item,
+            "write_bullet_path must produce the SAME bytes as \
+             write_bullet_item on a plain-ASCII path — the pre-lift \
+             shape was `print_bullet_item(&format!(\"{{}}\", \
+             <path>.display()))`, so the byte-oracles must coincide on \
+             any path whose `Display` render coincides with its `&str` \
+             form. A divergence here signals that a future edit inlined \
+             a second `writeln!` inside `write_bullet_path` and lost \
+             the shared underlying grammar owner."
+        );
+    }
+
+    /// Post-lift caller shield: no source line under `cli/src/commands/`
+    /// may spell the pre-lift `print_bullet_item(&format!("{}",
+    /// <path>.display()))` stanza inline any more. Every path-catalog
+    /// row now routes through [`super::print_bullet_path`], which owns
+    /// the `Path::display()`-projection contract at one body. A future
+    /// caller that reaches for the wider-body [`super::print_bullet_item`]
+    /// sibling and spells the raw `format!`+`display()` stanza inline
+    /// reopens the 8-site duplication class this shield closes.
+    ///
+    /// The shield scans EVERY `commands/*.rs` module (not just the two
+    /// pre-lift files) so a future flow that surfaces a new path-catalog
+    /// entry reaches for `print_bullet_path` on first grep, not by
+    /// copy-pasting a `print_bullet_item(&format!(...display()))` stanza
+    /// from `developer_tools.rs`. Comment lines are skipped so the
+    /// shield's own diagnostic prose does not self-hit.
+    #[test]
+    fn print_bullet_path_callers_do_not_spell_format_display_inline() {
+        use std::path::PathBuf;
+        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands");
+        let mut offenders: Vec<(PathBuf, usize, String)> = Vec::new();
+        for entry in std::fs::read_dir(&commands_dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            for (idx, line) in source.lines().enumerate() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                    continue;
+                }
+                // The pre-lift stanza was
+                // `print_bullet_item(&format!("{}", <path>.display()))`
+                // spread on ONE physical line at every one of the 8
+                // sites. Match the `print_bullet_item(&format!("{}"` +
+                // `.display()` co-occurrence on the same line so a
+                // `print_bullet_item(&format!("Registry push: {}", …))`
+                // stanza (which is NOT a path-catalog row) is not
+                // flagged.
+                if line.contains("print_bullet_item(&format!(\"{}\"") && line.contains(".display()")
+                {
+                    offenders.push((path.clone(), idx + 1, line.to_string()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "raw \
+             `print_bullet_item(&format!(\"{{}}\", <path>.display()))` \
+             stanza(s) survive under `commands/` — route each through \
+             `crate::ui::print_bullet_path(<path>)` instead:\n{:#?}",
+            offenders
+        );
+    }
+
+    /// Positive half of the shield: the two pre-lift files MUST each
+    /// forward through `crate::ui::print_bullet_path(` at least the
+    /// pre-lift count. A migration that dropped a call site outright
+    /// leaves the negative "no raw `format!`+`display()` inline shape"
+    /// scan trivially satisfied by absence but the positive count still
+    /// fails, and the sum-shield above keeps the total row count
+    /// invariant.
+    #[test]
+    fn every_prelift_module_forwards_through_print_bullet_path() {
+        use std::path::PathBuf;
+        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands");
+        // (module basename, minimum direct forward count)
+        let expectations: &[(&str, usize)] = &[("developer_tools.rs", 4), ("web_service.rs", 4)];
+        for (basename, min_count) in expectations {
+            let path = commands_dir.join(basename);
+            let source = std::fs::read_to_string(&path).unwrap();
+            let forwards = source.matches("crate::ui::print_bullet_path(").count();
+            assert!(
+                forwards >= *min_count,
+                "{basename} must forward at least {min_count} \
+                 file-catalog path row(s) through \
+                 `crate::ui::print_bullet_path(`; found {forwards}. A \
+                 dropped call would leave the negative raw-shape scan \
+                 satisfied by absence.",
             );
         }
     }
