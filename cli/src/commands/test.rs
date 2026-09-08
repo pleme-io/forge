@@ -321,10 +321,8 @@ async fn run_web_tests(service: &str, service_dir: &str, test_type: TestType) ->
             run_test_suite(service, service_dir, "unit", &config.unit).await?;
             tests_run += 1;
         } else if !config.unit.enabled {
-            println!(
-                "  {} Unit tests: {} (disabled in deploy.yaml)",
-                "⏭️ ".bright_yellow(),
-                "skipped".dimmed()
+            crate::commands::web_test_suite_skipped::print_web_test_suite_skipped(
+                crate::commands::web_test_suite_skipped::WebTestSuiteKind::Unit,
             );
             tests_skipped += 1;
         }
@@ -342,10 +340,8 @@ async fn run_web_tests(service: &str, service_dir: &str, test_type: TestType) ->
             .await?;
             tests_run += 1;
         } else if !config.api_integration.enabled {
-            println!(
-                "  {} API integration tests: {} (disabled in deploy.yaml)",
-                "⏭️ ".bright_yellow(),
-                "skipped".dimmed()
+            crate::commands::web_test_suite_skipped::print_web_test_suite_skipped(
+                crate::commands::web_test_suite_skipped::WebTestSuiteKind::ApiIntegration,
             );
             tests_skipped += 1;
         }
@@ -355,10 +351,8 @@ async fn run_web_tests(service: &str, service_dir: &str, test_type: TestType) ->
             run_test_suite(service, service_dir, "e2e", &config.e2e).await?;
             tests_run += 1;
         } else if !config.e2e.enabled {
-            println!(
-                "  {} E2E tests: {} (disabled in deploy.yaml)",
-                "⏭️ ".bright_yellow(),
-                "skipped".dimmed()
+            crate::commands::web_test_suite_skipped::print_web_test_suite_skipped(
+                crate::commands::web_test_suite_skipped::WebTestSuiteKind::E2E,
             );
             tests_skipped += 1;
         }
