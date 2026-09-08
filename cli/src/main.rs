@@ -62,6 +62,7 @@ mod version;
 mod attic_configure_step;
 mod attic_push_step;
 mod bun_argv;
+mod cargo_test_argv;
 mod cloudflare;
 mod deploy_target_field;
 mod git;
