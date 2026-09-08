@@ -67,4 +67,5 @@ pub mod tool;
 pub mod typescript;
 pub mod web_build_verify;
 pub mod web_service;
+pub mod web_test_suite_skipped;
 pub mod workspace_deps;
