@@ -90,6 +90,7 @@ mod success_step;
 mod tags_field;
 mod tools;
 mod updated_field;
+mod workload_field;
 mod zone_id_field;
 
 // New architecture modules

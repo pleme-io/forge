@@ -514,7 +514,10 @@ pub async fn execute(
         println!();
         info!("👀 Watching StatefulSet rollout...");
         crate::info_namespace_field!(namespace);
-        info!("   StatefulSet: {}", name);
+        crate::info_workload_field!(
+            crate::workload_field::KubernetesWorkloadKind::StatefulSet,
+            name
+        );
         println!();
 
         // Monitor rollout with pod failure detection

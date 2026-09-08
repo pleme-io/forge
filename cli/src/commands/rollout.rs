@@ -26,7 +26,10 @@ pub async fn execute(
     if rollback {
         info!("🔄 Performing rollback...");
         crate::info_namespace_field!(namespace);
-        info!("   Deployment: {}", name);
+        crate::info_workload_field!(
+            crate::workload_field::KubernetesWorkloadKind::Deployment,
+            name
+        );
         println!();
 
         let rollback_result = kubectl_command_async()
