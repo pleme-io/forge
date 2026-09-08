@@ -420,7 +420,7 @@ pub async fn execute(
                     "⚠️  Compose file not found: {}",
                     compose_file_path.display()
                 );
-                warn!("⚠️  Skipping integration tests");
+                crate::warn_advisory!("Skipping integration tests");
                 println!();
             } else {
                 info!("📦 Loading Docker image into local daemon...");
@@ -706,8 +706,8 @@ pub async fn execute(
                     .status()
                     .await;
 
-                if cleanup_result.is_err() {
-                    warn!("⚠️  Failed to cleanup docker-compose (non-fatal)");
+                if let Err(e) = cleanup_result {
+                    crate::warn_nonfatal!("Failed to cleanup docker-compose", e);
                 }
 
                 // Bail after cleanup if tests failed
@@ -729,7 +729,7 @@ pub async fn execute(
         } else {
             crate::step_header::announce_step_header(3, 5, "Integration Testing");
             println!();
-            warn!("⚠️  No compose file provided, skipping integration tests");
+            crate::warn_advisory!("No compose file provided, skipping integration tests");
             println!();
         }
     } else {

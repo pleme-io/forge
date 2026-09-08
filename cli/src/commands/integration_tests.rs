@@ -691,7 +691,7 @@ pub async fn execute(
                 anyhow::bail!("Integration tests failed");
             }
             "continue" => {
-                warn!("⚠️  Continuing despite test failures");
+                crate::warn_advisory!("Continuing despite test failures");
             }
             _ => {
                 anyhow::bail!("Unknown on_failure action: {}", config.on_failure.action);
@@ -796,7 +796,7 @@ async fn execute_sequential(
         results.push(result.clone());
 
         if !result.success && config.execution.fail_fast {
-            warn!("⚠️  Fail-fast enabled, stopping test execution");
+            crate::warn_advisory!("Fail-fast enabled, stopping test execution");
             break;
         }
     }
@@ -1567,7 +1567,9 @@ pub async fn execute_pre_deployment_tests(
     // Handle failure
     if any_failed {
         if config.on_failure.action == "warn" {
-            warn!("⚠️  Pre-deployment tests failed but on_failure.action = 'warn', continuing...");
+            crate::warn_advisory!(
+                "Pre-deployment tests failed but on_failure.action = 'warn', continuing..."
+            );
             Ok(())
         } else {
             error!("❌ Pre-deployment tests failed! Release aborted.");

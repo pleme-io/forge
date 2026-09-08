@@ -526,7 +526,7 @@ pub async fn execute(
         loop {
             // Check for timeout
             if tokio::time::Instant::now().duration_since(start_time) > rollout_timeout {
-                warn!("⚠️  Rollout timeout after 5 minutes");
+                crate::warn_advisory!("Rollout timeout after 5 minutes");
                 break;
             }
 
@@ -740,13 +740,13 @@ pub async fn execute(
                 if deployed_image.contains(&git_sha) {
                     crate::info_success!("Verified: {}", deployed_image);
                 } else {
-                    warn!("⚠️  Image mismatch!");
+                    crate::warn_advisory!("Image mismatch!");
                     warn!("   Expected: {}:{}", registry, git_sha);
                     warn!("   Deployed: {}", deployed_image);
                 }
             }
             _ => {
-                warn!("⚠️  Could not verify deployed image");
+                crate::warn_advisory!("Could not verify deployed image");
             }
         }
     } else {
