@@ -4,7 +4,6 @@
 //! Handles both primary and secondary clusters in a single release.
 
 use anyhow::Result;
-use tracing::info;
 
 use crate::commands::push;
 use crate::commands::release_commit::announce_and_commit_cluster_overlay_release_step;
@@ -168,7 +167,7 @@ async fn update_kustomization_image(
                 line, "newTag", new_tag,
             ));
             updated_images = true;
-            info!("   Updated images[] newTag to: {}", new_tag);
+            crate::info_updated_field!("images[] newTag", new_tag);
         }
         // Update AGENT_IMAGE env var reference if present. The
         // registry-anchored `{prefix}{new_image}{suffix}\n` splice
@@ -190,7 +189,7 @@ async fn update_kustomization_image(
             {
                 new_content.push_str(&rewritten);
                 updated_env = true;
-                info!("   Updated AGENT_IMAGE env to: {}", new_image);
+                crate::info_updated_field!("AGENT_IMAGE env", new_image);
             } else {
                 new_content.push_str(line);
                 new_content.push('\n');

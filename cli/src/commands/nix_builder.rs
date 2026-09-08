@@ -394,7 +394,7 @@ async fn update_kustomization_image(
                 line, "newTag", new_tag,
             ));
             updated = true;
-            info!("   Updated newTag to: {}", new_tag);
+            crate::info_updated_field!("newTag", new_tag);
         } else {
             new_content.push_str(line);
             new_content.push('\n');
@@ -460,7 +460,7 @@ async fn update_kenshi_builder_image(
                 );
             new_content.push_str(&rewritten);
             updated = true;
-            info!("   Updated BUILDER_IMAGE to: {}", new_image);
+            crate::info_updated_field!("BUILDER_IMAGE", new_image);
         } else {
             new_content.push_str(line);
             new_content.push('\n');
