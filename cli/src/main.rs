@@ -59,6 +59,7 @@ mod tree_listing;
 mod version;
 
 // Legacy modules (to be migrated)
+mod advisory_warning;
 mod attic_configure_step;
 mod attic_push_step;
 mod bun_argv;

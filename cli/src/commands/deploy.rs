@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::path::Path;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::{cloudflare, commands, config::DeployConfig};
 
@@ -187,7 +187,9 @@ pub async fn execute(
                     }
                 }
             } else {
-                warn!("⚠️  Cloudflare enabled but missing configuration (zone_id, api_token, or base_url)");
+                crate::warn_advisory!(
+                    "Cloudflare enabled but missing configuration (zone_id, api_token, or base_url)"
+                );
                 println!();
             }
         }

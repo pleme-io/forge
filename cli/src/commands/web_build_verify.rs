@@ -3,7 +3,7 @@ use colored::Colorize;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use tracing::{info, warn};
+use tracing::info;
 
 /// Verifies web build has no hardcoded API URLs and prepares runtime env.js
 pub async fn execute(dist_dir: PathBuf, template_path: PathBuf) -> Result<()> {
@@ -188,7 +188,7 @@ fn verify_cache_policy(dist_dir: &Path) -> Result<()> {
             Fix: Update index.html to load env.js dynamically with cache-busting"
         );
     } else {
-        warn!("⚠️  env.js not referenced in index.html (may be loaded differently)");
+        crate::warn_advisory!("env.js not referenced in index.html (may be loaded differently)");
     }
 
     // CHECK 2: Verify version.json uses cache-busting
@@ -201,7 +201,7 @@ fn verify_cache_policy(dist_dir: &Path) -> Result<()> {
             version.json must be fetched fresh on every page load to detect new deployments"
         );
     } else {
-        warn!("⚠️  version.json not referenced in index.html");
+        crate::warn_advisory!("version.json not referenced in index.html");
     }
 
     // CHECK 3: Verify no long-cache meta tags in HTML
@@ -247,7 +247,7 @@ fn verify_cache_policy(dist_dir: &Path) -> Result<()> {
             .collect();
 
         if asset_files.is_empty() {
-            warn!("⚠️  No JavaScript or CSS assets found in distribution");
+            crate::warn_advisory!("No JavaScript or CSS assets found in distribution");
         } else {
             // Check if assets use content hashing (e.g., main-abc123.js)
             let hashed_pattern = regex::Regex::new(r"-[a-zA-Z0-9]{8,}\.(js|css)$").unwrap();
@@ -261,7 +261,7 @@ fn verify_cache_policy(dist_dir: &Path) -> Result<()> {
                     hashed_count += 1;
                 } else {
                     non_hashed_count += 1;
-                    warn!("⚠️  Non-hashed asset: {} (will use short cache)", filename);
+                    crate::warn_advisory!("Non-hashed asset: {} (will use short cache)", filename);
                 }
             }
 
@@ -278,7 +278,7 @@ fn verify_cache_policy(dist_dir: &Path) -> Result<()> {
             }
         }
     } else {
-        warn!("⚠️  Assets directory not found");
+        crate::warn_advisory!("Assets directory not found");
     }
 
     crate::ui::print_bright_step_pass("Cache policy verification passed");
