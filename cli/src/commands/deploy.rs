@@ -83,7 +83,7 @@ pub async fn execute(
         .ok_or_else(|| anyhow::anyhow!("Invalid registry format: {}", registry))?;
 
     info!("📝 Updating kustomization.yaml...");
-    info!("   Image: {}", image_name);
+    crate::info_image_field!(image_name);
     info!("   Old tag: {}", old_tag);
     info!("   New tag: {}", tag);
     println!();
