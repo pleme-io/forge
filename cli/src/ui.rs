@@ -1074,6 +1074,136 @@ pub fn print_boxed_banner(style: BoxedBannerStyle, title: &str) {
     println!();
 }
 
+/// Top-border glyph line of the wide `╔`-boxed banner grammar —
+/// `╔` + 63 `═` glyphs + `╗`, 65 codepoints wide.
+///
+/// # Distinct from [`BOXED_HEADER_TOP`]
+///
+/// [`BOXED_HEADER_TOP`] is 62 codepoints (60 `═`), the narrower dialect
+/// [`print_header`] / [`print_boxed_banner`] emit. Five pre-lift sibling
+/// stanzas in `commands/{comprehensive_release, integration_tests}.rs`
+/// each hand-rolled a 63-`═` box against a hand-formatted title line
+/// whose right-side `║` sat 2–3 codepoints past the narrower dialect's
+/// natural fill. Naming the wider top-border literal at ONE named
+/// constant lets [`WideBoxedBannerStyle`] paint it in four palettes
+/// without each caller respelling the 65-codepoint literal inline.
+const WIDE_BOXED_BANNER_TOP: &str =
+    "╔═══════════════════════════════════════════════════════════════╗";
+
+/// Bottom-border glyph line sibling to [`WIDE_BOXED_BANNER_TOP`] —
+/// `╚` + 63 `═` glyphs + `╝`, 65 codepoints wide.
+const WIDE_BOXED_BANNER_BOTTOM: &str =
+    "╚═══════════════════════════════════════════════════════════════╝";
+
+/// Palette+weight variant [`write_wide_boxed_banner`] /
+/// [`print_wide_boxed_banner`] paint the three body lines of the WIDE
+/// `╔`-boxed grammar in.
+///
+/// Pre-lift five sibling stanzas in
+/// `commands/{comprehensive_release, integration_tests}.rs` each spelled
+/// the same 20-line
+/// `println!("{}", "╔═…═╗".bright_<cyan|green|magenta|yellow>().bold())`
+/// + hand-padded title middle line + closing border verbatim, differing
+/// only in palette and the title text. The color choice is CLOSED to the
+/// four dialects those stanzas actually spell — cyan-bold for the
+/// workflow-intro and integration-test-open banners, green-bold for the
+/// comprehensive-release completion banner, magenta-bold for the manual
+/// integration-tests banner, and yellow-bold for the pre-deployment
+/// tests banner — so a new palette is a deliberate additive edit, not
+/// an open call-site choice.
+///
+/// # Distinct from [`BoxedBannerStyle`]
+///
+/// [`BoxedBannerStyle`] carries the NARROWER 62-codepoint box dialect
+/// (`BOXED_HEADER_TOP` / `BOXED_HEADER_BOTTOM`) with a 58-column padded
+/// title middle line the primitive itself formats. This enum carries
+/// the WIDER 65-codepoint box dialect where each caller hand-formats
+/// its own middle line (padding + closing `║` embedded in the title
+/// argument) — the two dialects coexist because the pre-lift stanzas
+/// carried DIFFERENT box widths, not because either author preferred a
+/// different padding rule. Merging into one enum would force one
+/// dialect to widen its border literal and re-pad every middle line;
+/// keeping the two enums lets each dialect stay byte-identical to its
+/// pre-lift stanzas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WideBoxedBannerStyle {
+    /// `.bright_cyan().bold()` palette. Pre-lift sites:
+    /// `commands/comprehensive_release.rs` ("🚀 <service> Comprehensive
+    /// Release Workflow") and `commands/integration_tests.rs`
+    /// ("📊 Running Post-Deployment Integration Tests…").
+    CyanBold,
+    /// `.bright_green().bold()` palette. Pre-lift site:
+    /// `commands/comprehensive_release.rs` ("✅ Comprehensive Release
+    /// Complete!…").
+    GreenBold,
+    /// `.bright_magenta().bold()` palette. Pre-lift site:
+    /// `commands/integration_tests.rs` ("🧪 Manual Integration Tests:
+    /// <service>…").
+    MagentaBold,
+    /// `.bright_yellow().bold()` palette. Pre-lift site:
+    /// `commands/integration_tests.rs` ("🧪 Running Pre-Deployment
+    /// Tests (before push/deploy)…").
+    YellowBold,
+}
+
+impl WideBoxedBannerStyle {
+    /// Paint a single body line in this style's palette+weight pair.
+    /// One code path per line-per-style; the enum's closed exhaustiveness
+    /// means a new palette must add both the variant AND the arm.
+    fn paint(self, s: &str) -> colored::ColoredString {
+        match self {
+            Self::CyanBold => s.bright_cyan().bold(),
+            Self::GreenBold => s.bright_green().bold(),
+            Self::MagentaBold => s.bright_magenta().bold(),
+            Self::YellowBold => s.bright_yellow().bold(),
+        }
+    }
+}
+
+/// Writer-taking sibling to [`print_wide_boxed_banner`]. Emits the three
+/// body lines of the WIDE `╔═…═╗` boxed grammar — top border, the
+/// caller-formatted title middle line, bottom border — in the
+/// palette+weight [`WideBoxedBannerStyle`] names, via [`writeln!`]
+/// against the supplied writer. The leading and trailing framing blank
+/// lines the pre-lift stanzas each carried live on
+/// [`print_wide_boxed_banner`], not on this writer sibling — so a test
+/// that pins the box's body-line count and per-line palette+weight can
+/// inspect emitted bytes rather than capturing stdout.
+///
+/// # The title-line contract
+///
+/// Unlike [`write_boxed_banner`] (which pads the title against a
+/// primitive-owned `BOXED_HEADER_TITLE_WIDTH`), this primitive passes
+/// the caller's `title_line` argument through verbatim as the middle
+/// body line. The five pre-lift stanzas each spelled their title with
+/// a hand-formatted opening `║`, hand-tuned padding, and (in four of
+/// the five sites) a closing `║` embedded in the string — the
+/// primitive preserves that spelling byte-identically so a rewrite of
+/// a middle line does not silently drift the top and bottom borders
+/// out of alignment with the title's true display width.
+pub fn write_wide_boxed_banner<W: std::io::Write>(
+    w: &mut W,
+    style: WideBoxedBannerStyle,
+    title_line: &str,
+) -> std::io::Result<()> {
+    writeln!(w, "{}", style.paint(WIDE_BOXED_BANNER_TOP))?;
+    writeln!(w, "{}", style.paint(title_line))?;
+    writeln!(w, "{}", style.paint(WIDE_BOXED_BANNER_BOTTOM))?;
+    Ok(())
+}
+
+/// Prints the leading blank, the [`write_wide_boxed_banner`] three-line
+/// box in [`WideBoxedBannerStyle`]'s palette+weight, and the trailing
+/// blank via [`writeln!`] against [`std::io::stdout()`]. Mirrors
+/// [`print_boxed_banner`]'s exact leading-blank + box + trailing-blank
+/// framing so a caller migrating between the two primitives cannot
+/// silently drift the outer whitespace.
+pub fn print_wide_boxed_banner(style: WideBoxedBannerStyle, title_line: &str) {
+    println!();
+    let _ = write_wide_boxed_banner(&mut std::io::stdout().lock(), style, title_line);
+    println!();
+}
+
 pub fn print_success(message: &str) {
     let _ = write_success(&mut std::io::stdout().lock(), message);
 }
@@ -6972,6 +7102,216 @@ mod tests {
             "boxed-banner stanza reintroduced inline in command \
              module(s); call `crate::ui::print_boxed_banner(\
              BoxedBannerStyle::CyanBold|GreenBold, title)` instead:\n  {}",
+            offenders.join("\n  ")
+        );
+    }
+
+    /// Fail-before-pass envelope for [`super::write_wide_boxed_banner`]
+    /// under each of its four [`super::WideBoxedBannerStyle`] palettes.
+    /// Pins the exact three body lines the pre-lift five sibling
+    /// stanzas (`commands/comprehensive_release.rs` intro+completion,
+    /// `commands/integration_tests.rs` post-deploy open, manual open,
+    /// pre-deploy open) each spelled inline as sibling
+    /// `println!("{}", "╔══…══╗".bright_<cyan|green|magenta|yellow>().bold())`
+    /// + hand-formatted title middle line + closing border. A silent
+    /// drift a future rewrite might introduce — dropping `.bold()` on
+    /// one line only, misspelling one palette on one border while
+    /// leaving the middle line untouched, dropping the outer
+    /// framing-blank pair — flips these assertions rather than
+    /// compiling and silently diverging the five migrated call sites'
+    /// visual grammar.
+    #[test]
+    fn write_wide_boxed_banner_emits_three_body_lines_per_style_with_matching_ansi_seqs() {
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        // (style, expected combined bold+bright_<color> SGR sequence).
+        // `colored` splices the two parameters into one `\x1b[1;<code>m`
+        // open escape per line; the codes are 96 (bright_cyan), 92
+        // (bright_green), 95 (bright_magenta), 93 (bright_yellow) —
+        // preserving the pre-lift `.bright_<color>().bold()` chain on
+        // each of the three lines.
+        let cases: &[(super::WideBoxedBannerStyle, &str, &str)] = &[
+            (
+                super::WideBoxedBannerStyle::CyanBold,
+                "\x1b[1;96m",
+                "║  🚀 Nexus Comprehensive Release Workflow",
+            ),
+            (
+                super::WideBoxedBannerStyle::GreenBold,
+                "\x1b[1;92m",
+                "║  ✅ Comprehensive Release Complete!                           ║",
+            ),
+            (
+                super::WideBoxedBannerStyle::MagentaBold,
+                "\x1b[1;95m",
+                "║  🧪 Manual Integration Tests: Nexus                           ║",
+            ),
+            (
+                super::WideBoxedBannerStyle::YellowBold,
+                "\x1b[1;93m",
+                "║  🧪 Running Pre-Deployment Tests (before push/deploy)       ║",
+            ),
+        ];
+
+        for (style, expected_sgr, title_line) in cases {
+            let mut buf: Vec<u8> = Vec::new();
+            super::write_wide_boxed_banner(&mut buf, *style, title_line)
+                .expect("write_wide_boxed_banner against a Vec<u8> writer must succeed");
+
+            let out =
+                String::from_utf8(buf).expect("write_wide_boxed_banner must emit valid UTF-8");
+
+            let lines: Vec<&str> = out.lines().collect();
+            assert_eq!(
+                lines.len(),
+                3,
+                "{:?} — write_wide_boxed_banner must emit exactly three \
+                 body lines (top border, title, bottom border); got {}:\n{}",
+                style,
+                lines.len(),
+                out
+            );
+
+            for (i, line) in lines.iter().enumerate() {
+                assert!(
+                    line.contains(expected_sgr),
+                    "{:?} — line {} must carry the combined bold+bright ANSI \
+                     SGR sequence (`{}`) — the pre-lift stanza spelled \
+                     `.bright_<color>().bold()` on each of the three \
+                     lines; got {:?}",
+                    style,
+                    i,
+                    expected_sgr.escape_debug(),
+                    line
+                );
+            }
+
+            assert!(
+                lines[0].contains('╔') && lines[0].contains('╗'),
+                "{:?} — line 0 must be the top border framed by `╔`…`╗`; \
+                 got {:?}",
+                style,
+                lines[0]
+            );
+            assert!(
+                lines[2].contains('╚') && lines[2].contains('╝'),
+                "{:?} — line 2 must be the bottom border framed by `╚`…`╝`; \
+                 got {:?}",
+                style,
+                lines[2]
+            );
+            assert!(
+                lines[1].contains(title_line),
+                "{:?} — line 1 must carry the title verbatim; got {:?}",
+                style,
+                lines[1]
+            );
+        }
+    }
+
+    /// Pins the exact 65-codepoint (`╔` + 63 `═` + `╗`) top and bottom
+    /// border widths of the wide dialect against a codepoint count —
+    /// the pre-lift five sibling stanzas each spelled the 63-`═` box
+    /// verbatim, and a future rewrite that widened or narrowed the box
+    /// by even one `═` glyph would silently drift every migrated call
+    /// site's visual grammar out of alignment with its hand-formatted
+    /// title middle line. This assertion flips instead.
+    #[test]
+    fn wide_boxed_banner_borders_are_63_equals_glyphs_wide() {
+        let top = super::WIDE_BOXED_BANNER_TOP;
+        let bottom = super::WIDE_BOXED_BANNER_BOTTOM;
+
+        assert_eq!(
+            top.chars().count(),
+            65,
+            "WIDE_BOXED_BANNER_TOP must be 65 codepoints wide (`╔` + \
+             63 `═` + `╗`); got {} codepoints in {:?}",
+            top.chars().count(),
+            top
+        );
+        assert_eq!(
+            bottom.chars().count(),
+            65,
+            "WIDE_BOXED_BANNER_BOTTOM must be 65 codepoints wide (`╚` + \
+             63 `═` + `╝`); got {} codepoints in {:?}",
+            bottom.chars().count(),
+            bottom
+        );
+        assert_eq!(
+            top.chars().filter(|c| *c == '═').count(),
+            63,
+            "WIDE_BOXED_BANNER_TOP must carry exactly 63 `═` glyphs; \
+             got {:?}",
+            top
+        );
+        assert_eq!(
+            bottom.chars().filter(|c| *c == '═').count(),
+            63,
+            "WIDE_BOXED_BANNER_BOTTOM must carry exactly 63 `═` glyphs; \
+             got {:?}",
+            bottom
+        );
+        assert!(
+            top.starts_with('╔') && top.ends_with('╗'),
+            "WIDE_BOXED_BANNER_TOP must be framed by `╔`…`╗`; got {:?}",
+            top
+        );
+        assert!(
+            bottom.starts_with('╚') && bottom.ends_with('╝'),
+            "WIDE_BOXED_BANNER_BOTTOM must be framed by `╚`…`╝`; got {:?}",
+            bottom
+        );
+    }
+
+    /// Shield test — grep-based assertion that no command module still
+    /// carries the WIDE boxed-banner stanza inline as three sibling
+    /// `println!("{}", "╔══(63×═)══╗".bright_<cyan|green|magenta|yellow>().bold())`
+    /// + hand-formatted title + closing border lines. Pre-lift five
+    /// consumers (`commands/comprehensive_release.rs` intro+completion,
+    /// `commands/integration_tests.rs` post-deploy open + manual open +
+    /// pre-deploy open) each spelled the 20-line stanza against a
+    /// 63-`═` `╔`-boxed literal; all five now delegate to
+    /// [`super::print_wide_boxed_banner`]. This shield fires if a future
+    /// rewrite reintroduces the inline stanza under ANY of the four
+    /// palettes, keeping the wide box's color+weight+width contract at
+    /// ONE typed boundary.
+    #[test]
+    fn print_wide_boxed_banner_callers_delegate_through_primitive() {
+        let commands_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands");
+
+        const NEEDLES: &[&str] = &[
+            "\"╔═══════════════════════════════════════════════════════════════╗\".bright_cyan()",
+            "\"╔═══════════════════════════════════════════════════════════════╗\".bright_green()",
+            "\"╔═══════════════════════════════════════════════════════════════╗\".bright_magenta()",
+            "\"╔═══════════════════════════════════════════════════════════════╗\".bright_yellow()",
+        ];
+
+        let mut offenders: Vec<String> = Vec::new();
+        let entries = std::fs::read_dir(&commands_dir)
+            .expect("commands/ dir must exist under CARGO_MANIFEST_DIR/src");
+        for entry in entries {
+            let entry = entry.expect("read_dir entry");
+            let path = entry.path();
+            if !crate::repo::path_has_extension(&path, "rs") {
+                continue;
+            }
+            let content = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+            for needle in NEEDLES {
+                if content.contains(needle) {
+                    offenders.push(format!("{} :: {}", path.display(), needle));
+                }
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "wide boxed-banner stanza reintroduced inline in command \
+             module(s); call `crate::ui::print_wide_boxed_banner(\
+             WideBoxedBannerStyle::CyanBold|GreenBold|MagentaBold|YellowBold, \
+             title_line)` instead:\n  {}",
             offenders.join("\n  ")
         );
     }

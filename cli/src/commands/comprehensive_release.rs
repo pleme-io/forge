@@ -221,26 +221,10 @@ pub async fn execute(
     watch: bool,
 ) -> Result<()> {
     let workflow_start = Instant::now();
-    println!();
-    println!(
-        "{}",
-        "╔═══════════════════════════════════════════════════════════════╗"
-            .bright_cyan()
-            .bold()
+    crate::ui::print_wide_boxed_banner(
+        crate::ui::WideBoxedBannerStyle::CyanBold,
+        &format!("║  🚀 {} Comprehensive Release Workflow", service_name),
     );
-    println!(
-        "{}",
-        format!("║  🚀 {} Comprehensive Release Workflow", service_name)
-            .bright_cyan()
-            .bold()
-    );
-    println!(
-        "{}",
-        "╚═══════════════════════════════════════════════════════════════╝"
-            .bright_cyan()
-            .bold()
-    );
-    println!();
 
     // ========================================================================
     // STEP 0: INPUT VALIDATION
@@ -814,26 +798,10 @@ pub async fn execute(
     // SUMMARY
     // ========================================================================
     let workflow_duration = workflow_start.elapsed();
-    println!();
-    println!(
-        "{}",
-        "╔═══════════════════════════════════════════════════════════════╗"
-            .bright_green()
-            .bold()
+    crate::ui::print_wide_boxed_banner(
+        crate::ui::WideBoxedBannerStyle::GreenBold,
+        "║  ✅ Comprehensive Release Complete!                           ║",
     );
-    println!(
-        "{}",
-        "║  ✅ Comprehensive Release Complete!                           ║"
-            .bright_green()
-            .bold()
-    );
-    println!(
-        "{}",
-        "╚═══════════════════════════════════════════════════════════════╝"
-            .bright_green()
-            .bold()
-    );
-    println!();
     println!("Summary:");
     crate::ui::print_bullet_item(&format!(
         "Unit tests: {}",

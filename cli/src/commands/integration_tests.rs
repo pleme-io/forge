@@ -542,26 +542,10 @@ pub async fn execute(
         return Ok(vec![]);
     }
 
-    println!();
-    println!(
-        "{}",
-        "╔═══════════════════════════════════════════════════════════════╗"
-            .bright_cyan()
-            .bold()
+    crate::ui::print_wide_boxed_banner(
+        crate::ui::WideBoxedBannerStyle::CyanBold,
+        "║  📊 Running Post-Deployment Integration Tests              ║",
     );
-    println!(
-        "{}",
-        "║  📊 Running Post-Deployment Integration Tests              ║"
-            .bright_cyan()
-            .bold()
-    );
-    println!(
-        "{}",
-        "╚═══════════════════════════════════════════════════════════════╝"
-            .bright_cyan()
-            .bold()
-    );
-    println!();
 
     // Wait for application to be ready by polling health endpoint
     info!("🔍 Waiting for application to be ready...");
@@ -1230,29 +1214,13 @@ pub async fn execute_manual(
             )
         })?;
 
-    println!();
-    println!(
-        "{}",
-        "╔═══════════════════════════════════════════════════════════════╗"
-            .bright_magenta()
-            .bold()
-    );
-    println!(
-        "{}",
-        format!(
+    crate::ui::print_wide_boxed_banner(
+        crate::ui::WideBoxedBannerStyle::MagentaBold,
+        &format!(
             "║  🧪 Manual Integration Tests: {}                           ║",
             service
-        )
-        .bright_magenta()
-        .bold()
+        ),
     );
-    println!(
-        "{}",
-        "╚═══════════════════════════════════════════════════════════════╝"
-            .bright_magenta()
-            .bold()
-    );
-    println!();
 
     // Filter test suites if requested
     let test_suites: Vec<TestSuite> = if let Some(filter) = &suite_filter {
@@ -1338,26 +1306,10 @@ pub async fn execute_pre_deployment_tests(
         return Ok(());
     }
 
-    println!();
-    println!(
-        "{}",
-        "╔═══════════════════════════════════════════════════════════════╗"
-            .bright_yellow()
-            .bold()
+    crate::ui::print_wide_boxed_banner(
+        crate::ui::WideBoxedBannerStyle::YellowBold,
+        "║  🧪 Running Pre-Deployment Tests (before push/deploy)       ║",
     );
-    println!(
-        "{}",
-        "║  🧪 Running Pre-Deployment Tests (before push/deploy)       ║"
-            .bright_yellow()
-            .bold()
-    );
-    println!(
-        "{}",
-        "╚═══════════════════════════════════════════════════════════════╝"
-            .bright_yellow()
-            .bold()
-    );
-    println!();
 
     println!("📋 Test suites to run: {}", config.test_suites.len());
     for suite in &config.test_suites {
