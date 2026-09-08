@@ -244,7 +244,7 @@ pub async fn update_builder_pool_field(
     };
 
     for _ in 0..outcome.match_count {
-        info!("   Updated {} to: {}", field, new_image);
+        crate::info_updated_field!(field, new_image);
     }
 
     crate::repo::write_text_async(path, &outcome.content).await?;

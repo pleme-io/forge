@@ -4,7 +4,6 @@
 //! Handles both primary and secondary clusters in a single release.
 
 use anyhow::Result;
-use tracing::info;
 
 use crate::commands::push;
 use crate::commands::release_commit::announce_and_commit_cluster_overlay_release_step;
@@ -121,7 +120,7 @@ async fn update_kustomization_image(
             ));
             updated = true;
             in_kenshi_image = false; // Done with this block
-            info!("   Updated images[] newTag to: {}", new_tag);
+            crate::info_updated_field!("images[] newTag", new_tag);
         } else {
             new_content.push_str(line);
             new_content.push('\n');
