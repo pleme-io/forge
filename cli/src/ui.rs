@@ -4099,6 +4099,87 @@ pub fn write_step_info<W: std::io::Write>(w: &mut W, message: &str) -> std::io::
     writeln!(w, "ℹ️  {}", message)
 }
 
+/// Prints the one-line `"   ℹ️  <message>"` (three-space indent + `ℹ️`
+/// glyph + two-space gap + plain message) DEEPER-nested in-body info
+/// grammar 3 pre-lift consumer sites spelled inline as `println!("   ℹ️
+/// <literal>")` in `commands/migrations.rs` (envFrom "No secrets
+/// configured" arm at :466, "No existing migration jobs to clean up"
+/// arm at :919, "No orphaned pods to clean up" arm at :959). Marks an
+/// informational note inside a sub-listing whose siblings already carry
+/// a three-space indent (a `print_step_pass` / `print_plain_step_warn`
+/// / `print_red_x_step_fail` line above it in the same block) — the
+/// deeper-nested twin of [`print_step_info`] under the same `ℹ️  `
+/// glyph and identical uncolored-line contract, with the sole
+/// difference being a three-space leading indent that visually
+/// registers this line as a peer of the surrounding indented items
+/// rather than a top-level step.
+///
+/// # Distinct from [`print_step_info`]
+///
+/// [`print_step_info`] emits the same `ℹ️  <message>` grammar at ZERO
+/// leading indent — its 15 pre-lift consumer sites all sat at the
+/// top-level of a command's readout (a milestone-level note, not
+/// inside a sub-listing). The three `commands/migrations.rs` sites
+/// this primitive owns each sit inside a check-loop's "no-work"
+/// branch whose sibling lines carry a three-space indent
+/// (`print_step_pass` "Deleted orphaned pods", `print_plain_step_warn`
+/// "Configured secret not found: …") — the indent is not decorative,
+/// it aligns the informational note with those siblings so a reader
+/// scanning the block sees a single indented column. The two grammars
+/// coexist deliberately: [`print_step_info`]'s existing caller-shield
+/// test explicitly names this 3-space-indented variant as a distinct
+/// class NOT enrolled in its own shield, so a lift of these 3 sites
+/// onto [`print_step_info`] would drop the indent and drift the visual
+/// grammar of the surrounding block; a fresh primitive is the only
+/// safe migration path.
+///
+/// # Uncolored — no palette to preserve
+///
+/// Pre-lift every consumer spelled the whole line plain — no `.color()`
+/// chain on the glyph, no `format!(...).color()` wrap on the composed
+/// line. The primitive preserves that: the writer receives `   ℹ️
+/// <msg>\n` with no ANSI escape sequences anywhere, so a terminal
+/// without color renders exactly what a color-capable one does. A
+/// future promotion to `.bright_cyan()` on the whole line would
+/// collide with the sibling milestone-level [`print_info`] grammar.
+///
+/// # Compounding
+///
+/// Pre-lift 3 sibling sites in `commands/migrations.rs` each restated
+/// the `println!("   ℹ️  <literal>")` grammar verbatim, with the
+/// three-space indent, the `ℹ️` glyph, the two-space gap after the
+/// glyph, and the plain-message tail all spelled inline. A future
+/// palette adjustment (a promotion to `.bright_cyan()` on the whole
+/// line, an OTLP `sub_check_info` observability event wired alongside
+/// the print, a shift of the three-space indent to two- or
+/// four-space under a standardized body-indent, a swap of `ℹ️  ` for
+/// `[i] ` under a CI-log-friendly grammar) had to hit 3 sites in
+/// lockstep or drift the visual grammar; post-lift it hits ONE typed
+/// body. Delegates to [`write_step_info_indented`] against
+/// [`std::io::stdout()`]; the writer split exists so the fail-before-
+/// pass test can pin the one-line body, the three-space indent
+/// OUTSIDE the glyph span, the `ℹ️  ` glyph + two-space gap, and the
+/// absence-of-any-ANSI-escape contract by inspecting emitted bytes
+/// rather than shelling out and grepping stdout.
+pub fn print_step_info_indented(message: &str) {
+    let _ = write_step_info_indented(&mut std::io::stdout().lock(), message);
+}
+
+/// Writer-taking sibling to [`print_step_info_indented`]. Emits the
+/// single `   ℹ️  <message>` line via [`writeln!`] against the supplied
+/// writer. [`print_step_info_indented`] is the stdout adapter; this
+/// variant exists so tests can pin the one-line body, the three-space
+/// leading indent (OUTSIDE the glyph — pre-lift consumers spelled
+/// `"   ℹ️  <fmt>"` verbatim so the indent is not part of the glyph
+/// span), the `ℹ️  ` glyph + two-space gap, and the absence of any
+/// ANSI escape sequence without capturing stdout.
+pub fn write_step_info_indented<W: std::io::Write>(
+    w: &mut W,
+    message: &str,
+) -> std::io::Result<()> {
+    writeln!(w, "   ℹ️  {}", message)
+}
+
 /// Prints the two-line `"=".repeat(<width>)` ASCII rule + trailing
 /// blank grammar 14 pre-lift consumer sites spelled inline as
 /// `println!("{}", "=".repeat(<50|60>)); println!();` across 5
@@ -13348,6 +13429,156 @@ mod tests {
                  `crate::ui::print_step_info(\"<MSG>\")` — the \
                  primitive body every uncolored `ℹ️  ` in-body \
                  step-info in the crate now delegates through."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for
+    /// [`super::write_step_info_indented`]. Pins the one-line body
+    /// every pre-lift consumer spelled verbatim (`println!("   ℹ️
+    /// <literal>")`): a three-space leading indent OUTSIDE the glyph
+    /// (pre-lift consumers spelled the indent inside the format
+    /// string, not as a computed prefix), the `ℹ️` glyph followed by
+    /// TWO spaces (matching the sibling [`super::write_step_info`]
+    /// legibility hedge against the emoji's variable rendered width),
+    /// then the plain (uncolored) message. A silent contract drift a
+    /// future rewrite might introduce — dropping the three-space
+    /// indent (silently collapsing this primitive onto
+    /// [`super::write_step_info`]), promoting the line to
+    /// `.bright_cyan()` (`\x1b[96m` — the milestone-level
+    /// `print_info` palette), collapsing the double-space gap after
+    /// the glyph to a single space, slipping a trailing blank line
+    /// into the primitive body — flips this assertion rather than
+    /// compiling and silently diverging the 3 consumer sites' visual
+    /// grammar.
+    #[test]
+    fn write_step_info_indented_emits_exactly_one_indented_info_line() {
+        // Force ANSI emission (colored auto-drops sequences on a
+        // non-tty stdout) and serialize against peer banner tests via
+        // [`AnsiOverrideForTest`] — pre-lift stanza carries NO ANSI
+        // escapes, so the absence-of-color contract this test pins
+        // holds under either colored-mode.
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_step_info_indented(&mut buf, "No orphaned pods to clean up")
+            .expect("write_step_info_indented against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_step_info_indented must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — the pre-lift stanza is one `println!`,
+        // not two, and carries no framing blank.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_step_info_indented must emit exactly one line — \
+             the pre-lift stanza is one `println!` carrying no \
+             framing blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The three-space indent reaches the rendered line before the
+        // glyph — a fusion that dropped the indent (silently
+        // collapsing this primitive onto [`super::write_step_info`])
+        // fails here.
+        assert!(
+            lines[0].starts_with("   ℹ"),
+            "line 0 must begin with three spaces followed by the `ℹ️` \
+             info glyph — every pre-lift consumer spelled `\"   ℹ️  \
+             <fmt>\"` verbatim; the three-space indent is the one \
+             visual difference from the sibling [`super::write_step_info`] \
+             and dropping it collapses the two grammars silently; \
+             got {:?}",
+            lines[0]
+        );
+
+        // The `ℹ️` glyph followed by TWO spaces reaches the rendered
+        // line — a legibility hedge against the emoji's variable
+        // rendered width, shared with the sibling
+        // [`super::write_step_info`]. A fusion that collapses it to a
+        // single space fails here.
+        assert!(
+            lines[0].contains("ℹ\u{fe0f}  "),
+            "line 0 must contain the `ℹ️` glyph followed by TWO \
+             spaces — every pre-lift consumer spelled `\"   ℹ️  \"` \
+             (three-space indent + glyph + double space) verbatim as \
+             a legibility hedge against the emoji's variable rendered \
+             width; got {:?}",
+            lines[0]
+        );
+
+        // The message text reaches the rendered line verbatim.
+        assert!(
+            lines[0].contains("No orphaned pods to clean up"),
+            "line 0 must carry the message verbatim; got {:?}",
+            lines[0]
+        );
+
+        // NO ANSI escape sequence reaches the rendered line — every
+        // pre-lift consumer spelled the whole line plain (no
+        // `.color()` chain, no `format!(...).color()` wrap). A future
+        // promotion to `.bright_cyan()` (`\x1b[96m` — the
+        // milestone-level [`super::print_info`] palette) collapses
+        // the distinction between this uncolored in-body primitive
+        // and the heavier milestone-level info sigil.
+        assert!(
+            !out.contains('\x1b'),
+            "write_step_info_indented must emit ZERO ANSI escape \
+             sequences — every pre-lift consumer spelled the whole \
+             line plain. Got: {:?}",
+            out
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `println!`.
+        assert!(
+            out.ends_with('\n'),
+            "write_step_info_indented must emit a trailing `\\n` (the \
+             pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the 3 callers migrated onto
+    /// [`super::print_step_info_indented`] no longer spell the
+    /// `println!("   ℹ️  <literal>")` shape inline. Structural
+    /// regression shield — the exact-shape needle is `"   ℹ` (opening
+    /// quote immediately followed by three spaces and the info
+    /// glyph's leading BMP code point, `\u{2139}`) appearing anywhere
+    /// in the module body. The sibling zero-indent
+    /// [`super::print_step_info`] shape spelled `"ℹ` right after the
+    /// quote (no spaces), so the needle does not match it.
+    #[test]
+    fn print_step_info_indented_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[(
+            include_str!("commands/migrations.rs"),
+            "commands/migrations.rs",
+        )];
+        for (source, module_path) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                assert!(
+                    !line.contains("\"   ℹ"),
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `\"   ℹ️  <literal>\"` three-space-indented \
+                     step-info marker — that shape was lifted onto \
+                     `crate::ui::print_step_info_indented`. A re-inline \
+                     would silently reopen the 3-site duplication \
+                     class this shield exists to close. Offending \
+                     line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            assert!(
+                body.contains("crate::ui::print_step_info_indented("),
+                "{module_path} body must forward to \
+                 `crate::ui::print_step_info_indented(\"<MSG>\")` — \
+                 the primitive body every three-space-indented uncolored \
+                 `ℹ️  ` in-body sub-listing info line in the crate now \
+                 delegates through."
             );
         }
     }

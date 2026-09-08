@@ -463,7 +463,7 @@ async fn run_migration_job(
     }
 
     if secret_name.is_none() && valid_secrets.is_empty() {
-        println!("   ℹ️  No secrets configured (service uses ConfigMap only)");
+        crate::ui::print_step_info_indented("No secrets configured (service uses ConfigMap only)");
     }
 
     // Build envFrom section dynamically
@@ -916,7 +916,7 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
         .collect();
 
     if jobs.is_empty() {
-        println!("   ℹ️  No existing migration jobs to clean up");
+        crate::ui::print_step_info_indented("No existing migration jobs to clean up");
     } else {
         for job in &jobs {
             let delete = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
@@ -956,7 +956,7 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
         if output.contains("deleted") {
             crate::ui::print_step_pass("Deleted orphaned pods");
         } else {
-            println!("   ℹ️  No orphaned pods to clean up");
+            crate::ui::print_step_info_indented("No orphaned pods to clean up");
         }
     }
 
