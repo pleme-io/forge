@@ -513,7 +513,9 @@ pub async fn rust_dev(
                 }
             }
         } else {
-            println!("⚠️  No compose.yml found - skipping infrastructure startup");
+            crate::ui::print_plain_advisory_warn(
+                "No compose.yml found - skipping infrastructure startup",
+            );
         }
     } else {
         println!("⏭️  Skipping docker-compose (--skip-docker)");
@@ -672,7 +674,10 @@ pub async fn rust_dev_down(service: String) -> Result<()> {
 
         crate::ui::print_success_line("Infrastructure stopped");
     } else {
-        println!("⚠️  No compose.yml found in {}", service_path.display());
+        crate::ui::print_plain_advisory_warn(&format!(
+            "No compose.yml found in {}",
+            service_path.display()
+        ));
     }
 
     Ok(())
