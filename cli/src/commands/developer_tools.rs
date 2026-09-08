@@ -128,7 +128,10 @@ fn service_path_from_env() -> Result<PathBuf> {
 
 /// Run Rust unit tests
 pub async fn rust_test(service: String) -> Result<()> {
-    println!("🧪 Running unit tests for {}...", service.cyan());
+    crate::commands::developer_tool_phase_open::print_developer_tool_phase_open(
+        crate::commands::developer_tool_phase_open::DeveloperToolPhase::UnitTest,
+        &service,
+    );
     crate::retry::run_bin_args_inherited_status(
         &cargo_bin(),
         &["test", "--lib", "--bins"],
@@ -139,7 +142,10 @@ pub async fn rust_test(service: String) -> Result<()> {
 
 /// Run Rust clippy linter
 pub async fn rust_lint(service: String) -> Result<()> {
-    println!("🔍 Running clippy linter for {}...", service.cyan());
+    crate::commands::developer_tool_phase_open::print_developer_tool_phase_open(
+        crate::commands::developer_tool_phase_open::DeveloperToolPhase::Clippy,
+        &service,
+    );
     crate::retry::run_bin_args_inherited_status(
         &cargo_bin(),
         &[
@@ -157,13 +163,19 @@ pub async fn rust_lint(service: String) -> Result<()> {
 
 /// Format Rust code with rustfmt
 pub async fn rust_fmt(service: String) -> Result<()> {
-    println!("✨ Formatting code for {}...", service.cyan());
+    crate::commands::developer_tool_phase_open::print_developer_tool_phase_open(
+        crate::commands::developer_tool_phase_open::DeveloperToolPhase::Format,
+        &service,
+    );
     crate::retry::run_bin_args_inherited_status(&cargo_bin(), &["fmt", "--all"], "cargo fmt").await
 }
 
 /// Check Rust code formatting
 pub async fn rust_fmt_check(service: String) -> Result<()> {
-    println!("🔍 Checking code formatting for {}...", service.cyan());
+    crate::commands::developer_tool_phase_open::print_developer_tool_phase_open(
+        crate::commands::developer_tool_phase_open::DeveloperToolPhase::FormatCheck,
+        &service,
+    );
     crate::retry::run_bin_args_inherited_status(
         &cargo_bin(),
         &["fmt", "--all", "--", "--check"],
@@ -174,7 +186,10 @@ pub async fn rust_fmt_check(service: String) -> Result<()> {
 
 /// Extract GraphQL schema from Rust service
 pub async fn rust_extract_schema(service: String) -> Result<()> {
-    println!("📄 Extracting GraphQL schema for {}...", service.cyan());
+    crate::commands::developer_tool_phase_open::print_developer_tool_phase_open(
+        crate::commands::developer_tool_phase_open::DeveloperToolPhase::ExtractSchema,
+        &service,
+    );
 
     // Check for schema extraction binary
     let bin_names = vec!["extract_schema", "extractschema", "extract-schema"];
@@ -204,7 +219,10 @@ pub async fn rust_extract_schema(service: String) -> Result<()> {
 
 /// Update Cargo.nix after dependency changes
 pub async fn rust_update_cargo_nix(service: String) -> Result<()> {
-    println!("🔄 Updating Cargo.nix for {}...", service.cyan());
+    crate::commands::developer_tool_phase_open::print_developer_tool_phase_open(
+        crate::commands::developer_tool_phase_open::DeveloperToolPhase::UpdateCargoNix,
+        &service,
+    );
     println!("   This regenerates per-crate derivations for Attic caching");
     println!();
 
