@@ -130,8 +130,7 @@ pub async fn execute(backend_dir: &Path, web_dir: &Path) -> Result<CodegenResult
     let codegen_start = Instant::now();
 
     let codegen_output = Command::new(&bun)
-        .arg("x")
-        .args(["graphql-codegen", "--config", "codegen.ts"])
+        .args(crate::bun_argv::bun_x_graphql_codegen_argv())
         .current_dir(web_dir)
         .output()
         .await

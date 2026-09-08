@@ -1,5 +1,7 @@
-//! Fixed-arity `bun install --frozen-lockfile` argv slice used at every
-//! bun-install spawn site across the crate.
+//! Fixed-arity `bun` argv slices used at every bun spawn site across the
+//! crate. Two primitives: `bun_install_frozen_lockfile_argv` for the
+//! dep-install preamble, and `bun_x_graphql_codegen_argv` for the
+//! `bun x graphql-codegen --config codegen.ts` run.
 //!
 //! # Pre-lift census — four sibling stanzas, byte-identical
 //!
@@ -78,6 +80,53 @@
 /// slice's lifetime, and the returned array outlives every use.
 pub fn bun_install_frozen_lockfile_argv() -> [&'static str; 2] {
     ["install", "--frozen-lockfile"]
+}
+
+/// The pre-lift 4-element `x graphql-codegen --config codegen.ts` argv
+/// slice used at every `bun x graphql-codegen`-driven schema-codegen
+/// spawn site across the crate.
+///
+/// # Pre-lift census — three sibling stanzas, one splayed
+///
+/// Three consumer sites each spelled the same 4-argument invocation on
+/// their `bun` builder, two byte-identical and one splayed across a
+/// `.arg("x")` + 3-element `.args([...])` pair:
+///
+/// 1. `commands/codegen.rs::run_codegen_at` (Step 4 codegen run,
+///    splayed as `.arg("x").args(["graphql-codegen", "--config",
+///    "codegen.ts"])`).
+/// 2. `commands/codegen_validation.rs::validate_codegen` (drift-check
+///    codegen run, 4-element inline literal).
+/// 3. `commands/sync.rs::check_drift` (schema-vs-codegen drift check,
+///    4-element inline literal).
+///
+/// A drift in the codegen argv — a `--config` rename by graphql-codegen,
+/// a `--overwrite` toggle, a config-file path change from `codegen.ts`
+/// to `codegen.mjs`, an argv-order swap between subcommand and flag —
+/// pre-lift had to hit three sites in lockstep (with the splayed site
+/// separately) or diverge; post-lift it hits ONE typed body and every
+/// consumer inherits the change from `Command::args(
+/// bun_x_graphql_codegen_argv())`. The splayed site is normalized in
+/// the same lift so the `.arg` / `.args` split no longer hides half the
+/// argv from a future grep.
+///
+/// Sibling of [`bun_install_frozen_lockfile_argv`] in the same module:
+/// same shape (compile-time literal elements, `[&'static str; N]`
+/// return type, no borrows from inputs), same consumer boundary
+/// (`commands/`), same shield pair. The two primitives partition the
+/// bun-argv duplication budget: install-phase (`bun install
+/// --frozen-lockfile`) and codegen-phase (`bun x graphql-codegen
+/// --config codegen.ts`), which are the only two argv shapes forge
+/// spawns `bun` with at runtime.
+///
+/// # `&'static str` lifetimes, not borrows from inputs
+///
+/// Every element is a compile-time string literal — no caller-supplied
+/// path is interpolated into the argv. Returning `[&'static str; 4]`
+/// pins that at the type level: no caller can accidentally shorten the
+/// slice's lifetime, and the returned array outlives every use.
+pub fn bun_x_graphql_codegen_argv() -> [&'static str; 4] {
+    ["x", "graphql-codegen", "--config", "codegen.ts"]
 }
 
 #[cfg(test)]
@@ -186,6 +235,120 @@ mod tests {
             assert!(
                 forwards >= *min_count,
                 "{basename} must forward at least {min_count} bun-install \
+                 spawn site(s) through `{needle}`; found {forwards}. \
+                 A dropped call would leave the negative raw-shape scan \
+                 satisfied by absence.",
+            );
+        }
+    }
+
+    /// Byte-oracle: [`bun_x_graphql_codegen_argv`] returns the pre-lift
+    /// 4-element slice element-for-element (`"x"`, `"graphql-codegen"`,
+    /// `"--config"`, `"codegen.ts"`), in the pre-lift order, with no
+    /// extra element and no rewritten value. A future refactor that (a)
+    /// reordered the slice, (b) added a `--overwrite` / `--errors-only`
+    /// flag, (c) renamed `--config` to graphql-codegen's alternative
+    /// short form, (d) switched the config extension from `.ts` to
+    /// `.mjs`, or (e) collapsed the four elements regresses this
+    /// assertion.
+    #[test]
+    fn test_bun_x_graphql_codegen_argv_emits_pre_lift_four_element_slice() {
+        let argv = bun_x_graphql_codegen_argv();
+        assert_eq!(argv[0], "x");
+        assert_eq!(argv[1], "graphql-codegen");
+        assert_eq!(argv[2], "--config");
+        assert_eq!(argv[3], "codegen.ts");
+        assert_eq!(argv.len(), 4);
+    }
+
+    /// The return type is a fixed-arity `[&str; 4]`, NOT a `Vec<&str>`
+    /// or a `&'static [&'static str]`. Pin the fixed arity at compile
+    /// time via a destructured binding — if the returned type ever
+    /// loses its `[_; 4]` shape, this line fails to type-check. Mirrors
+    /// the sibling
+    /// [`test_bun_install_frozen_lockfile_argv_returns_fixed_arity_two`]
+    /// shape.
+    #[test]
+    fn test_bun_x_graphql_codegen_argv_returns_fixed_arity_four() {
+        let argv: [&str; 4] = bun_x_graphql_codegen_argv();
+        let [first, second, third, fourth] = argv;
+        assert_eq!(first, "x");
+        assert_eq!(second, "graphql-codegen");
+        assert_eq!(third, "--config");
+        assert_eq!(fourth, "codegen.ts");
+    }
+
+    /// Caller shield (negative half): no source line under
+    /// `cli/src/commands/` may spell the pre-lift raw
+    /// `["x", "graphql-codegen", "--config", "codegen.ts"]` argv literal
+    /// (nor the pre-lift splayed form
+    /// `.arg("x").args(["graphql-codegen", "--config", "codegen.ts"])`)
+    /// inline any more. The three pre-lift sites migrated; any future
+    /// consumer that wants the same codegen run shape reaches for
+    /// [`bun_x_graphql_codegen_argv`] on first grep, not by
+    /// copy-pasting the raw literal from an existing command module.
+    #[test]
+    fn no_command_module_still_spells_raw_bun_x_graphql_codegen_argv() {
+        use std::path::PathBuf;
+        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands");
+        let mut offenders: Vec<(PathBuf, usize, String)> = Vec::new();
+        for entry in std::fs::read_dir(&commands_dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            for (idx, line) in source.lines().enumerate() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                    continue;
+                }
+                let hits_full_4tuple =
+                    line.contains("\"x\", \"graphql-codegen\", \"--config\", \"codegen.ts\"");
+                let hits_splayed_3tuple =
+                    line.contains("\"graphql-codegen\", \"--config\", \"codegen.ts\"");
+                if hits_full_4tuple || hits_splayed_3tuple {
+                    offenders.push((path.clone(), idx + 1, line.to_string()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "raw `[\"x\", \"graphql-codegen\", \"--config\", \"codegen.ts\"]` \
+             argv literal(s) (full or splayed) survive under `commands/` — \
+             route each through \
+             `crate::bun_argv::bun_x_graphql_codegen_argv()` \
+             instead:\n{:#?}",
+            offenders
+        );
+    }
+
+    /// Caller shield (positive half): the three pre-lift modules MUST
+    /// each forward through [`bun_x_graphql_codegen_argv`] at least
+    /// once, so a migration that dropped a call site outright leaves
+    /// the negative "no raw inline shape" scan trivially satisfied by
+    /// absence but the positive count still fails.
+    #[test]
+    fn every_prelift_module_forwards_through_bun_x_graphql_codegen_argv() {
+        use std::path::PathBuf;
+        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands");
+        let expectations: &[(&str, usize)] = &[
+            ("codegen.rs", 1),
+            ("codegen_validation.rs", 1),
+            ("sync.rs", 1),
+        ];
+        let needle = "bun_x_graphql_codegen_argv(";
+        for (basename, min_count) in expectations {
+            let path = commands_dir.join(basename);
+            let source = std::fs::read_to_string(&path).unwrap();
+            let forwards = source.matches(needle).count();
+            assert!(
+                forwards >= *min_count,
+                "{basename} must forward at least {min_count} bun-x-graphql-codegen \
                  spawn site(s) through `{needle}`; found {forwards}. \
                  A dropped call would leave the negative raw-shape scan \
                  satisfied by absence.",
