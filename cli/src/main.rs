@@ -79,6 +79,7 @@ mod nix_hooks;
 mod nonfatal_warning;
 mod observability;
 mod path_builder;
+mod post_deploy_http_client;
 mod probe_dump;
 mod pushed_image_ref_list;
 mod rebac_keys_probe;
