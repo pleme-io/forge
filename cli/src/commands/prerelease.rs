@@ -910,13 +910,7 @@ async fn run_integration_gate(config: &PreReleaseConfig) -> Result<bool> {
     let output = tokio::time::timeout(
         Duration::from_secs(timeout_secs),
         Command::new(&cargo)
-            .args([
-                "test",
-                "--test",
-                "integration_tests",
-                "--features",
-                "integration-tests",
-            ])
+            .args(crate::cargo_test_argv::cargo_integration_tests_argv())
             .current_dir(&config.backend_dir)
             .output(),
     )
@@ -1049,16 +1043,8 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
 
     let cargo = cargo_bin();
     let mut cmd = Command::new(&cargo);
-    cmd.args([
-        "test",
-        "--test",
-        "e2e_tests",
-        "--features",
-        "integration-tests",
-        "--",
-        "--include-ignored",
-    ])
-    .current_dir(&config.backend_dir);
+    cmd.args(crate::cargo_test_argv::cargo_e2e_tests_include_ignored_argv())
+        .current_dir(&config.backend_dir);
 
     if headless {
         cmd.env("E2E_HEADLESS", "1");

@@ -510,13 +510,7 @@ fn run_frontend_unit_tests(
 
 /// Run backend integration tests
 fn run_backend_integration_tests(backend_dir: &str, filter: Option<&str>) -> Result<()> {
-    let mut args = vec![
-        "test",
-        "--test",
-        "integration_tests",
-        "--features",
-        "integration-tests",
-    ];
+    let mut args: Vec<&str> = crate::cargo_test_argv::cargo_integration_tests_argv().to_vec();
     if let Some(f) = filter {
         args.push("--");
         args.push(f);
@@ -628,15 +622,8 @@ pub fn run_e2e_tests(
     cleanup_testcontainers()?;
 
     // Build the cargo command
-    let mut args = vec![
-        "test",
-        "--test",
-        "e2e_tests",
-        "--features",
-        "integration-tests",
-        "--",
-        "--include-ignored",
-    ];
+    let mut args: Vec<&str> =
+        crate::cargo_test_argv::cargo_e2e_tests_include_ignored_argv().to_vec();
     let filter_owned;
     if let Some(f) = &filter {
         filter_owned = f.clone();
