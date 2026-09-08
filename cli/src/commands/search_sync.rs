@@ -50,7 +50,9 @@ pub async fn run_novasearch_sync(
     let novasearchctl_available = check_novasearchctl_available().await;
 
     if !novasearchctl_available {
-        println!("⚠️  novasearchctl not found in PATH, using kubectl exec fallback");
+        crate::ui::print_plain_advisory_warn(
+            "novasearchctl not found in PATH, using kubectl exec fallback",
+        );
         return run_sync_via_kubectl(&config_path, namespace, novasearch_config).await;
     }
 

@@ -3760,6 +3760,99 @@ pub fn write_plain_step_warn<W: std::io::Write>(w: &mut W, message: &str) -> std
     writeln!(w, "   \u{26A0}\u{FE0F}  {}", message)
 }
 
+/// Prints the single `"⚠️  <message>"` (UNINDENTED, UNCOLORED `⚠️` emoji
+/// glyph + TWO ASCII spaces + caller-supplied plain message) stdout-routed
+/// top-level advisory-warning grammar 3 pre-lift consumer sites spelled
+/// inline as `println!("⚠️  <fmt>", <args>)` across
+/// `commands/{search_sync (×1: novasearchctl absent, falling back to
+/// kubectl exec), developer_tools (×2: missing compose.yml on
+/// spin-up-infra + stop-infra paths)}.rs`, each marking a top-level
+/// (unindented) advisory the enclosing command emits and then continues
+/// past under a degraded contract — a missing optional binary that has a
+/// fallback path, a missing optional artifact whose absence just skips a
+/// step.
+///
+/// # Distinct from every peer `ui::*` warn primitive
+///
+/// [`print_warning`] shares the unindented single-line shape and the
+/// `⚠️  ` prefix but paints the WHOLE line `.bright_yellow()` via
+/// `format!("⚠️  {}", message).bright_yellow()`. Consumer sites there
+/// carry a milestone-level command-warning sigil the operator must
+/// notice; this primitive's sites deliberately spelled the marker plain
+/// (no `.bright_yellow()`) so a CI log renderer, a `grep`-in-logs
+/// pipeline, or a plain-text runbook capture reads the pre-lift bytes
+/// verbatim rather than through an ANSI decode. A collapse into
+/// [`print_warning`] would silently repaint 3 top-level advisories the
+/// pre-lift authors chose to keep uncolored.
+///
+/// [`print_plain_step_warn`] shares the UNCOLORED `⚠️` glyph, the two
+/// post-glyph spaces, and the stdout routing but wears a THREE-SPACE
+/// indent, marking an in-body step-scope warning inside a
+/// pipeline's readout. Consumer sites there mark an irregularity nested
+/// beneath a `println!("<TITLE>".bold())` step-heading; this primitive's
+/// sites emit at the top level of the command with no leading indent,
+/// so a collapse would insert a spurious three-space indent on every
+/// call site.
+///
+/// [`crate::warn_advisory!`] shares the unindented `⚠️  <msg>` shape
+/// but routes through `tracing::warn!` — the structured-log pipeline
+/// with a `warn`-level target that a downstream OTLP subscriber counts.
+/// Consumer sites there use `tracing`-macro spelling; this primitive's
+/// sites use plain `println!` and stay out of the tracing pipeline.
+///
+/// # UNCOLORED `⚠️` glyph, TWO ASCII spaces, no indent
+///
+/// Pre-lift every consumer spelled `println!("⚠️  <fmt>", <args>)`
+/// verbatim — the bare `⚠️` emoji glyph inside the format literal
+/// followed by TWO ASCII spaces before the message, with NO leading
+/// indent and NO `.yellow()`/`.bright_yellow()` styling. The two-space
+/// post-glyph gap is load-bearing for the same East Asian Wide
+/// (two-column) reason [`print_plain_step_warn`] carries: on an
+/// emoji-aware terminal one space visually consumes the glyph's second
+/// column, leaving one visible space; on a one-column-fallback renderer
+/// both spaces remain visible so the message still lands two columns
+/// after the glyph.
+///
+/// # Compounding
+///
+/// Pre-lift 3 sibling sites each restated the `println!("⚠️  <fmt>",
+/// <args>)` grammar verbatim, with the plain `⚠️` emoji glyph, the two
+/// ASCII spaces, and the caller-composed message tail all spelled
+/// inline. A future adjustment — routing them through
+/// `tracing::warn!(target: "forge::advisory", …)` for structured
+/// observability so a downstream OTLP subscriber counts top-level
+/// advisories per command, promoting the glyph to `.yellow()` under a
+/// palette-consistency grammar, promoting the whole line to
+/// `.bright_yellow()` under a milestone-warning collapse into
+/// [`print_warning`] — had to hit 3 sites in lockstep or drift the
+/// surface. Post-lift the glyph, spacing, and destination stream live
+/// in ONE writer body; the sites carry only the message. Delegates to
+/// [`write_plain_advisory_warn`] against [`std::io::stdout()`]; the
+/// writer split exists so the fail-before-pass test can pin the
+/// one-line body, the ABSENCE of any leading indent, the plain (no
+/// ANSI) `⚠️` glyph, the two-space post-glyph gap, and the trailing
+/// newline by inspecting emitted bytes rather than shelling out and
+/// grepping stdout.
+pub fn print_plain_advisory_warn(message: &str) {
+    let _ = write_plain_advisory_warn(&mut std::io::stdout().lock(), message);
+}
+
+/// Writer-taking sibling to [`print_plain_advisory_warn`]. Emits the
+/// single `"⚠️  <message>"` line via [`writeln!`] against the supplied
+/// writer. [`print_plain_advisory_warn`] is the stdout adapter; this
+/// variant exists so tests can pin the one-line body, the ABSENCE of a
+/// leading indent (distinguishing this primitive from
+/// [`write_plain_step_warn`]'s three-space indent), the UNCOLORED `⚠️`
+/// emoji glyph (never `.bright_yellow()` — that grammar belongs to
+/// [`print_warning`]), the two-space post-glyph gap, and the trailing
+/// newline without capturing stdout.
+pub fn write_plain_advisory_warn<W: std::io::Write>(
+    w: &mut W,
+    message: &str,
+) -> std::io::Result<()> {
+    writeln!(w, "\u{26A0}\u{FE0F}  {}", message)
+}
+
 /// Prints the one-line `"   {} {} failed (non-fatal): {}"` (three-space
 /// indent + `"WARN".yellow()` textual prefix + verb-phrase label +
 /// literal ` failed (non-fatal): ` connective + [`std::fmt::Display`]
@@ -13069,6 +13162,186 @@ mod tests {
                  `crate::ui::print_plain_step_warn(<MSG>)` — the \
                  primitive body every three-space-indented uncolored \
                  `⚠️  ` in-body stdout step-warn in the crate now \
+                 delegates through."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_plain_advisory_warn`].
+    /// Pins the one-line body every pre-lift consumer spelled verbatim
+    /// (`println!("⚠️  <fmt>", <args>)`): NO leading indent (this is the
+    /// unindented peer of [`super::write_plain_step_warn`]'s
+    /// three-space-indented in-body variant), the UNCOLORED `⚠️`
+    /// grapheme cluster (U+26A0 WARNING SIGN + U+FE0F VARIATION
+    /// SELECTOR-16), two ASCII spaces after the glyph, then the
+    /// caller-composed plain message, then a trailing `\n`. A silent
+    /// contract drift a future rewrite might introduce — slipping a
+    /// leading indent (a "align with the sibling `write_plain_step_warn`
+    /// cadence" cleanup which would insert a spurious three-space margin
+    /// at every top-level advisory site), collapsing the two post-glyph
+    /// spaces to one (a "match the `.yellow()`-decorated
+    /// `print_warning` cadence" cleanup — but this primitive lacks the
+    /// ANSI prefix, so a single space misaligns the message on
+    /// emoji-aware terminals), painting the glyph via
+    /// `.bright_yellow()` (a "match the sibling `print_warning`
+    /// palette" cleanup which would erase the deliberate uncolored-line
+    /// choice pre-lift authors made for CI-log and plain-text-renderer
+    /// legibility), dropping the U+FE0F variation selector so the glyph
+    /// renders as monochrome `⚠` on emoji-aware terminals — flips this
+    /// assertion rather than compiling and silently diverging the 3
+    /// consumer sites' visual grammar.
+    #[test]
+    fn write_plain_advisory_warn_emits_exactly_one_unindented_uncolored_line() {
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_plain_advisory_warn(&mut buf, "novasearchctl not found in PATH")
+            .expect("write_plain_advisory_warn against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_plain_advisory_warn must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — the pre-lift stanza is one `println!`, not
+        // two, and carries no framing blank.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_plain_advisory_warn must emit exactly one line — \
+             the pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // NO leading indent — this is the UNINDENTED peer of
+        // `write_plain_step_warn`. A fusion that hoisted a three-space
+        // margin (matching the in-body sibling's cadence) fails here.
+        assert!(
+            !lines[0].starts_with(' '),
+            "line 0 must NOT begin with a leading space — every \
+             pre-lift consumer spelled `\"⚠️  <fmt>\"` at column 0 \
+             (unindented, top-level advisory), distinguishing this \
+             primitive from the three-space-indented in-body \
+             `write_plain_step_warn` sibling; got {:?}",
+            lines[0]
+        );
+
+        // The `⚠️` grapheme cluster (U+26A0 + U+FE0F) starts the line.
+        assert!(
+            lines[0].starts_with("\u{26A0}\u{FE0F}"),
+            "line 0 must begin with the `⚠️` grapheme cluster \
+             (U+26A0 WARNING SIGN + U+FE0F VARIATION SELECTOR-16) — \
+             the variation selector requests emoji presentation and \
+             every pre-lift consumer spelled the full grapheme at the \
+             line's start; got {:?}",
+            lines[0]
+        );
+
+        // The TWO ASCII spaces between the glyph and the message reach
+        // the rendered line — a fusion that collapsed to one space
+        // (matching a `.yellow()`-decorated cadence this primitive
+        // deliberately lacks) would misalign the message column on
+        // emoji-aware terminals.
+        let glyph_end = "\u{26A0}\u{FE0F}".len();
+        let after_glyph = &lines[0][glyph_end..];
+        assert!(
+            after_glyph.starts_with("  "),
+            "line 0 must carry exactly TWO ASCII spaces after the \
+             `⚠️` glyph — the second space compensates for the East \
+             Asian Wide emoji presentation on emoji-aware terminals \
+             where an ANSI prefix (that the `print_warning` sibling \
+             carries) is absent here; got {:?} (after glyph: {:?})",
+            lines[0],
+            after_glyph
+        );
+
+        // The message text reaches the rendered line verbatim.
+        assert!(
+            lines[0].contains("novasearchctl not found in PATH"),
+            "line 0 must carry the message verbatim; got {:?}",
+            lines[0]
+        );
+
+        // NO ANSI escape reaches the rendered line — this primitive
+        // deliberately spells the line PLAIN. A fusion that promoted
+        // the line to `.bright_yellow()` (collapsing into the sibling
+        // `print_warning` palette) fails here.
+        assert!(
+            !lines[0].contains("\x1b["),
+            "line 0 must NOT carry any ANSI escape sequence — this \
+             primitive is the UNCOLORED sibling of `print_warning`, \
+             deliberately spelling the line plain so a CI log \
+             renderer, a `grep`-in-logs pipeline, or a plain-text \
+             runbook capture reads the pre-lift bytes verbatim. Every \
+             pre-lift consumer spelled the marker inside the format \
+             literal without `.bright_yellow()` styling; got {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `println!` (not `print!`), so the newline is part of the
+        // contract.
+        assert!(
+            out.ends_with('\n'),
+            "write_plain_advisory_warn must emit a trailing `\\n` \
+             (the pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_plain_advisory_warn`] no longer spell the
+    /// `println!("⚠️  <fmt>", <args>)` shape inline. Structural
+    /// regression shield — without it, a future refactor could
+    /// silently re-inline the one-liner (a "just call `println!`
+    /// directly, it's shorter" cleanup) and reopen the 3-site
+    /// duplication class this lift closed. Enforced at the module
+    /// bodies before their `#[cfg(test)]` regions so a test-support
+    /// mention of the raw shape does not defeat the shield.
+    ///
+    /// The exact-shape needle is `println!("⚠\u{fe0f}  ` appearing at
+    /// the start of a `println!` invocation — the plain `⚠️` grapheme
+    /// cluster + two ASCII spaces at column 0 (no leading indent)
+    /// uniquely identifies the pre-lift unindented stdout stanza and
+    /// separates it from the sibling `println!("   ⚠️  ` (three-space
+    /// indented, `write_plain_step_warn` territory) and the
+    /// `println!("⚠️  {}", format!(...).yellow())` grammar (a colored
+    /// interpolation-slot form used at `federation.rs:572`, distinct
+    /// class).
+    #[test]
+    fn print_plain_advisory_warn_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[
+            (
+                include_str!("commands/search_sync.rs"),
+                "commands/search_sync.rs",
+            ),
+            (
+                include_str!("commands/developer_tools.rs"),
+                "commands/developer_tools.rs",
+            ),
+        ];
+        for (source, module_path) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("println!(\"\u{26A0}\u{FE0F}  ") {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `println!(\"⚠️  <fmt>\", <args>)` unindented \
+                     stdout advisory-warn stanza — that shape was \
+                     lifted onto `crate::ui::print_plain_advisory_warn`. \
+                     A re-inline would silently reopen the 3-site \
+                     duplication class this shield exists to close. \
+                     Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            assert!(
+                body.contains("crate::ui::print_plain_advisory_warn("),
+                "{module_path} body must forward to \
+                 `crate::ui::print_plain_advisory_warn(<MSG>)` — the \
+                 primitive body every unindented uncolored `⚠️  ` \
+                 top-level stdout advisory-warn in the crate now \
                  delegates through."
             );
         }
