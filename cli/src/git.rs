@@ -1201,10 +1201,13 @@ where
 /// # When NOT to reach for this
 ///
 /// If the caller wants a non-zero commit exit to bail (a commit that
-/// MUST land — no idempotency), reach for [`git_run_inherited_status`]
-/// with `["commit", "-m", msg]` instead. The two primitives sit on the
-/// same async-git-mutation surface; only the failure-dispatch axis
-/// separates them.
+/// MUST land — no idempotency), reach for [`git_commit_or_bail`] instead.
+/// The two primitives sit on the same async-git-mutation surface and
+/// share the fixed `["commit", "-m", msg]` argv; only the failure-dispatch
+/// axis separates them — [`git_commit_idempotent`] warns and returns
+/// `Ok(())` on non-zero exit; [`git_commit_or_bail`] surfaces the same
+/// `"git commit"` op label through
+/// [`crate::retry::classify_inherited_status`] and bails.
 pub async fn git_commit_idempotent(commit_msg: &str, spawn_context: &str) -> anyhow::Result<()> {
     let status = git_command_async()
         .args(["commit", "-m", commit_msg])
@@ -1348,6 +1351,81 @@ pub async fn git_push_origin_main() -> anyhow::Result<()> {
 /// same discipline every git-mutation site in forge honors.
 pub async fn git_add_path(path: &str) -> anyhow::Result<()> {
     git_run_inherited_status(["add", path], "git add").await
+}
+
+/// `git commit -m <commit_msg>` under the shared inherited-stdio,
+/// bail-on-non-zero envelope — the fused delegation two sibling
+/// bail-on-failure `git commit` sites now share.
+///
+/// # Pre-lift census — two call sites, one shape
+///
+/// `commands/federation.rs::update_federation` (post-supergraph-write)
+/// and `commands/rust_service.rs::deploy_rust_service_with_tag`
+/// (post-manifest-write) each spelled
+///
+/// ```ignore
+/// crate::git::git_run_inherited_status(["commit", "-m", &commit_msg], "git commit")
+///     .await
+///     .context("<per-site context>")?;
+/// ```
+///
+/// verbatim — same argv, same op label, same delegation, same
+/// `.await.context(...)?` tail. Two sites past the "same shape sibling"
+/// threshold on the SAME async-git-mutation surface `git_add_path` and
+/// `git_push_origin_main` already inhabit; the fusion primitive owns
+/// the fixed argv and the canonical op label at ONE body.
+///
+/// # Peer of [`git_commit_idempotent`] on the "warn vs bail" axis
+///
+/// Same [`git_command_async`] opener, same `["commit", "-m", msg]` argv,
+/// same inherited stdio contract as the sibling. Where
+/// [`git_commit_idempotent`] emits a `tracing::warn!` diagnostic and
+/// returns `Ok(())` on non-zero exit (the documented "commit with
+/// nothing to commit" idempotency carve-out), THIS primitive delegates
+/// through [`crate::retry::run_inherited_status`] and bails on non-zero
+/// via [`crate::retry::classify_inherited_status`]'s
+/// `(op, exit_code)` envelope — the same failure-dispatch shape every
+/// other bail-on-failure git-mutation primitive in this module inherits.
+///
+/// # Fixed argv — `["commit", "-m", commit_msg]`
+///
+/// The primitive hardcodes the leading `"commit"` verb and the `"-m"`
+/// flag and forwards the caller's `commit_msg` as the third (and only
+/// variable) argv element. A caller reaching for `git commit --amend`,
+/// `git commit -F <path>`, `git commit --allow-empty`, or any other
+/// commit-shape reaches for the raw [`git_run_inherited_status`] surface
+/// instead — this primitive owns exactly the `-m <msg>` bail-on-failure
+/// shape the two pre-lift sites shared.
+///
+/// # Canonical op label
+///
+/// The op label pins at `"git commit"` — the exact spelling both
+/// pre-lift sites already used and the same label
+/// [`git_commit_idempotent`]'s warning envelope carries, so an operator
+/// grepping deploy logs sees the SAME identifier from every consumer of
+/// either commit primitive.
+///
+/// # Failure envelope inherits from [`git_run_inherited_status`]
+///
+/// Spawn failure raises `"Failed to run git commit"` through
+/// [`crate::retry::classify_inherited_status`]; non-zero exit raises
+/// `"git commit failed (exit {code})"`; signal termination raises
+/// `"git commit failed (killed by signal)"`. Callers attach per-site
+/// context with `.await.context(...)?` (or the equivalent
+/// `.with_context(|| ...)?`) on the outer chain — the primitive itself
+/// does not layer a `.context(...)` so the caller retains full control
+/// over the outer message (each pre-lift site already carried its own
+/// `"Failed to commit manifest"` / `"Git commit failed for supergraph
+/// changes"` per-site context that survives verbatim).
+///
+/// # `GIT_BIN` env override
+///
+/// The `git` binary resolves through the delegated
+/// [`git_run_inherited_status`] → [`git_command_async`] chain so a
+/// Nix-hermetic runner's `GIT_BIN` override wins over ambient `PATH` —
+/// same discipline every git-mutation site in forge honors.
+pub async fn git_commit_or_bail(commit_msg: &str) -> anyhow::Result<()> {
+    git_run_inherited_status(["commit", "-m", commit_msg], "git commit").await
 }
 
 #[cfg(test)]
@@ -2938,6 +3016,204 @@ mod tests {
              ONE body:\n{:#?}",
             offenders
         );
+    }
+
+    /// [`git_commit_or_bail`] MUST forward the fixed leading `"commit"`
+    /// verb, the `"-m"` flag, and the caller's `commit_msg` as the third
+    /// argv element to the GIT_BIN-resolved shim. Pins the three-element
+    /// pre-lift argv both sibling bail-on-failure commit sites each
+    /// hand-spelled (`commands/federation.rs::update_federation`,
+    /// `commands/rust_service.rs::deploy_rust_service_with_tag`) — a
+    /// regression that dropped `"-m"`, swapped it for `--message`, or
+    /// re-tokenized the caller's message on whitespace would silently
+    /// redirect the git mutation every deploy-frontier consumer depends
+    /// on for the post-write commit contract.
+    ///
+    /// Runs under [`GIT_BIN_ENV_LOCK`] to serialize against every other
+    /// test that either mutates `GIT_BIN` or invokes a no-bin production
+    /// entry point that reads it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_git_commit_or_bail_forwards_fixed_argv_and_returns_ok_on_zero_exit() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let argv_log = crate::test_support::ArgvLog::reserve();
+        let (_shim_dir, shim) = make_git_shim(&argv_log.shim_body(""));
+        let _scope = GitBinScope::set(&shim);
+
+        git_commit_or_bail("Deploy service abc123 v1.2.3")
+            .await
+            .expect("zero-exit shim must surface as Ok(())");
+
+        let logged = argv_log.read_argv_log();
+        let lines: Vec<&str> = logged.lines().collect();
+        assert_eq!(
+            lines,
+            vec!["commit", "-m", "Deploy service abc123 v1.2.3"],
+            "git_commit_or_bail must forward the fixed \
+             `[\"commit\", \"-m\", <msg>]` argv verbatim to the \
+             GIT_BIN-resolved shim — proves the primitive delegates \
+             through `git_run_inherited_status` with exactly the \
+             pre-lift three-element argv and does not silently drop, \
+             swap `-m` for `--message`, or re-tokenize the caller's \
+             message on whitespace"
+        );
+    }
+
+    /// [`git_commit_or_bail`] MUST surface a non-zero shim exit through
+    /// the canonical `"{op} failed (exit {code})"` envelope with the op
+    /// label pinned to `"git commit"` — the exact spelling both pre-lift
+    /// sites already used and the same label the sibling
+    /// [`git_commit_idempotent`] warning envelope carries. A regression
+    /// that dropped the label (or drifted it to `"git commit -m"` /
+    /// `"git commit <msg>"`) or dropped the delegation to
+    /// [`crate::retry::run_inherited_status`] for a bare
+    /// `.status().await?` fails this test.
+    ///
+    /// Runs under [`GIT_BIN_ENV_LOCK`] to serialize against every other
+    /// test that either mutates `GIT_BIN` or invokes a no-bin production
+    /// entry point that reads it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_git_commit_or_bail_non_zero_exit_carries_canonical_op_label() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let (_shim_dir, shim) = make_git_shim(
+            "#!/bin/sh\necho 'SIGIL_ROUTED_VIA_GIT_COMMIT_OR_BAIL_8e3a92' 1>&2\nexit 41\n",
+        );
+        let _scope = GitBinScope::set(&shim);
+
+        let err = git_commit_or_bail("chore: forge commit-or-bail regression probe")
+            .await
+            .expect_err("shim exits 41");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("git commit"),
+            "git_commit_or_bail must surface `\"git commit\"` as the op \
+             label via the anyhow message — proves the primitive \
+             delegates to `git_run_inherited_status` with the pinned \
+             canonical label both pre-lift sites already used; got: {msg:?}"
+        );
+        assert!(
+            msg.contains("exit 41"),
+            "git_commit_or_bail must surface the shim's exit code via \
+             the anyhow message — proves the primitive delegates through \
+             `retry::run_inherited_status`'s `classify_inherited_status` \
+             envelope, not a bare `.status().await?` that silently drops \
+             the exit code; got: {msg:?}"
+        );
+    }
+
+    /// A spawn `Err` (`GIT_BIN` resolves to a nonexistent path) MUST
+    /// bail with the canonical `"Failed to run git commit"` envelope —
+    /// the SPAWN arm of [`crate::retry::classify_inherited_status`]. Pins
+    /// the shape both consumer sites depend on for the "developer has
+    /// no `git` on PATH / GIT_BIN points at an absent Nix derivation"
+    /// precondition to surface as an operator-actionable error rather
+    /// than a downstream silent-success against an uncommitted tree.
+    ///
+    /// Runs under [`GIT_BIN_ENV_LOCK`] to serialize against every other
+    /// test that either mutates `GIT_BIN` or invokes a no-bin production
+    /// entry point that reads it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_git_commit_or_bail_spawn_error_carries_canonical_op_label() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _scope = GitBinScope::set(
+            "/nonexistent/dir/absolutely-not-a-git-binary-forge-commit-or-bail-shim",
+        );
+
+        let err = git_commit_or_bail("chore: unresolvable GIT_BIN probe")
+            .await
+            .expect_err("unresolvable GIT_BIN must produce Err");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Failed to run git commit"),
+            "git_commit_or_bail must surface the canonical spawn-failure \
+             envelope `\"Failed to run git commit\"` from \
+             `retry::classify_inherited_status` — proves the primitive \
+             delegates through the shared envelope and the op label pins \
+             to the canonical spelling; got: {msg:?}"
+        );
+    }
+
+    /// Caller shield: no source file under `cli/src/commands/` may still
+    /// spell the raw
+    /// `git_run_inherited_status(["commit", "-m", …], "git commit")`
+    /// shape — every bail-on-failure `git commit -m <msg>` MUST route
+    /// through [`git_commit_or_bail`] so the fixed `["commit", "-m", msg]`
+    /// argv contract and the canonical `"git commit"` op label stay
+    /// owned by ONE primitive rather than by two per-site conventions.
+    ///
+    /// The idempotent-no-op sibling [`git_commit_idempotent`] is the
+    /// other consumer of the same argv on the "warn vs bail" axis; a
+    /// caller that wants the warn branch reaches for THAT primitive
+    /// rather than a raw `git_run_inherited_status` spelling.
+    ///
+    /// A future consumer that spells the raw shape trips this shield
+    /// even before it can drift the op label back to a per-site spelling.
+    #[test]
+    fn no_command_module_still_spells_raw_git_commit_argv() {
+        use std::path::PathBuf;
+        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands");
+        let mut offenders: Vec<(PathBuf, usize, String)> = Vec::new();
+        for entry in std::fs::read_dir(&commands_dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            for (idx, line) in source.lines().enumerate() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                    continue;
+                }
+                if line.contains("git_run_inherited_status([\"commit\",") {
+                    offenders.push((path.clone(), idx + 1, line.to_string()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "raw \
+             `git_run_inherited_status([\"commit\", \"-m\", …], \
+             \"git commit\")` stanza(s) survive under `commands/` — \
+             route each through `crate::git::git_commit_or_bail(<msg>)` \
+             (or `crate::git::git_commit_idempotent(<msg>, ctx)` for the \
+             warn-on-nonzero carve-out) instead so the canonical op \
+             label and fixed argv stay pinned at ONE body:\n{:#?}",
+            offenders
+        );
+    }
+
+    /// Positive half of the shield: the two pre-lift files under
+    /// `commands/` MUST each forward through `crate::git::git_commit_or_bail(`
+    /// at least once, so a migration that dropped a call site outright
+    /// leaves the negative "no raw argv" scan trivially satisfied by
+    /// absence but the positive count still fails.
+    #[test]
+    fn every_prelift_module_forwards_through_git_commit_or_bail() {
+        use std::path::PathBuf;
+        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands");
+        // (module basename, minimum forward count from the pre-lift census)
+        let expectations: &[(&str, usize)] = &[("federation.rs", 1), ("rust_service.rs", 1)];
+        for (basename, min_count) in expectations {
+            let path = commands_dir.join(basename);
+            let source = std::fs::read_to_string(&path).unwrap();
+            let forwards = source.matches("git_commit_or_bail(").count();
+            assert!(
+                forwards >= *min_count,
+                "{basename} must forward at least {min_count} \
+                 bail-on-failure `git commit -m <msg>` site(s) through \
+                 `crate::git::git_commit_or_bail(`; found {forwards}. \
+                 A dropped call would leave the negative raw-argv scan \
+                 satisfied by absence.",
+            );
+        }
     }
 
     /// Positive half of the shield: the four pre-lift files under

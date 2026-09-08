@@ -523,7 +523,7 @@ pub async fn update_federation(
             deploy_config.product.name, service
         );
 
-        crate::git::git_run_inherited_status(["commit", "-m", &commit_msg], "git commit")
+        crate::git::git_commit_or_bail(&commit_msg)
             .await
             .context("Git commit failed for supergraph changes")?;
 
