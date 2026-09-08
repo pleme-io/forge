@@ -12,7 +12,9 @@ use std::path::Path;
 use std::process::Command;
 use tracing::info;
 
-use crate::commands::cluster_overlay_release_preamble::format_amd64_release_tag;
+use crate::commands::cluster_overlay_release_preamble::{
+    format_amd64_release_tag, format_arm64_release_tag,
+};
 use crate::git;
 use crate::nix::build_flake_attr_in;
 use crate::retry::run_inherited_status_sync;
@@ -94,7 +96,7 @@ pub async fn execute(
             info!("Verifying {} (arm64) image loader before push...", name);
             verify_image_arch(&doca, arm64, "arm64")?;
         }
-        let arm64_tag = format!("arm64-{}", sha);
+        let arm64_tag = format_arm64_release_tag(&sha);
         info!("Pushing {} (arm64) as {}:{}...", name, registry, arm64_tag);
         push_image(&doca, arm64, registry, &arm64_tag)?;
         push_image(&doca, arm64, registry, "arm64-latest")?;
@@ -120,7 +122,7 @@ pub async fn execute(
             "--ref",
             &format!("{}:{}", registry, amd64_tag),
             "--ref",
-            &format!("{}:arm64-{}", registry, sha),
+            &format!("{}:{}", registry, format_arm64_release_tag(&sha)),
         ]);
         run_inherited_status_sync(
             sha_index,
@@ -153,7 +155,7 @@ pub async fn execute(
         format!("{}:amd64-latest", registry),
     ];
     if arm64_path.is_some() {
-        tags_pushed.push(format!("{}:arm64-{}", registry, sha));
+        tags_pushed.push(format!("{}:{}", registry, format_arm64_release_tag(&sha)));
         tags_pushed.push(format!("{}:arm64-latest", registry));
         tags_pushed.push(crate::oci_manifest::image_reference(registry, &sha));
         tags_pushed.push(crate::oci_manifest::image_reference(registry, "latest"));

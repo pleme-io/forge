@@ -49,6 +49,33 @@ pub fn format_amd64_release_tag(git_sha: &str) -> String {
     format!("amd64-{}", git_sha)
 }
 
+/// Render the canonical `arm64-<git_sha>` release tag — arch-peer of
+/// [`format_amd64_release_tag`].
+///
+/// Pure function — no I/O. Pinning the format at one site means a future
+/// drift to a new tag convention (a `linux-arm64-` prefix, an
+/// architecture-parametric form, an embedded date stamp) flows to the
+/// three `arm64-<sha>` construction sites in `commands/image_release.rs`
+/// (multi-arch push arm64 tag + the two `regctl index create --ref
+/// <registry>:arm64-<sha>` references that resolve against it) from one
+/// edit, and downstream `docker manifest inspect
+/// ghcr.io/.../arm64-<sha>` audit queries continue to resolve against a
+/// single canonical shape.
+///
+/// Kept as a sibling of [`format_amd64_release_tag`] rather than a
+/// parametric `format_arch_release_tag(arch, sha)` because the pre-lift
+/// consumer census carries `amd64` (six sites — three cluster-overlay
+/// flows + three product-level flows) and `arm64` (three sites, all in
+/// `commands/image_release.rs`) as distinct grammars — an `arm64`-only
+/// consumer never carries an `amd64` counterpart at the same call site,
+/// and vice versa. A parametric helper would force every consumer to
+/// thread an `Arch` argument through the call, which the pre-lift sites
+/// never spelled — the arch is fixed at the call site, not a runtime
+/// choice.
+pub fn format_arm64_release_tag(git_sha: &str) -> String {
+    format!("arm64-{}", git_sha)
+}
+
 /// Emit the canonical two-stanza cluster-overlay release preamble to
 /// `w`, wrapping the arguments with the pre-lift prefix + newlines +
 /// separator that three sibling sites spelled inline.
@@ -287,5 +314,100 @@ mod tests {
                  without this positive check."
             );
         }
+    }
+
+    /// Arch-peer of [`format_amd64_release_tag_prefixes_arch_and_sha`].
+    /// The pure `arm64` tag-format helper MUST produce the canonical
+    /// `arm64-<sha>` shape byte-for-byte. Pins the format at one site so
+    /// a future drift to a new tag convention surfaces as a localized
+    /// test failure at one site, not as silent tag-drift across the
+    /// three `commands/image_release.rs` `arm64-<sha>` construction
+    /// sites and every downstream registry-scan tool that resolves
+    /// against `arm64-<sha>`.
+    #[test]
+    fn format_arm64_release_tag_prefixes_arch_and_sha() {
+        assert_eq!(format_arm64_release_tag("deadbeef"), "arm64-deadbeef");
+    }
+
+    /// Arch-peer of
+    /// [`format_amd64_release_tag_forwards_full_sha_verbatim`]. The
+    /// `arm64` tag-format helper MUST forward its `git_sha` argument
+    /// verbatim — no truncation, no case-folding, no whitespace trim.
+    /// A future change that decided to normalise the SHA at the format
+    /// boundary would silently diverge from the pre-lift inline
+    /// `format!("arm64-{}", git_sha)` shape every consumer inherits.
+    #[test]
+    fn format_arm64_release_tag_forwards_full_sha_verbatim() {
+        assert_eq!(
+            format_arm64_release_tag("0123456789abcdef"),
+            "arm64-0123456789abcdef"
+        );
+    }
+
+    /// Arch-peer of
+    /// [`amd64_tag_render_routes_through_format_helper_not_raw_format_literal`].
+    /// Whole-module shield: no raw `format!("arm64-{}", ...)` may live
+    /// in any `arm64-<sha>` tag-emitting consumer module. The pre-lift
+    /// census covered three sites — all in `commands/image_release.rs`
+    /// (the multi-arch push arm64 tag construction + the two
+    /// `regctl index create --ref <registry>:arm64-<sha>` references
+    /// that resolve against it). Every `arm64-<sha>` tag rendered by
+    /// forge must resolve through [`format_arm64_release_tag`] so a
+    /// future drift to a new tag convention (a `linux/arm64-` prefix,
+    /// an architecture-parametric form, an embedded date stamp) flows
+    /// to all three sites from one edit and downstream
+    /// `docker manifest inspect ghcr.io/.../arm64-<sha>` audit queries
+    /// continue to resolve against a single canonical shape.
+    ///
+    /// The forbidden shape is reconstructed at test time via `format!`
+    /// from the bare string `"arm64-"` so this shield's own source text
+    /// does not false-match itself. The exception is
+    /// [`format_arm64_release_tag`] itself (in this same module), which
+    /// is the ONE site allowed to spell the raw shape — that site is
+    /// what every consumer delegates through.
+    #[test]
+    fn arm64_tag_render_routes_through_format_helper_not_raw_format_literal() {
+        let forbidden = format!("{}{{}}", "\"arm64-");
+        // Single-element census (only `commands/image_release.rs` carries
+        // the pre-lift `arm64-<sha>` construction sites). A `let`-binding
+        // rather than a `for` keeps `clippy::single_element_loop` happy;
+        // when a second consumer joins the census, promote to a slice +
+        // for-loop and mirror the amd64 shield above.
+        let (path, source): (&str, &str) = (
+            "commands/image_release.rs",
+            include_str!("image_release.rs"),
+        );
+        assert!(
+            !source.contains(&forbidden),
+            "`{path}` must not spell the raw `format!(\"arm64-{{}}\", ...)` shape; \
+             route through `crate::commands::cluster_overlay_release_preamble::\
+             format_arm64_release_tag` instead (the byte-oracle-covered \
+             canonical tag renderer)"
+        );
+    }
+
+    /// Positive delegation shield paired with
+    /// [`arm64_tag_render_routes_through_format_helper_not_raw_format_literal`]:
+    /// `commands/image_release.rs` MUST carry a call to
+    /// `format_arm64_release_tag` — a re-inline that also silently
+    /// dropped the primitive call would evade the "no raw format
+    /// literal" scan but is caught here.
+    #[test]
+    fn image_release_arm64_tag_callers_delegate_through_format_helper() {
+        // Same single-element-census rationale as
+        // [`arm64_tag_render_routes_through_format_helper_not_raw_format_literal`]
+        // — a `let`-binding until a second consumer joins the census.
+        let (path, source): (&str, &str) = (
+            "commands/image_release.rs",
+            include_str!("image_release.rs"),
+        );
+        assert!(
+            source.contains("format_arm64_release_tag("),
+            "`{path}` MUST call `format_arm64_release_tag(...)` at least once — \
+             it is on the census of `arm64-<sha>` tag-emitting sites the shield \
+             covers. A re-inline that dropped both the raw literal AND the \
+             delegation call would silently remove the tag from the fleet without \
+             this positive check."
+        );
     }
 }
