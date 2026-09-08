@@ -2603,15 +2603,23 @@ pub fn lint_all(charts_dir: &str, lib_chart_dir: Option<&str>, lib_chart_name: &
         // Workspace prep is isolated too — a single chart's copy/stage/
         // redirect failure must not `?`-abort the remaining charts, same as
         // the lint step below.
-        let (_tmpdir, chart_path) =
-            match prepare_chart_workspace(chart_name, charts_dir, lib_chart_dir, lib_chart_name) {
-                Ok(v) => v,
-                Err(e) => {
-                    println!("FAIL: {} workspace prep — {}", chart_name, e);
-                    failed.push((chart_name.clone(), format!("workspace prep: {e}")));
-                    continue;
-                }
-            };
+        let (_tmpdir, chart_path) = match prepare_chart_workspace(
+            chart_name,
+            charts_dir,
+            lib_chart_dir,
+            lib_chart_name,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                crate::commands::chart_release_phase_failure::record_chart_release_phase_failure(
+                    &mut failed,
+                    chart_name,
+                    crate::commands::chart_release_phase_failure::ChartReleasePhase::WorkspacePrep,
+                    &e,
+                );
+                continue;
+            }
+        };
 
         match lint(&chart_path) {
             Ok(()) => println!("PASS: {}", chart_name),
@@ -2696,21 +2704,33 @@ pub fn release_all(
         // GHCR permission gap or bad dependency version must never prevent
         // an unrelated, already-clean chart later in the list from
         // publishing (task pleme-io/helmworks-akeyless#143).
-        let (_tmpdir, chart_path) =
-            match prepare_chart_workspace(chart_name, charts_dir, lib_chart_dir, lib_chart_name) {
-                Ok(v) => v,
-                Err(e) => {
-                    println!("FAIL: {} workspace prep — {}", chart_name, e);
-                    failed.push((chart_name.clone(), format!("workspace prep: {e}")));
-                    continue;
-                }
-            };
+        let (_tmpdir, chart_path) = match prepare_chart_workspace(
+            chart_name,
+            charts_dir,
+            lib_chart_dir,
+            lib_chart_name,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                crate::commands::chart_release_phase_failure::record_chart_release_phase_failure(
+                    &mut failed,
+                    chart_name,
+                    crate::commands::chart_release_phase_failure::ChartReleasePhase::WorkspacePrep,
+                    &e,
+                );
+                continue;
+            }
+        };
 
         // Lint
         println!("--- Lint ---");
         if let Err(e) = lint(&chart_path) {
-            println!("FAIL: {} lint — {}", chart_name, e);
-            failed.push((chart_name.clone(), format!("lint: {e}")));
+            crate::commands::chart_release_phase_failure::record_chart_release_phase_failure(
+                &mut failed,
+                chart_name,
+                crate::commands::chart_release_phase_failure::ChartReleasePhase::Lint,
+                &e,
+            );
             continue;
         }
 
@@ -2719,8 +2739,12 @@ pub fn release_all(
         let tgz = match package(&chart_path, output_dir, None) {
             Ok(t) => t,
             Err(e) => {
-                println!("FAIL: {} package — {}", chart_name, e);
-                failed.push((chart_name.clone(), format!("package: {e}")));
+                crate::commands::chart_release_phase_failure::record_chart_release_phase_failure(
+                    &mut failed,
+                    chart_name,
+                    crate::commands::chart_release_phase_failure::ChartReleasePhase::Package,
+                    &e,
+                );
                 continue;
             }
         };
@@ -2747,8 +2771,12 @@ pub fn release_all(
             continue;
         }
         if let Err(e) = push(&tgz, registry) {
-            println!("FAIL: {} push — {}", chart_name, e);
-            failed.push((chart_name.clone(), format!("push: {e}")));
+            crate::commands::chart_release_phase_failure::record_chart_release_phase_failure(
+                &mut failed,
+                chart_name,
+                crate::commands::chart_release_phase_failure::ChartReleasePhase::Push,
+                &e,
+            );
             continue;
         }
 
@@ -4348,6 +4376,120 @@ mod dep_update_retry_backoff_tests {
              helper at the `helm_dependency_update` between-retry \
              sleep site — the canonical delegation call was not \
              found at any code line.",
+        );
+    }
+}
+
+#[cfg(test)]
+mod chart_release_phase_failure_routing_tests {
+    //! Whole-module shield: no raw pre-lift
+    //! `println!("FAIL: {} <phase> — {}", chart_name, e); failed.push(
+    //! (chart_name.clone(), format!("<phase>: {e}")));` two-line
+    //! failure-record stanza may live in `commands/helm.rs`. Every
+    //! phase-annotated chart-batch failure branch MUST route through
+    //! [`crate::commands::chart_release_phase_failure::
+    //! record_chart_release_phase_failure`] first — the typed primitive
+    //! that closes over BOTH axes (the operator-facing FAIL line AND
+    //! the batch-summary reason) at ONE `match` arm so a caller-side
+    //! typo cannot silently drift them apart.
+    //!
+    //! Pre-lift the two chart-batch loops (`lint_all` and `release_all`)
+    //! collectively carried five phase-annotated sibling record
+    //! stanzas — one workspace-prep in `lint_all`, and workspace-prep
+    //! / lint / package / push in `release_all` — each spelled the
+    //! phase label at TWO literal positions per site.
+
+    /// The pre-lift two-line record shape (raw `format!("workspace prep: {e}")`
+    /// / `format!("lint: {e}")` / `format!("package: {e}")` /
+    /// `format!("push: {e}")` inline at a `failed.push(...)` site) MUST
+    /// NOT survive anywhere in `commands/helm.rs` outside the surviving
+    /// pre-lift `lint_all`-lint branch (which carries a bespoke
+    /// no-phase-suffix FAIL line and is deliberately out of scope for
+    /// this primitive). The four canonical phase labels
+    /// (`workspace prep`, `package`, `push`, and the annotated `lint`
+    /// under `release_all`) must never appear as a bare
+    /// `format!("<phase>: {e}")` literal in the production body — all
+    /// four route through [`super::super::chart_release_phase_failure::
+    /// ChartReleasePhase`].
+    ///
+    /// The `lint_all`-lint branch's `format!("lint: {e}")` at the pre-lift
+    /// no-phase-suffix site (paired with a bespoke `"FAIL: {} — {}"`
+    /// line without a phase infix) remains, deliberately out of scope —
+    /// its printed line grammar diverges from the primitive's shape.
+    /// The shield accounts for that ONE surviving `lint` hit and forbids
+    /// any additional inline lint reason format!, plus zero hits on the
+    /// three other phase labels.
+    #[test]
+    fn no_raw_chart_release_phase_failure_reason_format_survives_in_helm_rs() {
+        const SOURCE: &str = include_str!("helm.rs");
+
+        // Reconstruct the forbidden needles via `format!` at test time
+        // so this shield's own needle-construction lines do not carry
+        // the fused literal (the reconstruction interpolates `label`
+        // rather than spelling any phase word directly). `code_line_hits`
+        // also filters `///` / `//!` / `//` doc-comment lines, so the
+        // docstring above naming the pre-lift shape as prose cannot
+        // false-fire this scan.
+        for label in ["workspace prep", "package", "push"] {
+            let needle = format!("format!({}{}: ", '"', label);
+            let hits = crate::test_support::code_line_hits(SOURCE, &needle);
+            assert!(
+                hits.is_empty(),
+                "commands/helm.rs must NOT carry an inline \
+                 `format!({DQ}{lbl}: …{DQ})` failure-reason literal — \
+                 every phase-annotated chart-batch failure branch must \
+                 route through `crate::commands::chart_release_phase_failure::\
+                 record_chart_release_phase_failure(&mut failed, chart_name, \
+                 ChartReleasePhase::<variant>, &e)`. Found code-line \
+                 hits: {hits:#?}",
+                DQ = '"',
+                lbl = label,
+            );
+        }
+
+        // The one surviving pre-lift `format!("lint: {e}")` at the
+        // `lint_all`-lint no-phase-suffix branch is intentionally
+        // out of scope for this primitive (its paired FAIL line
+        // diverges); pin its residual count at exactly ONE so a
+        // future re-inlining of an ADDITIONAL bare `format!("lint: …")`
+        // at a phase-annotated branch cannot silently satisfy the
+        // absence check.
+        let lint_needle = format!("format!({}{}: ", '"', "lint");
+        let lint_hits = crate::test_support::code_line_hits(SOURCE, &lint_needle);
+        assert_eq!(
+            lint_hits.len(),
+            1,
+            "commands/helm.rs must carry exactly ONE bare \
+             `format!({DQ}lint: …{DQ})` residual (the `lint_all`-lint \
+             no-phase-suffix branch); every OTHER phase-annotated \
+             lint failure must route through the primitive. Found \
+             code-line hits: {lint_hits:#?}",
+            DQ = '"',
+        );
+    }
+
+    /// Positive-delegation shield: `commands/helm.rs` MUST forward
+    /// through the primitive at ≥5 sites — the workspace-prep in
+    /// `lint_all` and the workspace-prep / lint / package / push
+    /// arms in `release_all`. A drop below the floor cannot leave the
+    /// negative shield above trivially satisfied by absence.
+    #[test]
+    fn helm_rs_forwards_through_record_chart_release_phase_failure_primitive_at_five_sites() {
+        const SOURCE: &str = include_str!("helm.rs");
+        // Reconstruct at test time so this shield's own needle-string
+        // does not itself count as one of the hits.
+        let needle = format!(
+            "chart_release_phase_failure::{}(",
+            "record_chart_release_phase_failure",
+        );
+        let hits = crate::test_support::code_line_hits(SOURCE, &needle);
+        assert!(
+            hits.len() >= 5,
+            "commands/helm.rs must forward through the \
+             `record_chart_release_phase_failure` primitive at ≥5 \
+             sites (workspace-prep in `lint_all`; workspace-prep / \
+             lint / package / push in `release_all`). Found \
+             code-line hits: {hits:#?}"
         );
     }
 }
