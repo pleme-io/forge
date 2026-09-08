@@ -5,6 +5,7 @@ pub mod build;
 pub mod builder_pool_edit;
 pub mod cluster_overlay_release_postamble;
 pub mod cluster_overlay_release_preamble;
+pub mod cluster_overlay_release_push_step;
 pub mod codegen;
 pub mod codegen_validation;
 pub mod comprehensive_release;
