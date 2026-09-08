@@ -225,7 +225,7 @@ pub async fn execute_drift_check(working_dir: &Path) -> Result<DriftCheckResult>
 
     // Run codegen
     let codegen_output = Command::new(&bun)
-        .args(["x", "graphql-codegen", "--config", "codegen.ts"])
+        .args(crate::bun_argv::bun_x_graphql_codegen_argv())
         .current_dir(&config.web_dir)
         .output()
         .await

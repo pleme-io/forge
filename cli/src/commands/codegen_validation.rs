@@ -152,7 +152,7 @@ pub async fn validate_codegen_with_autocommit(
 
     // Run codegen
     let codegen_output = Command::new(&bun)
-        .args(["x", "graphql-codegen", "--config", "codegen.ts"])
+        .args(crate::bun_argv::bun_x_graphql_codegen_argv())
         .current_dir(web_dir)
         .output()
         .await
