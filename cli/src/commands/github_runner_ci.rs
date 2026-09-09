@@ -724,7 +724,7 @@ pub async fn execute(
 
         // Verify the new image is deployed
         println!();
-        info!("🔍 Verifying deployment...");
+        crate::info_probe_verifying!("deployment");
         let verify_result = kubectl_command_async()
             .args(&[
                 "get",
