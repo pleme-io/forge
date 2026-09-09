@@ -425,7 +425,7 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
     // Success summary
     print_success_banner(80, "✅ UPDATE COMPLETE");
     println!();
-    println!("Updated files:");
+    crate::ui::print_updated_files_heading();
     crate::ui::print_bullet_path(&workspace_root.join("Cargo.lock"));
     crate::ui::print_bullet_path(&workspace_root.join("Cargo.nix"));
     println!();
