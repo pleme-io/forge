@@ -11,8 +11,11 @@
 //! at :699 pod-list JSON, :831 wide-format pod dump, :848 per-container
 //! state jsonpath, and :862 waiting/terminated-reason jsonpath), migrations
 //! (×1: `find_migration_jobs_for_service` at :904, name-list jsonpath),
-//! rust_service (×2: `verify_deployment_status` pod-phase probe at
-//! :2064 + pod-image-tag probe at :2078), status (×3: `probe_pods` at
+//! rust_service (×2 pre-lift, ×1 post-lift: `verify_deployment_status`
+//! pod-phase probe + pod-image-tag probe now share one
+//! `let app_selector = ...` bind that both
+//! `crate::first_pod_field_argv::first_pod_field_get_pods_argv(namespace,
+//! &app_selector, FirstPodField::<variant>)` calls borrow), status (×3: `probe_pods` at
 //! :440 pod-list JSON, `probe_services` at :1065 service-list JSON,
 //! `probe_jobs` at :1118 sorted job-list JSON)}.rs` each spelled the
 //!
@@ -268,7 +271,15 @@ mod tests {
     //   rollout.rs:          1  (execute pod-history probe)
     //   flux.rs:             4  (gather_deployment_diagnostics ×4)
     //   migrations.rs:       1  (find_migration_jobs_for_service)
-    //   rust_service.rs:     2  (pod-phase probe + pod-image-tag probe)
+    //   rust_service.rs:     1  (pod-phase probe + pod-image-tag probe
+    //                           share one `let app_selector = ...` bind
+    //                           post-lift onto
+    //                           `crate::first_pod_field_argv::first_pod_field_get_pods_argv`,
+    //                           which takes the selector by `&str`; the
+    //                           two probes now spawn against the same
+    //                           borrowed selector rather than
+    //                           re-formatting `app=<name>` twice at
+    //                           adjacent call sites)
     //   status.rs:           3  (probe_pods + probe_services + probe_jobs)
     #[test]
     fn every_prelift_module_forwards_through_format_app_label_selector() {
@@ -282,7 +293,7 @@ mod tests {
             ("rollout.rs", 1),
             ("flux.rs", 4),
             ("migrations.rs", 1),
-            ("rust_service.rs", 2),
+            ("rust_service.rs", 1),
             ("status.rs", 3),
         ];
         for (basename, min_count) in expectations {

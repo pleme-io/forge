@@ -69,6 +69,7 @@ mod cloudflare;
 mod deploy_target_field;
 mod docker_daemon_running_preflight;
 mod docker_installed_preflight;
+mod first_pod_field_argv;
 mod git;
 mod git_sha_field;
 mod hermetic_scratch;
