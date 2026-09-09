@@ -474,8 +474,8 @@ pub async fn regenerate(pangea_dir: Option<String>) -> Result<()> {
     let cargo = cargo_bin();
     let crate2nix = crate2nix_bin();
 
-    info!("Using cargo: {}", cargo);
-    info!("Using crate2nix: {}", crate2nix);
+    crate::info_using_tool_field!("cargo", cargo);
+    crate::info_using_tool_field!("crate2nix", crate2nix);
 
     in_directory(&pangea_dir, || async {
         run_cargo_update(&cargo).await?;
@@ -519,8 +519,8 @@ pub async fn regenerate_compiler() -> Result<()> {
     let bundler = get_tool_path("BUNDLE_BIN", "bundle");
     let bundix = get_tool_path("BUNDIX_BIN", "bundix");
 
-    info!("Using bundler: {}", bundler);
-    info!("Using bundix: {}", bundix);
+    crate::info_using_tool_field!("bundler", bundler);
+    crate::info_using_tool_field!("bundix", bundix);
 
     in_directory(&pangea_dir, || async {
         // Update Gemfile.lock. Rides `crate::retry::run_bin_args_inherited_status`

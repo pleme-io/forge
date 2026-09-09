@@ -68,7 +68,7 @@ impl NixHooks {
         // Try environment variable first
         if let Some(path_buf) = crate::repo::path_from_env_optional("NIX_HOOKS_PATH") {
             if path_buf.exists() {
-                info!("🔧 Using NIX_HOOKS_PATH: {}", path_buf.display());
+                crate::info_using_tool_field!("NIX_HOOKS_PATH", path_buf.display());
                 let _ = NIX_HOOKS_PATH.set(Some(path_buf.clone()));
                 return Ok(Self {
                     package_path: Some(path_buf),
