@@ -63,6 +63,15 @@ use anyhow::Result;
 
 use crate::commands::push;
 
+/// The canonical `Push Image` step title carried by the first step
+/// header of every cluster-overlay release flow. Sibling of
+/// [`crate::commands::release_commit::COMMIT_AND_PUSH_STEP_TITLE`] (its
+/// terminal-step counterpart in `commands/release_commit.rs`) — a
+/// module-private `const` so a future re-titling (`Publish Image`,
+/// `Land Image`, an emoji-prefixed variant) flows to all three flows
+/// from one edit rather than through three inline literal edits.
+const PUSH_IMAGE_STEP_TITLE: &str = "Push Image";
+
 /// Push a release image to `registry` using auto-generated
 /// `amd64-<sha>` / `amd64-latest` tags via [`push::execute`], then emit
 /// the fleet-standard blank-line separator that closes the "Push Image"
@@ -138,6 +147,76 @@ pub async fn push_release_image_amd64_auto_tag(
     Ok(())
 }
 
+/// Announce the `━━━ Step 1/<total_steps>: Push Image ━━━` header and
+/// perform the auto-tag amd64 image push in one fused primitive.
+///
+/// Fusion primitive over the three sibling two-line stanzas the
+/// cluster-overlay release flows in
+/// `commands/{kenshi,kenshi_agent,nix_builder}.rs` each spelled inline
+/// verbatim (modulo the per-flow `total_steps` in the header and the
+/// per-flow `(image_path, registry, retries, token)` runtime quartet
+/// forwarded to the underlying push):
+///
+/// ```ignore
+/// crate::step_header::announce_step_header(1, N, "Push Image");
+/// crate::commands::cluster_overlay_release_push_step::push_release_image_amd64_auto_tag(
+///     image_path,
+///     registry.clone(),
+///     retries,
+///     token,
+/// )
+/// .await?;
+/// ```
+///
+/// Three occurrences of an identical shape past THEORY §VI.1's
+/// three-is-a-law threshold — the SAME three-file consumer census
+/// [`push_release_image_amd64_auto_tag`] already covers on its own,
+/// now one call above it — makes this primitive the law-redeeming
+/// extraction. Post-lift each flow calls
+/// [`announce_and_push_release_image_step`] with `(total_steps,
+/// image_path, registry, retries, token)` and inherits the canonical
+/// `Step 1/N: Push Image` header, the step-1 anchor, and the
+/// twelve-slot push argument tuple through one site. Sibling of
+/// [`crate::commands::release_commit::announce_and_commit_cluster_overlay_release_step`]
+/// on the tail end of the same three flows — same three-file
+/// consumer census, same `announce_and_*_step` naming discipline,
+/// same [`tracing::info!`]-forwarding + private-const-title +
+/// forward-to-underlying-primitive shape.
+///
+/// # Types-as-theorems: the first-step anchor
+///
+/// The primitive fixes `step == 1` at the call site so an operator
+/// eyeballing the header sees `Step 1/N: Push Image` unambiguously
+/// flagged as the FIRST workflow step of the release flow, symmetric
+/// with the sibling
+/// [`crate::commands::release_commit::announce_and_commit_cluster_overlay_release_step`]'s
+/// `step == total_steps` terminal-step anchor. A future consumer
+/// that reached for this primitive for a non-first push step (a
+/// mid-flow `Republish Image`) would need a separate primitive with
+/// distinct semantics — a design-level forcing function rather than
+/// an implicit off-by-one.
+///
+/// # Grammar pinned by the byte-oracle sibling
+///
+/// The rendered header bytes (`━━━ Step 1/N: Push Image ━━━\n`) are
+/// pinned by the fleet-standard
+/// [`crate::step_header::write_step_header`] byte-oracle plus the
+/// [`PUSH_IMAGE_STEP_TITLE`] literal-bytes shield below; a drift
+/// here (a step-title rename, an emoji-prefix on the header, a
+/// glyph-swap on the U+2501 heavy horizontal) surfaces as a
+/// localized test failure at one site, not as silent log-drift
+/// across three release flows.
+pub async fn announce_and_push_release_image_step(
+    total_steps: usize,
+    image_path: String,
+    registry: String,
+    retries: u32,
+    token: Option<String>,
+) -> Result<()> {
+    crate::step_header::announce_step_header(1, total_steps, PUSH_IMAGE_STEP_TITLE);
+    push_release_image_amd64_auto_tag(image_path, registry, retries, token).await
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -204,21 +283,30 @@ mod tests {
     }
 
     // Positive-delegation shield: each pre-lift consumer module still
-    // routes through the typed primitive at least once. Without this,
+    // routes through the fusion primitive at least once. Without this,
     // a future workflow rewrite that drops the "Push Image" step
     // entirely (or renames the primitive without re-pointing a caller)
     // would leave the negative marker-comment shield satisfied by
     // absence rather than by delegation. Pin the positive shape
     // explicitly per the sibling-writer discipline
-    // `crate::step_header::every_prelift_module_forwards_through_announce_step_header`
-    // established.
+    // `crate::commands::release_commit::every_cluster_overlay_release_consumer_delegates_through_commit_and_push_fusion`
+    // established on the terminal-step peer of this primitive.
+    //
+    // Post-lift the consumers forward through the fusion entry point
+    // `announce_and_push_release_image_step`, which internally routes
+    // through the underlying `push_release_image_amd64_auto_tag`.
+    // Checking the fusion name here (rather than the underlying) means
+    // a consumer that dropped the step-header + push fusion in favor
+    // of a bare underlying-push call would trip this shield — the
+    // fused announce+push contract is the load-bearing invariant, not
+    // the bare push alone.
     #[test]
-    fn every_prelift_module_forwards_through_push_release_image_amd64_auto_tag() {
+    fn every_prelift_module_forwards_through_announce_and_push_release_image_step() {
         let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("src")
             .join("commands");
         let expected_forwarder =
-            "cluster_overlay_release_push_step::push_release_image_amd64_auto_tag";
+            "cluster_overlay_release_push_step::announce_and_push_release_image_step";
         for module in ["kenshi.rs", "kenshi_agent.rs", "nix_builder.rs"] {
             let path = commands_dir.join(module);
             let source = std::fs::read_to_string(&path).unwrap();
@@ -261,5 +349,85 @@ mod tests {
                 image_path, registry, retries, token,
             ))
         };
+    }
+
+    // Signature shield for the fusion primitive: pin `(total_steps,
+    // image_path, registry, retries, token) -> Result<()>`. Guards
+    // against a slot appended to the underlying push arity leaking
+    // upward, or against `total_steps` drifting to a non-`usize`
+    // representation (`u32`, `NonZeroUsize`) that would silently
+    // misalign the three cluster-overlay release call sites the
+    // underlying primitive's own signature shield already covers on
+    // its side of the fusion.
+    #[test]
+    fn announce_and_push_release_image_step_signature_stays_stable() {
+        let _: fn(
+            usize,
+            String,
+            String,
+            u32,
+            Option<String>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>,
+        > = |total_steps, image_path, registry, retries, token| {
+            Box::pin(super::announce_and_push_release_image_step(
+                total_steps,
+                image_path,
+                registry,
+                retries,
+                token,
+            ))
+        };
+    }
+
+    // Byte-oracle: the `PUSH_IMAGE_STEP_TITLE` const must carry the
+    // exact literal `"Push Image"` — 10 bytes of ASCII, a single
+    // ASCII space between the two words, no leading/trailing
+    // whitespace, no emoji prefix. A drift here (a `Push image` case
+    // change, a `Push  Image` double-space, an emoji-prefixed
+    // variant) trips the shield before the change reaches the three
+    // cluster-overlay release flows the const feeds. Pinning the
+    // bytes at one test means the sibling
+    // `release_commit::COMMIT_AND_PUSH_STEP_TITLE` treatment of its
+    // own literal ("Commit and Push") is symmetric on the first-step
+    // peer.
+    #[test]
+    fn push_image_step_title_bytes_pin_literal() {
+        assert_eq!(super::PUSH_IMAGE_STEP_TITLE, "Push Image");
+        assert_eq!(super::PUSH_IMAGE_STEP_TITLE.len(), "Push Image".len());
+    }
+
+    // Negative caller shield: the raw literal `"Push Image"` must
+    // NOT survive as a step-header argument in any of the three
+    // consumer modules. Post-lift the title flows to
+    // `announce_step_header` exclusively through the private
+    // `PUSH_IMAGE_STEP_TITLE` const via the fusion primitive; any
+    // future re-introduction of the inline literal at a call site
+    // (a partial revert, a merge conflict resolution that dragged
+    // the literal back) trips this shield.
+    //
+    // The forbidden shape is reconstructed at test time from ASCII
+    // halves so this test file's own source does not contain the
+    // literal as one contiguous quoted string — otherwise a naive
+    // future extension of the scan to this module would self-hit.
+    #[test]
+    fn no_cluster_overlay_release_consumer_still_spells_push_image_literal() {
+        let forbidden = format!("\"{}{}\"", "Push", " Image");
+        for (path, source) in [
+            ("commands/kenshi.rs", include_str!("kenshi.rs")),
+            ("commands/kenshi_agent.rs", include_str!("kenshi_agent.rs")),
+            ("commands/nix_builder.rs", include_str!("nix_builder.rs")),
+        ] {
+            assert!(
+                !source.contains(&forbidden),
+                "`{path}` must not spell the raw {forbidden} step-title \
+                 literal; route through `crate::commands::\
+                 cluster_overlay_release_push_step::\
+                 announce_and_push_release_image_step` instead (the \
+                 fusion primitive that owns the canonical Push-Image \
+                 step title via the private `PUSH_IMAGE_STEP_TITLE` \
+                 const)."
+            );
+        }
     }
 }

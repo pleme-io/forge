@@ -389,6 +389,18 @@ mod tests {
     // sibling shield in `commands/release_commit.rs`
     // (`every_cluster_overlay_release_consumer_delegates_through_commit_and_push_fusion`)
     // which pins the fusion-call count at exactly 1 per consumer.
+    //
+    // The same three flows subsequently lifted their leading
+    // `Push Image` step onto
+    // `crate::commands::cluster_overlay_release_push_step::\
+    // announce_and_push_release_image_step`; that fusion primitive
+    // transitively calls `crate::step_header::announce_step_header`
+    // from `commands/cluster_overlay_release_push_step.rs`, so the
+    // direct-count in each of those three flows dropped by one MORE
+    // — see the positive-half sibling shield in
+    // `commands/cluster_overlay_release_push_step.rs`
+    // (`every_prelift_module_forwards_through_announce_and_push_release_image_step`)
+    // which pins that fusion-call count at ≥1 per consumer.
     #[test]
     fn every_prelift_module_forwards_through_announce_step_header() {
         use std::path::PathBuf;
@@ -400,9 +412,9 @@ mod tests {
             ("comprehensive_release.rs", 6),
             ("deploy.rs", 4),
             ("github_runner_ci.rs", 3),
-            ("kenshi.rs", 3),
-            ("kenshi_agent.rs", 5),
-            ("nix_builder.rs", 7),
+            ("kenshi.rs", 2),
+            ("kenshi_agent.rs", 4),
+            ("nix_builder.rs", 6),
         ];
         for (basename, min_count) in expectations {
             let path = commands_dir.join(basename);
