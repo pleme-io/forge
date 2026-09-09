@@ -23,7 +23,7 @@ pub async fn execute(dist_dir: PathBuf, template_path: PathBuf) -> Result<()> {
 
 /// Verifies NO hardcoded API URLs are baked into JavaScript bundles
 fn verify_no_hardcoded_urls(dist_dir: &Path) -> Result<()> {
-    info!("🔍 Verifying NO hardcoded API URLs in bundles...");
+    crate::info_probe_verifying!("NO hardcoded API URLs in bundles");
 
     let assets_dir = dist_dir.join("assets");
     crate::repo::require_existing_path(&assets_dir, "Assets directory")?;
@@ -82,7 +82,7 @@ fn verify_no_hardcoded_urls(dist_dir: &Path) -> Result<()> {
 /// Verifies bundle consistency: index.html references match actual bundle files
 /// Prevents stale bundles from being deployed (e.g., old bundles with wrong URLs)
 fn verify_bundle_consistency(dist_dir: &Path) -> Result<()> {
-    info!("🔍 Verifying bundle consistency...");
+    crate::info_probe_verifying!("bundle consistency");
 
     let index_html_path = dist_dir.join("index.html");
     crate::repo::require_existing_path(&index_html_path, "index.html")?;
@@ -148,7 +148,7 @@ fn verify_bundle_consistency(dist_dir: &Path) -> Result<()> {
 /// Ensures env.js and version.json use cache-busting, no long-cache meta tags,
 /// and assets use content hashing
 fn verify_cache_policy(dist_dir: &Path) -> Result<()> {
-    info!("🔍 Verifying cache policy configuration...");
+    crate::info_probe_verifying!("cache policy configuration");
 
     let index_html_path = dist_dir.join("index.html");
     if !index_html_path.exists() {
