@@ -81,11 +81,15 @@ pub(crate) async fn run_health_check(
 
     // Check rollout status
     let timeout_str = format!("{}s", timeout_secs);
+    let deployment_ref = crate::workload_field::format_workload_argv_ref(
+        crate::workload_field::KubernetesWorkloadKind::Deployment,
+        deployment,
+    );
     let mut cmd = kubectl_command_async();
     cmd.args([
         "rollout",
         "status",
-        &format!("deployment/{}", deployment),
+        &deployment_ref,
         "-n",
         namespace,
         &format!("--timeout={}", timeout_str),

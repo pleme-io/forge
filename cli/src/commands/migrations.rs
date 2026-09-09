@@ -599,11 +599,15 @@ spec:
         config.migration_timeout_secs()
     );
     let timeout_str = format!("{}s", config.migration_timeout_secs());
+    let job_ref = crate::workload_field::format_workload_argv_ref(
+        crate::workload_field::KubernetesWorkloadKind::Job,
+        &job_name,
+    );
     let wait_result = kubectl_command_async()
         .args(&[
             "wait",
             "--for=condition=complete",
-            &format!("job/{}", job_name),
+            &job_ref,
             "-n",
             &namespace,
             "--timeout",

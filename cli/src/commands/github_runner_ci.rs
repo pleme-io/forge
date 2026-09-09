@@ -725,10 +725,14 @@ pub async fn execute(
         // Verify the new image is deployed
         println!();
         crate::info_probe_verifying!("deployment");
+        let statefulset_ref = crate::workload_field::format_workload_argv_ref(
+            crate::workload_field::KubernetesWorkloadKind::StatefulSet,
+            &name,
+        );
         let verify_result = kubectl_command_async()
             .args(&[
                 "get",
-                &format!("statefulset/{}", name),
+                &statefulset_ref,
                 "-n",
                 &namespace,
                 "-o",
