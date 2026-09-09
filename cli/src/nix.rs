@@ -340,7 +340,7 @@ pub async fn build_docker_image(image_name: &str, suffix: Option<&str>) -> Resul
 
     let result = build_flake_attr(&flake_attr).await?;
 
-    info!("   ✅ Built: {}", result.store_path);
+    crate::info_built_store_path_field!(result.store_path);
 
     Ok(result)
 }
@@ -384,7 +384,7 @@ pub async fn build_docker_image_from_dir(
     )
     .await?;
 
-    info!("   ✅ Built: {}", store_path);
+    crate::info_built_store_path_field!(store_path);
 
     Ok(NixBuildResult {
         store_path,

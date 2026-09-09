@@ -76,6 +76,7 @@ mod k8s;
 mod namespace_field;
 mod nix;
 mod nix_build_spinner;
+mod nix_built_store_path;
 mod nix_hooks;
 mod nonfatal_warning;
 mod observability;
