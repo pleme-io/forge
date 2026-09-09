@@ -394,6 +394,127 @@ pub fn write_heavy_rule<W: std::io::Write>(
     }
 }
 
+/// Palette + width + indent triple every pre-lift indented light-rule
+/// site fed to `println!("<INDENT>{}", "─".repeat(<width>).<palette>())`
+/// verbatim. Closed to the exact `(indent, palette, width, glyph)`
+/// tuple the pre-lift 2-site sibling class carried and nothing more —
+/// a new light-rule shape is a deliberate additive variant, not an
+/// open call-site choice.
+///
+/// # Distinct from [`HeavyRuleStyle`]
+///
+/// [`HeavyRuleStyle`] carries the U+2501 `━` HEAVY horizontal rule,
+/// always ZERO-indent, painted `bright_blue` / `bright_green` /
+/// uncolored, used to open or close a top-level section-boundary
+/// headline (SUMMARY, PUSH COMPLETE, per-service test-run, pre-deploy
+/// summary). This enum carries the U+2500 `─` LIGHT horizontal rule,
+/// three-space-indented, painted `.dimmed()`, used to bracket a
+/// nested throwaway subprocess-dump body (the truncated failing
+/// integration-test stdout inside the retry loop). The two coexist
+/// rather than fusing because the glyph weight (heavy vs. light), the
+/// indent scope (top-level vs. nested-in-body), and the palette weight
+/// (bright-colored vs. dimmed) are three axes of visual hierarchy the
+/// operator has been trained to read — a `━` at zero indent marks a
+/// section headline, a dimmed `─` at three-space indent marks a
+/// diagnostic dump inside a step body. Folding the two would let a
+/// nested subprocess-dump wrapper promote to the top-level
+/// section-boundary grammar (or collapse a section rule down to a
+/// dimmed nested wrapper) and drift the visual hierarchy silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LightRuleStyle {
+    /// Integration-test failure stdout-dump wrapper
+    /// (`.dimmed()` × 60 `─` glyphs, three-space indent). 2 pre-lift
+    /// sites in `commands/integration_tests.rs`, both spelled inline
+    /// as `println!("   {}", "─".repeat(60).dimmed())` — the opening
+    /// (:1474) and closing (:1481) rule around the truncated
+    /// (`.take(50)`-capped, `... (output truncated)`-tailed if
+    /// overflowed) failing-suite `result.output` echo inside the
+    /// per-suite retry-loop failure branch. The 3-space indent aligns
+    /// the wrapper under the sibling
+    /// [`print_step_failure`]-emitted `❌ <suite> - <dur>s
+    /// [<passed>, <failed>]` verdict line above and the sibling
+    /// `println!("   {}", line.dimmed())` per-line body echo between
+    /// the two rules. `.dimmed()` frames the whole subprocess-corpus
+    /// dump one shade calmer than the accented mid-lines
+    /// (`suite_name.bright_yellow()`, `passed.green()`,
+    /// `failed.red()`) the surrounding summary carries, deliberately
+    /// receding into the visual background so operator eye lands on
+    /// the verdict and the per-line body rather than the frame.
+    IntegrationTestFailureStdoutDimmed60,
+}
+
+impl LightRuleStyle {
+    /// Rule width the [`String::repeat`] call receives — the number
+    /// of `─` glyphs the rule carries.
+    const fn width(self) -> usize {
+        match self {
+            LightRuleStyle::IntegrationTestFailureStdoutDimmed60 => 60,
+        }
+    }
+
+    /// Leading indent every pre-lift consumer emitted OUTSIDE the
+    /// coloring span — the `"   "` prefix in
+    /// `println!("   {}", "─".repeat(60).dimmed())`. Emitted verbatim
+    /// on the writer so a `--no-color` grep still surfaces the
+    /// three-space indent aligning the wrapper under its sibling
+    /// step-failure verdict line.
+    const fn indent(self) -> &'static str {
+        match self {
+            LightRuleStyle::IntegrationTestFailureStdoutDimmed60 => "   ",
+        }
+    }
+}
+
+/// Prints the indented light-rule line every pre-lift consumer in
+/// `commands/integration_tests.rs` spelled inline as
+/// `println!("<INDENT>{}", "─".repeat(<width>).<palette>())`. Marks
+/// the opening or closing edge of a nested subprocess-dump body at 2
+/// sibling call sites (`commands/integration_tests.rs:1474` — opening
+/// rule above the truncated failing-suite stdout echo; `:1481` —
+/// closing rule below it) — the pre-lift one-line stanza — so a
+/// future palette shift against rule-char, rule-width, indent, or
+/// palette happens at ONE site rather than two.
+///
+/// Delegates to [`write_light_rule`] against `std::io::stdout()`; the
+/// writer split exists so the fail-before-pass test can pin the
+/// rule-glyph, width, indent, and palette contract by inspecting
+/// emitted bytes rather than shelling out and grepping stdout.
+///
+/// # Compounding
+///
+/// Pre-lift both sibling sites restated the entire indented-dimmed-
+/// light-rule stanza — a swap of `"─".repeat(60)` for
+/// `"─".repeat(80)` at one site alone silently misaligns the closing
+/// rule against the opening rule and mismatches the truncated-body
+/// echo width, a swap of `.dimmed()` for `.bright_black()` at one
+/// site loses the paired framing tone, a swap of the leading `"   "`
+/// for `"    "` at one site alone drifts the wrapper indent against
+/// its sibling verdict and body-echo lines above and between the
+/// rules. Post-lift the primitive collapses both restatements onto
+/// ONE typed function; a future palette adjustment hits one body,
+/// not two.
+pub fn print_light_rule(style: LightRuleStyle) {
+    let _ = write_light_rule(&mut std::io::stdout().lock(), style);
+}
+
+/// Writer-taking sibling to [`print_light_rule`]. Emits the single
+/// `<INDENT><rule.palette()>` line (indent OUTSIDE the coloring span,
+/// rule INSIDE it) via [`writeln!`] against the supplied writer.
+/// [`print_light_rule`] is the stdout adapter; this variant exists
+/// so tests can pin the rule-glyph, width, indent, and palette
+/// contract without capturing stdout.
+pub fn write_light_rule<W: std::io::Write>(
+    w: &mut W,
+    style: LightRuleStyle,
+) -> std::io::Result<()> {
+    let bar = "─".repeat(style.width());
+    match style {
+        LightRuleStyle::IntegrationTestFailureStdoutDimmed60 => {
+            writeln!(w, "{}{}", style.indent(), bar.as_str().dimmed())
+        }
+    }
+}
+
 /// Rule-character glyph every pre-lift box-bottom site in
 /// [`commands/status.rs`](crate::commands::status)'s
 /// `print_text_status` closed a thin box with, spelled through the
@@ -20483,6 +20604,188 @@ mod tests {
                  fusion that dropped one of the step-failure prints or \
                  folded two into a single call fails here; got \
                  {forwards}"
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_light_rule`] under
+    /// the [`super::LightRuleStyle::IntegrationTestFailureStdoutDimmed60`]
+    /// variant. Pins the single-line body every pre-lift consumer in
+    /// `commands/integration_tests.rs` spelled inline as
+    /// `println!("   {}", "─".repeat(60).dimmed())`: exactly one line,
+    /// a three-space indent OUTSIDE the coloring span, exactly 60
+    /// U+2500 `─` glyphs INSIDE the coloring span, the `\x1b[2m`
+    /// dimmed ANSI opener wrapping the bar, the `\x1b[0m` reset
+    /// closing it, and a trailing `\n`. Peer to
+    /// [`write_heavy_rule_integration_test_section_plain_60_emits_one_uncolored_bar_line_of_60_glyphs`]
+    /// — SAME 60-glyph width and SAME `commands/integration_tests.rs`
+    /// module, DIFFERENT rule-glyph (U+2500 `─` light vs. U+2501 `━`
+    /// heavy), DIFFERENT palette (`.dimmed()` vs. uncolored), and
+    /// DIFFERENT indent (3-space vs. flush) — so a fusion that folded
+    /// the two would drift both the visual weight and the indent
+    /// scope silently.
+    #[test]
+    fn write_light_rule_integration_test_failure_stdout_dimmed_60_emits_one_indented_dimmed_bar_line_of_60_glyphs(
+    ) {
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_light_rule(
+            &mut buf,
+            super::LightRuleStyle::IntegrationTestFailureStdoutDimmed60,
+        )
+        .expect("write_light_rule against a Vec<u8> writer must succeed");
+        let out = String::from_utf8(buf)
+            .expect("write_light_rule must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — every pre-lift stanza is one `println!`
+        // carrying no framing blank.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_light_rule must emit exactly one line — every \
+             pre-lift stanza in `commands/integration_tests.rs` is one \
+             `println!` carrying no framing blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The rule width reaches `String::repeat` at the enum-mapped
+        // 60 — a fusion that hoisted the width off the variant and
+        // pinned it to a fresh literal (say, widening to 80 to match
+        // some other module's rule) fails here.
+        let bar_glyph_count = lines[0].chars().filter(|c| *c == '─').count();
+        assert_eq!(
+            bar_glyph_count, 60,
+            "line 0 must contain exactly 60 `─` glyphs (matching the \
+             pre-lift inline `\"─\".repeat(60)`); got {}",
+            bar_glyph_count
+        );
+
+        // The palette contract: the bar carries the `\x1b[2m` dimmed
+        // opener and the `\x1b[0m` reset, exactly as the pre-lift
+        // `.dimmed()` call emits. A silent promotion to `.bold()` /
+        // `.bright_black()` / uncolored fails here.
+        assert!(
+            lines[0].contains("\x1b[2m"),
+            "line 0 must carry the `\\x1b[2m` dimmed ANSI opener \
+             around the bar — the pre-lift `.dimmed()` call emits \
+             it; got {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("\x1b[0m"),
+            "line 0 must carry the `\\x1b[0m` reset closing the \
+             dimmed span; got {:?}",
+            lines[0]
+        );
+
+        // The three-space indent is emitted OUTSIDE the coloring
+        // span — the pre-lift stanza spelled it as the literal `"   "`
+        // in the format string BEFORE the `{}` placeholder, so a
+        // terminal that strips ANSI still surfaces the indent
+        // aligning the wrapper under its sibling step-failure verdict
+        // above. A silent hoist of the indent INSIDE the `.dimmed()`
+        // span would put the dim escape before the spaces and drift
+        // that alignment.
+        assert!(
+            lines[0].starts_with("   \x1b[2m"),
+            "line 0 must begin with a bare three-space indent \
+             followed by the `\\x1b[2m` dimmed opener — the pre-lift \
+             `println!(\"   {{}}\", …)` format string carries the \
+             indent OUTSIDE the coloring span; got {:?}",
+            lines[0]
+        );
+
+        // Byte-for-byte: three spaces + `\x1b[2m` + 60 × `─` +
+        // `\x1b[0m` + trailing `\n`. Pins the pre-lift stanza's exact
+        // output byte pattern so a silent hoist of the indent into
+        // the coloring span, a swap of glyph width, or a palette
+        // shift trips exactly one assertion.
+        let expected = format!("   \x1b[2m{}\x1b[0m", "\u{2500}".repeat(60));
+        assert_eq!(
+            lines[0], expected,
+            "line 0 must be byte-for-byte identical to the pre-lift \
+             inline `println!(\"   {{}}\", \"─\".repeat(60).dimmed())` \
+             output; got {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza
+        // used `println!` (not `print!`), so the newline is part of
+        // the contract.
+        assert!(
+            out.ends_with('\n'),
+            "write_light_rule must emit a trailing `\\n` (the \
+             pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the 2 callers in `commands/integration_tests.rs`
+    /// migrated onto [`super::print_light_rule`] under
+    /// [`super::LightRuleStyle::IntegrationTestFailureStdoutDimmed60`]
+    /// no longer spell the `println!("   {}", "─".repeat(60).dimmed())`
+    /// inline stanza. Structural regression shield — without it, a
+    /// future refactor could silently re-inline the one-liner (a
+    /// "just call `println!` directly, it's shorter" cleanup) and
+    /// reopen the 2-site duplication class this lift closed.
+    /// Enforced against the module body BEFORE its first `#[cfg(test)]`
+    /// region so a test-support mention of the raw shape does not
+    /// defeat the shield.
+    ///
+    /// The exact-shape needle is
+    /// `println!("   {}", "─".repeat(` — the macro invocation with
+    /// the exact three-space-indent format string and the
+    /// `"─".repeat(` literal opener. A sibling shape carrying a
+    /// different glyph (`"━".repeat`), a different indent (a
+    /// two-space `"  "` or flush ZERO-indent), or a bare uncolored
+    /// bar (no trailing `.dimmed()`) is OUT of scope by construction —
+    /// the needle's exact character sequence rejects all three.
+    ///
+    /// The positive count is pinned at the pre-lift 2-site census
+    /// (`integration_tests.rs` ×2). A fusion that folded the two
+    /// rule sites into one call or dropped one silently fails here —
+    /// the negative half above would still pass, but the positive
+    /// count would fall below the pre-lift census.
+    #[test]
+    fn print_light_rule_integration_test_failure_stdout_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str, usize)] = &[(
+            include_str!("commands/integration_tests.rs"),
+            "commands/integration_tests.rs",
+            2,
+        )];
+        for (source, module_path, expected_forwards) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("println!(\"   {}\", \"\u{2500}\".repeat(") {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `println!(\"   {{}}\", \"\u{2500}\".repeat(<w>).dimmed())` \
+                     three-space-indent dimmed light-rule stanza — that \
+                     shape was lifted onto `crate::ui::print_light_rule` \
+                     under `LightRuleStyle::IntegrationTestFailureStdoutDimmed60`. \
+                     A re-inline would silently reopen the 2-site \
+                     duplication class this shield exists to close. \
+                     Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            let forward_hits = body
+                .matches("crate::ui::LightRuleStyle::IntegrationTestFailureStdoutDimmed60")
+                .count();
+            assert_eq!(
+                forward_hits, *expected_forwards,
+                "{module_path} body must forward to \
+                 `crate::ui::print_light_rule(crate::ui::LightRuleStyle::IntegrationTestFailureStdoutDimmed60)` \
+                 at exactly {expected_forwards} site(s) — one per \
+                 pre-lift consumer in this module. A fusion that folded \
+                 two consumer sites into one call or dropped one of \
+                 the rule lines silently fails here. Found \
+                 {forward_hits} forwarding hits."
             );
         }
     }
