@@ -280,7 +280,7 @@ pub async fn web_cargo_update(product: String, service: String, repo_root: Strin
     // Success summary
     print_success_banner(80, "✅ UPDATE COMPLETE");
     println!();
-    println!("Updated files:");
+    crate::ui::print_updated_files_heading();
     crate::ui::print_bullet_path(&hanabi_dir.join("Cargo.lock"));
     crate::ui::print_bullet_path(&hanabi_dir.join("Cargo.nix"));
     println!();
