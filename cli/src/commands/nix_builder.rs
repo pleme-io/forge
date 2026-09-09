@@ -244,21 +244,23 @@ pub async fn release(
         )
         .await?;
 
-    // Step 2: Push image to GHCR — the twelve-positional-argument
-    // `push::execute` invocation + trailing `println!()` blank-line
-    // separator fusion now lives at ONE typed boundary at
-    // `commands::cluster_overlay_release_push_step::push_release_image_amd64_auto_tag`,
+    // Step 2: Announce the `Step 1/7: Push Image` header and perform
+    // the auto-tag amd64 image push in one fused primitive at
+    // `commands::cluster_overlay_release_push_step::announce_and_push_release_image_step`,
     // shared with the sibling `commands/{kenshi,kenshi_agent}.rs`
-    // consumers so the six load-bearing default slots (explicit-tags
-    // empty, arch=amd64, push_attic=false, attic_cache="",
-    // update_kustomization_path=None, commit_kustomization=false) stay
-    // owned by the primitive rather than by a copy-of-twelve-tuple
-    // convention at each call site; a future signature change on
-    // `push::execute` (a new positional slot, a bool-flag swap) flows
-    // to all three flows from one edit rather than through three
-    // silently misalignable positional call sites.
-    crate::step_header::announce_step_header(1, 7, "Push Image");
-    crate::commands::cluster_overlay_release_push_step::push_release_image_amd64_auto_tag(
+    // consumers. The primitive owns the canonical `Push Image` step
+    // title (via the private `PUSH_IMAGE_STEP_TITLE` const in that
+    // module), the step-1 anchor, and the six load-bearing push
+    // defaults (explicit-tags empty, arch=amd64, push_attic=false,
+    // attic_cache="", update_kustomization_path=None,
+    // commit_kustomization=false), so a future signature change on
+    // `push::execute` (a new positional slot, a bool-flag swap) or a
+    // re-titling of the step (`Publish Image`) flows to all three
+    // flows from one edit rather than through three silently
+    // misalignable positional call sites + three inline literal
+    // edits.
+    crate::commands::cluster_overlay_release_push_step::announce_and_push_release_image_step(
+        7,
         image_path,
         registry.clone(),
         retries,
