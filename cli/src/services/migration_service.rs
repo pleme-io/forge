@@ -186,7 +186,9 @@ impl MigrationService {
 
     async fn delete_existing_job(&self, name: &str, namespace: &str) -> Result<()> {
         let output = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
-            &["delete", "job", name, "-n", namespace, "--ignore-not-found"],
+            &crate::kubectl_delete_job_argv::kubectl_delete_job_ignore_not_found_argv(
+                name, namespace,
+            ),
             "kubectl delete job (pre-create cleanup)",
         )
         .await?;

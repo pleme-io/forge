@@ -684,14 +684,11 @@ spec:
             "failed migration job",
         );
         let _ = kubectl_command_async()
-            .args(&[
-                "delete",
-                "job",
-                &job_name,
-                "-n",
-                &namespace,
-                "--ignore-not-found",
-            ])
+            .args(
+                crate::kubectl_delete_job_argv::kubectl_delete_job_ignore_not_found_argv(
+                    &job_name, &namespace,
+                ),
+            )
             .output()
             .await;
 
@@ -920,7 +917,9 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
     } else {
         for job in &jobs {
             let delete = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
-                &["delete", "job", job, "-n", namespace, "--ignore-not-found"],
+                &crate::kubectl_delete_job_argv::kubectl_delete_job_ignore_not_found_argv(
+                    job, namespace,
+                ),
                 "kubectl delete job (cleanup loop)",
             )
             .await?;
