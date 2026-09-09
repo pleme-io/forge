@@ -101,7 +101,7 @@ pub async fn execute(
     let mut pod_state_tracking: HashMap<String, PodStateHistory> = HashMap::new();
 
     // Build label selector for the deployment
-    let label_selector = format!("app={}", name);
+    let label_selector = crate::k8s_label_selector::format_app_label_selector(&name);
 
     // Thresholds for stuck detection
     const STUCK_THRESHOLD_ITERATIONS: u32 = 10; // 30 seconds with 3s interval

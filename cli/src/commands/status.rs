@@ -437,7 +437,7 @@ async fn fetch_pods(namespace: &str, deployment_name: &str) -> Result<Vec<serde_
         "-n",
         namespace,
         "-l",
-        &format!("app={}", deployment_name),
+        &crate::k8s_label_selector::format_app_label_selector(&deployment_name),
         "-o",
         "json",
     ])
@@ -1062,7 +1062,7 @@ async fn fetch_k8s_services(namespace: &str, deployment_name: &str) -> Result<Ve
         "-n",
         namespace,
         "-l",
-        &format!("app={}", deployment_name),
+        &crate::k8s_label_selector::format_app_label_selector(&deployment_name),
         "-o",
         "json",
     ])
@@ -1115,7 +1115,7 @@ async fn fetch_migrations(namespace: &str, deployment_name: &str) -> Result<Vec<
         "-n",
         namespace,
         "-l",
-        &format!("app={}", deployment_name),
+        &crate::k8s_label_selector::format_app_label_selector(&deployment_name),
         "-o",
         "json",
         "--sort-by=.metadata.creationTimestamp",

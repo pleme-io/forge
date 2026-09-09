@@ -2061,7 +2061,7 @@ async fn print_deployment_report(
             "-n",
             namespace,
             "-l",
-            &format!("app={}", service),
+            &crate::k8s_label_selector::format_app_label_selector(&service),
             "-o",
             "jsonpath={.items[0].status.phase}",
         ])
@@ -2075,7 +2075,7 @@ async fn print_deployment_report(
             "-n",
             namespace,
             "-l",
-            &format!("app={}", service),
+            &crate::k8s_label_selector::format_app_label_selector(&service),
             "-o",
             "jsonpath={.items[0].spec.containers[0].image}",
         ])

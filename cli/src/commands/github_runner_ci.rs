@@ -541,7 +541,7 @@ pub async fn execute(
                     "-n",
                     &namespace,
                     "-l",
-                    &format!("app={}", name),
+                    &crate::k8s_label_selector::format_app_label_selector(&name),
                     "-o",
                     "json",
                 ])

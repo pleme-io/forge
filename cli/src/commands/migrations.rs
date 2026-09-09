@@ -901,7 +901,7 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
             "-n",
             namespace,
             "-l",
-            &format!("app={}", service),
+            &crate::k8s_label_selector::format_app_label_selector(&service),
             "-o",
             "jsonpath={.items[*].metadata.name}",
         ],
