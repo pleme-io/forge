@@ -806,9 +806,13 @@ fn verify_docker() -> Result<()> {
         .output()
         .context("Failed to run docker info")?;
 
-    if !info_output.status.success() {
-        bail!("Docker daemon is not running. Please start Docker first.");
-    }
+    // Daemon-liveness gate. Owns the pre-lift `bail!("Docker daemon is
+    // not running. Please start Docker first.")` message at one point
+    // of truth (the sibling `ensure_docker_running` below rides the
+    // same primitive on its terminal fall-through branch).
+    crate::docker_daemon_running_preflight::bail_unless_docker_daemon_running(
+        info_output.status.success(),
+    )?;
 
     ui::print_success("Docker daemon is running");
     Ok(())
@@ -1235,7 +1239,13 @@ pub fn ensure_docker_running() -> Result<()> {
         );
     }
 
-    bail!("Docker daemon is not running. Please start Docker first.");
+    // Terminal fall-through: no auto-start remains to try. Owns the
+    // pre-lift `bail!("Docker daemon is not running. Please start
+    // Docker first.")` message at one point of truth (the sibling
+    // `verify_docker` above rides the same primitive on its
+    // conditional branch).
+    crate::docker_daemon_running_preflight::bail_unless_docker_daemon_running(false)?;
+    unreachable!("bail_unless_docker_daemon_running(false) always returns Err(_)");
 }
 
 #[cfg(test)]
