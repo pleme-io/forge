@@ -21,6 +21,7 @@ pub mod e2e;
 pub mod federation;
 pub mod federation_tests;
 pub mod flux;
+pub mod flux_debug_commands_hint;
 pub mod flux_system_reconcile;
 pub mod frontend_validation;
 pub mod gate_config_source_announcement;
