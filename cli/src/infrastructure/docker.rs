@@ -25,6 +25,8 @@
 //!   (async) split this module's `kubectl.rs` sibling already
 //!   carries.
 
+use anyhow::{Context, Result};
+
 use crate::repo::get_tool_path;
 
 /// Module-scoped sigil that resolves the `docker` binary via the
@@ -217,6 +219,84 @@ pub(crate) async fn find_first_image_id_by_name_async_with_bin(
         .await
         .ok()?;
     classify_first_image_id(&output)
+}
+
+/// Canonical `docker ps` filter-list argv: `docker ps -q --filter <filter>`.
+/// Centralized so the sync ([`ps_filter_rm_f`]) primitive and its
+/// `_with_bin` test sibling both build the same argv from one definition
+/// — a regression that dropped `-q` (silently broadening the emitted
+/// output to the human-readable `CONTAINER ID / IMAGE / COMMAND / …`
+/// table that no caller knows how to parse) is a one-site fix here.
+fn ps_filter_ids_args(filter: &str) -> [&str; 4] {
+    ["ps", "-q", "--filter", filter]
+}
+
+/// Best-effort docker garbage-collect stanza: probe `docker ps -q --filter
+/// <filter>` for matching container IDs, and — if any are returned — fire
+/// `docker rm -f <ids…>` through [`crate::retry::run_discard_sync`] to
+/// discard the exit status (a still-referenced container, a daemon race,
+/// or a stopped-but-not-yet-cleaned Ryuk sidecar are all acceptable
+/// silent-no-op outcomes at this GC surface). Returns the count of
+/// container IDs the ps probe reported so the caller can render the
+/// post-cleanup summary the operator sees.
+///
+/// # Duplication lift
+///
+/// Two pre-lift sibling stanzas in
+/// [`crate::commands::e2e`]`::cleanup_testcontainers` each spelled the
+/// probe + parse + conditional `rm -f` dance verbatim — one filter for
+/// `label=org.testcontainers=true` (testcontainers-managed containers)
+/// and one for `ancestor=testcontainers/ryuk` (Ryuk reaper sidecars).
+/// Centralizing collapses both onto ONE typed primitive so a future
+/// refinement — a `docker ps --format '{{.ID}}'` swap for machine-
+/// parseable output, a `--all` broadening to include exited containers,
+/// a per-ID individual rm to isolate a stuck container the batch `rm -f`
+/// wedges on — lands at one site instead of drifting one stanza at a
+/// time.
+///
+/// # Failure envelope
+///
+/// The initial `ps` probe is spawn-fallible (docker daemon down / binary
+/// missing / PATH broken) and its `.output()` result is propagated as an
+/// [`anyhow::Result`] with `list_context` as the `.context(…)` message —
+/// matching the pre-lift `.context("Failed to list <what>")?` shape.
+/// The follow-on `rm -f` runs through [`crate::retry::run_discard_sync`]
+/// which swallows every failure by construction; the pre-lift sites
+/// established that discipline already (a partial cleanup is the
+/// canonical outcome, and re-tries are the caller's post-loop
+/// concern, not this primitive's).
+pub fn ps_filter_rm_f(filter: &str, list_context: &'static str) -> Result<usize> {
+    ps_filter_rm_f_with_bin(&docker_bin(), filter, list_context)
+}
+
+/// Test-facing sibling of [`ps_filter_rm_f`] that takes the docker
+/// binary path as an explicit parameter, so hermetic shim tests can
+/// spawn the primitive against a `make_executable_shim`-produced
+/// absolute path without mutating the process-global `PATH` /
+/// `DOCKER_BIN` env var (the parallel-runner race trap the centralized
+/// `make_executable_shim` discipline pins everywhere else in forge).
+pub(crate) fn ps_filter_rm_f_with_bin(
+    bin: &str,
+    filter: &str,
+    list_context: &'static str,
+) -> Result<usize> {
+    let output = std::process::Command::new(bin)
+        .args(ps_filter_ids_args(filter))
+        .output()
+        .with_context(|| list_context.to_string())?;
+    let stdout = crate::repo::utf8_lossy_borrow(&output.stdout);
+    let ids: Vec<&str> = stdout.trim().lines().filter(|l| !l.is_empty()).collect();
+    let count = ids.len();
+    if count > 0 {
+        let mut argv: Vec<&str> = Vec::with_capacity(2 + count);
+        argv.push("rm");
+        argv.push("-f");
+        for id in &ids {
+            argv.push(id);
+        }
+        crate::retry::run_discard_sync(bin, &argv);
+    }
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -537,6 +617,131 @@ mod tests {
             "infrastructure/docker.rs",
             "DOCKER_BIN",
             "docker",
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // ps_filter_rm_f — filter-list-then-rm-f garbage-collect primitive
+    // ---------------------------------------------------------------
+
+    /// [`ps_filter_rm_f_with_bin`] passes the canonical
+    /// `["ps", "-q", "--filter", <filter>]` argv to docker on the
+    /// initial probe spawn. Pins the byte-exact argv both pre-lift
+    /// call sites in [`crate::commands::e2e`]`::cleanup_testcontainers`
+    /// spelled verbatim — a future regression that dropped `-q`
+    /// (silently broadening the emitted stdout to docker's
+    /// human-readable `CONTAINER ID / IMAGE / COMMAND / …` header
+    /// row that this primitive's `.lines().filter(!is_empty).collect()`
+    /// classifier would then treat as a "container ID") or reordered
+    /// `--filter <value>` (silently rendering the filter as a
+    /// positional container ID that `docker ps` would `Bad container id`
+    /// on) fails this test rather than shipping a broken cleanup.
+    #[cfg(unix)]
+    #[test]
+    fn test_ps_filter_rm_f_with_bin_passes_canonical_ps_argv_on_zero_ids() {
+        let argv_log = ArgvLog::reserve();
+        let (_dir, shim) = make_executable_shim("docker", &argv_log.shim_body(""));
+
+        let got =
+            ps_filter_rm_f_with_bin(&shim, "label=org.testcontainers=true", "list containers")
+                .expect("ps probe succeeds with empty stdout");
+        assert_eq!(got, 0, "empty stdout must collapse to zero-count");
+
+        let logged = argv_log.read_argv_log();
+        let lines: Vec<&str> = logged.lines().collect();
+        assert_eq!(
+            lines,
+            vec!["ps", "-q", "--filter", "label=org.testcontainers=true"],
+            "docker probe argv must match the canonical `ps -q --filter <filter>` \
+             shape both pre-lift sites in commands/e2e.rs::cleanup_testcontainers \
+             spelled verbatim"
+        );
+    }
+
+    /// [`ps_filter_rm_f_with_bin`] on a probe that emits multiple
+    /// container IDs (one per line) invokes `docker rm -f <id1> <id2> …`
+    /// through [`crate::retry::run_discard_sync`] and returns the count
+    /// of IDs the probe reported. Because the shim writes every
+    /// invocation's argv onto ONE shared log (append), the log carries
+    /// both the probe argv AND the follow-on `rm -f` argv end-to-end
+    /// — the test walks the log to prove the `rm -f` invocation
+    /// happened AND that it passed the exact ID triple the probe
+    /// emitted.
+    #[cfg(unix)]
+    #[test]
+    fn test_ps_filter_rm_f_with_bin_multi_id_spawns_rm_f_with_every_id() {
+        let argv_log = ArgvLog::reserve();
+        let (_dir, shim) =
+            make_executable_shim("docker", &argv_log.shim_body("abc123\ndef456\nghi789\n"));
+
+        let got = ps_filter_rm_f_with_bin(&shim, "ancestor=testcontainers/ryuk", "list ryuk")
+            .expect("ps probe succeeds");
+        assert_eq!(got, 3, "three-line stdout must yield a count of three");
+
+        let logged = argv_log.read_argv_log();
+        let lines: Vec<&str> = logged.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                // probe: docker ps -q --filter <filter>
+                "ps",
+                "-q",
+                "--filter",
+                "ancestor=testcontainers/ryuk",
+                // rm -f: docker rm -f <ids…>
+                "rm",
+                "-f",
+                "abc123",
+                "def456",
+                "ghi789",
+            ],
+            "docker argv end-to-end must carry the probe `ps -q --filter` argv \
+             followed by the `rm -f <ids…>` argv with every reported ID \
+             threaded through — the pre-lift dance both cleanup_testcontainers \
+             stanzas assembled by hand"
+        );
+    }
+
+    /// [`ps_filter_rm_f_with_bin`] short-circuits the `rm -f` follow-on
+    /// entirely when the probe's stdout is empty — the argv log carries
+    /// ONLY the probe invocation, never a bare `docker rm -f` argv (which
+    /// docker rejects with `"docker rm" requires at least 1 argument`).
+    /// Pins the pre-lift `if !container_ids.is_empty()` guard the two
+    /// cleanup_testcontainers stanzas both wrapped their `rm -f` call
+    /// with.
+    #[cfg(unix)]
+    #[test]
+    fn test_ps_filter_rm_f_with_bin_empty_probe_does_not_spawn_rm_f() {
+        let argv_log = ArgvLog::reserve();
+        let (_dir, shim) = make_executable_shim("docker", &argv_log.shim_body(""));
+
+        let got =
+            ps_filter_rm_f_with_bin(&shim, "label=org.testcontainers=true", "list containers")
+                .expect("ps probe succeeds");
+        assert_eq!(got, 0);
+
+        let logged = argv_log.read_argv_log();
+        let lines: Vec<&str> = logged.lines().collect();
+        assert!(
+            !lines.contains(&"rm"),
+            "empty probe stdout must NOT spawn `docker rm -f` at all — pre-lift \
+             both cleanup_testcontainers stanzas guarded on `!container_ids.is_empty()`. \
+             Argv log: {logged:?}"
+        );
+    }
+
+    /// [`ps_filter_rm_f_with_bin`] on a probe spawn failure (nonexistent
+    /// docker binary) returns `Err` with the caller-provided context as
+    /// the top-level message — matching the pre-lift
+    /// `.output().context("Failed to list <what>")?` shape.
+    #[test]
+    fn test_ps_filter_rm_f_with_bin_spawn_failure_returns_context_err() {
+        let missing = "/nonexistent/forge-test-shim-must-not-exist-docker-ps-filter";
+        let err = ps_filter_rm_f_with_bin(missing, "any=filter", "Failed to list testcontainers")
+            .expect_err("spawn against nonexistent path must be Err");
+        assert!(
+            err.to_string().contains("Failed to list testcontainers"),
+            "spawn-failure Err must carry the caller-provided context — got: {err}"
         );
     }
 }

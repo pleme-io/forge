@@ -678,49 +678,24 @@ pub fn run_e2e_tests(
 pub fn cleanup_testcontainers() -> Result<()> {
     ui::print_info("Cleaning up testcontainers...");
 
-    // Kill containers with testcontainers label
-    let output = Command::new(docker_bin())
-        .args(["ps", "-q", "--filter", "label=org.testcontainers=true"])
-        .output()
-        .context("Failed to list testcontainers")?;
+    // Kill containers with testcontainers label — filter-list + conditional
+    // `rm -f` fusion pinned once at the [`crate::infrastructure::docker::ps_filter_rm_f`]
+    // primitive so a future refinement (a `docker ps --format '{{.ID}}'`
+    // switch, a per-ID individual rm, a `--all` broadening) lands once
+    // instead of drifting between the label / Ryuk stanzas.
+    let tc_count = crate::infrastructure::docker::ps_filter_rm_f(
+        "label=org.testcontainers=true",
+        "Failed to list testcontainers",
+    )?;
 
-    let stdout = crate::repo::utf8_lossy_borrow(&output.stdout);
-    let container_ids: Vec<&str> = stdout.trim().lines().filter(|l| !l.is_empty()).collect();
-
-    let tc_count = container_ids.len();
-
-    if !container_ids.is_empty() {
-        let ids: Vec<String> = container_ids.iter().map(|s| s.to_string()).collect();
-        let mut args = vec!["rm", "-f"];
-        for id in &ids {
-            args.push(id);
-        }
-        crate::retry::run_discard_sync(&docker_bin(), &args);
-    }
-
-    // Kill Ryuk sidecars (may not have the label)
-    let ryuk_output = Command::new(docker_bin())
-        .args(["ps", "-q", "--filter", "ancestor=testcontainers/ryuk"])
-        .output()
-        .context("Failed to list Ryuk containers")?;
-
-    let ryuk_stdout = crate::repo::utf8_lossy_borrow(&ryuk_output.stdout);
-    let ryuk_ids: Vec<&str> = ryuk_stdout
-        .trim()
-        .lines()
-        .filter(|l| !l.is_empty())
-        .collect();
-
-    let ryuk_count = ryuk_ids.len();
-
-    if !ryuk_ids.is_empty() {
-        let ids: Vec<String> = ryuk_ids.iter().map(|s| s.to_string()).collect();
-        let mut args = vec!["rm", "-f"];
-        for id in &ids {
-            args.push(id);
-        }
-        crate::retry::run_discard_sync(&docker_bin(), &args);
-    }
+    // Kill Ryuk sidecars (may not have the label) — same primitive as the
+    // label stanza above; the Ryuk containers survive under an
+    // `ancestor=testcontainers/ryuk` filter because they may launch
+    // before their testcontainers-parent gets the label stamp.
+    let ryuk_count = crate::infrastructure::docker::ps_filter_rm_f(
+        "ancestor=testcontainers/ryuk",
+        "Failed to list Ryuk containers",
+    )?;
 
     let total = tc_count + ryuk_count;
     if total > 0 {
@@ -1641,23 +1616,38 @@ mod docker_bin_routing_tests {
     ///
     /// # Reconstruction discipline
     ///
-    /// The delegation needle `run_discard_sync(` is reconstructed
-    /// via [`format!`] at test time so this shield's own source
-    /// text does not self-match the substring count — the per-line
-    /// filter would otherwise inflate the count by one for the
-    /// needle-literal line. The three delegation sites each spell
-    /// `crate::retry::run_discard_sync(` verbatim; the shorter
-    /// `run_discard_sync(` needle matches all three (a suffix of
-    /// the fully-qualified form) without also matching the shield's
-    /// own body (which only spells the two halves as separate
-    /// literals joined at `format!` time).
+    /// Both delegation needles (`run_discard_sync(` and
+    /// `ps_filter_rm_f(`) are reconstructed via [`format!`] at test
+    /// time so this shield's own source text does not self-match the
+    /// substring count — the per-line filter would otherwise inflate
+    /// the count by one per needle-literal line.
+    ///
+    /// # Composed delegation surface (post-lift)
+    ///
+    /// One of the three cleanup sweeps (the `docker image prune` inside
+    /// [`super::cleanup_e2e_images`]) still spawns `docker` directly and
+    /// discards the exit status through `crate::retry::run_discard_sync`.
+    /// The other two (the `docker rm -f <ids>` sweeps inside
+    /// [`super::cleanup_testcontainers`]) now compose the docker
+    /// `ps -q --filter <filter>` list + conditional `docker rm -f <ids…>`
+    /// fan-out through
+    /// [`crate::infrastructure::docker::ps_filter_rm_f`], which itself
+    /// discards the follow-on `rm -f` spawn through
+    /// `crate::retry::run_discard_sync` at its own body. So the "three
+    /// best-effort cleanup sweeps must route through the shared discard-
+    /// primitive" invariant is preserved by construction — either
+    /// directly (one site) or through the `ps_filter_rm_f` fusion
+    /// primitive that owns the ps-list + rm-f dance (two sites), for a
+    /// total of three delegation lines the shield accepts.
     #[test]
     fn test_e2e_cleanup_sweeps_route_through_run_discard_sync() {
         const SOURCE: &str = include_str!("e2e.rs");
         let body =
             crate::test_support::module_body_before_first_cfg_test(SOURCE, "commands/e2e.rs");
-        let needle = format!("run_discard_{}(", "sync");
-        let hits = crate::test_support::code_line_hits(body, &needle);
+        let direct_needle = format!("run_discard_{}(", "sync");
+        let fusion_needle = format!("ps_filter_rm_{}(", "f");
+        let mut hits = crate::test_support::code_line_hits(body, &direct_needle);
+        hits.extend(crate::test_support::code_line_hits(body, &fusion_needle));
         assert!(
             hits.len() >= 3,
             "commands/e2e.rs must delegate its three best-effort \
@@ -1666,12 +1656,17 @@ mod docker_bin_routing_tests {
              `docker image prune -f --filter \
              label=org.testcontainers=true` inside \
              `cleanup_e2e_images`) through the shared \
-             `crate::retry::run_discard_sync` primitive — found {} \
-             delegation(s) in the top-of-file body, expected at \
-             least 3. A regression that reintroduces the pre-lift \
-             `let _ = Command::new(docker_bin()).args([...]).output();` \
-             stanza re-establishes the five-copy duplication this \
-             commit closes. Offending hits: {hits:?}",
+             `crate::retry::run_discard_sync` primitive — either \
+             directly or through the sibling \
+             `crate::infrastructure::docker::ps_filter_rm_f` fusion \
+             primitive that owns the `docker ps -q --filter <filter>` \
+             list + conditional `docker rm -f <ids…>` dance and calls \
+             `run_discard_sync` internally. Found {} delegation(s) in \
+             the top-of-file body, expected at least 3. A regression \
+             that reintroduces the pre-lift `let _ = \
+             Command::new(docker_bin()).args([...]).output();` stanza \
+             re-establishes the five-copy duplication this commit \
+             closes. Offending hits: {hits:?}",
             hits.len(),
         );
     }
@@ -2490,6 +2485,96 @@ mod e2e_image_output_symlink_tests {
              `TempDir::Drop` closes the leak AND `tempfile::Builder`'s \
              `std::env::temp_dir()` honor closes the hermetic-`TMPDIR` \
              bypass. Offending: {stale:#?}",
+        );
+    }
+}
+
+#[cfg(test)]
+mod cleanup_testcontainers_ps_filter_rm_f_delegation_tests {
+    /// Whole-module shield: `commands/e2e.rs::cleanup_testcontainers`
+    /// MUST route every docker `ps -q --filter <filter>` list + `rm -f
+    /// <ids…>` garbage-collect stanza through
+    /// [`crate::infrastructure::docker::ps_filter_rm_f`], never the
+    /// pre-lift hand-rolled probe + parse + conditional-`rm -f` fusion.
+    ///
+    /// Pre-lift two sibling stanzas in `cleanup_testcontainers` each
+    /// spelled the argv literal `[\"ps\", \"-q\", \"--filter\", <filter>]`
+    /// verbatim before hand-rolling the empty-guard + `rm -f` fan-out —
+    /// one under the `label=org.testcontainers=true` filter (matches
+    /// testcontainers-managed containers), and one under
+    /// `ancestor=testcontainers/ryuk` (matches the Ryuk reaper sidecars
+    /// that lifted their parent's label before the label stamp landed).
+    /// Both stanzas fed the resulting ID vector into the same
+    /// `docker rm -f <ids…>` fan-out via [`crate::retry::run_discard_sync`]
+    /// (best-effort — a still-referenced container / daemon race / stopped-
+    /// but-uncleaned Ryuk sidecar are all acceptable silent-no-op
+    /// outcomes at this GC surface).
+    ///
+    /// Post-lift both consumers reach for
+    /// [`crate::infrastructure::docker::ps_filter_rm_f`] and the argv
+    /// literal, the empty-guard, the ID-vector build, and the `rm -f`
+    /// fan-out live once at that primitive.
+    ///
+    /// The shield asserts two invariants against the whole-module body
+    /// (scan bounded from file start to the FIRST `\n#[cfg(test)]\n`
+    /// marker via [`crate::test_support::module_body_before_first_cfg_test`],
+    /// so the negative-needle literal in this shield's own body stays
+    /// out of scope):
+    ///
+    /// - **Negative**: neither pre-lift docker-`ps` argv literal
+    ///   (`[\"ps\", \"-q\", \"--filter\", \"label=org.testcontainers=true\"]` /
+    ///   `[\"ps\", \"-q\", \"--filter\", \"ancestor=testcontainers/ryuk\"]`)
+    ///   may reappear at any code line — a re-inline would silently
+    ///   fork the argv from its `ps_filter_rm_f` sibling and re-open
+    ///   the class this lift closed.
+    /// - **Positive**: [`ps_filter_rm_f`] appears at ≥2 code lines
+    ///   (one per pre-lift stanza — the testcontainers-label site AND
+    ///   the Ryuk-ancestor site), so a regression that dropped both
+    ///   delegations cannot leave the negative scan trivially satisfied
+    ///   by absence.
+    ///
+    /// Sibling of `commands/rust_service.rs`'s
+    /// `test_rust_service_routes_through_kubectl_get_object` (2540) and
+    /// every other negative + positive caller-shield pair on `main`.
+    #[test]
+    fn test_cleanup_testcontainers_routes_ps_and_rm_f_through_ps_filter_rm_f_primitive() {
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            include_str!("e2e.rs"),
+            "commands/e2e.rs",
+        );
+
+        for filter in [
+            "label=org.testcontainers=true",
+            "ancestor=testcontainers/ryuk",
+        ] {
+            let needle = format!(
+                r#".args([{q}ps{q}, {q}-q{q}, {q}--filter{q}, {q}{filter}{q}])"#,
+                q = "\"",
+            );
+            let hits = crate::test_support::code_line_hits(body, &needle);
+            assert!(
+                hits.is_empty(),
+                "commands/e2e.rs must route the `docker ps -q --filter <filter>` \
+                 list + conditional `docker rm -f <ids…>` fan-out through \
+                 `crate::infrastructure::docker::ps_filter_rm_f(<filter>, \
+                 <spawn-error-context>)` — pre-lift needle {needle:?} \
+                 (the argv literal both `cleanup_testcontainers` stanzas \
+                 spelled verbatim) must not reappear; found: {hits:?}"
+            );
+        }
+
+        let delegation_hits = crate::test_support::code_line_hits(body, "ps_filter_rm_f(");
+        assert!(
+            delegation_hits.len() >= 2,
+            "commands/e2e.rs must forward through \
+             `crate::infrastructure::docker::ps_filter_rm_f(` at ≥2 code \
+             lines — one for the `label=org.testcontainers=true` stanza \
+             and one for the `ancestor=testcontainers/ryuk` stanza in \
+             `cleanup_testcontainers`. Got {} delegation hit(s): \
+             {delegation_hits:#?} — a regression that dropped both \
+             delegations would silently satisfy the negative shield above \
+             by absence.",
+            delegation_hits.len(),
         );
     }
 }
