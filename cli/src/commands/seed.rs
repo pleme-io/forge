@@ -307,7 +307,7 @@ pub async fn seed(working_dir: &Path, env: &str, dry_run: bool) -> Result<()> {
 
     info!("Finding primary postgres pod...");
     let pod = find_primary_pod(&env_cfg.namespace, &postgres_cluster)?;
-    info!("Using pod: {}", pod);
+    crate::info_using_pod_field!(pod);
 
     info!("Executing seed SQL...");
     let output = exec_psql(&env_cfg.namespace, &pod, &db_name, &sql)?;
@@ -347,7 +347,7 @@ pub async fn unseed(working_dir: &Path, env: &str, dry_run: bool) -> Result<()> 
 
     info!("Finding primary postgres pod...");
     let pod = find_primary_pod(&env_cfg.namespace, &postgres_cluster)?;
-    info!("Using pod: {}", pod);
+    crate::info_using_pod_field!(pod);
 
     info!("Executing unseed SQL...");
     let output = exec_psql(&env_cfg.namespace, &pod, &db_name, &sql)?;
