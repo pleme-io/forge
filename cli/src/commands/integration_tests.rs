@@ -1471,14 +1471,18 @@ pub async fn execute_pre_deployment_tests(
             ));
             // Print output for failed tests
             if !result.output.is_empty() {
-                println!("   {}", "─".repeat(60).dimmed());
+                crate::ui::print_light_rule(
+                    crate::ui::LightRuleStyle::IntegrationTestFailureStdoutDimmed60,
+                );
                 for line in result.output.lines().take(50) {
                     println!("   {}", line.dimmed());
                 }
                 if result.output.lines().count() > 50 {
                     println!("   {} (output truncated)", "...".dimmed());
                 }
-                println!("   {}", "─".repeat(60).dimmed());
+                crate::ui::print_light_rule(
+                    crate::ui::LightRuleStyle::IntegrationTestFailureStdoutDimmed60,
+                );
             }
             any_failed = true;
         }
