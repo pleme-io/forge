@@ -974,14 +974,10 @@ fn print_e2e_diagnostics(backend_dir: &Path) {
 
     // E2E images
     println!("\n   E2E Docker images:");
-    if let Some(stdout) = crate::retry::probe_stdout_capture_sync(
-        &docker_bin(),
-        &[
-            "images",
-            "--format",
-            "     {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.ID}}",
-        ],
-    ) {
+    let template = crate::probe_dump::docker_images_diag_format("     ", "ID");
+    if let Some(stdout) =
+        crate::retry::probe_stdout_capture_sync(&docker_bin(), &["images", "--format", &template])
+    {
         for line in stdout.lines() {
             if line.contains("-backend") || line.contains("-web") {
                 println!("{}", line);

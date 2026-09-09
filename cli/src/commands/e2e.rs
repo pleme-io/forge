@@ -993,12 +993,9 @@ fn build_and_load_image(repo_root: &str, name: &str, flake_attr: &str) -> Result
 fn print_image_info() -> Result<()> {
     println!("Loaded images:");
 
+    let template = crate::probe_dump::docker_images_diag_format("  ", "CreatedSince");
     let output = Command::new(docker_bin())
-        .args([
-            "images",
-            "--format",
-            "  {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}",
-        ])
+        .args(["images", "--format", &template])
         .output()
         .context("Failed to list Docker images")?;
 
@@ -1037,14 +1034,10 @@ fn print_failure_diagnostics() {
 
     // Check Docker images
     eprintln!("\nE2E Docker images:");
-    if let Some(stdout) = crate::retry::probe_stdout_capture_sync(
-        &docker_bin(),
-        &[
-            "images",
-            "--format",
-            "  {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.ID}}",
-        ],
-    ) {
+    let template = crate::probe_dump::docker_images_diag_format("  ", "ID");
+    if let Some(stdout) =
+        crate::retry::probe_stdout_capture_sync(&docker_bin(), &["images", "--format", &template])
+    {
         for line in stdout.lines() {
             if line.contains("backend") || line.contains("web") {
                 eprintln!("{}", line);
