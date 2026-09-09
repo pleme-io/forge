@@ -792,13 +792,13 @@ fn resolve_repo_root(repo_root: Option<String>) -> Result<String> {
 fn verify_docker() -> Result<()> {
     ui::print_info("Verifying Docker daemon");
 
-    // Check if docker command exists via the in-process `which` crate rather
-    // than a `which`-binary subprocess spawn. Mirrors the sibling
-    // `check_novasearchctl_available` / `check_sea_orm_cli_available` lifts
-    // (a46d580) — no ambient dependency on a `which` binary existing on PATH.
-    if which::which("docker").is_err() {
-        bail!("Docker is not installed. Please install Docker first.");
-    }
+    // Docker-binary-installed preflight gate. Routes through the
+    // in-process `which::which` crate call inside the primitive so no
+    // `which` subprocess spawn is added on the module's PATH-lookup
+    // surface. Owns the pre-lift `bail!("Docker is not installed. Please
+    // install Docker first.")` message at one point of truth (the
+    // sibling `ensure_docker_running` below rides the same primitive).
+    crate::docker_installed_preflight::bail_unless_docker_installed()?;
 
     // Check if Docker daemon is running
     let info_output = Command::new(docker_bin())
@@ -1173,13 +1173,13 @@ pub fn run_e2e_tests_smart(
 
 /// Ensure Docker daemon is running, auto-starting on macOS if needed
 pub fn ensure_docker_running() -> Result<()> {
-    // Check if docker command exists via the in-process `which` crate rather
-    // than a `which`-binary subprocess spawn. Mirrors the sibling
-    // `check_novasearchctl_available` / `check_sea_orm_cli_available` lifts
-    // (a46d580) — no ambient dependency on a `which` binary existing on PATH.
-    if which::which("docker").is_err() {
-        bail!("Docker is not installed. Please install Docker first.");
-    }
+    // Docker-binary-installed preflight gate. Routes through the
+    // in-process `which::which` crate call inside the primitive so no
+    // `which` subprocess spawn is added on the module's PATH-lookup
+    // surface. Owns the pre-lift `bail!("Docker is not installed. Please
+    // install Docker first.")` message at one point of truth (the
+    // sibling `verify_docker` above rides the same primitive).
+    crate::docker_installed_preflight::bail_unless_docker_installed()?;
 
     // Check if Docker daemon is running
     let info_output = Command::new(docker_bin())
@@ -1698,10 +1698,19 @@ mod which_probe_routing_tests {
     /// and the docstring above uses `which`-binary paraphrase rather
     /// than the literal shape for the same reason; the whole-module
     /// scan therefore covers both the top-of-file production body AND
-    /// every sibling `#[cfg(test)]` block. Also asserts the canonical
-    /// `which::which("docker")` crate idiom is present in the module,
-    /// so the sigil-body itself cannot silently drift back to a
-    /// subprocess spawn.
+    /// every sibling `#[cfg(test)]` block.
+    ///
+    /// The pre-lift positive half — asserting the canonical
+    /// `which::which(...)` code-line probe on the `docker` bare name
+    /// lives here — MIGRATED to the sibling shield on
+    /// [`crate::docker_installed_preflight`] alongside the
+    /// `bail_unless_docker_installed()` lift: post-lift `commands/e2e.rs`
+    /// forwards to that primitive twice (`verify_docker` +
+    /// `ensure_docker_running`) and the crate-idiom probe lives at ONE
+    /// point of truth inside the primitive's body. The delegation is
+    /// pinned in-module by the positive-forward count enforced from
+    /// `docker_installed_preflight::tests::
+    /// every_prelift_module_forwards_through_bail_unless_docker_installed`.
     #[test]
     fn test_which_probes_route_through_which_crate_not_command_spawn() {
         const SOURCE: &str = include_str!("e2e.rs");
@@ -1711,11 +1720,6 @@ mod which_probe_routing_tests {
             "commands/e2e.rs",
             "which",
             "resolve through the in-process `which::which(...)` crate idiom",
-        );
-        crate::test_support::assert_source_probes_via_which_which_code_line(
-            SOURCE,
-            "commands/e2e.rs",
-            "docker",
         );
     }
 }

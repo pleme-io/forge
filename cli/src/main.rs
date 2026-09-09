@@ -67,6 +67,7 @@ mod bun_argv;
 mod cargo_test_argv;
 mod cloudflare;
 mod deploy_target_field;
+mod docker_installed_preflight;
 mod git;
 mod git_sha_field;
 mod hermetic_scratch;
