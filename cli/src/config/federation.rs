@@ -301,13 +301,13 @@ impl ServiceFederationTestsConfig {
             return Ok(()); // Skip validation if tests are disabled
         }
 
-        // Validate suite name is not empty
-        if self.suite.trim().is_empty() {
-            bail!(
-                "Federation test suite cannot be empty for service '{}'",
-                service_name
-            );
-        }
+        // Validate suite name via the crate::config::nonblank oracle so the
+        // required-nonblank grammar lands at ONE code point across every
+        // config-layer string field.
+        crate::config::nonblank::require_nonblank(
+            &self.suite,
+            &format!("Federation test suite for service '{service_name}'"),
+        )?;
 
         // Validate timeout is reasonable. The zero-rejection routes through
         // the canonical `crate::duration` u64-secs oracle so this field
@@ -333,13 +333,12 @@ impl ServiceFederationTestsConfig {
             );
         }
 
-        // Validate router URL
-        if self.router_url.trim().is_empty() {
-            bail!(
-                "Federation test router_url cannot be empty for service '{}'",
-                service_name
-            );
-        }
+        // Validate router URL is non-blank via the same required-nonblank
+        // oracle.
+        crate::config::nonblank::require_nonblank(
+            &self.router_url,
+            &format!("Federation test router_url for service '{service_name}'"),
+        )?;
 
         if !self.router_url.starts_with("http://") && !self.router_url.starts_with("https://") {
             bail!(

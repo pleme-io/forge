@@ -29,6 +29,7 @@ mod federation;
 mod global;
 mod kubernetes;
 mod migration;
+mod nonblank;
 mod prerelease;
 mod product;
 pub mod product_release;
