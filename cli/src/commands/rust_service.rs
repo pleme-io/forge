@@ -2054,31 +2054,22 @@ async fn print_deployment_report(
     println!();
 
     // Check current pod status
+    let app_selector = crate::k8s_label_selector::format_app_label_selector(&service);
     let pod_status = kubectl_command_async()
-        .args(&[
-            "get",
-            "pods",
-            "-n",
+        .args(crate::first_pod_field_argv::first_pod_field_get_pods_argv(
             namespace,
-            "-l",
-            &crate::k8s_label_selector::format_app_label_selector(&service),
-            "-o",
-            "jsonpath={.items[0].status.phase}",
-        ])
+            &app_selector,
+            crate::first_pod_field_argv::FirstPodField::StatusPhase,
+        ))
         .output()
         .await;
 
     let current_image = kubectl_command_async()
-        .args(&[
-            "get",
-            "pods",
-            "-n",
+        .args(crate::first_pod_field_argv::first_pod_field_get_pods_argv(
             namespace,
-            "-l",
-            &crate::k8s_label_selector::format_app_label_selector(&service),
-            "-o",
-            "jsonpath={.items[0].spec.containers[0].image}",
-        ])
+            &app_selector,
+            crate::first_pod_field_argv::FirstPodField::SpecContainer0Image,
+        ))
         .output()
         .await;
 

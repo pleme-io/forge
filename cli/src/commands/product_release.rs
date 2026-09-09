@@ -102,16 +102,11 @@ pub(crate) async fn run_health_check(
     // Verify at least one pod is Running
     let app_selector = crate::k8s_label_selector::format_app_label_selector(&deployment);
     let output = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
-        &[
-            "get",
-            "pods",
-            "-n",
+        &crate::first_pod_field_argv::first_pod_field_get_pods_argv(
             namespace,
-            "-l",
             &app_selector,
-            "-o",
-            "jsonpath={.items[0].status.phase}",
-        ],
+            crate::first_pod_field_argv::FirstPodField::StatusPhase,
+        ),
         "Failed to get pod status",
     )
     .await?;
