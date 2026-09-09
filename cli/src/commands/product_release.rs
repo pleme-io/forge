@@ -100,7 +100,7 @@ pub(crate) async fn run_health_check(
     .await?;
 
     // Verify at least one pod is Running
-    let app_selector = format!("app={}", deployment);
+    let app_selector = crate::k8s_label_selector::format_app_label_selector(&deployment);
     let output = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
         &[
             "get",

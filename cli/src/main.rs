@@ -73,6 +73,7 @@ mod hermetic_scratch;
 mod image_field;
 mod indented_success_step;
 mod k8s;
+mod k8s_label_selector;
 mod namespace_field;
 mod nix;
 mod nix_build_spinner;
