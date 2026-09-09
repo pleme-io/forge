@@ -156,6 +156,47 @@ fn docker_ps_diag_format(indent: &str, third_column: &str) -> String {
     format!("{indent}{{{{.Names}}}}\t{{{{.Status}}}}\t{{{{.{third_column}}}}}")
 }
 
+/// Build the docker `images --format` template every pre-lift diagnostic
+/// caller spelled inline:
+/// `{indent}{{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.<col>}}`.
+///
+/// Sibling of [`docker_ps_diag_format`]. Three pre-lift consumer sites
+/// (`commands/e2e.rs::print_image_info` — 2-space indent × `CreatedSince`
+/// third column, `commands/e2e.rs::print_failure_diagnostics` — 2-space
+/// indent × `ID`, `commands/prerelease.rs::print_e2e_diagnostics` —
+/// 5-space indent × `ID`) each restated the same `docker images --format`
+/// template inline with the leading indent, the fixed
+/// `{{.Repository}}:{{.Tag}}\t{{.Size}}\t` prefix, and a divergent third
+/// column baked into a heredoc-shaped multi-line argv literal.
+///
+/// The three consumer bodies differ in their command-invocation shape
+/// (one uses `Command::new(...).args(...).output()`; the two others use
+/// [`crate::retry::probe_stdout_capture_sync`]), in their sink
+/// (stdout / stderr / stdout), and in their post-capture filter
+/// (`.contains("backend") || .contains("web")` at 2-space sites vs
+/// `.contains("-backend") || .contains("-web")` at the 5-space site),
+/// so no full fusion primitive fits all three today. The shared
+/// `--format` template body IS common across the three, so this
+/// builder captures the template alone and each consumer builds
+/// its argv around it.
+///
+/// A future re-decision on the template (a fourth column, a different
+/// separator, or a per-column format directive) lands at ONE body here
+/// rather than at three sites. `docker` echoes the template verbatim
+/// per row, so aligning the `indent` argument with the surrounding
+/// section heading keeps the dumped rows visually nested under it —
+/// the same discipline [`docker_ps_diag_format`] carries.
+///
+/// The `third_column` parameter accepts the docker `--format` field
+/// name unadorned (`"ID"`, `"CreatedSince"`, `"Size"`, ...); the
+/// builder prepends the `{{.` delimiters and appends `}}`. A caller
+/// that spelled `"{{.ID}}"` inline would double-wrap the delimiters
+/// and produce an invalid template — the byte-oracles below reject
+/// exactly that regression class.
+pub(crate) fn docker_images_diag_format(indent: &str, third_column: &str) -> String {
+    format!("{indent}{{{{.Repository}}}}:{{{{.Tag}}}}\t{{{{.Size}}}}\t{{{{.{third_column}}}}}")
+}
+
 /// Diagnostic probe: run `docker ps --format` with the fixed
 /// (Names, Status, Ports) three-column table indented by `indent`,
 /// dump the captured stdout to `sink`, or emit `"{indent}(none)"`
@@ -495,5 +536,154 @@ mod tests {
              instead:\n{:#?}",
             offenders
         );
+    }
+
+    // ── docker_images_diag_format — byte-oracle over the shared template ─
+
+    /// Byte-oracle: [`docker_images_diag_format`] with the pre-lift
+    /// 2-space indent and `"CreatedSince"` third column emits the byte-form
+    /// `commands/e2e.rs::print_image_info` spelled inline pre-lift,
+    /// verbatim. Regressions caught: a swap from TAB to another
+    /// separator, a reorder of the `Repository:Tag` / `Size` / `<3rd>`
+    /// column triple, or a change in the `Repository:Tag` colon
+    /// separator that hides the repository+tag pair from the downstream
+    /// filter.
+    #[test]
+    fn docker_images_diag_format_two_space_indent_created_since_matches_pre_lift() {
+        let template = docker_images_diag_format("  ", "CreatedSince");
+        assert_eq!(
+            template,
+            "  {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}"
+        );
+    }
+
+    /// Byte-oracle: [`docker_images_diag_format`] with the pre-lift
+    /// 2-space indent and `"ID"` third column matches the byte-form
+    /// `commands/e2e.rs::print_failure_diagnostics` spelled inline
+    /// pre-lift. Distinct sibling case to
+    /// [`docker_images_diag_format_two_space_indent_created_since_matches_pre_lift`]:
+    /// the two together pin that the `third_column` axis is honored
+    /// (a builder that hard-coded `ID` and ignored the parameter would
+    /// pass the ID sibling but fail this test's `CreatedSince` peer).
+    #[test]
+    fn docker_images_diag_format_two_space_indent_id_matches_pre_lift() {
+        let template = docker_images_diag_format("  ", "ID");
+        assert_eq!(template, "  {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.ID}}");
+    }
+
+    /// Byte-oracle: [`docker_images_diag_format`] with the pre-lift
+    /// 5-space indent and `"ID"` third column matches the byte-form
+    /// `commands/prerelease.rs::print_e2e_diagnostics` spelled inline
+    /// pre-lift. Sibling to the two-space case above; the two together
+    /// pin the `indent` axis is honored independently of the
+    /// `third_column` axis.
+    #[test]
+    fn docker_images_diag_format_five_space_indent_id_matches_pre_lift() {
+        let template = docker_images_diag_format("     ", "ID");
+        assert_eq!(
+            template,
+            "     {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.ID}}"
+        );
+    }
+
+    /// Byte-oracle: [`docker_images_diag_format`] with an empty indent
+    /// still emits the fixed three-column template — pins that the
+    /// indent parameter is a leading prefix rather than a required
+    /// non-empty token, mirroring the empty-indent case for the
+    /// docker-ps sibling above. A future consumer aligning against a
+    /// zero-indent section heading (a top-level failure report) does
+    /// not have to pre-slice or workaround.
+    #[test]
+    fn docker_images_diag_format_empty_indent_emits_bare_template() {
+        assert_eq!(
+            docker_images_diag_format("", "ID"),
+            "{{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.ID}}"
+        );
+    }
+
+    /// Caller shield: no source line under `cli/src/commands/` may
+    /// spell any of the three pre-lift `docker images --format`
+    /// template literals inline any more. The three pre-lift sites
+    /// (`commands/e2e.rs::print_image_info`,
+    /// `commands/e2e.rs::print_failure_diagnostics`,
+    /// `commands/prerelease.rs::print_e2e_diagnostics`) migrated onto
+    /// [`docker_images_diag_format`]; any future consumer that wants
+    /// the same three-column diagnostic template reaches for that
+    /// builder on first grep, not by copy-pasting the raw literal from
+    /// an existing command module. Mirrors the negative half of the
+    /// sibling `no_command_module_still_spells_raw_docker_ps_diag_format_literal`
+    /// shield above.
+    #[test]
+    fn no_command_module_still_spells_raw_docker_images_diag_format_literal() {
+        use std::path::PathBuf;
+        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands");
+        let mut offenders: Vec<(PathBuf, usize, String)> = Vec::new();
+        for entry in std::fs::read_dir(&commands_dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            for (idx, line) in source.lines().enumerate() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                    continue;
+                }
+                // Anchor on the fixed `{{.Repository}}:{{.Tag}}\t{{.Size}}\t`
+                // head that all three pre-lift template shapes share,
+                // plus one of the two third-column variants observed in
+                // the pre-lift census — a stanza that spelled the
+                // pre-lift template verbatim always carried this exact
+                // sequence, and no post-lift consumer will (the typed
+                // primitive owns the template inside its body, generated
+                // at runtime via `format!`).
+                if line.contains("{{.Repository}}:{{.Tag}}\\t{{.Size}}\\t{{.ID}}")
+                    || line.contains("{{.Repository}}:{{.Tag}}\\t{{.Size}}\\t{{.CreatedSince}}")
+                {
+                    offenders.push((path.clone(), idx + 1, line.to_string()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "raw `docker images --format` template literal(s) survive \
+             under `commands/` — route each through \
+             `crate::probe_dump::docker_images_diag_format(indent, third_column)` \
+             instead:\n{:#?}",
+            offenders
+        );
+    }
+
+    /// Positive delegation shield: the two pre-lift files MUST forward
+    /// through [`docker_images_diag_format`] at least as many times as
+    /// the pre-lift census demanded (`e2e.rs` × 2 sites,
+    /// `prerelease.rs` × 1 site). A migration that dropped a call site
+    /// outright — leaving the negative "no raw template" scan trivially
+    /// satisfied by absence — regresses this floor. Mirrors the sibling
+    /// `every_prelift_module_forwards_through_probe_and_dump_primitive`
+    /// positive-half discipline.
+    #[test]
+    fn every_prelift_module_forwards_through_docker_images_diag_format() {
+        use std::path::PathBuf;
+        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands");
+        let expectations: &[(&str, usize)] = &[("e2e.rs", 2), ("prerelease.rs", 1)];
+        let needle = "crate::probe_dump::docker_images_diag_format(";
+        for (basename, min_count) in expectations {
+            let path = commands_dir.join(basename);
+            let source = std::fs::read_to_string(&path).unwrap();
+            let forwards = source.matches(needle).count();
+            assert!(
+                forwards >= *min_count,
+                "{basename} must forward at least {min_count} \
+                 `docker images --format` template site(s) through \
+                 `crate::probe_dump::docker_images_diag_format(...)`; found \
+                 {forwards}. A dropped call would leave the negative \
+                 raw-template scan satisfied by absence.",
+            );
+        }
     }
 }
