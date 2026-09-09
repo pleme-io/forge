@@ -619,8 +619,8 @@ pub async fn regenerate() -> Result<()> {
     let cargo = cargo_bin();
     let crate2nix = crate2nix_bin();
 
-    info!("🔧 Using cargo: {}", cargo);
-    info!("🔧 Using crate2nix: {}", crate2nix);
+    crate::info_using_tool_field!("cargo", cargo);
+    crate::info_using_tool_field!("crate2nix", crate2nix);
 
     // Run commands in bootstrap directory
     in_directory(&bootstrap_dir, || async {
