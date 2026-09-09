@@ -320,7 +320,9 @@ fn load_gates_config(working_dir: &Path) -> PreReleaseGatesConfig {
         if let Some(prerelease) = value.get("prerelease") {
             if let Ok(config) = serde_yaml::from_value::<PreReleaseGatesConfig>(prerelease.clone())
             {
-                eprintln!("📋 Loaded gate configuration from backend/deploy.yaml");
+                crate::commands::gate_config_source_announcement::print_gate_config_source_announcement(
+                    crate::commands::gate_config_source_announcement::GateConfigSource::LoadedFromBackendDeployYaml,
+                );
                 return config;
             }
         }
@@ -333,13 +335,17 @@ fn load_gates_config(working_dir: &Path) -> PreReleaseGatesConfig {
         if let Some(prerelease) = value.get("prerelease") {
             if let Ok(config) = serde_yaml::from_value::<PreReleaseGatesConfig>(prerelease.clone())
             {
-                eprintln!("📋 Loaded gate configuration from product/deploy.yaml");
+                crate::commands::gate_config_source_announcement::print_gate_config_source_announcement(
+                    crate::commands::gate_config_source_announcement::GateConfigSource::LoadedFromProductDeployYaml,
+                );
                 return config;
             }
         }
     }
 
-    eprintln!("📋 Using default gate configuration");
+    crate::commands::gate_config_source_announcement::print_gate_config_source_announcement(
+        crate::commands::gate_config_source_announcement::GateConfigSource::UsingDefault,
+    );
     PreReleaseGatesConfig::default()
 }
 
