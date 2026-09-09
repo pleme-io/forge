@@ -139,9 +139,7 @@ pub async fn health_check(context: &str) -> Result<()> {
         );
         println!("{}", "Please fix the issues above and try again.".yellow());
         println!();
-        println!("Debug commands:");
-        println!("  flux get all                  # Show all FluxCD resources");
-        println!("  flux logs --all-namespaces    # Check FluxCD controller logs");
+        crate::commands::flux_debug_commands_hint::print_flux_debug_commands_hint();
 
         bail!(
             "FluxCD health check failed: {} kustomization(s) not ready",
@@ -213,9 +211,7 @@ pub async fn health_check_with_retry(
                         println!("{}", failure.red());
                     }
                     println!();
-                    println!("Debug commands:");
-                    println!("  flux get all                  # Show all FluxCD resources");
-                    println!("  flux logs --all-namespaces    # Check FluxCD controller logs");
+                    crate::commands::flux_debug_commands_hint::print_flux_debug_commands_hint();
 
                     bail!(
                         "FluxCD health check failed after {} seconds: {} kustomization(s) not ready",
