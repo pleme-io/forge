@@ -255,13 +255,21 @@ impl ServiceMigrationConfig {
             );
         }
 
-        // Validate migration paths are not empty
-        if self.schema_migrations && self.schema_migrations_path.trim().is_empty() {
-            bail!("schema_migrations_path cannot be empty when schema_migrations is enabled");
+        // Validate migration paths are not empty via the crate::config::nonblank
+        // required-nonblank oracle so the grammar lands at ONE code point
+        // across every config-layer string field.
+        if self.schema_migrations {
+            crate::config::nonblank::require_nonblank(
+                &self.schema_migrations_path,
+                "schema_migrations_path",
+            )?;
         }
 
-        if self.data_migrations && self.data_migrations_path.trim().is_empty() {
-            bail!("data_migrations_path cannot be empty when data_migrations is enabled");
+        if self.data_migrations {
+            crate::config::nonblank::require_nonblank(
+                &self.data_migrations_path,
+                "data_migrations_path",
+            )?;
         }
 
         // Validate shinka timeout is reasonable (30s to 1800s)

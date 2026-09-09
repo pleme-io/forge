@@ -293,10 +293,10 @@ impl ProductConfig {
 
     /// Validate product configuration
     pub fn validate(&self) -> Result<()> {
-        // Validate product name
-        if self.name.trim().is_empty() {
-            bail!("Product name cannot be empty");
-        }
+        // Validate product name via the crate::config::nonblank required-
+        // nonblank oracle so the grammar lands at ONE code point across
+        // every config-layer string field.
+        crate::config::nonblank::require_nonblank(&self.name, "Product name")?;
 
         // Validate product name format (lowercase, alphanumeric + hyphens)
         if !self
@@ -310,10 +310,8 @@ impl ProductConfig {
             );
         }
 
-        // Validate environment
-        if self.environment.trim().is_empty() {
-            bail!("Environment cannot be empty");
-        }
+        // Validate environment via the same required-nonblank oracle.
+        crate::config::nonblank::require_nonblank(&self.environment, "Environment")?;
 
         // Validate environment is one of the known values (or warn)
         let known_environments = ["dev", "development", "staging", "production", "prod"];
@@ -325,10 +323,8 @@ impl ProductConfig {
             );
         }
 
-        // Validate cluster name
-        if self.cluster.trim().is_empty() {
-            bail!("Cluster name cannot be empty");
-        }
+        // Validate cluster name via the same required-nonblank oracle.
+        crate::config::nonblank::require_nonblank(&self.cluster, "Cluster name")?;
 
         Ok(())
     }

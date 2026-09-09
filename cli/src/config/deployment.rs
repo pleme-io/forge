@@ -35,19 +35,22 @@ pub struct AbSliceConfig {
 impl AbSliceConfig {
     /// Validate slice configuration
     pub fn validate(&self, slice_index: usize) -> Result<()> {
-        // Validate slice name is not empty
-        if self.name.trim().is_empty() {
-            bail!("Slice name cannot be empty (slice index {})", slice_index);
-        }
+        // Validate slice name is not empty via the crate::config::nonblank
+        // oracle so the required-nonblank grammar lands at ONE code point.
+        crate::config::nonblank::require_nonblank(
+            &self.name,
+            &format!("Slice name (slice index {slice_index})"),
+        )?;
 
-        // Validate kustomization is not empty
-        if self.kustomization.trim().is_empty() {
-            bail!(
-                "Kustomization name cannot be empty for slice '{}' (index {})",
-                self.name,
-                slice_index
-            );
-        }
+        // Validate kustomization is not empty via the same required-nonblank
+        // oracle.
+        crate::config::nonblank::require_nonblank(
+            &self.kustomization,
+            &format!(
+                "Kustomization name for slice '{}' (index {})",
+                self.name, slice_index
+            ),
+        )?;
 
         // Validate first slice has delay_secs = 0
         if slice_index == 0 && self.delay_secs != 0 {
@@ -222,19 +225,17 @@ impl PreDeploymentTestsConfig {
         }
 
         for suite in &self.test_suites {
-            if suite.name.trim().is_empty() {
-                bail!(
-                    "Pre-deployment test suite name cannot be empty for '{}'",
-                    service_name
-                );
-            }
-            if suite.command.trim().is_empty() {
-                bail!(
-                    "Pre-deployment test suite '{}' command cannot be empty for '{}'",
-                    suite.name,
-                    service_name
-                );
-            }
+            crate::config::nonblank::require_nonblank(
+                &suite.name,
+                &format!("Pre-deployment test suite name for '{service_name}'"),
+            )?;
+            crate::config::nonblank::require_nonblank(
+                &suite.command,
+                &format!(
+                    "Pre-deployment test suite '{}' command for '{}'",
+                    suite.name, service_name
+                ),
+            )?;
             // Reject a malformed timeout at config-load rather than letting
             // the test-execution path silently swallow it to a default
             // (the prior `parse_duration(..).unwrap_or(300s)` hole). Route
@@ -369,11 +370,12 @@ impl DeploymentConfig {
             bail!("flux_commands cannot be empty when deployment is enabled");
         }
 
-        // Validate each flux command is not just whitespace
+        // Validate each flux command is not empty or whitespace-only.
+        // The `.trim()`-based required-nonblank oracle handles both cases
+        // identically — one grammar-rejected shape across every string
+        // field.
         for (idx, cmd) in self.flux_commands.iter().enumerate() {
-            if cmd.trim().is_empty() {
-                bail!("flux_commands[{}] cannot be empty or whitespace-only", idx);
-            }
+            crate::config::nonblank::require_nonblank(cmd, &format!("flux_commands[{idx}]"))?;
         }
 
         // Validate timeouts are reasonable. Both magnitude fields route
