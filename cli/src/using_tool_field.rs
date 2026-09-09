@@ -37,14 +37,15 @@
 //!
 //! # Distinct from `info!("Using pod: {}", pod)` at seed.rs
 //!
-//! Two sibling `info!("Using pod: {}", pod);` sites survive at
-//! `commands/seed.rs:310 + :350` (inside `seed` / `unseed`), and they
-//! are deliberately out of scope. `pod` there is a runtime Kubernetes
-//! resource identifier returned by `find_primary_pod(...)` — a live
-//! cluster-side resource being addressed for a `kubectl exec` — not a
-//! discovered build-tool binary or env-var path being adopted for a
-//! local process spawn. Collapsing the two grammars would fuse the
-//! build-tool sigil family with the runtime-k8s-resource selection
+//! Two sibling `info!("Using pod: {}", pod);` sites at
+//! `commands/seed.rs` (inside `seed` / `unseed`) now flow through the
+//! peer primitive [`crate::info_using_pod_field!`], and they are
+//! deliberately out of scope of THIS macro. `pod` there is a runtime
+//! Kubernetes resource identifier returned by `find_primary_pod(...)`
+//! — a live cluster-side resource being addressed for a `kubectl exec`
+//! — not a discovered build-tool binary or env-var path being adopted
+//! for a local process spawn. Collapsing the two grammars would fuse
+//! the build-tool sigil family with the runtime-k8s-resource selection
 //! family, erasing the local-vs-remote sink-target distinction the
 //! operator uses to tell one line's meaning from the other. The caller
 //! shield below matches only the `<label>: {}` shape when it also
