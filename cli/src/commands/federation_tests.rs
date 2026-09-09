@@ -368,14 +368,12 @@ pub async fn run_federation_tests(
             println!();
 
             // Fetch logs with better error handling
+            let job_ref = crate::workload_field::format_workload_argv_ref(
+                crate::workload_field::KubernetesWorkloadKind::Job,
+                &job_name,
+            );
             let log_output = kubectl_command_async()
-                .args(&[
-                    "logs",
-                    "-n",
-                    namespace,
-                    &format!("job/{}", job_name),
-                    "--tail=100",
-                ])
+                .args(&["logs", "-n", namespace, &job_ref, "--tail=100"])
                 .output()
                 .await;
 

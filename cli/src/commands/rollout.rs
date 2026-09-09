@@ -32,14 +32,12 @@ pub async fn execute(
         );
         println!();
 
+        let deployment_ref = crate::workload_field::format_workload_argv_ref(
+            crate::workload_field::KubernetesWorkloadKind::Deployment,
+            &name,
+        );
         let rollback_result = kubectl_command_async()
-            .args(&[
-                "rollout",
-                "undo",
-                &format!("deployment/{}", name),
-                "-n",
-                &namespace,
-            ])
+            .args(&["rollout", "undo", &deployment_ref, "-n", &namespace])
             .status()
             .await;
 

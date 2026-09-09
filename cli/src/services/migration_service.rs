@@ -329,7 +329,10 @@ spec:
     }
 
     async fn get_job_logs(&self, name: &str, namespace: &str) -> Result<String> {
-        let job_ref = format!("job/{}", name);
+        let job_ref = crate::workload_field::format_workload_argv_ref(
+            crate::workload_field::KubernetesWorkloadKind::Job,
+            name,
+        );
         let output = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
             &["logs", &job_ref, "-n", namespace],
             "kubectl logs (migration job)",

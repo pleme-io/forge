@@ -96,6 +96,19 @@ pub enum KubernetesWorkloadKind {
     /// `commands/github_runner_ci.rs::execute` emits under this
     /// label immediately below the sibling namespace readout.
     StatefulSet,
+    /// A `Job` workload — used by the kubectl-argv-ref grammar for
+    /// migration and federation-test job references
+    /// (`commands/migrations.rs::wait_for_job` +
+    /// `commands/federation_tests.rs::fetch_job_logs` +
+    /// `services/migration_service.rs::get_job_logs`), all of which
+    /// splice `job/<name>` as a kubectl positional argument via
+    /// [`format_workload_argv_ref`]. No `info_workload_field!`
+    /// readout site emits under this variant today; the enum carries
+    /// it so the argv-ref grammar has a single-source-of-truth
+    /// [`KubernetesWorkloadKind`] variant per workload kind, and a
+    /// future `Job` readout addition costs only its emit site (not a
+    /// second enum).
+    Job,
 }
 
 impl KubernetesWorkloadKind {
@@ -112,8 +125,69 @@ impl KubernetesWorkloadKind {
         match self {
             KubernetesWorkloadKind::Deployment => "Deployment",
             KubernetesWorkloadKind::StatefulSet => "StatefulSet",
+            KubernetesWorkloadKind::Job => "Job",
         }
     }
+
+    /// The lowercase kubectl-argv prefix — the byte-string kubectl
+    /// accepts as the `<kind>` half of a `<kind>/<name>` positional
+    /// argument to `get`, `delete`, `wait`, `rollout status`,
+    /// `rollout undo`, `logs`, and every other verb that takes a
+    /// workload reference.
+    ///
+    /// The upstream kubectl argv grammar is case-insensitive on the
+    /// kind slot (`Deployment/api` and `deployment/api` both parse),
+    /// but every pre-lift site in this crate spelled the lowercase
+    /// form. Pin the lowercase spelling so the migrated sites keep
+    /// their byte-for-byte kubectl-argv shape and a future reader
+    /// grepping strace/audit logs for the exact argv sees the same
+    /// bytes the primitive stamps.
+    ///
+    /// Paired with [`format_workload_argv_ref`], which splices this
+    /// prefix onto a caller-supplied name to produce the kubectl
+    /// positional argument.
+    pub const fn kubectl_argv_prefix(self) -> &'static str {
+        match self {
+            KubernetesWorkloadKind::Deployment => "deployment",
+            KubernetesWorkloadKind::StatefulSet => "statefulset",
+            KubernetesWorkloadKind::Job => "job",
+        }
+    }
+}
+
+/// Format a kubectl workload reference `<prefix>/<name>` — the shape
+/// kubectl accepts as a positional argument to `get`, `delete`,
+/// `wait`, `rollout status`, `rollout undo`, `logs`, and every
+/// other verb that takes a workload reference.
+///
+/// Six pre-lift sibling sites across
+/// `commands/{rollout (×1: rollback branch, `rollout undo`
+/// argv), product_release (×1: `run_health_check`, `rollout status`
+/// argv), github_runner_ci (×1: watch branch, `get statefulset` argv),
+/// migrations (×1: `wait_for_job`, `wait --for=condition=complete`
+/// argv), federation_tests (×1: `fetch_job_logs`, `logs` argv)}.rs`
+/// and `services/migration_service.rs::get_job_logs` (×1: `logs`
+/// argv) each restated the `format!("<kind>/{}", <name>)` splice
+/// verbatim — the lowercase kubectl-argv prefix, a `/` byte, and the
+/// interpolated workload name. Post-lift the sites reach for
+/// [`format_workload_argv_ref`] and the argv prefix decision is
+/// owned by [`KubernetesWorkloadKind::kubectl_argv_prefix`].
+///
+/// # Distinct from the readout-label [`write_workload_field`]
+///
+/// [`write_workload_field`] emits the PascalCase human-readable label
+/// (`Deployment` / `StatefulSet`) inside the `"   <Label>: <name>"`
+/// three-space-indented sub-item readout grammar — a stdout/tracing
+/// emission targeting the interactive operator's terminal. This
+/// function emits the LOWERCASE kubectl-argv-parseable prefix
+/// (`deployment` / `statefulset` / `job`) inside the `<prefix>/<name>`
+/// positional-argument grammar — a `String` returned to the caller
+/// for splicing into a kubectl argv vector. The two projections
+/// deliberately diverge: kubectl's argv slot is case-insensitive but
+/// every pre-lift site spelled lowercase; the readout label spells
+/// PascalCase to match the upstream Kubernetes API kind name.
+pub fn format_workload_argv_ref(kind: KubernetesWorkloadKind, name: &str) -> String {
+    format!("{}/{}", kind.kubectl_argv_prefix(), name)
 }
 
 impl fmt::Display for KubernetesWorkloadKind {
@@ -453,6 +527,207 @@ mod tests {
                 forwards >= *min_count,
                 "{basename} must forward at least {min_count} workload \
                  sub-item site(s) through `crate::info_workload_field!(`; \
+                 found {forwards}. A dropped call would leave the \
+                 negative raw-shape scan satisfied by absence.",
+            );
+        }
+    }
+
+    // Byte-oracle pins for the lowercase kubectl-argv prefix of each
+    // enum variant. Kubectl's argv slot is case-insensitive but every
+    // pre-lift site spelled the lowercase form — a future promotion
+    // to PascalCase (a "reuse `label()` for both readout and argv"
+    // cleanup) would drift the argv byte-shape from what a
+    // grep-through-strace-audit-logs reader expects.
+    #[test]
+    fn kubectl_argv_prefix_emits_lowercase_kind_names() {
+        assert_eq!(
+            KubernetesWorkloadKind::Deployment.kubectl_argv_prefix(),
+            "deployment"
+        );
+        assert_eq!(
+            KubernetesWorkloadKind::StatefulSet.kubectl_argv_prefix(),
+            "statefulset"
+        );
+        assert_eq!(KubernetesWorkloadKind::Job.kubectl_argv_prefix(), "job");
+    }
+
+    // Pin the readout label and the kubectl-argv prefix stay
+    // deliberately divergent: label() is PascalCase (matches the
+    // upstream Kubernetes API kind name for the human-readable
+    // readout), kubectl_argv_prefix() is lowercase (matches the
+    // spelling every pre-lift call site used in a kubectl argv). A
+    // future collapse of the two projections onto one string would
+    // break either the readout grammar (if it went lowercase) or the
+    // argv-shape parity with the pre-lift sites (if it went
+    // PascalCase).
+    #[test]
+    fn label_and_kubectl_argv_prefix_are_deliberately_case_divergent() {
+        for kind in [
+            KubernetesWorkloadKind::Deployment,
+            KubernetesWorkloadKind::StatefulSet,
+            KubernetesWorkloadKind::Job,
+        ] {
+            assert_eq!(kind.label(), kind.label().to_string()); // silence unused
+            assert_eq!(
+                kind.kubectl_argv_prefix(),
+                kind.label().to_ascii_lowercase(),
+                "kubectl_argv_prefix must be the lowercase of label for {kind:?}"
+            );
+            assert_ne!(
+                kind.kubectl_argv_prefix(),
+                kind.label(),
+                "the two projections must differ in casing for {kind:?}"
+            );
+        }
+    }
+
+    // Byte-oracles pin the exact `<lowercase-kind>/<name>` splice
+    // shape for each variant. A future refactor that changed the
+    // separator (`-`, `.`, `:`), reordered the halves
+    // (`<name>/<kind>`), or added padding (`<kind>/ <name>`) hits
+    // these rather than compiling and silently diverging the argv
+    // shape from what kubectl parses.
+    #[test]
+    fn format_workload_argv_ref_deployment_emits_lowercase_kind_slash_name() {
+        assert_eq!(
+            format_workload_argv_ref(KubernetesWorkloadKind::Deployment, "api-server"),
+            "deployment/api-server"
+        );
+    }
+
+    #[test]
+    fn format_workload_argv_ref_statefulset_emits_lowercase_kind_slash_name() {
+        assert_eq!(
+            format_workload_argv_ref(KubernetesWorkloadKind::StatefulSet, "github-runner"),
+            "statefulset/github-runner"
+        );
+    }
+
+    #[test]
+    fn format_workload_argv_ref_job_emits_lowercase_kind_slash_name() {
+        assert_eq!(
+            format_workload_argv_ref(KubernetesWorkloadKind::Job, "migrate-42"),
+            "job/migrate-42"
+        );
+    }
+
+    // Pin the splice carries no ANSI escape byte, no leading
+    // whitespace, no trailing newline — a plain `<prefix>/<name>`
+    // string with one `/` separator. A future refactor that reached
+    // for a `writeln!`-style trailing newline (mistaking this for a
+    // print primitive) would break every kubectl argv slot the
+    // return value slots into.
+    #[test]
+    fn format_workload_argv_ref_carries_no_ansi_no_whitespace_no_newline() {
+        for kind in [
+            KubernetesWorkloadKind::Deployment,
+            KubernetesWorkloadKind::StatefulSet,
+            KubernetesWorkloadKind::Job,
+        ] {
+            let s = format_workload_argv_ref(kind, "app");
+            assert!(!s.contains('\x1b'), "no ANSI escape; got: {s:?}");
+            assert!(!s.starts_with(' '), "no leading space; got: {s:?}");
+            assert!(!s.ends_with('\n'), "no trailing newline; got: {s:?}");
+            assert_eq!(s.matches('/').count(), 1, "exactly one `/`; got: {s:?}");
+        }
+    }
+
+    // Caller shield (negative): no source line under
+    // `cli/src/{commands,services}/` may spell the pre-lift raw
+    // `format!("<kind>/{}", ...)` splice inline any more — the six
+    // pre-lift sites (`commands/{rollout, product_release,
+    // github_runner_ci, migrations, federation_tests}.rs` plus
+    // `services/migration_service.rs`) migrated; any future consumer
+    // that wants a kubectl workload-argv reference reaches for
+    // `crate::workload_field::format_workload_argv_ref(` on first
+    // grep, not by copy-pasting the raw shape from an existing
+    // command module. Comment lines and lines under `#[cfg(test)]`
+    // blocks are excluded so this shield's own reference to the
+    // pre-lift shape in prose and any in-test rehearsal of the
+    // pre-lift shape do not self-hit.
+    #[test]
+    fn no_command_or_service_module_still_spells_raw_workload_argv_ref_format() {
+        use std::path::PathBuf;
+        let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let scan_dirs = [src_root.join("commands"), src_root.join("services")];
+        let needles: &[&str] = &[
+            "format!(\"deployment/{}\",",
+            "format!(\"statefulset/{}\",",
+            "format!(\"job/{}\",",
+        ];
+        let mut offenders: Vec<(PathBuf, usize, String)> = Vec::new();
+        for dir in scan_dirs {
+            if !dir.exists() {
+                continue;
+            }
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).unwrap();
+                // Whole-file scan with comment-line exclusion — mirrors
+                // the sibling `no_command_module_still_spells_raw_info_workload_field_stanza`
+                // shield above. Not every module carries a `#[cfg(test)]`
+                // block (`commands/web_build_verify.rs`, for example),
+                // so the module-body slicing helper is not usable here;
+                // and no source line under the scanned dirs today
+                // legitimately spells any of the three needles inside a
+                // test block (the pre-lift census hits are all in
+                // production code), so a whole-file scan is faithful.
+                for (idx, line) in source.lines().enumerate() {
+                    let trimmed = line.trim_start();
+                    if trimmed.starts_with("//") {
+                        continue;
+                    }
+                    if needles.iter().any(|n| line.contains(n)) {
+                        offenders.push((path.clone(), idx + 1, line.to_string()));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "raw `format!(\"<kind>/{{}}\", <name>)` kubectl-argv splice(s) \
+             survive under `commands/` or `services/` — route each through \
+             `crate::workload_field::format_workload_argv_ref(\
+             KubernetesWorkloadKind::<Kind>, <name>)` instead:\n{:#?}",
+            offenders
+        );
+    }
+
+    // Caller shield (positive): the six pre-lift files MUST each
+    // forward through `crate::workload_field::format_workload_argv_ref(`
+    // at least once (with the exact expected per-file forward count
+    // from the pre-lift census), so a migration that dropped a call
+    // site outright leaves the negative "no raw inline shape" scan
+    // trivially satisfied by absence but the positive count still
+    // fails.
+    #[test]
+    fn every_prelift_module_forwards_through_format_workload_argv_ref() {
+        use std::path::PathBuf;
+        let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        // (relative path, minimum forward count from the pre-lift census)
+        let expectations: &[(&str, usize)] = &[
+            ("commands/rollout.rs", 1),
+            ("commands/product_release.rs", 1),
+            ("commands/github_runner_ci.rs", 1),
+            ("commands/migrations.rs", 1),
+            ("commands/federation_tests.rs", 1),
+            ("services/migration_service.rs", 1),
+        ];
+        for (rel_path, min_count) in expectations {
+            let path = src_root.join(rel_path);
+            let source = std::fs::read_to_string(&path).unwrap();
+            let forwards = source
+                .matches("crate::workload_field::format_workload_argv_ref(")
+                .count();
+            assert!(
+                forwards >= *min_count,
+                "{rel_path} must forward at least {min_count} kubectl-argv \
+                 workload-ref site(s) through \
+                 `crate::workload_field::format_workload_argv_ref(`; \
                  found {forwards}. A dropped call would leave the \
                  negative raw-shape scan satisfied by absence.",
             );
