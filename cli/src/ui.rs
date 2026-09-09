@@ -394,12 +394,13 @@ pub fn write_heavy_rule<W: std::io::Write>(
     }
 }
 
-/// Palette + width + indent triple every pre-lift indented light-rule
-/// site fed to `println!("<INDENT>{}", "─".repeat(<width>).<palette>())`
-/// verbatim. Closed to the exact `(indent, palette, width, glyph)`
-/// tuple the pre-lift 2-site sibling class carried and nothing more —
-/// a new light-rule shape is a deliberate additive variant, not an
-/// open call-site choice.
+/// Palette + width + indent triple every pre-lift light-rule site
+/// fed to `println!("<INDENT>{}", "─".repeat(<width>).dimmed())`
+/// verbatim. Closed to the exact `(indent, width)` tuples the pre-lift
+/// sibling classes carried and nothing more — a new light-rule shape
+/// is a deliberate additive variant, not an open call-site choice.
+/// Palette is always `.dimmed()` (dimmed ANSI); glyph is always U+2500
+/// `─`. Indent and width vary per variant.
 ///
 /// # Distinct from [`HeavyRuleStyle`]
 ///
@@ -408,18 +409,17 @@ pub fn write_heavy_rule<W: std::io::Write>(
 /// uncolored, used to open or close a top-level section-boundary
 /// headline (SUMMARY, PUSH COMPLETE, per-service test-run, pre-deploy
 /// summary). This enum carries the U+2500 `─` LIGHT horizontal rule,
-/// three-space-indented, painted `.dimmed()`, used to bracket a
-/// nested throwaway subprocess-dump body (the truncated failing
-/// integration-test stdout inside the retry loop). The two coexist
-/// rather than fusing because the glyph weight (heavy vs. light), the
-/// indent scope (top-level vs. nested-in-body), and the palette weight
-/// (bright-colored vs. dimmed) are three axes of visual hierarchy the
-/// operator has been trained to read — a `━` at zero indent marks a
-/// section headline, a dimmed `─` at three-space indent marks a
-/// diagnostic dump inside a step body. Folding the two would let a
-/// nested subprocess-dump wrapper promote to the top-level
+/// always painted `.dimmed()`, used to open, close, or bracket a
+/// throwaway subprocess-dump / diagnostic body (the truncated failing
+/// integration-test stdout, the E2E / unit-test failure `cargo test`
+/// stderr dump). The two coexist rather than fusing because the glyph
+/// weight (heavy vs. light) and the palette weight (bright-colored
+/// vs. dimmed) are two axes of visual hierarchy the operator has been
+/// trained to read — a `━` marks a section headline, a dimmed `─`
+/// marks a diagnostic dump. Folding the two would let a
+/// diagnostic-dump wrapper promote to the top-level
 /// section-boundary grammar (or collapse a section rule down to a
-/// dimmed nested wrapper) and drift the visual hierarchy silently.
+/// dimmed diagnostic wrapper) and drift the visual hierarchy silently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LightRuleStyle {
     /// Integration-test failure stdout-dump wrapper
@@ -441,6 +441,34 @@ pub enum LightRuleStyle {
     /// receding into the visual background so operator eye lands on
     /// the verdict and the per-line body rather than the frame.
     IntegrationTestFailureStdoutDimmed60,
+    /// Prerelease diagnostic close rule (`.dimmed()` × 28 `─` glyphs,
+    /// zero indent). 2 pre-lift sites in `commands/prerelease.rs`,
+    /// both spelled inline as
+    /// `println!("{}", "────────────────────────────".dimmed())` (a
+    /// 28-`─`-glyph string literal, not `String::repeat`) — closes
+    /// the E2E-diagnostics troubleshooting section footer
+    /// (`print_e2e_diagnostics` at :1001) AND closes the G11
+    /// unit-test failure `cargo test` stderr dump (at :1323). Both
+    /// sites carry ZERO printed indent (source-file whitespace is
+    /// Rust block indentation, not printed output) and stand as the
+    /// unlabeled companion closer to the labeled opener that
+    /// [`print_dimmed_dashed_marker`] emits above the same dump body.
+    PrereleaseDiagnosticCloseDimmed28,
+    /// Prerelease E2E-test failure `cargo test` stderr close rule
+    /// (`.dimmed()` × 23 `─` glyphs, zero indent). 1 pre-lift site in
+    /// `commands/prerelease.rs` at :1089, spelled inline as
+    /// `println!("{}", "───────────────────────".dimmed())` (a
+    /// 23-`─`-glyph string literal, not `String::repeat`). Closes
+    /// the E2E test failure `cargo test stderr` last-50-lines dump
+    /// inside `run_e2e_gate`'s `Ok(Ok(output))` non-success branch,
+    /// paired above with the labeled
+    /// [`print_dimmed_dashed_marker`]-emitted `── cargo test stderr ──`
+    /// opener. The 23-glyph width (rather than 28) is the pre-lift
+    /// deliberate narrower framing chosen by the E2E-failure body
+    /// and pinned as a distinct variant so a future homogenisation
+    /// against the 28-glyph siblings is a visible additive edit and
+    /// not a silent width drift.
+    PrereleaseE2eFailureStderrCloseDimmed23,
 }
 
 impl LightRuleStyle {
@@ -449,18 +477,23 @@ impl LightRuleStyle {
     const fn width(self) -> usize {
         match self {
             LightRuleStyle::IntegrationTestFailureStdoutDimmed60 => 60,
+            LightRuleStyle::PrereleaseDiagnosticCloseDimmed28 => 28,
+            LightRuleStyle::PrereleaseE2eFailureStderrCloseDimmed23 => 23,
         }
     }
 
     /// Leading indent every pre-lift consumer emitted OUTSIDE the
     /// coloring span — the `"   "` prefix in
-    /// `println!("   {}", "─".repeat(60).dimmed())`. Emitted verbatim
-    /// on the writer so a `--no-color` grep still surfaces the
-    /// three-space indent aligning the wrapper under its sibling
-    /// step-failure verdict line.
+    /// `println!("   {}", "─".repeat(60).dimmed())`, or the empty
+    /// `""` prefix in `println!("{}", "─×N".dimmed())` at
+    /// zero-indent variants. Emitted verbatim on the writer so a
+    /// `--no-color` grep still surfaces the indent aligning the
+    /// wrapper under its sibling verdict line.
     const fn indent(self) -> &'static str {
         match self {
             LightRuleStyle::IntegrationTestFailureStdoutDimmed60 => "   ",
+            LightRuleStyle::PrereleaseDiagnosticCloseDimmed28 => "",
+            LightRuleStyle::PrereleaseE2eFailureStderrCloseDimmed23 => "",
         }
     }
 }
@@ -509,7 +542,9 @@ pub fn write_light_rule<W: std::io::Write>(
 ) -> std::io::Result<()> {
     let bar = "─".repeat(style.width());
     match style {
-        LightRuleStyle::IntegrationTestFailureStdoutDimmed60 => {
+        LightRuleStyle::IntegrationTestFailureStdoutDimmed60
+        | LightRuleStyle::PrereleaseDiagnosticCloseDimmed28
+        | LightRuleStyle::PrereleaseE2eFailureStderrCloseDimmed23 => {
             writeln!(w, "{}{}", style.indent(), bar.as_str().dimmed())
         }
     }
@@ -20788,5 +20823,268 @@ mod tests {
                  {forward_hits} forwarding hits."
             );
         }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_light_rule`] under
+    /// the [`super::LightRuleStyle::PrereleaseDiagnosticCloseDimmed28`]
+    /// variant. Pins the single-line body every pre-lift consumer in
+    /// `commands/prerelease.rs` at :1001 and :1323 spelled inline as
+    /// `println!("{}", "────────────────────────────".dimmed())` (a
+    /// 28-`─`-glyph literal): exactly one line, ZERO leading indent,
+    /// exactly 28 U+2500 `─` glyphs INSIDE the coloring span, the
+    /// `\x1b[2m` dimmed ANSI opener wrapping the bar, the `\x1b[0m`
+    /// reset closing it, and a trailing `\n`. Distinguished from the
+    /// sibling [`super::LightRuleStyle::IntegrationTestFailureStdoutDimmed60`]
+    /// oracle above on TWO axes at once — indent (empty vs. 3-space)
+    /// and width (28 vs. 60) — so a fusion that promoted this
+    /// zero-indent diagnostic close to the 3-space-indent 60-glyph
+    /// integration-test wrapper (or vice versa) trips exactly one
+    /// assertion.
+    #[test]
+    fn write_light_rule_prerelease_diagnostic_close_dimmed_28_emits_one_flush_dimmed_bar_line_of_28_glyphs(
+    ) {
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_light_rule(
+            &mut buf,
+            super::LightRuleStyle::PrereleaseDiagnosticCloseDimmed28,
+        )
+        .expect("write_light_rule against a Vec<u8> writer must succeed");
+        let out = String::from_utf8(buf)
+            .expect("write_light_rule must emit valid UTF-8 (the pre-lift println!s did)");
+
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_light_rule must emit exactly one line — every \
+             pre-lift stanza in `commands/prerelease.rs` is one \
+             `println!` carrying no framing blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        let bar_glyph_count = lines[0].chars().filter(|c| *c == '─').count();
+        assert_eq!(
+            bar_glyph_count, 28,
+            "line 0 must contain exactly 28 `─` glyphs (matching the \
+             pre-lift inline `\"────────────────────────────\"` \
+             28-glyph string literal); got {}",
+            bar_glyph_count
+        );
+
+        assert!(
+            lines[0].contains("\x1b[2m"),
+            "line 0 must carry the `\\x1b[2m` dimmed ANSI opener \
+             around the bar — the pre-lift `.dimmed()` call emits \
+             it; got {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("\x1b[0m"),
+            "line 0 must carry the `\\x1b[0m` reset closing the \
+             dimmed span; got {:?}",
+            lines[0]
+        );
+
+        // ZERO indent — the pre-lift stanza carried no leading
+        // characters in the format string before the `{}`
+        // placeholder. A silent 3-space-indent promotion (folding
+        // this variant into the sibling `IntegrationTestFailureStdoutDimmed60`
+        // grammar) fails here.
+        assert!(
+            lines[0].starts_with("\x1b[2m"),
+            "line 0 must begin flush with the `\\x1b[2m` dimmed \
+             opener — the pre-lift `println!(\"{{}}\", …)` format \
+             string carried no leading indent; got {:?}",
+            lines[0]
+        );
+
+        let expected = format!("\x1b[2m{}\x1b[0m", "\u{2500}".repeat(28));
+        assert_eq!(
+            lines[0], expected,
+            "line 0 must be byte-for-byte identical to the pre-lift \
+             inline `println!(\"{{}}\", \"────────────────────────────\".dimmed())` \
+             output; got {:?}",
+            lines[0]
+        );
+
+        assert!(
+            out.ends_with('\n'),
+            "write_light_rule must emit a trailing `\\n` (the \
+             pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Fail-before-pass envelope for [`super::write_light_rule`] under
+    /// the [`super::LightRuleStyle::PrereleaseE2eFailureStderrCloseDimmed23`]
+    /// variant. Pins the single-line body the pre-lift consumer at
+    /// `commands/prerelease.rs:1089` spelled inline as
+    /// `println!("{}", "───────────────────────".dimmed())` (a
+    /// 23-`─`-glyph literal): exactly one line, ZERO leading indent,
+    /// exactly 23 U+2500 `─` glyphs INSIDE the coloring span, the
+    /// `\x1b[2m`/`\x1b[0m` dimmed envelope, and a trailing `\n`.
+    /// Distinguished from the sibling
+    /// [`super::LightRuleStyle::PrereleaseDiagnosticCloseDimmed28`]
+    /// oracle above on the 5-glyph-narrower width axis (23 vs. 28)
+    /// alone — same module, same palette, same zero indent — so a
+    /// fusion that homogenised the E2E-failure narrower close into
+    /// the 28-glyph siblings trips exactly one assertion.
+    #[test]
+    fn write_light_rule_prerelease_e2e_failure_stderr_close_dimmed_23_emits_one_flush_dimmed_bar_line_of_23_glyphs(
+    ) {
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_light_rule(
+            &mut buf,
+            super::LightRuleStyle::PrereleaseE2eFailureStderrCloseDimmed23,
+        )
+        .expect("write_light_rule against a Vec<u8> writer must succeed");
+        let out = String::from_utf8(buf)
+            .expect("write_light_rule must emit valid UTF-8 (the pre-lift println! did)");
+
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_light_rule must emit exactly one line — the \
+             pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        let bar_glyph_count = lines[0].chars().filter(|c| *c == '─').count();
+        assert_eq!(
+            bar_glyph_count, 23,
+            "line 0 must contain exactly 23 `─` glyphs (matching the \
+             pre-lift inline `\"───────────────────────\"` 23-glyph \
+             string literal); got {}",
+            bar_glyph_count
+        );
+
+        assert!(
+            lines[0].contains("\x1b[2m"),
+            "line 0 must carry the `\\x1b[2m` dimmed ANSI opener; \
+             got {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("\x1b[0m"),
+            "line 0 must carry the `\\x1b[0m` reset closing the \
+             dimmed span; got {:?}",
+            lines[0]
+        );
+
+        assert!(
+            lines[0].starts_with("\x1b[2m"),
+            "line 0 must begin flush with the `\\x1b[2m` dimmed \
+             opener — zero indent; got {:?}",
+            lines[0]
+        );
+
+        let expected = format!("\x1b[2m{}\x1b[0m", "\u{2500}".repeat(23));
+        assert_eq!(
+            lines[0], expected,
+            "line 0 must be byte-for-byte identical to the pre-lift \
+             inline `println!(\"{{}}\", \"───────────────────────\".dimmed())` \
+             output; got {:?}",
+            lines[0]
+        );
+
+        assert!(
+            out.ends_with('\n'),
+            "write_light_rule must emit a trailing `\\n`; got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the 3 callers in `commands/prerelease.rs`
+    /// migrated onto [`super::print_light_rule`] under the two new
+    /// zero-indent `Prerelease*` variants no longer spell the
+    /// `println!("{}", "─…─".dimmed())` inline stanza. Structural
+    /// regression shield — without it, a future refactor could
+    /// silently re-inline the one-liner ("just call `println!`
+    /// directly, it's shorter") and reopen the 3-site duplication
+    /// class this lift closed.
+    ///
+    /// Enforced against the module body BEFORE its first `#[cfg(test)]`
+    /// region so a test-support mention of the raw shape does not
+    /// defeat the shield.
+    ///
+    /// The needle is `"─".dimmed()` occurring after a `println!("{}",`
+    /// — the exact zero-indent dimmed-light-rule shape both widths
+    /// share. Positive count is pinned per variant at the pre-lift
+    /// census: `PrereleaseDiagnosticCloseDimmed28` × 2 (:1001 +
+    /// :1323 closer sites), `PrereleaseE2eFailureStderrCloseDimmed23`
+    /// × 1 (:1089 E2E-failure stderr close). A fusion that folded
+    /// two close sites into one call or dropped a rule line
+    /// silently drops one of the two count floors here.
+    #[test]
+    fn print_light_rule_prerelease_zero_indent_dimmed_close_callers_delegate_through_primitive() {
+        let source = include_str!("commands/prerelease.rs");
+        let module_path = "commands/prerelease.rs";
+        let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+
+        // Negative shield: no inline zero-indent dimmed-light-rule
+        // `println!("{}", "─…─".dimmed())` stanza spanning at least 15
+        // `─` glyphs survives in the module body. 15 is a floor safely
+        // below the pre-lift 23-glyph narrowest sibling — any future
+        // inline zero-indent dimmed rule of the same family at any
+        // width from 15 upward is caught.
+        for (i, line) in body.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("println!(\"{}\", \"") {
+                continue;
+            }
+            let dash_run = trimmed.chars().filter(|c| *c == '\u{2500}').count();
+            if dash_run < 15 {
+                continue;
+            }
+            if !line.contains(".dimmed()") {
+                continue;
+            }
+            panic!(
+                "{module_path}:{lineno} spells the pre-lift inline \
+                 `println!(\"{{}}\", \"─…─\".dimmed())` zero-indent \
+                 dimmed light-rule stanza (>= 15 `─` glyphs) — that \
+                 shape was lifted onto `crate::ui::print_light_rule` \
+                 under one of the `PrereleaseDiagnosticCloseDimmed28` \
+                 / `PrereleaseE2eFailureStderrCloseDimmed23` variants. \
+                 A re-inline would silently reopen the 3-site \
+                 duplication class this shield exists to close. \
+                 Offending line: {line:?}",
+                lineno = i + 1
+            );
+        }
+
+        // Positive delegation: pin per-variant forwarding count at
+        // the pre-lift site census.
+        let close28_hits = body
+            .matches("crate::ui::LightRuleStyle::PrereleaseDiagnosticCloseDimmed28")
+            .count();
+        assert_eq!(
+            close28_hits, 2,
+            "{module_path} body must forward to \
+             `crate::ui::print_light_rule(crate::ui::LightRuleStyle::PrereleaseDiagnosticCloseDimmed28)` \
+             at exactly 2 sites (the pre-lift :1001 E2E-troubleshooting \
+             footer close + :1323 G11 unit-test-failure stderr close). \
+             A fusion that folded two into one call or dropped one \
+             silently fails here; found {close28_hits}."
+        );
+
+        let close23_hits = body
+            .matches("crate::ui::LightRuleStyle::PrereleaseE2eFailureStderrCloseDimmed23")
+            .count();
+        assert_eq!(
+            close23_hits, 1,
+            "{module_path} body must forward to \
+             `crate::ui::print_light_rule(crate::ui::LightRuleStyle::PrereleaseE2eFailureStderrCloseDimmed23)` \
+             at exactly 1 site (the pre-lift :1089 E2E-failure \
+             `cargo test stderr` narrower close). Found {close23_hits}."
+        );
     }
 }

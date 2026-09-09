@@ -998,7 +998,7 @@ fn print_e2e_diagnostics(backend_dir: &Path) {
     println!();
     println!("   {}", "Troubleshooting:".bold());
     crate::ui::print_e2e_troubleshooting_steps("     ");
-    println!("{}", "────────────────────────────".dimmed());
+    crate::ui::print_light_rule(crate::ui::LightRuleStyle::PrereleaseDiagnosticCloseDimmed28);
 }
 
 /// G14: Run E2E tests (chromiumoxide + testcontainers full stack)
@@ -1086,7 +1086,9 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
                         crate::ui::print_diagnostic_line(line);
                     }
                 }
-                println!("{}", "───────────────────────".dimmed());
+                crate::ui::print_light_rule(
+                    crate::ui::LightRuleStyle::PrereleaseE2eFailureStderrCloseDimmed23,
+                );
 
                 print_e2e_diagnostics(&config.backend_dir);
                 Ok(false)
@@ -1320,7 +1322,7 @@ async fn run_cargo_test(backend_dir: &Path) -> Result<bool> {
                 }
             }
         }
-        println!("{}", "────────────────────────────".dimmed());
+        crate::ui::print_light_rule(crate::ui::LightRuleStyle::PrereleaseDiagnosticCloseDimmed28);
         Ok(false)
     }
 }
