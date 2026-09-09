@@ -179,9 +179,10 @@ async fn check_rebac_documentation(
     }
 
     let Some(docs_dir) = &config.docs_dir else {
-        if !config.quiet {
-            println!("   (skipped — docs_arch dir not configured)");
-        }
+        crate::commands::rebac_check_skipped_missing_dir::print_rebac_check_skipped_missing_dir(
+            config.quiet,
+            crate::commands::rebac_check_skipped_missing_dir::RebacValidationSkippedReason::DocsArchDir,
+        );
         return Ok(());
     };
 
@@ -217,9 +218,10 @@ async fn check_permission_engine_files(
     }
 
     let Some(backend_dir) = &config.backend_dir else {
-        if !config.quiet {
-            println!("   (skipped — backend dir not configured)");
-        }
+        crate::commands::rebac_check_skipped_missing_dir::print_rebac_check_skipped_missing_dir(
+            config.quiet,
+            crate::commands::rebac_check_skipped_missing_dir::RebacValidationSkippedReason::BackendDir,
+        );
         return Ok(());
     };
 
@@ -253,9 +255,10 @@ async fn check_object_type_mapping(
     }
 
     let (Some(docs_dir), Some(backend_dir)) = (&config.docs_dir, &config.backend_dir) else {
-        if !config.quiet {
-            println!("   (skipped — docs_arch and/or backend dir not configured)");
-        }
+        crate::commands::rebac_check_skipped_missing_dir::print_rebac_check_skipped_missing_dir(
+            config.quiet,
+            crate::commands::rebac_check_skipped_missing_dir::RebacValidationSkippedReason::DocsArchAndOrBackendDir,
+        );
         return Ok(());
     };
 
@@ -337,9 +340,10 @@ async fn check_relation_hierarchy(
     }
 
     let Some(backend_dir) = &config.backend_dir else {
-        if !config.quiet {
-            println!("   (skipped — backend dir not configured)");
-        }
+        crate::commands::rebac_check_skipped_missing_dir::print_rebac_check_skipped_missing_dir(
+            config.quiet,
+            crate::commands::rebac_check_skipped_missing_dir::RebacValidationSkippedReason::BackendDir,
+        );
         return Ok(());
     };
 
@@ -428,9 +432,10 @@ async fn check_redis_key_patterns(
     }
 
     let Some(docs_dir) = &config.docs_dir else {
-        if !config.quiet {
-            println!("   (skipped — docs_arch dir not configured)");
-        }
+        crate::commands::rebac_check_skipped_missing_dir::print_rebac_check_skipped_missing_dir(
+            config.quiet,
+            crate::commands::rebac_check_skipped_missing_dir::RebacValidationSkippedReason::DocsArchDir,
+        );
         return Ok(());
     };
 
@@ -558,9 +563,10 @@ async fn check_graphql_operations(
     }
 
     let Some(web_dir) = &config.web_dir else {
-        if !config.quiet {
-            println!("   (skipped — web dir not configured)");
-        }
+        crate::commands::rebac_check_skipped_missing_dir::print_rebac_check_skipped_missing_dir(
+            config.quiet,
+            crate::commands::rebac_check_skipped_missing_dir::RebacValidationSkippedReason::WebDir,
+        );
         return Ok(());
     };
 
@@ -782,6 +788,77 @@ mod tests {
              name is canonicalized to `REDIS_CLI_BIN` by the underlying \
              primitive; a regression here would silently downgrade to \
              the PATH fallback."
+        );
+    }
+
+    /// Whole-module negative caller shield: no raw pre-lift
+    /// `println!("   (skipped — <label> not configured)")` skip-line
+    /// literal may live in `commands/rebac_validation.rs`. Every
+    /// per-check `let Some(<dir>) = &config.<dir_opt> else { … }`
+    /// early-out MUST route through
+    /// [`crate::commands::rebac_check_skipped_missing_dir::print_rebac_check_skipped_missing_dir`]
+    /// so the 3-space indent, the parenthesized `(skipped — …)`
+    /// grammar, and the ` not configured` suffix — plus the
+    /// `if !config.quiet { … }` gate — live at ONE typed body
+    /// (`commands/rebac_check_skipped_missing_dir.rs`).
+    ///
+    /// Pre-lift 6 sibling sites — `check_rebac_documentation`,
+    /// `check_permission_engine`, `check_object_type_mapping`,
+    /// `check_relation_hierarchy`, `check_redis_key_patterns`,
+    /// `check_graphql_permissions` — each spelled the entire skip
+    /// stanza (guard + `println!` + `return Ok(())`) verbatim in
+    /// its `else { … }` branch, differing only in the directory
+    /// phrase baked into the `println!` format string.
+    ///
+    /// The needle scans for the fused prefix
+    /// `println!("   (skipped — ` (three spaces of indent, the
+    /// parenthesis, and the em-dash separator). The prefix is
+    /// reconstructed at test time via [`format!`] so this shield's
+    /// own diagnostic prose does not false-match itself.
+    #[test]
+    fn no_raw_rebac_check_skipped_missing_dir_line_survives_in_rebac_validation_rs() {
+        const SOURCE: &str = include_str!("rebac_validation.rs");
+        let needle = format!("println!({}   (skipped — ", '"');
+        let hits = crate::test_support::code_line_hits(SOURCE, &needle);
+        assert!(
+            hits.is_empty(),
+            "commands/rebac_validation.rs must NOT carry an inline \
+             `println!({DQ}   (skipped — <label> not configured){DQ})` \
+             literal — every per-check missing-dir skip branch must \
+             route through `crate::commands::rebac_check_skipped_missing_dir::\
+             print_rebac_check_skipped_missing_dir(config.quiet, \
+             RebacValidationSkippedReason::<variant>)`. Found code-line \
+             hits: {hits:#?}",
+            DQ = '"',
+        );
+    }
+
+    /// Positive-delegation shield: `commands/rebac_validation.rs`
+    /// MUST forward through the primitive at ≥6 sites — the
+    /// pre-lift `check_rebac_documentation`,
+    /// `check_permission_engine`, `check_object_type_mapping`,
+    /// `check_relation_hierarchy`, `check_redis_key_patterns`, and
+    /// `check_graphql_permissions` early-outs. A drop below the
+    /// floor cannot leave the negative shield above trivially
+    /// satisfied by absence (a "just delete the skip announcement,
+    /// the silent early-out suffices" cleanup that quietly stops
+    /// telling the operator why a check produced no output).
+    #[test]
+    fn rebac_validation_rs_forwards_through_rebac_check_skipped_missing_dir_primitive_at_six_sites()
+    {
+        const SOURCE: &str = include_str!("rebac_validation.rs");
+        let needle = format!(
+            "rebac_check_skipped_missing_dir::{}(",
+            "print_rebac_check_skipped_missing_dir",
+        );
+        let hits = crate::test_support::code_line_hits(SOURCE, &needle);
+        assert!(
+            hits.len() >= 6,
+            "commands/rebac_validation.rs must forward through the \
+             `print_rebac_check_skipped_missing_dir` primitive at ≥6 \
+             sites (one per pre-lift check whose `let Some(<dir>) = …` \
+             else-branch previously carried a raw `println!`). Found \
+             code-line hits: {hits:#?}"
         );
     }
 }
