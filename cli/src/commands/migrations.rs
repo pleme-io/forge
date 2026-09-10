@@ -581,7 +581,9 @@ spec:
     // Apply the job
     println!("📄 Applying {} migration job: {}", db_label, job_name);
     let mut apply_cmd = kubectl_command_async();
-    apply_cmd.args(["apply", "-f", &manifest_path_str]);
+    apply_cmd.args(crate::kubectl_apply_argv::kubectl_apply_argv(
+        crate::kubectl_apply_argv::KubectlApplySource::ManifestPath(&manifest_path_str),
+    ));
     crate::retry::run_inherited_status(apply_cmd, "kubectl apply")
         .await
         .context("Failed to apply migration job")?;

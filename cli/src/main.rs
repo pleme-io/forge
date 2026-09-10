@@ -78,6 +78,7 @@ mod image_field;
 mod indented_success_step;
 mod k8s;
 mod k8s_label_selector;
+mod kubectl_apply_argv;
 mod kubectl_delete_job_argv;
 mod namespace_field;
 mod nix;
