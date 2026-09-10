@@ -375,7 +375,11 @@ pub async fn run_federation_tests(
                 &job_name,
             );
             let log_output = kubectl_command_async()
-                .args(&["logs", "-n", namespace, &job_ref, "--tail=100"])
+                .args(crate::kubectl_logs_argv::kubectl_logs_tail_argv(
+                    &job_ref,
+                    namespace,
+                    crate::kubectl_logs_argv::KubectlLogsTail::N100,
+                ))
                 .output()
                 .await;
 

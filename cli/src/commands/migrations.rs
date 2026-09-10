@@ -668,7 +668,11 @@ spec:
         if let Some(pod) = pod_name.as_deref() {
             // Get logs for display
             kubectl_command_async()
-                .args(&["logs", pod, "-n", &namespace, "--tail=100"])
+                .args(crate::kubectl_logs_argv::kubectl_logs_tail_argv(
+                    pod,
+                    &namespace,
+                    crate::kubectl_logs_argv::KubectlLogsTail::N100,
+                ))
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
                 .status()
@@ -676,7 +680,11 @@ spec:
 
             // Also capture logs for event
             let logs_output = kubectl_command_async()
-                .args(&["logs", pod, "-n", &namespace, "--tail=50"])
+                .args(crate::kubectl_logs_argv::kubectl_logs_tail_argv(
+                    pod,
+                    &namespace,
+                    crate::kubectl_logs_argv::KubectlLogsTail::N50,
+                ))
                 .output()
                 .await
                 .ok();

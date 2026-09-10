@@ -80,6 +80,7 @@ mod k8s;
 mod k8s_label_selector;
 mod kubectl_apply_argv;
 mod kubectl_delete_job_argv;
+mod kubectl_logs_argv;
 mod namespace_field;
 mod nix;
 mod nix_build_spinner;
