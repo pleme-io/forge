@@ -290,8 +290,10 @@ impl RegistryClient {
                 // from permanent ones (a 401 does not burn the budget).
                 Command::new(&doca)
                     .args(doca_push_argv(image_path, &host, &image, tag))
-                    .env("INPUT_DEST_USER", &self.credentials.organization)
-                    .env("INPUT_DEST_PASS", &self.credentials.token)
+                    .envs(doca_creds_env_pairs(
+                        &self.credentials.organization,
+                        &self.credentials.token,
+                    ))
                     .stdout(Stdio::null())
                     .stderr(Stdio::piped())
                     .output()
@@ -709,6 +711,63 @@ pub fn doca_push_argv<'a>(
         image,
         "--tag",
         tag,
+    ]
+}
+
+/// Canonical `(env-var, value)` pair vector doca reads GHCR
+/// credentials from: `INPUT_DEST_USER` = organization,
+/// `INPUT_DEST_PASS` = token.
+///
+/// Consumed by every doca-push site that carries explicit
+/// credentials (sites 1-3 in the [`doca_push_argv`] docstring's
+/// four-site consumer table) via `Command::envs(...)`, mirroring
+/// how the argv shape is consumed via `Command::args(...)`. The
+/// two `.env("INPUT_DEST_USER", <org>).env("INPUT_DEST_PASS",
+/// <token>)` calls that lived at each of the three retry-driven
+/// auth-push sites (`commands/push.rs::execute` doca branch,
+/// `commands/github_runner_ci.rs::push_with_retry` retry closure,
+/// `RegistryClient::push_with_retries` retry closure) now collapse
+/// onto one `.envs(doca_creds_env_pairs(&org, token))` call whose
+/// pair set is defined once here.
+///
+/// # Why the credentials go through the environment, not argv
+///
+/// The pre-migration `--dest-creds=<org>:<token>` argv-carried
+/// shape put the token in `/proc/<pid>/cmdline` — world-readable
+/// on a shared runner for the life of the push. doca reads
+/// `INPUT_DEST_USER` / `INPUT_DEST_PASS` from the environment,
+/// which is not; a co-tenant process cannot enumerate
+/// `/proc/<pid>/environ` on a hardened runner. Centralizing the
+/// exact pair names here forecloses the class of drift where a
+/// future consumer copy-pastes only one of the two env vars or
+/// spells one of them slightly wrong (`INPUT_DEST_USERNAME`, the
+/// natural expansion, is silently ignored by doca and the push
+/// then fails with a 401 that reads as a token-scope error, not
+/// a wiring error).
+///
+/// # Why an env-pair vector, not a `Command`-mutating helper
+///
+/// The three consumers differ AFTER the env pair on stdio capture
+/// (site 1 pipes stderr to a retry classifier, site 2 pipes both
+/// streams to a debug tee, site 3 pipes stderr through
+/// [`crate::retry::classify_capture_query_anyhow`]) and on
+/// downstream `.output().await` vs. `.spawn()` shapes. A
+/// `Command`-mutating helper would have to expose a follow-on
+/// chain axis for each of those; the env-pair vector owns only
+/// the shape `Command::envs(...)` consumes identically, mirroring
+/// the argv-slice discipline [`doca_push_argv`] carries.
+///
+/// The `(&'static str, &'a str)` element type pins the env-var
+/// keys at the call site — a future edit that swapped a key for
+/// a borrowed local (a plausible mistake if the pair were built
+/// via `format!`) is a compile error, not a runtime auth failure.
+pub fn doca_creds_env_pairs<'a>(
+    organization: &'a str,
+    token: &'a str,
+) -> [(&'static str, &'a str); 2] {
+    [
+        ("INPUT_DEST_USER", organization),
+        ("INPUT_DEST_PASS", token),
     ]
 }
 
@@ -1384,6 +1443,91 @@ mod tests {
              {resolve_hits:#?}",
             resolve_hits.len(),
             resolve_hits.len()
+        );
+    }
+
+    /// Byte-oracle for [`doca_creds_env_pairs`]: pin both env-var
+    /// names and their interpolation slots. A regression that
+    /// swapped a key for a borrowed local (a plausible mistake if
+    /// the pair vector were built via `format!`), typo'd one of the
+    /// two names into a doca-ignored spelling
+    /// (`INPUT_DEST_USERNAME`, the natural expansion, is silently
+    /// dropped by doca and the push then fails with a 401 that
+    /// reads as a token-scope error), or crossed the two slots
+    /// (organization → `INPUT_DEST_PASS`) fails here rather than as
+    /// a downstream 401 chain on the shared runner.
+    #[test]
+    fn test_doca_creds_env_pairs_pins_both_pairs_byte_for_byte() {
+        let pairs = doca_creds_env_pairs("pleme-io", "ghp_token_placeholder_do_not_use");
+        assert_eq!(
+            pairs.len(),
+            2,
+            "doca_creds_env_pairs must return exactly two entries — \
+             adding a third silently is a drift class this fixed-arity \
+             `[(_, _); 2]` return closes at monomorphization. Got: \
+             {pairs:?}",
+        );
+        assert_eq!(
+            pairs[0].0, "INPUT_DEST_USER",
+            "pairs[0].0 must be the exact literal `INPUT_DEST_USER` — \
+             doca ignores unrecognized `INPUT_*` names silently, so a \
+             typo (e.g., `INPUT_DEST_USERNAME`) surfaces as a 401 at \
+             push time, not as a wiring error.",
+        );
+        assert_eq!(
+            pairs[0].1, "pleme-io",
+            "pairs[0].1 must be the interpolated `<organization>` — a \
+             regression that crossed the org and token slots would ship \
+             the token as the username and fail all downstream pushes.",
+        );
+        assert_eq!(
+            pairs[1].0, "INPUT_DEST_PASS",
+            "pairs[1].0 must be the exact literal `INPUT_DEST_PASS` — \
+             same drift class as `INPUT_DEST_USER` above.",
+        );
+        assert_eq!(
+            pairs[1].1, "ghp_token_placeholder_do_not_use",
+            "pairs[1].1 must be the interpolated `<token>`.",
+        );
+    }
+
+    /// Positive-delegation shield: every doca-push site under the
+    /// non-test module body that pairs
+    /// `.env("INPUT_DEST_USER", …).env("INPUT_DEST_PASS", …)` routes
+    /// through `doca_creds_env_pairs(…)` via `Command::envs(…)`. A
+    /// future consumer that reintroduced the raw pair would silently
+    /// drift off the byte oracle above and diverge whenever the pair
+    /// set is next refined (e.g., a `INPUT_DEST_TLSVERIFY` addition).
+    /// Reconstructed via `format!` so this test's own docstring prose
+    /// does not false-match.
+    #[test]
+    fn test_registry_routes_doca_creds_through_doca_creds_env_pairs() {
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("registry.rs"),
+            "infrastructure/registry.rs",
+        );
+
+        let user_needle = format!(".env(\"{}\",", "INPUT_DEST_USER");
+        let pass_needle = format!(".env(\"{}\",", "INPUT_DEST_PASS");
+        let user_hits = crate::test_support::code_line_hits(module_body, &user_needle);
+        let pass_hits = crate::test_support::code_line_hits(module_body, &pass_needle);
+        assert!(
+            user_hits.is_empty() && pass_hits.is_empty(),
+            "infrastructure/registry.rs must NOT spell the raw \
+             `.env(\"INPUT_DEST_USER\", …)` / `.env(\"INPUT_DEST_PASS\", …)` \
+             pair at any code line — every doca-push site routes through \
+             `doca_creds_env_pairs(&org, token)` via `Command::envs(...)`. \
+             Offending USER: {user_hits:#?}, PASS: {pass_hits:#?}",
+        );
+
+        let delegation_hits =
+            crate::test_support::code_line_hits(module_body, "doca_creds_env_pairs(");
+        assert!(
+            delegation_hits.len() >= 1,
+            "infrastructure/registry.rs must delegate to \
+             `doca_creds_env_pairs(` at ≥1 code line (the module's own \
+             `RegistryClient::push_with_retries` doca-push closure). \
+             Hits: {delegation_hits:#?}",
         );
     }
 }
