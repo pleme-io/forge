@@ -957,7 +957,11 @@ fn print_e2e_diagnostics(backend_dir: &Path) {
     println!("{}", "── E2E Failure Diagnostics ──".bold().red());
 
     // Docker containers still running
-    println!("\n   Docker containers (running):");
+    crate::probe_dump::print_diag_section_header(
+        crate::probe_dump::DiagSink::Stdout,
+        "   ",
+        crate::probe_dump::DiagSectionHeader::DockerContainersRunning,
+    );
     crate::probe_dump::probe_and_dump_docker_ps_running(
         &docker_bin(),
         crate::probe_dump::DiagSink::Stdout,
@@ -965,7 +969,11 @@ fn print_e2e_diagnostics(backend_dir: &Path) {
     );
 
     // Recently exited containers
-    println!("\n   Docker containers (recently exited):");
+    crate::probe_dump::print_diag_section_header(
+        crate::probe_dump::DiagSink::Stdout,
+        "   ",
+        crate::probe_dump::DiagSectionHeader::DockerContainersRecentlyExited,
+    );
     crate::probe_dump::probe_and_dump_docker_ps_exited_since_15m(
         &docker_bin(),
         crate::probe_dump::DiagSink::Stdout,
@@ -973,7 +981,11 @@ fn print_e2e_diagnostics(backend_dir: &Path) {
     );
 
     // E2E images
-    println!("\n   E2E Docker images:");
+    crate::probe_dump::print_diag_section_header(
+        crate::probe_dump::DiagSink::Stdout,
+        "   ",
+        crate::probe_dump::DiagSectionHeader::E2eDockerImages,
+    );
     let template = crate::probe_dump::docker_images_diag_format("     ", "ID");
     if let Some(stdout) =
         crate::retry::probe_stdout_capture_sync(&docker_bin(), &["images", "--format", &template])

@@ -1020,7 +1020,11 @@ fn print_failure_diagnostics() {
     eprintln!("{}", "=".repeat(72));
 
     // Docker container status
-    eprintln!("\nDocker containers (running):");
+    crate::probe_dump::print_diag_section_header(
+        crate::probe_dump::DiagSink::Stderr,
+        "",
+        crate::probe_dump::DiagSectionHeader::DockerContainersRunning,
+    );
     crate::probe_dump::probe_and_dump_docker_ps_running(
         &docker_bin(),
         crate::probe_dump::DiagSink::Stderr,
@@ -1028,7 +1032,11 @@ fn print_failure_diagnostics() {
     );
 
     // Recently exited containers (testcontainers that died)
-    eprintln!("\nDocker containers (recently exited):");
+    crate::probe_dump::print_diag_section_header(
+        crate::probe_dump::DiagSink::Stderr,
+        "",
+        crate::probe_dump::DiagSectionHeader::DockerContainersRecentlyExited,
+    );
     crate::probe_dump::probe_and_dump_docker_ps_exited_since_15m(
         &docker_bin(),
         crate::probe_dump::DiagSink::Stderr,
@@ -1036,7 +1044,11 @@ fn print_failure_diagnostics() {
     );
 
     // Check Docker images
-    eprintln!("\nE2E Docker images:");
+    crate::probe_dump::print_diag_section_header(
+        crate::probe_dump::DiagSink::Stderr,
+        "",
+        crate::probe_dump::DiagSectionHeader::E2eDockerImages,
+    );
     let template = crate::probe_dump::docker_images_diag_format("  ", "ID");
     if let Some(stdout) =
         crate::retry::probe_stdout_capture_sync(&docker_bin(), &["images", "--format", &template])
