@@ -86,7 +86,11 @@ pub async fn execute(
         verify_image_arch(&doca, &amd64_path, "amd64")?;
     }
     let amd64_tag = format_amd64_release_tag(&sha);
-    info!("Pushing {} (amd64) as {}:{}...", name, registry, amd64_tag);
+    info!(
+        "Pushing {} (amd64) as {}...",
+        name,
+        crate::oci_manifest::image_reference(registry, &amd64_tag)
+    );
     push_image(&doca, &amd64_path, registry, &amd64_tag)?;
     push_image(&doca, &amd64_path, registry, "amd64-latest")?;
 
@@ -97,7 +101,11 @@ pub async fn execute(
             verify_image_arch(&doca, arm64, "arm64")?;
         }
         let arm64_tag = format_arm64_release_tag(&sha);
-        info!("Pushing {} (arm64) as {}:{}...", name, registry, arm64_tag);
+        info!(
+            "Pushing {} (arm64) as {}...",
+            name,
+            crate::oci_manifest::image_reference(registry, &arm64_tag)
+        );
         push_image(&doca, arm64, registry, &arm64_tag)?;
         push_image(&doca, arm64, registry, "arm64-latest")?;
     }
@@ -118,15 +126,18 @@ pub async fn execute(
         sha_index.args([
             "index",
             "create",
-            &format!("{}:{}", registry, sha),
+            &crate::oci_manifest::image_reference(registry, &sha),
             "--ref",
-            &format!("{}:{}", registry, amd64_tag),
+            &crate::oci_manifest::image_reference(registry, &amd64_tag),
             "--ref",
-            &format!("{}:{}", registry, format_arm64_release_tag(&sha)),
+            &crate::oci_manifest::image_reference(registry, &format_arm64_release_tag(&sha)),
         ]);
         run_inherited_status_sync(
             sha_index,
-            &format!("regctl multi-arch index create for {}:{}", registry, sha),
+            &format!(
+                "regctl multi-arch index create for {}",
+                crate::oci_manifest::image_reference(registry, &sha)
+            ),
         )?;
 
         // Floating `latest` multi-arch index.
@@ -134,15 +145,18 @@ pub async fn execute(
         latest_index.args([
             "index",
             "create",
-            &format!("{}:latest", registry),
+            &crate::oci_manifest::image_reference(registry, "latest"),
             "--ref",
-            &format!("{}:amd64-latest", registry),
+            &crate::oci_manifest::image_reference(registry, "amd64-latest"),
             "--ref",
-            &format!("{}:arm64-latest", registry),
+            &crate::oci_manifest::image_reference(registry, "arm64-latest"),
         ]);
         run_inherited_status_sync(
             latest_index,
-            &format!("regctl multi-arch index create for {}:latest", registry),
+            &format!(
+                "regctl multi-arch index create for {}",
+                crate::oci_manifest::image_reference(registry, "latest")
+            ),
         )?;
     }
 
@@ -151,12 +165,18 @@ pub async fn execute(
     // didn't always exist (e.g. when arm64_path is None, no multi-arch
     // index is created and the unprefixed tag never gets created).
     let mut tags_pushed = vec![
-        format!("{}:amd64-{}", registry, sha),
-        format!("{}:amd64-latest", registry),
+        crate::oci_manifest::image_reference(registry, &format_amd64_release_tag(&sha)),
+        crate::oci_manifest::image_reference(registry, "amd64-latest"),
     ];
     if arm64_path.is_some() {
-        tags_pushed.push(format!("{}:{}", registry, format_arm64_release_tag(&sha)));
-        tags_pushed.push(format!("{}:arm64-latest", registry));
+        tags_pushed.push(crate::oci_manifest::image_reference(
+            registry,
+            &format_arm64_release_tag(&sha),
+        ));
+        tags_pushed.push(crate::oci_manifest::image_reference(
+            registry,
+            "arm64-latest",
+        ));
         tags_pushed.push(crate::oci_manifest::image_reference(registry, &sha));
         tags_pushed.push(crate::oci_manifest::image_reference(registry, "latest"));
     }
@@ -206,7 +226,13 @@ fn push_image(doca: &str, image_path: &str, registry: &str, tag: &str) -> Result
     push.args(crate::infrastructure::registry::doca_push_argv(
         image_path, host, image, tag,
     ));
-    run_inherited_status_sync(push, &format!("doca push for {}:{}", registry, tag))?;
+    run_inherited_status_sync(
+        push,
+        &format!(
+            "doca push for {}",
+            crate::oci_manifest::image_reference(registry, tag)
+        ),
+    )?;
 
     Ok(())
 }
@@ -1070,6 +1096,81 @@ mod status_spawn_routing_tests {
             body,
             "commands/image_release.rs::verify_image_arch",
             1,
+        );
+    }
+
+    /// Whole-module shield on the `<registry>:<tag>` image-reference
+    /// composition grammar: every `<registry>:<tag>` string produced in
+    /// this module's body MUST route through the canonical typed
+    /// primitive [`crate::oci_manifest::image_reference`]. Pre-lift
+    /// the module carried ten sibling
+    /// `format!("{}:{}", registry, <tag>)` sites plus four literal-tag
+    /// peers (`format!("{}:latest", registry)`,
+    /// `format!("{}:amd64-latest", registry)`,
+    /// `format!("{}:arm64-latest", registry)`,
+    /// `format!("{}:amd64-{}", registry, sha)`) across
+    /// `execute` (the `regctl index create --ref` argv builder for
+    /// both the SHA-pinned index and the floating-`latest` index, the
+    /// two diagnostic labels for `run_inherited_status_sync` on those
+    /// two spawns, the `tags_pushed` summary vector, and the two
+    /// per-arch `Pushing … as <registry>:<tag>` info-line preambles)
+    /// plus one raw peer inside `push_image`'s `doca push` diagnostic
+    /// label. Each independently reproduced the trivial
+    /// `<repo>:<tag>` composition and each independently bypassed the
+    /// canonical primitive's `debug_assert!` guards — non-empty
+    /// repository, non-empty tag, and repository does not already
+    /// carry a tag ([`crate::oci_manifest::image_reference`]).
+    ///
+    /// The negative side scans the module body (bounded to the head
+    /// of the FIRST `#[cfg(test)]` marker via
+    /// [`crate::test_support::module_body_before_tests`], so this
+    /// shield's own docstring mentions of the pre-lift `format!("{}:`
+    /// spellings stay out of scope) for the four residual pre-lift
+    /// needles that would have matched at at least one raw call site
+    /// each. The positive side pins that the canonical delegation
+    /// `crate::oci_manifest::image_reference(registry,` appears at
+    /// ≥12 code lines — a regression that dropped every delegation
+    /// cannot leave the negative scan trivially satisfied by absence.
+    /// Both hits route through [`crate::test_support::code_line_hits`]
+    /// so docstring narration of either form is filtered out. Sibling
+    /// discipline to the sibling status-only-spawn and captured-bail
+    /// routing shields above on this same module — same negative/
+    /// positive pattern, applied to the reference-grammar surface
+    /// instead of the spawn-terminator surface.
+    #[test]
+    fn test_image_release_registry_tag_refs_route_through_image_reference() {
+        const SOURCE: &str = include_str!("image_release.rs");
+        let body =
+            crate::test_support::module_body_before_tests(SOURCE, "commands/image_release.rs");
+
+        for needle in [
+            "\"{}:{}\", registry,",
+            "\"{}:latest\", registry",
+            "\"{}:amd64-latest\", registry",
+            "\"{}:arm64-latest\", registry",
+        ] {
+            let hits = crate::test_support::code_line_hits(body, needle);
+            assert!(
+                hits.is_empty(),
+                "commands/image_release.rs: raw `format!({}, …)` `<registry>:<tag>` \
+                 composition must route through `crate::oci_manifest::image_reference` — \
+                 found {} residual site(s):\n{}",
+                needle,
+                hits.len(),
+                hits.join("\n")
+            );
+        }
+
+        let forwards =
+            crate::test_support::code_line_hits(body, "oci_manifest::image_reference(registry,");
+        assert!(
+            forwards.len() >= 12,
+            "commands/image_release.rs: expected ≥12 code lines forwarding through \
+             `crate::oci_manifest::image_reference(registry, …)` (net-new sites + the \
+             pre-existing pair on `tags_pushed`); found {} — a regression here means the \
+             delegation was dropped without the negative side of the shield noticing.\n{}",
+            forwards.len(),
+            forwards.join("\n")
         );
     }
 }
