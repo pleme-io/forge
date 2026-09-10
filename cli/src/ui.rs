@@ -19338,19 +19338,34 @@ mod tests {
     /// with the exact leading-blank + three-space indent template and
     /// the `.format()` argument on the same source line.
     ///
-    /// The positive count is pinned at the pre-lift site count
-    /// (`migration_validation.rs` ×3). A fusion that folded two
-    /// consumer sites into one call or dropped one of the issue rows
-    /// silently fails here — the negative half above would still pass,
-    /// but the positive count would fall below the pre-lift census.
+    /// # Post-further-lift topology
+    ///
+    /// A second lift consolidated the 3 direct-call sites onto a
+    /// module-local `print_migration_issue_report(&[MigrationIssue])`
+    /// primitive (see
+    /// [`super::super::commands::migration_validation::print_migration_issue_report`])
+    /// whose writer-form sibling `write_migration_issue_report<W>`
+    /// delegates once per issue to
+    /// [`super::write_validation_issue_line`]. Result: no direct
+    /// `crate::ui::print_validation_issue_line(` calls remain in
+    /// `migration_validation.rs`, and exactly ONE writer-form
+    /// `crate::ui::write_validation_issue_line(` call remains — the
+    /// per-issue emit inside `write_migration_issue_report`'s loop.
+    /// The positive count is pinned at that single writer-form forward
+    /// (module-local delegation is checked by
+    /// `test_migration_issue_report_forwards_meet_call_site_floor`
+    /// alongside the primitive definition). A fusion that dropped the
+    /// writer-form forward, or a re-inline that re-opened the
+    /// direct-call pattern, fails here.
     #[test]
     fn print_validation_issue_line_callers_delegate_through_primitive() {
-        const CALLERS: &[(&str, &str, usize)] = &[(
+        const CALLERS: &[(&str, &str, usize, usize)] = &[(
             include_str!("commands/migration_validation.rs"),
             "commands/migration_validation.rs",
-            3,
+            0, // direct `crate::ui::print_validation_issue_line(` forwards
+            1, // writer-form `crate::ui::write_validation_issue_line(` forwards
         )];
-        for (source, module_path, expected_forwards) in CALLERS {
+        for (source, module_path, expected_print_forwards, expected_write_forwards) in CALLERS {
             let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
             for (i, line) in body.lines().enumerate() {
                 if !line.contains("println!(\"\\n   {}\",") {
@@ -19364,25 +19379,43 @@ mod tests {
                      `println!(\"\\n   {{}}\", <issue>.format());` \
                      leading-blank + three-space indented validation-\
                      issue enumeration stanza — that shape was lifted \
-                     onto `crate::ui::print_validation_issue_line`. A \
+                     onto `crate::ui::print_validation_issue_line`, then \
+                     further-lifted onto the module-local \
+                     `print_migration_issue_report` primitive. A \
                      re-inline would silently reopen the 3-site \
                      duplication class this shield exists to close. \
                      Offending line: {line:?}",
                     lineno = i + 1
                 );
             }
-            let forward_hits = body
+            let print_hits = body
                 .matches("crate::ui::print_validation_issue_line(")
                 .count();
             assert_eq!(
-                forward_hits, *expected_forwards,
+                print_hits, *expected_print_forwards,
                 "{module_path} body must forward to \
                  `crate::ui::print_validation_issue_line(...)` at \
-                 exactly {expected_forwards} site(s) — one per pre-lift \
-                 consumer in this module. A fusion that folded two \
-                 consumer sites into one call or dropped one of the \
-                 issue rows silently fails here. Found {forward_hits} \
-                 forwarding hits."
+                 exactly {expected_print_forwards} site(s) — the \
+                 module-local `print_migration_issue_report` primitive \
+                 consolidated the 3 pre-lift direct-call sites onto ONE \
+                 writer-form delegation (see \
+                 `crate::ui::write_validation_issue_line` count below), \
+                 so a further re-emergence of the direct-call shape \
+                 fails here. Found {print_hits} direct-call hits."
+            );
+            let write_hits = body
+                .matches("crate::ui::write_validation_issue_line(")
+                .count();
+            assert_eq!(
+                write_hits, *expected_write_forwards,
+                "{module_path} body must forward to \
+                 `crate::ui::write_validation_issue_line(...)` at \
+                 exactly {expected_write_forwards} site(s) — the ONE \
+                 per-issue emit inside `write_migration_issue_report`'s \
+                 loop, the further-lift terminus for the 3 pre-lift \
+                 sites. A fusion that dropped or duplicated that \
+                 forward silently fails here. Found {write_hits} \
+                 writer-form hits."
             );
         }
     }

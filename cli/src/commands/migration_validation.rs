@@ -155,6 +155,65 @@ impl MigrationValidationResult {
     }
 }
 
+/// Emit a report of migration validation issues, one per issue, through
+/// [`crate::ui::print_validation_issue_line`] (leading blank line +
+/// three-space indent per row).
+///
+/// # Compounding
+///
+/// Pre-lift 3 sibling sites — the tail of the `check_migrations`
+/// (SQLx idempotency + soft-delete), `check_seaorm_migrations`
+/// (production safety), and `validate_migration_manifest` (manifest
+/// completeness) failure branches — each spelled the same 3-line
+/// `for issue in <issues> { crate::ui::print_validation_issue_line
+/// (&issue.format()); }` loop (the newline splits the fn name to keep
+/// this doc-comment out of the `ui.rs`
+/// `print_validation_issue_line_callers_delegate_through_primitive`
+/// caller-shield's line-scanning needle).
+/// The three-times threshold (THEORY §VI.1: "two occurrences is a
+/// coincidence; three is a law") is crossed exactly here, so the loop
+/// shape lifts onto ONE typed body. A future gate — the pending
+/// `check_rollback_compatibility` branch, or a JSON-per-line dialect
+/// under a `--report=json` flag — idiomatically forwards through the
+/// primitive; the paired byte-oracle sibling
+/// [`write_migration_issue_report`] pins the exact multi-issue byte
+/// concatenation so drift (a dropped separator, an inverted order) is
+/// caught at `cargo test` time rather than at operator readout.
+///
+/// # Theory grounding
+///
+/// THEORY.md §VI.1 (three-times rule): three sibling occurrences past
+/// the "two is a coincidence; three is a law" threshold. THEORY.md
+/// §V.1 (Types → Invariants → Proofs → Render Anywhere): the paired
+/// byte-oracle [`write_migration_issue_report`] is the Render Anywhere
+/// half — pinning the exact rendered bytes as a unit-testable
+/// invariant.
+pub(crate) fn print_migration_issue_report(issues: &[MigrationIssue]) {
+    let mut out = std::io::stdout().lock();
+    // Ignore stdout write failures — matches the pre-lift `println!`
+    // semantics (panic only on formatter errors, not broken-pipe / OOM).
+    let _ = write_migration_issue_report(&mut out, issues);
+}
+
+/// Byte-oracle sibling of [`print_migration_issue_report`] — writes the
+/// same bytes to any [`std::io::Write`] so a `#[test]` can capture and
+/// compare them.
+///
+/// Delegates to [`crate::ui::write_validation_issue_line`] per issue
+/// so the primitive keeps a single source of truth for the per-row
+/// byte template (leading `\n` + three-space indent + Display body +
+/// trailing `\n`); the multi-issue byte oracle asserts on the
+/// concatenation of those rows.
+pub(crate) fn write_migration_issue_report<W: std::io::Write>(
+    w: &mut W,
+    issues: &[MigrationIssue],
+) -> std::io::Result<()> {
+    for issue in issues {
+        crate::ui::write_validation_issue_line(w, &issue.format())?;
+    }
+    Ok(())
+}
+
 /// Check migrations for idempotency patterns
 ///
 /// Validates that migrations use IF NOT EXISTS / IF EXISTS patterns
@@ -579,9 +638,7 @@ pub async fn validate_migrations_with_config(
         crate::ui::print_step_pass("All migrations valid");
     } else {
         crate::ui::print_step_failure(&format!("Found {} issues", all_issues.len()));
-        for issue in &all_issues {
-            crate::ui::print_validation_issue_line(&issue.format());
-        }
+        print_migration_issue_report(&all_issues);
     }
 
     Ok(MigrationValidationResult {
@@ -946,9 +1003,7 @@ pub async fn validate_seaorm_migrations(
         crate::ui::print_step_pass("All SeaORM migrations safe");
     } else {
         crate::ui::print_step_failure(&format!("Found {} safety issues", all_issues.len()));
-        for issue in &all_issues {
-            crate::ui::print_validation_issue_line(&issue.format());
-        }
+        print_migration_issue_report(&all_issues);
     }
 
     Ok(SeaOrmValidationResult {
@@ -1214,9 +1269,7 @@ pub async fn validate_migration_manifest(
         ));
     } else {
         crate::ui::print_step_failure(&format!("Found {} manifest issues", issues.len()));
-        for issue in &issues {
-            crate::ui::print_validation_issue_line(&issue.format());
-        }
+        print_migration_issue_report(&issues);
     }
 
     Ok(ManifestValidationResult {
@@ -2036,6 +2089,152 @@ migrations:
              suffix (POSIX `mkdtemp(3)` on Unix) and the returned `TempDir`'s \
              `Drop` runs through panics.\n{}",
             residue.join("\n")
+        );
+    }
+
+    /// Byte-oracle: [`write_migration_issue_report`] renders a single
+    /// issue as leading `\n`, three-space indent, the issue's
+    /// `format()` payload, then a trailing `\n` from
+    /// [`crate::ui::write_validation_issue_line`]. Pinned as raw bytes
+    /// so a future edit that drops the leading blank line, changes the
+    /// indent width, or swaps `writeln!` for `write!` (dropping the
+    /// terminator) inside the underlying per-row writer fails this test
+    /// rather than silently degrading the on-terminal spacing between
+    /// successive issues.
+    #[test]
+    fn test_write_migration_issue_report_single_issue_byte_oracle() {
+        let issue = MigrationIssue::HardDelete {
+            file: PathBuf::from("m1.sql"),
+            line_number: 7,
+            statement: "DELETE FROM users".to_string(),
+            suggestion: "use soft delete".to_string(),
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        write_migration_issue_report(&mut buf, std::slice::from_ref(&issue)).unwrap();
+        let mut expected: Vec<u8> = Vec::new();
+        crate::ui::write_validation_issue_line(&mut expected, &issue.format()).unwrap();
+        assert_eq!(
+            buf, expected,
+            "single-issue byte template must equal exactly one \
+             `crate::ui::write_validation_issue_line(&issue.format())` \
+             invocation — the primitive must NOT add a header, a trailer, or \
+             a per-issue separator of its own"
+        );
+    }
+
+    /// Byte-oracle: [`write_migration_issue_report`] renders multiple
+    /// consecutive issues as the concatenation of each per-issue
+    /// [`crate::ui::write_validation_issue_line`] invocation, in slice
+    /// order. Pins the multi-issue spacing shape so a future edit that
+    /// folds successive issues onto one line, reverses order, or
+    /// inserts a fabricated header between them fails here.
+    #[test]
+    fn test_write_migration_issue_report_multiple_issues_byte_oracle() {
+        let a = MigrationIssue::IdempotencyViolation {
+            file: PathBuf::from("a.sql"),
+            line_number: 1,
+            statement: "CREATE TABLE t".to_string(),
+            suggestion: "add IF NOT EXISTS".to_string(),
+        };
+        let b = MigrationIssue::UnsafeDrop {
+            file: PathBuf::from("b.sql"),
+            line_number: 2,
+            statement: "DROP TABLE t".to_string(),
+            suggestion: "guard with IF EXISTS".to_string(),
+        };
+        let issues = vec![a.clone(), b.clone()];
+        let mut buf: Vec<u8> = Vec::new();
+        write_migration_issue_report(&mut buf, &issues).unwrap();
+        let mut expected: Vec<u8> = Vec::new();
+        crate::ui::write_validation_issue_line(&mut expected, &a.format()).unwrap();
+        crate::ui::write_validation_issue_line(&mut expected, &b.format()).unwrap();
+        assert_eq!(
+            buf, expected,
+            "multi-issue byte template must equal the ordered concatenation of \
+             per-issue `crate::ui::write_validation_issue_line(&issue.format())` \
+             invocations — no header, no trailer, no reordering, no separator"
+        );
+    }
+
+    /// Byte-oracle: [`write_migration_issue_report`] on an empty slice
+    /// writes zero bytes. Pins the "no issues, no output" invariant so
+    /// a future edit that unconditionally writes a header or trailing
+    /// newline breaks this test. All 3 pre-lift call sites gate the
+    /// loop behind `if all_issues.is_empty()` / `else`, so the empty
+    /// path was unreachable in practice; the primitive preserves that
+    /// safety by iterating over the slice directly.
+    #[test]
+    fn test_write_migration_issue_report_empty_writes_no_bytes() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_migration_issue_report(&mut buf, &[]).unwrap();
+        assert!(
+            buf.is_empty(),
+            "empty issue slice must produce zero bytes; got {} bytes: {:?}",
+            buf.len(),
+            String::from_utf8_lossy(&buf)
+        );
+    }
+
+    /// Negative caller shield: no raw
+    /// `crate::ui::print_validation_issue_line(&issue.format())` loop
+    /// bodies remain under `commands/migration_validation.rs` outside
+    /// the primitive itself — every migration-issue-report emit
+    /// routes through `print_migration_issue_report(...)`. A future
+    /// edit that reintroduces the pre-lift shape (a fourth gate
+    /// copy-pasting the loop, a debug probe restored during triage)
+    /// fails this shield.
+    ///
+    /// # Needle construction
+    ///
+    /// The needle is assembled at runtime via `format!` from two
+    /// fragments — `"crate::ui::"` and the fn name — so this shield's
+    /// own source lines do NOT contain the full concatenated substring
+    /// on any single line. That mirrors the discipline
+    /// [`test_migration_validation_tests_route_scratch_through_named_scratch_dir`]
+    /// uses (a `format!("std::env::{}()", "temp_dir")` construction) and
+    /// keeps the shield from finding itself; the panic message likewise
+    /// spells `crate::ui::print_validation_issue_line(...)` with the
+    /// arglist trimmed so its lines don't self-match either.
+    #[test]
+    fn test_no_raw_migration_issue_report_println_outside_primitive() {
+        const SOURCE: &str = include_str!("migration_validation.rs");
+        let needle = format!(
+            "crate::ui::{}(&issue.format())",
+            "print_validation_issue_line",
+        );
+        let residue = crate::test_support::code_line_hits(SOURCE, &needle);
+        assert!(
+            residue.is_empty(),
+            "commands/migration_validation.rs must NOT reintroduce the pre-lift \
+             `crate::ui::print_validation_issue_line(...)` loop-body stanza — \
+             every migration-issue-report emit routes through \
+             `print_migration_issue_report(...)`, which the byte-oracle \
+             sibling `write_migration_issue_report<W>` pins to exact bytes.\n{}",
+            residue.join("\n")
+        );
+    }
+
+    /// Positive-delegation shield: at least 3 call sites forward
+    /// through `print_migration_issue_report(` — one per validation
+    /// gate (SQLx `check_migrations`, SeaORM
+    /// `check_seaorm_migrations`, manifest
+    /// `validate_migration_manifest`). Plus the fn-signature line
+    /// itself contributes one hit. A future gate added without
+    /// threading through the primitive drops the delegation count and
+    /// fails this shield.
+    #[test]
+    fn test_migration_issue_report_forwards_meet_call_site_floor() {
+        const SOURCE: &str = include_str!("migration_validation.rs");
+        let forwards = crate::test_support::code_line_hits(SOURCE, "print_migration_issue_report(");
+        assert!(
+            forwards.len() >= 4,
+            "commands/migration_validation.rs must forward every \
+             migration-issue report through `print_migration_issue_report(` \
+             — 3 call sites (SQLx idempotency+soft-delete, SeaORM safety, \
+             manifest completeness) plus the fn-signature line itself, i.e. \
+             >= 4 code-line hits. Found {}.\n{}",
+            forwards.len(),
+            forwards.join("\n")
         );
     }
 }
