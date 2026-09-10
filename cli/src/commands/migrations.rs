@@ -627,15 +627,11 @@ spec:
         // Wait timed out or failed - check actual job status
         // Job might have completed but kubectl wait missed it
         let status_output = kubectl_command_async()
-            .args(&[
-                "get",
-                "job",
-                &job_name,
-                "-n",
-                &namespace,
-                "-o",
-                "jsonpath={.status.succeeded}",
-            ])
+            .args(
+                crate::kubectl_get_job_status_succeeded_argv::kubectl_get_job_status_succeeded_argv(
+                    &job_name, &namespace,
+                ),
+            )
             .output()
             .await
             .ok();

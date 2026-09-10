@@ -743,15 +743,9 @@ async fn wait_for_job_completion(
 /// Check if job succeeded
 async fn check_job_success(job_name: &str, namespace: &str) -> Result<bool> {
     let output = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
-        &[
-            "get",
-            "job",
-            job_name,
-            "-n",
-            namespace,
-            "-o",
-            "jsonpath={.status.succeeded}",
-        ],
+        &crate::kubectl_get_job_status_succeeded_argv::kubectl_get_job_status_succeeded_argv(
+            job_name, namespace,
+        ),
         "Failed to check job success status",
     )
     .await?;
