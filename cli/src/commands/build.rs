@@ -135,8 +135,15 @@ pub async fn execute(
 
     let spinner = crate::nix_build_spinner::nix_build_spinner();
 
-    // Use relative .# to avoid git+file:// protocol issues
-    let flake_ref = format!(".#{}", flake_attr);
+    // Use relative .# to avoid git+file:// protocol issues — routed
+    // through `crate::flake_attr_ref::format_flake_attr_ref` so the
+    // `.#<attr>` reference form (current-flake shorthand +
+    // attribute-suffix separator, deliberately NOT `path:` /
+    // `flake:` / `git+file://`) lives at ONE constructor across the
+    // three sibling flake-build call sites in forge
+    // (`commands/local.rs::up`, `commands/image_release.rs::build_nix_image`,
+    // and this site).
+    let flake_ref = crate::flake_attr_ref::format_flake_attr_ref(&flake_attr);
     // Route the `nix build` spawn through `NIX_BIN` so a Nix-hermetic
     // runner's store-path `nix` wins over whichever `nix` was first on
     // PATH at this spawn site. Mirrors every other nix-invocation site
