@@ -2707,9 +2707,11 @@ async fn update_service_federation_tests_tag(
     _deploy_config: &DeployConfig,
     deploy_yaml_path: &std::path::Path,
 ) -> Result<()> {
-    if !deploy_yaml_path.exists() {
-        bail!("deploy.yaml not found at: {}", deploy_yaml_path.display());
-    }
+    crate::repo::require_existing_path_at(
+        deploy_yaml_path,
+        deploy_yaml_path.display(),
+        "deploy.yaml",
+    )?;
 
     println!("   📝 Updating deploy.yaml...");
 
