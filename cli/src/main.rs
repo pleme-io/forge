@@ -68,6 +68,7 @@ mod cargo_test_argv;
 mod cloudflare;
 mod deploy_target_field;
 mod docker_daemon_running_preflight;
+mod docker_info_probe;
 mod docker_installed_preflight;
 mod first_pod_field_argv;
 mod git;

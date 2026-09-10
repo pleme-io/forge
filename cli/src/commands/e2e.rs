@@ -800,19 +800,18 @@ fn verify_docker() -> Result<()> {
     // sibling `ensure_docker_running` below rides the same primitive).
     crate::docker_installed_preflight::bail_unless_docker_installed()?;
 
-    // Check if Docker daemon is running
-    let info_output = Command::new(docker_bin())
-        .arg("info")
-        .output()
-        .context("Failed to run docker info")?;
+    // Daemon-liveness probe. Owns the pre-lift 4-line
+    // `Command::new(docker_bin()).arg("info").output().context("Failed
+    // to run docker info")?` + `.status.success()` spawn at one point
+    // of truth (the sibling `ensure_docker_running` below rides the
+    // same primitive on both its pre-loop and its in-loop probes).
+    let running = crate::docker_info_probe::probe_docker_daemon_running(&docker_bin())?;
 
     // Daemon-liveness gate. Owns the pre-lift `bail!("Docker daemon is
     // not running. Please start Docker first.")` message at one point
     // of truth (the sibling `ensure_docker_running` below rides the
     // same primitive on its terminal fall-through branch).
-    crate::docker_daemon_running_preflight::bail_unless_docker_daemon_running(
-        info_output.status.success(),
-    )?;
+    crate::docker_daemon_running_preflight::bail_unless_docker_daemon_running(running)?;
 
     ui::print_success("Docker daemon is running");
     Ok(())
@@ -1185,13 +1184,12 @@ pub fn ensure_docker_running() -> Result<()> {
     // sibling `verify_docker` above rides the same primitive).
     crate::docker_installed_preflight::bail_unless_docker_installed()?;
 
-    // Check if Docker daemon is running
-    let info_output = Command::new(docker_bin())
-        .arg("info")
-        .output()
-        .context("Failed to run docker info")?;
-
-    if info_output.status.success() {
+    // Daemon-liveness probe. Owns the pre-lift 4-line
+    // `Command::new(docker_bin()).arg("info").output().context("Failed
+    // to run docker info")?` + `.status.success()` spawn at one point
+    // of truth (the sibling `verify_docker` above and the in-loop
+    // retry probe below ride the same primitive).
+    if crate::docker_info_probe::probe_docker_daemon_running(&docker_bin())? {
         ui::print_success("Docker daemon is running");
         return Ok(());
     }
@@ -1212,13 +1210,16 @@ pub fn ensure_docker_running() -> Result<()> {
             thread::sleep(docker_startup_poll_delay(backoff_attempt));
             backoff_attempt = backoff_attempt.saturating_add(1);
 
-            let check = Command::new(docker_bin())
-                .arg("info")
-                .output()
-                .context("Failed to run docker info")?;
+            // Daemon-liveness probe. Owns the pre-lift 4-line
+            // `Command::new(docker_bin()).arg("info").output()
+            // .context("Failed to run docker info")?` +
+            // `.status.success()` spawn at one point of truth (the
+            // sibling `verify_docker` and the pre-loop probe above
+            // ride the same primitive).
+            let running = crate::docker_info_probe::probe_docker_daemon_running(&docker_bin())?;
 
             let elapsed = start.elapsed();
-            if check.status.success() {
+            if running {
                 ui::print_success(&format!("Docker started after {}s", elapsed.as_secs()));
                 return Ok(());
             }
