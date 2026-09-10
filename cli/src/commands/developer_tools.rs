@@ -321,7 +321,7 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
         tokio::fs::remove_file(&cargo_lock)
             .await
             .context("Failed to remove Cargo.lock")?;
-        println!("   ✓ Removed");
+        crate::ui::print_plain_step_check("Removed");
     } else {
         crate::ui::print_step_info("No existing Cargo.lock found");
     }

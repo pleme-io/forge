@@ -4009,6 +4009,108 @@ pub fn write_plain_advisory_warn<W: std::io::Write>(
     writeln!(w, "\u{26A0}\u{FE0F}  {}", message)
 }
 
+/// Prints the single `"   ✓ <message>"` (three-space indent + UNCOLORED
+/// `✓` U+2713 CHECK MARK glyph + ONE ASCII space + caller-supplied plain
+/// message) stdout-routed in-body sub-item acknowledgment grammar 5
+/// pre-lift consumer sites spelled inline as `println!("   ✓ <fmt>",
+/// <args>)` across `commands/{developer_tools (×1: Cargo.lock cleanup
+/// acknowledgment after `tokio::fs::remove_file`), migrations (×3:
+/// Kustomize-generated ConfigMap name + Kustomize-generated service Secret
+/// name + per-configured-secret validation-passed readouts), rust_service
+/// (×1: `.version` file post-write path readout)}.rs`, each marking a
+/// passing sub-item within a step-scope readout without applying any
+/// coloring to the glyph.
+///
+/// # Distinct from every peer `ui::*` check primitive
+///
+/// [`print_step_check`] shares the three-space body indent, the `✓`
+/// thin-checkmark glyph, and the single-space post-glyph gap but passes
+/// the glyph through a slot painted `.green()`
+/// (`\x1b[32m…\x1b[0m` around the glyph, message plain) — the pre-lift
+/// consumer grammar spelled as `println!("   {} <fmt>", "✓".green(),
+/// <args>)`. Consumer sites there mark sub-check passes inside a
+/// validation batch where the palette signals "gate held under adversarial
+/// probing"; this primitive's sites deliberately spelled the marker as the
+/// bare glyph inside the format literal, so a terminal without `\x1b[32m`
+/// interpretation (a CI log renderer, a downstream `grep`-in-logs
+/// pipeline, a plain-text runbook capture) reads the pre-lift bytes
+/// verbatim. A collapse into [`print_step_check`] would silently paint the
+/// glyph green at every one of the 5 sites — a shift in the visual
+/// grammar the pre-lift authors chose not to make.
+///
+/// [`print_step_pass`] shares the three-space body indent but wears the
+/// heavier `✅` U+2705 WHITE HEAVY CHECK MARK glyph (a step-scope
+/// milestone) rather than the thin `✓` sub-item glyph. Consumer sites
+/// there close out a full step or gate probe ("Health check passed
+/// (12ms)"); this primitive's sites mark ONE entry inside a listing under
+/// such a step — the finer-grained OK register the terminal readout
+/// carries in parallel with the milestone-glyph register.
+///
+/// [`print_plain_step_warn`] shares the three-space indent, the UNCOLORED
+/// glyph, the stdout routing, and the plain (uncolored) message tail; it
+/// is the ⚠️-emoji peer on the warn axis (with a load-bearing TWO
+/// post-glyph spaces to compensate for the East Asian Wide emoji
+/// presentation the U+FE0F variation selector requests). This primitive is
+/// the ASCII-checkmark peer on the OK axis, so ONE post-glyph space
+/// suffices — the U+2713 CHECK MARK is a single-column ASCII glyph and
+/// carries no variation selector.
+///
+/// # UNCOLORED `✓` glyph, ONE ASCII space
+///
+/// Pre-lift every consumer spelled the marker as the bare `✓` glyph
+/// inside the format string literal followed by ONE ASCII space before
+/// the message text — with NO `.green()` styling applied. The single
+/// space (vs. the two-space [`print_plain_step_warn`] emits after its
+/// `⚠️` glyph) is load-bearing: U+2713 CHECK MARK renders as a
+/// single-column glyph on every terminal, so one post-glyph space keeps
+/// the message column-aligned with the `.green()`-decorated
+/// [`print_step_check`] sibling and with the sibling-family primitives
+/// under a shared three-space body indent. Every pre-lift site enforced
+/// the same alignment inline — the primitive body preserves it.
+///
+/// # stdout, not stderr
+///
+/// Every pre-lift consumer routed through `println!` (stdout), not
+/// `eprintln!` (stderr) — a runbook capture piping `forge <cmd> > log.txt`
+/// records these acknowledgments alongside the success narration, and an
+/// operator watching stderr for release-abort signals sees only the
+/// terminal `anyhow::bail!` bubbles. The primitive preserves that routing.
+///
+/// # Compounding
+///
+/// Pre-lift 5 sibling sites each restated the `println!("   ✓ <fmt>",
+/// <args>)` grammar verbatim, with the three-space indent, the plain `✓`
+/// glyph, the single post-glyph space, and the caller-composed message
+/// tail all spelled inline. A future adjustment — routing them through
+/// `tracing::info!(target: "forge::pipeline", …)` for structured
+/// observability so a downstream OTLP subscriber counts sub-item
+/// acknowledgments per pipeline stage, promoting the glyph to `.green()`
+/// under a palette-consistency grammar with the [`print_step_check`]
+/// sibling, swapping `✓` for `[OK]` under a CI-log-friendly grammar,
+/// tightening the three-space indent to two- or four-space under a
+/// standardized body-indent — had to hit 5 sites in lockstep or drift the
+/// surface. Post-lift the glyph, spacing, and destination stream live in
+/// ONE writer body; the sites carry only the message. Delegates to
+/// [`write_plain_step_check`] against [`std::io::stdout()`]; the writer
+/// split exists so the fail-before-pass test can pin the one-line body,
+/// the three-space indent, the plain (no ANSI) `✓` glyph, the
+/// single-space post-glyph gap, and the trailing newline by inspecting
+/// emitted bytes rather than shelling out and grepping stdout.
+pub fn print_plain_step_check(message: &str) {
+    let _ = write_plain_step_check(&mut std::io::stdout().lock(), message);
+}
+
+/// Writer-taking sibling to [`print_plain_step_check`]. Emits the single
+/// `"   ✓ <message>"` line via [`writeln!`] against the supplied writer.
+/// [`print_plain_step_check`] is the stdout adapter; this variant exists
+/// so tests can pin the one-line body, the three-space indent, the
+/// UNCOLORED `✓` U+2713 CHECK MARK glyph (never `.green()` — that grammar
+/// belongs to [`write_step_check`]), the single-space post-glyph gap, and
+/// the trailing newline without capturing stdout.
+pub fn write_plain_step_check<W: std::io::Write>(w: &mut W, message: &str) -> std::io::Result<()> {
+    writeln!(w, "   \u{2713} {}", message)
+}
+
 /// Prints the one-line `"   {} {} failed (non-fatal): {}"` (three-space
 /// indent + `"WARN".yellow()` textual prefix + verb-phrase label +
 /// literal ` failed (non-fatal): ` connective + [`std::fmt::Display`]
@@ -13593,6 +13695,205 @@ mod tests {
                  primitive body every unindented uncolored `⚠️  ` \
                  top-level stdout advisory-warn in the crate now \
                  delegates through."
+            );
+        }
+    }
+
+    /// Fail-before-pass envelope for [`super::write_plain_step_check`].
+    /// Pins the one-line body every pre-lift consumer spelled verbatim
+    /// (`println!("   ✓ <fmt>", <args>)`): a three-space indent, the
+    /// UNCOLORED `✓` U+2713 CHECK MARK glyph, ONE ASCII space after the
+    /// glyph, then the caller-composed plain message, then a trailing
+    /// `\n`. A silent contract drift a future rewrite might introduce —
+    /// dropping the three-space indent (a "tighter body spacing"
+    /// cleanup), painting the glyph via `.green()` (a "match the sibling
+    /// `print_step_check` palette" cleanup which would erase the
+    /// deliberate uncolored-glyph choice pre-lift authors made for CI-log
+    /// and plain-text-renderer legibility), promoting `✓` to the heavier
+    /// `✅` glyph (collapsing the sub-item register into the
+    /// step-milestone register that [`super::print_step_pass`] owns),
+    /// widening the single post-glyph space to two (matching the
+    /// [`super::write_plain_step_warn`] cadence — but that primitive is
+    /// compensating for the East Asian Wide `⚠️` emoji glyph while `✓` is
+    /// a single-column ASCII character), slipping a trailing blank line
+    /// into the primitive body — flips this assertion rather than
+    /// compiling and silently diverging the 5 consumer sites' visual
+    /// grammar.
+    #[test]
+    fn write_plain_step_check_emits_exactly_one_uncolored_indented_line() {
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_plain_step_check(&mut buf, "ConfigMap: cart-config-d4kg222k5k")
+            .expect("write_plain_step_check against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_plain_step_check must emit valid UTF-8 (the pre-lift println!s did)");
+
+        // Exactly one line — the pre-lift stanza is one `println!`, not
+        // two, and carries no framing blank. A refactor that slips a
+        // leading or trailing blank into the primitive body fails here.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "write_plain_step_check must emit exactly one line — the \
+             pre-lift stanza is one `println!` carrying no framing \
+             blank; got {}:\n{}",
+            lines.len(),
+            out
+        );
+
+        // The three-space indent lands first — a fusion that dropped
+        // the indent altogether or padded it to four spaces (under a
+        // "align with nested sub-bullets" cleanup) fails here.
+        assert!(
+            lines[0].starts_with("   "),
+            "line 0 must begin with a three-space indent — every \
+             pre-lift consumer spelled `\"   ✓ <fmt>\"` verbatim; \
+             got {:?}",
+            lines[0]
+        );
+
+        // The `✓` U+2713 CHECK MARK glyph reaches the rendered line
+        // verbatim. A fusion that swapped the marker for the heavier
+        // `✅` (collapsing the sub-item vs step-milestone register) or
+        // for `[OK]` under a "CI-log-friendly" cleanup fails here.
+        assert!(
+            lines[0].contains('\u{2713}'),
+            "line 0 must contain the `✓` U+2713 CHECK MARK glyph — \
+             every pre-lift consumer spelled the marker as the bare \
+             `✓` (NEVER the heavier `✅` — that glyph belongs to the \
+             sibling `print_step_pass` primitive for full step \
+             results); got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('\u{2705}'),
+            "line 0 must NOT contain the heavier `✅` U+2705 WHITE \
+             HEAVY CHECK MARK glyph — that glyph belongs to the sibling \
+             `print_step_pass` primitive for step-milestone results, \
+             not this sub-item primitive; got {:?}",
+            lines[0]
+        );
+
+        // Exactly ONE ASCII space between the glyph and the message
+        // reaches the rendered line — a fusion that widened to two
+        // spaces (matching the sibling `write_plain_step_warn` cadence
+        // which is itself compensating for the East Asian Wide `⚠️`
+        // glyph) would insert a spurious column of whitespace at every
+        // site. Verify by locating the glyph and confirming exactly one
+        // space follows before a non-space message character.
+        let glyph_end =
+            lines[0].find('\u{2713}').expect("glyph must be present") + '\u{2713}'.len_utf8();
+        let after_glyph = &lines[0][glyph_end..];
+        assert!(
+            after_glyph.starts_with(' ') && !after_glyph.starts_with("  "),
+            "line 0 must carry exactly ONE ASCII space after the `✓` \
+             glyph — `✓` is a single-column ASCII CHECK MARK and \
+             carries no variation-selector East Asian Wide presentation, \
+             so a single space keeps the message column-aligned with \
+             the sibling `.green()`-decorated `write_step_check` peer; \
+             got {:?} (after glyph: {:?})",
+            lines[0],
+            after_glyph
+        );
+
+        // The message text reaches the rendered line verbatim; a
+        // fusion that hoisted the message off the parameter and pinned
+        // it to a constant fails here.
+        assert!(
+            lines[0].contains("ConfigMap: cart-config-d4kg222k5k"),
+            "line 0 must carry the message verbatim; got {:?}",
+            lines[0]
+        );
+
+        // NO ANSI escape reaches the rendered line — this primitive
+        // deliberately spells the glyph PLAIN. A fusion that promoted
+        // the glyph to `.green()` (collapsing into the sibling
+        // `write_step_check` palette) or painted the whole line under
+        // any color fails here. The `\x1b[` escape sequence introducer
+        // is the diagnostic — its absence proves no ANSI decoration
+        // was applied by the writer.
+        assert!(
+            !lines[0].contains("\x1b["),
+            "line 0 must NOT carry any ANSI escape sequence — this \
+             primitive is the UNCOLORED sibling of `write_step_check`, \
+             deliberately spelling the `✓` glyph plain so a CI log \
+             renderer, a `grep`-in-logs pipeline, or a plain-text \
+             runbook capture reads the pre-lift bytes verbatim. Every \
+             pre-lift consumer spelled the marker inside the format \
+             literal without `.green()` styling; got {:?}",
+            lines[0]
+        );
+
+        // The trailing `\n` reaches the writer — pre-lift stanza used
+        // `println!` (not `print!`), so the newline is part of the
+        // contract. A fusion that swapped `writeln!` for `write!`
+        // fails here.
+        assert!(
+            out.ends_with('\n'),
+            "write_plain_step_check must emit a trailing `\\n` (the \
+             pre-lift `println!` did); got {:?}",
+            out
+        );
+    }
+
+    /// Post-lift the callers migrated onto
+    /// [`super::print_plain_step_check`] no longer spell the
+    /// `println!("   ✓ <fmt>", <args>)` shape inline. Structural
+    /// regression shield — without it, a future refactor could silently
+    /// re-inline the one-liner (a "just call `println!` directly, it's
+    /// shorter" cleanup) and reopen the 5-site duplication class this
+    /// lift closed. Enforced at the module bodies before their
+    /// `#[cfg(test)]` regions so a test-support mention of the raw
+    /// shape does not defeat the shield.
+    ///
+    /// The exact-shape needle is `println!("   ✓ ` appearing anywhere
+    /// in the module body — the three-space indent followed by the plain
+    /// `✓` glyph followed by a single ASCII space uniquely identifies the
+    /// pre-lift stdout stanza and separates it from the sibling
+    /// `println!("   {} <fmt>", "✓".green(), …)` grammar (which lives
+    /// under `write_step_check` and passes its glyph through a slot
+    /// rather than spelling it inline).
+    #[test]
+    fn print_plain_step_check_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[
+            (
+                include_str!("commands/developer_tools.rs"),
+                "commands/developer_tools.rs",
+            ),
+            (
+                include_str!("commands/migrations.rs"),
+                "commands/migrations.rs",
+            ),
+            (
+                include_str!("commands/rust_service.rs"),
+                "commands/rust_service.rs",
+            ),
+        ];
+        for (source, module_path) in CALLERS {
+            let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            for (i, line) in body.lines().enumerate() {
+                if !line.contains("println!(\"   \u{2713} ") {
+                    continue;
+                }
+                panic!(
+                    "{module_path}:{lineno} spells the pre-lift inline \
+                     `println!(\"   ✓ <fmt>\", <args>)` stdout \
+                     sub-item acknowledgment stanza — that shape was \
+                     lifted onto `crate::ui::print_plain_step_check`. \
+                     A re-inline would silently reopen the 5-site \
+                     duplication class this shield exists to close. \
+                     Offending line: {line:?}",
+                    lineno = i + 1
+                );
+            }
+            assert!(
+                body.contains("crate::ui::print_plain_step_check("),
+                "{module_path} body must forward to \
+                 `crate::ui::print_plain_step_check(<MSG>)` — the \
+                 primitive body every three-space-indented uncolored \
+                 `✓ ` in-body stdout sub-item acknowledgment in the \
+                 crate now delegates through."
             );
         }
     }
