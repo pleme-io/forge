@@ -200,9 +200,12 @@ pub async fn execute(
 /// `(BuildFailed | EmptyStorePath | ExecFailed)` discrimination is
 /// recoverable across the anyhow boundary.
 async fn build_nix_image(flake_attr: &str, working_dir: &str) -> Result<String> {
-    info!("Building .#{}...", flake_attr);
-    let result =
-        build_flake_attr_in(&format!(".#{}", flake_attr), Some(Path::new(working_dir))).await?;
+    crate::info_building_flake_attr!(flake_attr);
+    let result = build_flake_attr_in(
+        &crate::flake_attr_ref::format_flake_attr_ref(flake_attr),
+        Some(Path::new(working_dir)),
+    )
+    .await?;
     Ok(result.store_path.into_string())
 }
 

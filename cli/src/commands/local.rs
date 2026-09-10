@@ -53,8 +53,8 @@ pub async fn up(name: &str, flake_attr: &str, port: u16, compose_file: Option<&s
     // canonical UTF-8-lossy-trim of the success-stdout. The typed
     // [`crate::error::NixBuildError`] is recoverable across the anyhow
     // boundary via `err.downcast_ref::<NixBuildError>()`.
-    info!("Building .#{}...", flake_attr);
-    let image_path = build_flake_attr(&format!(".#{}", flake_attr))
+    crate::info_building_flake_attr!(flake_attr);
+    let image_path = build_flake_attr(&crate::flake_attr_ref::format_flake_attr_ref(flake_attr))
         .await?
         .store_path;
 

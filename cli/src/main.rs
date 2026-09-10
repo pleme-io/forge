@@ -71,6 +71,7 @@ mod docker_daemon_running_preflight;
 mod docker_info_probe;
 mod docker_installed_preflight;
 mod first_pod_field_argv;
+mod flake_attr_ref;
 mod git;
 mod git_sha_field;
 mod hermetic_scratch;
