@@ -1049,14 +1049,12 @@ fn print_failure_diagnostics() {
     }
 
     // Check for screenshots
-    let screenshot_dir = std::path::Path::new("target/screenshots");
-    let screenshots = crate::repo::read_dir_files_with_extension(screenshot_dir, "png");
-    if !screenshots.is_empty() {
-        eprintln!("\nScreenshots captured:");
-        for entry in &screenshots {
-            eprintln!("  {}", entry.path().display());
-        }
-    }
+    crate::screenshot_diag::probe_and_dump_screenshots_captured_section(
+        std::path::Path::new("target/screenshots"),
+        crate::probe_dump::DiagSink::Stderr,
+        "",
+        "  ",
+    );
 
     eprintln!("\n{}", "=".repeat(72));
     eprintln!("Troubleshooting:");

@@ -986,14 +986,12 @@ fn print_e2e_diagnostics(backend_dir: &Path) {
     }
 
     // Screenshots
-    let screenshot_dir = backend_dir.join("target/screenshots");
-    let screenshots = crate::repo::read_dir_files_with_extension(&screenshot_dir, "png");
-    if !screenshots.is_empty() {
-        println!("\n   Screenshots captured:");
-        for entry in &screenshots {
-            println!("     {}", entry.path().display());
-        }
-    }
+    crate::screenshot_diag::probe_and_dump_screenshots_captured_section(
+        &backend_dir.join("target/screenshots"),
+        crate::probe_dump::DiagSink::Stdout,
+        "   ",
+        "     ",
+    );
 
     println!();
     println!("   {}", "Troubleshooting:".bold());
