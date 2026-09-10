@@ -198,19 +198,16 @@ async fn run_sync_via_kubectl(
     crate::retry::run_inherited_status(cp_cmd, &cp_op).await?;
 
     // Run novasearchctl sync inside the pod
-    let mut exec_args = vec![
-        "exec",
-        "-n",
-        namespace,
-        &pod_name,
-        "--",
+    let mut exec_args: Vec<&str> =
+        crate::kubectl_exec_pod_argv::kubectl_exec_pod_argv_prefix(namespace, &pod_name).to_vec();
+    exec_args.extend([
         "novasearchctl",
         "--server",
         "http://localhost:8081",
         "sync",
         "--source",
         remote_config_path,
-    ];
+    ]);
 
     if config.dry_run {
         exec_args.push("--dry-run");
@@ -237,19 +234,10 @@ async fn run_sync_via_kubectl(
     .await;
 
     // Clean up: remove config from pod
-    let _ = kubectl_command_async()
-        .args([
-            "exec",
-            "-n",
-            namespace,
-            &pod_name,
-            "--",
-            "rm",
-            "-rf",
-            remote_config_path,
-        ])
-        .status()
-        .await;
+    let mut cleanup_args: Vec<&str> =
+        crate::kubectl_exec_pod_argv::kubectl_exec_pod_argv_prefix(namespace, &pod_name).to_vec();
+    cleanup_args.extend(["rm", "-rf", remote_config_path]);
+    let _ = kubectl_command_async().args(&cleanup_args).status().await;
 
     match result {
         Ok(Ok(())) => {
