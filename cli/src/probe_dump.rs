@@ -253,6 +253,106 @@ pub fn probe_and_dump_docker_ps_exited_since_15m(docker_bin: &str, sink: DiagSin
     );
 }
 
+/// Section header preceding an E2E-failure-diagnostic probe dump.
+///
+/// # Pre-lift census — 6 sibling stanzas across e2e.rs and prerelease.rs
+///
+/// Both `commands/e2e.rs::print_failure_diagnostics` (stderr sink,
+/// `""` indent) and `commands/prerelease.rs::print_e2e_diagnostics`
+/// (stdout sink, `"   "` indent) each restated the same three
+/// `<println|eprintln>!("\n<indent><label>:")` header lines above the
+/// docker-ps-running / docker-ps-exited / docker-images probe dumps —
+/// three labels × two files = 6 stanzas diverging only on
+/// (sink, indent, label).
+///
+/// The three labels each precede a fixed probe pair the wider
+/// diagnostics block owns:
+///
+/// | variant                          | precedes                                                   |
+/// | -------------------------------- | ---------------------------------------------------------- |
+/// | `DockerContainersRunning`        | [`probe_and_dump_docker_ps_running`]                       |
+/// | `DockerContainersRecentlyExited` | [`probe_and_dump_docker_ps_exited_since_15m`]              |
+/// | `E2eDockerImages`                | inline `docker images --format` capture-and-filter loop    |
+///
+/// The closed 3-variant enum makes the label choice exhaustive at
+/// compile time; a caller cannot spell a fourth section title without
+/// adding a variant. Sibling of [`DiagSink`] in intent — both close a
+/// small discrete axis of the diagnostics block's shape at the type
+/// level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagSectionHeader {
+    /// `"Docker containers (running)"` — the label above the running
+    /// `docker ps` probe. Pre-lift sites:
+    /// `commands/e2e.rs::print_failure_diagnostics` (`""` indent,
+    /// stderr) and `commands/prerelease.rs::print_e2e_diagnostics`
+    /// (`"   "` indent, stdout).
+    DockerContainersRunning,
+    /// `"Docker containers (recently exited)"` — the label above the
+    /// `docker ps -a --filter status=exited --since 15m` probe. Pre-lift
+    /// sites: same two files as the sibling variant above.
+    DockerContainersRecentlyExited,
+    /// `"E2E Docker images"` — the label above the `docker images
+    /// --format` capture-and-filter loop. Pre-lift sites: same two
+    /// files as the sibling variants above.
+    E2eDockerImages,
+}
+
+impl DiagSectionHeader {
+    /// The literal English label rendered inside the section header.
+    ///
+    /// Correlated-adjective projection: each variant maps to exactly
+    /// one `&'static str`, byte-oracle-pinned by the tests below.
+    /// A future re-word (say, `"Docker containers (still running)"`)
+    /// lands at this one match rather than at six caller sites.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::DockerContainersRunning => "Docker containers (running)",
+            Self::DockerContainersRecentlyExited => "Docker containers (recently exited)",
+            Self::E2eDockerImages => "E2E Docker images",
+        }
+    }
+}
+
+/// Write the section-header stanza to `w`.
+///
+/// The pre-lift shape at both `println!`/`eprintln!` variants is:
+///
+/// ```ignore
+/// println!("\n{indent}{label}:");   // or eprintln!, per sink
+/// ```
+///
+/// The `println!`/`eprintln!` macro appends a trailing newline, so the
+/// on-the-wire bytes are exactly `\n{indent}{label}:\n` — a leading
+/// blank line (visual separator from the preceding block), the caller's
+/// `indent`, the label, a trailing colon, then the terminator. This
+/// byte-oracle pins that entire form.
+///
+/// Testable against a `Vec<u8>` sink without touching stdout/stderr.
+pub fn write_diag_section_header<W: Write>(
+    w: &mut W,
+    indent: &str,
+    header: DiagSectionHeader,
+) -> io::Result<()> {
+    writeln!(w, "\n{}{}:", indent, header.label())
+}
+
+/// Dispatch [`write_diag_section_header`] against the process's stdout
+/// or stderr per `sink`. Silently ignores the write result — matching
+/// the pre-lift `println!`/`eprintln!` discipline where a broken pipe
+/// on the diagnostics stream is not a fatal condition on the
+/// surrounding caller (E2E test failure). Sibling of
+/// [`dump_captured_or_none`] in intent.
+pub fn print_diag_section_header(sink: DiagSink, indent: &str, header: DiagSectionHeader) {
+    match sink {
+        DiagSink::Stdout => {
+            let _ = write_diag_section_header(&mut io::stdout().lock(), indent, header);
+        }
+        DiagSink::Stderr => {
+            let _ = write_diag_section_header(&mut io::stderr().lock(), indent, header);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,6 +783,298 @@ mod tests {
                  `crate::probe_dump::docker_images_diag_format(...)`; found \
                  {forwards}. A dropped call would leave the negative \
                  raw-template scan satisfied by absence.",
+            );
+        }
+    }
+
+    // ── DiagSectionHeader — byte-oracle over label projections ────────
+
+    /// Byte-oracle: `DockerContainersRunning.label()` renders exactly
+    /// the pre-lift English label `commands/e2e.rs::print_failure_diagnostics`
+    /// and `commands/prerelease.rs::print_e2e_diagnostics` both spelled
+    /// inline pre-lift. A future re-word (a dropped parenthetical, a
+    /// swap to `still running`, a colon inside the label) regresses
+    /// this assertion.
+    #[test]
+    fn diag_section_header_docker_containers_running_label_matches_pre_lift() {
+        assert_eq!(
+            DiagSectionHeader::DockerContainersRunning.label(),
+            "Docker containers (running)"
+        );
+    }
+
+    /// Byte-oracle: `DockerContainersRecentlyExited.label()` renders
+    /// exactly the pre-lift English label for the `docker ps -a --filter
+    /// status=exited --since 15m` diagnostic section. Sibling of the
+    /// `DockerContainersRunning` byte-oracle above; the two together
+    /// pin that the label axis is honored per-variant (a projection
+    /// that hard-coded one label and ignored the discriminant would
+    /// pass one and fail the other).
+    #[test]
+    fn diag_section_header_docker_containers_recently_exited_label_matches_pre_lift() {
+        assert_eq!(
+            DiagSectionHeader::DockerContainersRecentlyExited.label(),
+            "Docker containers (recently exited)"
+        );
+    }
+
+    /// Byte-oracle: `E2eDockerImages.label()` renders exactly the
+    /// pre-lift English label for the `docker images --format`
+    /// diagnostic section. Third sibling to the two docker-containers
+    /// byte-oracles above; the three together fix the closed-enum's
+    /// full label surface at the byte level.
+    #[test]
+    fn diag_section_header_e2e_docker_images_label_matches_pre_lift() {
+        assert_eq!(
+            DiagSectionHeader::E2eDockerImages.label(),
+            "E2E Docker images"
+        );
+    }
+
+    /// Shield: the three [`DiagSectionHeader`] variants each render a
+    /// distinct label. A future addition that accidentally aliased two
+    /// discriminants onto the same string (a copy-paste that dropped
+    /// the discriminating adjective) would collapse two visually
+    /// distinct diagnostic sections in the failure report — this shield
+    /// makes the collapse a hard test failure. Complements the three
+    /// per-variant byte-oracles above.
+    #[test]
+    fn diag_section_header_labels_are_pairwise_distinct() {
+        use std::collections::HashSet;
+        let labels: HashSet<&'static str> = [
+            DiagSectionHeader::DockerContainersRunning.label(),
+            DiagSectionHeader::DockerContainersRecentlyExited.label(),
+            DiagSectionHeader::E2eDockerImages.label(),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            labels.len(),
+            3,
+            "DiagSectionHeader variants must render pairwise-distinct labels; found: {:?}",
+            labels,
+        );
+    }
+
+    /// Shield: [`DiagSectionHeader`] stays a closed 3-variant enum.
+    /// A future fourth section (`"Node pod events"`, `"Flux
+    /// reconciliation status"`, `"E2E screenshots"`) is a deliberate
+    /// design decision — this shield forces it through review rather
+    /// than sliding in via a defaulted match arm. Mirrors the sibling
+    /// `diag_sink_stays_closed_two_variants` shield above.
+    #[test]
+    fn diag_section_header_stays_closed_three_variants() {
+        for header in [
+            DiagSectionHeader::DockerContainersRunning,
+            DiagSectionHeader::DockerContainersRecentlyExited,
+            DiagSectionHeader::E2eDockerImages,
+        ] {
+            match header {
+                DiagSectionHeader::DockerContainersRunning => (),
+                DiagSectionHeader::DockerContainersRecentlyExited => (),
+                DiagSectionHeader::E2eDockerImages => (),
+            }
+        }
+    }
+
+    // ── write_diag_section_header — byte-oracle over the emitted stanza ─
+
+    /// Byte-oracle: `write_diag_section_header` with the pre-lift
+    /// `"   "` (3-space) indent and `DockerContainersRunning` variant
+    /// emits exactly `"\n   Docker containers (running):\n"` — the
+    /// byte form `commands/prerelease.rs::print_e2e_diagnostics`
+    /// spelled inline pre-lift as `println!("\n   Docker containers
+    /// (running):")`. A future drift that dropped the leading `\n`
+    /// (removing the visual separator), the trailing `\n` (missing
+    /// terminator), or the trailing `:` (unlabeled section) regresses
+    /// this test.
+    #[test]
+    fn write_diag_section_header_three_space_indent_running_matches_pre_lift() {
+        let mut buf = Vec::new();
+        write_diag_section_header(&mut buf, "   ", DiagSectionHeader::DockerContainersRunning)
+            .expect("write to Vec is infallible");
+        assert_eq!(buf, b"\n   Docker containers (running):\n");
+    }
+
+    /// Byte-oracle: `write_diag_section_header` with an empty indent
+    /// and `DockerContainersRecentlyExited` variant emits exactly
+    /// `"\nDocker containers (recently exited):\n"` — the byte form
+    /// `commands/e2e.rs::print_failure_diagnostics` spelled inline
+    /// pre-lift as `eprintln!("\nDocker containers (recently exited):")`.
+    /// Distinct sibling case to the three-space-indent + running one
+    /// above: the two together pin that both the `indent` and the
+    /// `header` axes are honored independently (a writer that
+    /// hard-coded either axis would pass one and fail the other).
+    #[test]
+    fn write_diag_section_header_empty_indent_recently_exited_matches_pre_lift() {
+        let mut buf = Vec::new();
+        write_diag_section_header(
+            &mut buf,
+            "",
+            DiagSectionHeader::DockerContainersRecentlyExited,
+        )
+        .expect("write to Vec is infallible");
+        assert_eq!(buf, b"\nDocker containers (recently exited):\n");
+    }
+
+    /// Byte-oracle: `write_diag_section_header` with the `"   "` indent
+    /// and `E2eDockerImages` variant emits exactly `"\n   E2E Docker
+    /// images:\n"` — the byte form `commands/prerelease.rs::print_e2e_diagnostics`
+    /// spelled inline pre-lift as `println!("\n   E2E Docker images:")`.
+    /// Third-axis-crossing byte-oracle: pairs the 3-space indent with
+    /// the third variant, so the three per-variant byte-oracles and
+    /// the two-indent axis together cover both dimensions.
+    #[test]
+    fn write_diag_section_header_three_space_indent_e2e_images_matches_pre_lift() {
+        let mut buf = Vec::new();
+        write_diag_section_header(&mut buf, "   ", DiagSectionHeader::E2eDockerImages)
+            .expect("write to Vec is infallible");
+        assert_eq!(buf, b"\n   E2E Docker images:\n");
+    }
+
+    /// Byte-oracle: `write_diag_section_header` with an empty indent
+    /// and `E2eDockerImages` variant emits exactly `"\nE2E Docker
+    /// images:\n"` — the byte form `commands/e2e.rs::print_failure_diagnostics`
+    /// spelled inline pre-lift as `eprintln!("\nE2E Docker images:")`.
+    /// Sibling of the three-space + E2eDockerImages case above; the
+    /// two together pin the empty-vs-nonempty indent branch at the
+    /// same variant.
+    #[test]
+    fn write_diag_section_header_empty_indent_e2e_images_matches_pre_lift() {
+        let mut buf = Vec::new();
+        write_diag_section_header(&mut buf, "", DiagSectionHeader::E2eDockerImages)
+            .expect("write to Vec is infallible");
+        assert_eq!(buf, b"\nE2E Docker images:\n");
+    }
+
+    /// Byte-oracle: `write_diag_section_header` with an empty indent
+    /// and `DockerContainersRunning` variant emits exactly
+    /// `"\nDocker containers (running):\n"` — the byte form
+    /// `commands/e2e.rs::print_failure_diagnostics` spelled inline
+    /// pre-lift as `eprintln!("\nDocker containers (running):")`.
+    /// Ties off the (indent × header) matrix at the empty-indent /
+    /// running pair, so all four (indent × header) combinations the
+    /// pre-lift census carries are byte-oracle-pinned.
+    #[test]
+    fn write_diag_section_header_empty_indent_running_matches_pre_lift() {
+        let mut buf = Vec::new();
+        write_diag_section_header(&mut buf, "", DiagSectionHeader::DockerContainersRunning)
+            .expect("write to Vec is infallible");
+        assert_eq!(buf, b"\nDocker containers (running):\n");
+    }
+
+    /// Byte-oracle: `write_diag_section_header` with the `"   "` indent
+    /// and `DockerContainersRecentlyExited` variant emits exactly
+    /// `"\n   Docker containers (recently exited):\n"` — the byte form
+    /// `commands/prerelease.rs::print_e2e_diagnostics` spelled inline
+    /// pre-lift as `println!("\n   Docker containers (recently exited):")`.
+    /// Ties off the (indent × header) matrix at the three-space-indent /
+    /// recently-exited pair, so all four (indent × header) combinations
+    /// the pre-lift census carries are byte-oracle-pinned.
+    #[test]
+    fn write_diag_section_header_three_space_indent_recently_exited_matches_pre_lift() {
+        let mut buf = Vec::new();
+        write_diag_section_header(
+            &mut buf,
+            "   ",
+            DiagSectionHeader::DockerContainersRecentlyExited,
+        )
+        .expect("write to Vec is infallible");
+        assert_eq!(buf, b"\n   Docker containers (recently exited):\n");
+    }
+
+    // ── Caller shields — negative + positive ─────────────────────────
+
+    /// Caller shield: no source line under `cli/src/commands/` may
+    /// spell any of the six pre-lift `<println|eprintln>!("\n<indent>
+    /// <label>:")` diagnostic-section-header literals inline any more.
+    /// The six pre-lift sites (`commands/e2e.rs` × 3,
+    /// `commands/prerelease.rs` × 3) migrated onto
+    /// [`print_diag_section_header`]; any future consumer that wants
+    /// the same section-header stanza reaches for the typed primitive
+    /// on first grep, not by copy-pasting a raw literal from an
+    /// existing command module. Mirrors the negative-half discipline
+    /// of the sibling `no_command_module_still_spells_raw_docker_ps_diag_format_literal`
+    /// and `no_command_module_still_spells_raw_probe_dump_or_none_ternary`
+    /// shields above.
+    #[test]
+    fn no_command_module_still_spells_raw_diag_section_header_literal() {
+        use std::path::PathBuf;
+        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands");
+        // The six pre-lift needles — three labels × two indent/sink
+        // combinations. Anchoring on the full literal (leading `\n`,
+        // indent, label, trailing `:` inside the string, and the
+        // closing `")` triple) pins the pre-lift shape exactly; a
+        // post-lift caller either forwards through
+        // `print_diag_section_header(...)` or spells a different label
+        // (which is a new-variant decision, gated by the closed-enum
+        // shield above).
+        let literal_forms = [
+            r#"println!("\n   Docker containers (running):")"#,
+            r#"println!("\n   Docker containers (recently exited):")"#,
+            r#"println!("\n   E2E Docker images:")"#,
+            r#"eprintln!("\nDocker containers (running):")"#,
+            r#"eprintln!("\nDocker containers (recently exited):")"#,
+            r#"eprintln!("\nE2E Docker images:")"#,
+        ];
+        let mut offenders: Vec<(PathBuf, usize, String)> = Vec::new();
+        for entry in std::fs::read_dir(&commands_dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            for (idx, line) in source.lines().enumerate() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                    continue;
+                }
+                if literal_forms.iter().any(|needle| line.contains(needle)) {
+                    offenders.push((path.clone(), idx + 1, line.to_string()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "raw `<println|eprintln>!(\"\\n<indent><label>:\")` diagnostic-\
+             section-header literal(s) survive under `commands/` — route \
+             each through `crate::probe_dump::print_diag_section_header(\
+             <sink>, <indent>, crate::probe_dump::DiagSectionHeader::<variant>)` \
+             instead:\n{:#?}",
+            offenders
+        );
+    }
+
+    /// Positive delegation shield: the two pre-lift files MUST forward
+    /// through [`print_diag_section_header`] at least as many times as
+    /// the pre-lift census demanded (`e2e.rs` × 3 sites,
+    /// `prerelease.rs` × 3 sites). A migration that dropped a call
+    /// site outright — leaving the negative "no raw header literal"
+    /// scan trivially satisfied by absence — regresses this floor.
+    /// Mirrors the sibling
+    /// `every_prelift_module_forwards_through_probe_and_dump_primitive`
+    /// positive-half discipline.
+    #[test]
+    fn every_prelift_module_forwards_through_print_diag_section_header() {
+        use std::path::PathBuf;
+        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands");
+        let expectations: &[(&str, usize)] = &[("e2e.rs", 3), ("prerelease.rs", 3)];
+        let needle = "crate::probe_dump::print_diag_section_header(";
+        for (basename, min_count) in expectations {
+            let path = commands_dir.join(basename);
+            let source = std::fs::read_to_string(&path).unwrap();
+            let forwards = source.matches(needle).count();
+            assert!(
+                forwards >= *min_count,
+                "{basename} must forward at least {min_count} diagnostic-\
+                 section-header site(s) through \
+                 `crate::probe_dump::print_diag_section_header(...)`; \
+                 found {forwards}. A dropped call would leave the negative \
+                 raw-header-literal scan satisfied by absence.",
             );
         }
     }
