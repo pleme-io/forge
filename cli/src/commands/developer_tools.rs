@@ -344,15 +344,7 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
     println!();
 
     // Step 3: Generate Cargo.nix
-    println!(
-        "📦 {} {}",
-        "Generating Cargo.nix".bold(),
-        "(crate2nix generate)".dimmed()
-    );
-    crate::nix::run_nix_wrapped_crate2nix(&nix_bin(), &["-f", "Cargo.toml", "-o", "Cargo.nix"])
-        .await?;
-    crate::ui::print_step_pass("Cargo.nix generated");
-    println!();
+    crate::generate_cargo_nix_step::announce_and_generate_cargo_nix(&nix_bin()).await?;
 
     // Success summary
     print_success_banner(80, "✅ REGENERATION COMPLETE");
@@ -412,15 +404,7 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
     println!();
 
     // Step 2: Generate Cargo.nix
-    println!(
-        "📦 {} {}",
-        "Generating Cargo.nix".bold(),
-        "(crate2nix generate)".dimmed()
-    );
-    crate::nix::run_nix_wrapped_crate2nix(&nix_bin(), &["-f", "Cargo.toml", "-o", "Cargo.nix"])
-        .await?;
-    crate::ui::print_step_pass("Cargo.nix generated");
-    println!();
+    crate::generate_cargo_nix_step::announce_and_generate_cargo_nix(&nix_bin()).await?;
 
     // Success summary
     print_success_banner(80, "✅ UPDATE COMPLETE");
@@ -1082,25 +1066,38 @@ mod tests {
             inline_hits.len()
         );
         // Positive-side sibling: at least three consumers in this
-        // module route through the primitive (one per pre-lift site).
-        // A regression that dropped every
-        // `nix::run_nix_wrapped_crate2nix` call from this module would
-        // leave the forbidden scan trivially satisfied by absence, so
-        // pin the positive presence too — the three pre-lift sites
-        // (`rust_update_cargo_nix`, `rust_regenerate`,
-        // `rust_cargo_update`) each land one
-        // `crate::nix::run_nix_wrapped_crate2nix(` hit.
-        let canonical = "crate::nix::run_nix_wrapped_crate2nix(";
-        let canonical_hits = crate::test_support::code_line_hits(body, canonical);
+        // module route through the wrapped-crate2nix surface, either
+        // directly via `crate::nix::run_nix_wrapped_crate2nix(` (the
+        // `rust_update_cargo_nix` site, which passes the empty argv
+        // tail and an uncolored plain-println announce) or through
+        // the announce+generate fusion primitive
+        // `crate::generate_cargo_nix_step::announce_and_generate_cargo_nix(`
+        // (the `rust_regenerate` + `rust_cargo_update` sites, which
+        // both spell the `📦 Generating Cargo.nix (crate2nix
+        // generate)` colored announce and pass the fixed
+        // `["-f", "Cargo.toml", "-o", "Cargo.nix"]` argv tail; the
+        // primitive owns the delegation into
+        // `crate::nix::run_nix_wrapped_crate2nix` at ONE body). A
+        // regression that dropped every wrapped-crate2nix invocation
+        // from this module would leave the forbidden scan trivially
+        // satisfied by absence, so pin the positive presence across
+        // both routing shapes.
+        let direct = "crate::nix::run_nix_wrapped_crate2nix(";
+        let fused = "crate::generate_cargo_nix_step::announce_and_generate_cargo_nix(";
+        let direct_hits = crate::test_support::code_line_hits(body, direct);
+        let fused_hits = crate::test_support::code_line_hits(body, fused);
+        let total = direct_hits.len() + fused_hits.len();
         assert!(
-            canonical_hits.len() >= 3,
+            total >= 3,
             "commands/developer_tools.rs must delegate wrapped \
-             `crate2nix generate` spawns through `{canonical}...)` at \
-             at least three code lines (one per pre-lift consumer: \
-             `rust_update_cargo_nix`, `rust_regenerate`, \
-             `rust_cargo_update`). Found {} code-line hit(s): \
-             {canonical_hits:#?}.",
-            canonical_hits.len()
+             `crate2nix generate` spawns through `{direct}...)` \
+             or `{fused}...)` at at least three code lines (one per \
+             pre-lift consumer: `rust_update_cargo_nix`, \
+             `rust_regenerate`, `rust_cargo_update`). Found \
+             {} direct hit(s): {direct_hits:#?} + \
+             {} fused hit(s): {fused_hits:#?}.",
+            direct_hits.len(),
+            fused_hits.len(),
         );
     }
 
