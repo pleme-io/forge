@@ -1172,7 +1172,7 @@ async fn fetch_events(namespace: &str, deployment_name: &str) -> Result<Vec<Even
         "-n",
         namespace,
         "--field-selector",
-        &format!("involvedObject.name={}", deployment_name),
+        &crate::k8s_field_selector::format_involved_object_name_field_selector(&deployment_name),
         "-o",
         "json",
         "--sort-by=.lastTimestamp",
