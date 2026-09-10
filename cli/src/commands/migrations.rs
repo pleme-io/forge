@@ -443,9 +443,9 @@ async fn run_migration_job(
     .await
     .ok(); // Don't fail if secret doesn't exist
 
-    println!("   ✓ ConfigMap: {}", configmap_name);
+    crate::ui::print_plain_step_check(&format!("ConfigMap: {}", configmap_name));
     if let Some(ref secret) = secret_name {
-        println!("   ✓ Service secret (Kustomize): {}", secret);
+        crate::ui::print_plain_step_check(&format!("Service secret (Kustomize): {}", secret));
     }
 
     // Get explicitly configured secrets from deploy.yaml
@@ -455,7 +455,7 @@ async fn run_migration_job(
     let mut valid_secrets = Vec::new();
     for secret in configured_secrets {
         if check_secret_exists(&namespace, secret).await {
-            println!("   ✓ Configured secret: {}", secret);
+            crate::ui::print_plain_step_check(&format!("Configured secret: {}", secret));
             valid_secrets.push(secret.clone());
         } else {
             crate::ui::print_plain_step_warn(&format!("Configured secret not found: {}", secret));

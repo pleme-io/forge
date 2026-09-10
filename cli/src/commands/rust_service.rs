@@ -369,7 +369,10 @@ pub async fn build_rust_service(
     println!("📝 Writing .version file...");
     match write_version_file(&git_sha, deploy_config).await {
         Ok(path) => {
-            println!("   ✓ .version file written to: {}", path.display());
+            crate::ui::print_plain_step_check(&format!(
+                ".version file written to: {}",
+                path.display()
+            ));
         }
         Err(e) => {
             eprintln!(
