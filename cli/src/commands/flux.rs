@@ -882,7 +882,7 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
         namespace,
         "--sort-by=.lastTimestamp",
         "--field-selector",
-        &format!("involvedObject.name={}", deployment_name),
+        &crate::k8s_field_selector::format_involved_object_name_field_selector(&deployment_name),
         "-o",
         "custom-columns=TIME:.lastTimestamp,TYPE:.type,REASON:.reason,MESSAGE:.message",
         "--no-headers",

@@ -292,7 +292,8 @@ pub async fn get_pod_events(
 ) -> Result<Vec<String>> {
     let events: Api<Event> = Api::namespaced(client.clone(), namespace);
 
-    let lp = ListParams::default().fields(&format!("involvedObject.name={}", pod_name));
+    let lp = ListParams::default()
+        .fields(&crate::k8s_field_selector::format_involved_object_name_field_selector(&pod_name));
 
     let event_list = events
         .list(&lp)
