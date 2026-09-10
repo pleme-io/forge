@@ -320,7 +320,9 @@ pub async fn run_federation_tests(
     println!("   🚀 Creating federation test job...");
     let _output = crate::retry::classify_capture_anyhow(
         kubectl_command_async()
-            .args(&["apply", "-f", &manifest_path_str])
+            .args(crate::kubectl_apply_argv::kubectl_apply_argv(
+                crate::kubectl_apply_argv::KubectlApplySource::ManifestPath(&manifest_path_str),
+            ))
             .output()
             .await,
         "kubectl apply federation test job",

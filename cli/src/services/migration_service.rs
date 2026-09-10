@@ -252,7 +252,9 @@ spec:
         );
 
         let mut child = crate::infrastructure::kubectl::kubectl_command_async()
-            .args(["apply", "-f", "-"])
+            .args(crate::kubectl_apply_argv::kubectl_apply_argv(
+                crate::kubectl_apply_argv::KubectlApplySource::Stdin,
+            ))
             .stdin(std::process::Stdio::piped())
             .spawn()
             .context("Failed to spawn kubectl")?;
