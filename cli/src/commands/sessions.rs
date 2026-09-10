@@ -102,22 +102,17 @@ fn get_valkey_password(namespace: &str, secret_name: &str, key: &str) -> Result<
 /// Count session keys in Valkey
 fn count_sessions(namespace: &str, pod: &str, password: &str) -> Result<usize> {
     let kubectl = get_tool_path(tools::KUBECTL);
-    let output = run_query_capture_sync(
-        &kubectl,
-        &[
-            "exec",
-            "-n",
-            namespace,
-            pod,
-            "--",
-            "valkey-cli",
-            "-a",
-            password,
-            "--no-auth-warning",
-            "keys",
-            "session:*",
-        ],
-    )?;
+    let mut argv: Vec<&str> =
+        crate::kubectl_exec_pod_argv::kubectl_exec_pod_argv_prefix(namespace, pod).to_vec();
+    argv.extend([
+        "valkey-cli",
+        "-a",
+        password,
+        "--no-auth-warning",
+        "keys",
+        "session:*",
+    ]);
+    let output = run_query_capture_sync(&kubectl, &argv)?;
 
     // Count non-empty lines
     let count = output.lines().filter(|l| !l.trim().is_empty()).count();
@@ -133,10 +128,10 @@ fn delete_sessions(namespace: &str, pod: &str, password: &str) -> Result<usize> 
     );
 
     let kubectl = get_tool_path(tools::KUBECTL);
-    let output = run_query_capture_sync(
-        &kubectl,
-        &["exec", "-n", namespace, pod, "--", "sh", "-c", &script],
-    )?;
+    let mut argv: Vec<&str> =
+        crate::kubectl_exec_pod_argv::kubectl_exec_pod_argv_prefix(namespace, pod).to_vec();
+    argv.extend(["sh", "-c", &script]);
+    let output = run_query_capture_sync(&kubectl, &argv)?;
 
     // Parse output to get count of deleted keys
     // DEL returns the number of keys deleted

@@ -275,20 +275,10 @@ pub async fn verify_router_schema(
 
     // Query the router's health endpoint to get schema hash
     // Note: We'll need to expose this via the router's health check
-    let output = kubectl_command_async()
-        .args(&[
-            "exec",
-            &pod_name,
-            "-n",
-            namespace,
-            "--",
-            "wget",
-            "-q",
-            "-O-",
-            "http://localhost:4000/health",
-        ])
-        .output()
-        .await?;
+    let mut argv: Vec<&str> =
+        crate::kubectl_exec_pod_argv::kubectl_exec_pod_argv_prefix(namespace, &pod_name).to_vec();
+    argv.extend(["wget", "-q", "-O-", "http://localhost:4000/health"]);
+    let output = kubectl_command_async().args(&argv).output().await?;
 
     if !output.status.success() {
         errors.push("Failed to query hive-router health endpoint".to_string());
