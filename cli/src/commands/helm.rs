@@ -1807,7 +1807,16 @@ fn republish_enabled() -> bool {
 /// Discover chart directories inside a parent directory.
 ///
 /// Returns chart names that have a Chart.yaml, excluding `exclude_name`.
-fn discover_charts(charts_dir: &str, exclude_name: &str) -> Result<Vec<String>> {
+///
+/// Visibility is [`pub(super)`] so the sibling
+/// [`super::chart_discovery_gate::discover_charts_or_bail`] primitive
+/// — which composes this discovery with the shared empty-guard bail
+/// and info-routed announcement — can reach it. Nothing outside
+/// [`crate::commands`] should call this directly; every caller goes
+/// through the gate primitive so the three-axis prologue (discovery /
+/// empty-guard / announcement) stays byte-for-byte in sync between
+/// [`lint_all`] and [`release_all`].
+pub(super) fn discover_charts(charts_dir: &str, exclude_name: &str) -> Result<Vec<String>> {
     let dir = crate::repo::require_existing_labeled(charts_dir, "Charts directory")?;
 
     let mut charts: Vec<String> = Vec::new();
@@ -2588,12 +2597,8 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 /// Discovers charts, sets up temp workspaces with library dependencies,
 /// and runs lint on each. Returns error if any chart fails.
 pub fn lint_all(charts_dir: &str, lib_chart_dir: Option<&str>, lib_chart_name: &str) -> Result<()> {
-    let charts = discover_charts(charts_dir, lib_chart_name)?;
-    if charts.is_empty() {
-        bail!("No charts found in {}", charts_dir);
-    }
-
-    info!("Discovered {} charts: {}", charts.len(), charts.join(", "));
+    let charts =
+        crate::commands::chart_discovery_gate::discover_charts_or_bail(charts_dir, lib_chart_name)?;
 
     let mut failed: Vec<(String, String)> = Vec::new();
 
@@ -2654,12 +2659,8 @@ pub fn release_all(
     lib_chart_name: &str,
     registry: &str,
 ) -> Result<()> {
-    let charts = discover_charts(charts_dir, lib_chart_name)?;
-    if charts.is_empty() {
-        bail!("No charts found in {}", charts_dir);
-    }
-
-    info!("Discovered {} charts: {}", charts.len(), charts.join(", "));
+    let charts =
+        crate::commands::chart_discovery_gate::discover_charts_or_bail(charts_dir, lib_chart_name)?;
 
     let output_dir = "dist";
     crate::repo::create_dir_all_sync(Path::new(output_dir))?;
