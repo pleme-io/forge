@@ -283,16 +283,11 @@ async fn get_kustomize_resource_name(
 
     let query_op = format!("Failed to query {} for {}", resource_type, service);
     let output = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
-        &[
-            "get",
+        &crate::list_resource_names_by_selector_argv::list_resource_names_by_selector_argv(
             resource_type,
-            "-n",
             namespace,
-            "-l",
             &label_selector,
-            "-o",
-            "jsonpath={.items[*].metadata.name}",
-        ],
+        ),
         &query_op,
     )
     .await?;
@@ -902,16 +897,11 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
     // First, find and delete any migration jobs for this service
     // This is critical because Shinka will fail with "already exists" if old jobs remain
     let list_jobs = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
-        &[
-            "get",
+        &crate::list_resource_names_by_selector_argv::list_resource_names_by_selector_argv(
             "jobs",
-            "-n",
             namespace,
-            "-l",
             &crate::k8s_label_selector::format_app_label_selector(&service),
-            "-o",
-            "jsonpath={.items[*].metadata.name}",
-        ],
+        ),
         "Failed to list migration jobs",
     )
     .await?;
