@@ -19,6 +19,68 @@ use tracing::info;
 use crate::repo::get_tool_path;
 use crate::retry::run_inherited_status_sync;
 
+/// Assert a `crossplane.yaml` package-meta manifest exists directly under
+/// the given package-root directory, bailing with the exact
+/// `"no crossplane.yaml under package-root {package_root}"` envelope on
+/// the miss arm.
+///
+/// # Pre-lift sites fused into ONE body
+///
+/// Two sibling command-module sites at
+/// [`function_release`] and [`configuration_release`] each spelled the
+/// 3-line
+///
+/// ```text
+/// if !Path::new(package_root).join("crossplane.yaml").exists() {
+///     bail!("no crossplane.yaml under package-root {}", package_root);
+/// }
+/// ```
+///
+/// stanza verbatim before their `xpkg build → push` handoff. The gate is
+/// domain-specific: it names the `crossplane.yaml` manifest by its
+/// verbatim basename and reports the missing-under-a-directory shape,
+/// which does NOT compose onto the generic `"{label} not found[ at]: …"`
+/// wording that [`crate::repo::require_existing_labeled`] /
+/// [`crate::repo::require_existing_path`] /
+/// [`crate::repo::require_existing_path_at`] carry — those three project
+/// the fully-resolved child path through the message, whereas this gate
+/// keeps the operator-typed `package_root` in the wording (the string an
+/// operator actually typed on the CLI, so an `ls {package_root}`
+/// next-step is exactly what they can paste), and reads as a domain
+/// assertion about the package-root's contents rather than a generic
+/// path-not-found.
+///
+/// # Envelope
+///
+/// The bail wording is
+/// `"no crossplane.yaml under package-root {package_root}"`, interpolating
+/// the raw operator-typed `&str` verbatim (NOT via
+/// `Path::display`) because the pre-lift consumers both fed `package_root:
+/// &str` directly. A drift that swapped to
+/// `{Path::new(package_root).display()}` would change the wording bytes for
+/// operator-typed inputs carrying non-UTF8 fragments (which
+/// [`std::path::Path::display`] lossy-projects) and for operator-typed
+/// inputs that render differently through the display projection.
+///
+/// # Errors
+///
+/// Returns `Err` if `<package_root>/crossplane.yaml` does not exist on
+/// disk. On the miss arm the caller-facing wording is
+/// `"no crossplane.yaml under package-root {package_root}"`; the primitive
+/// does NOT probe why the file is missing (permission denied, ENOENT on
+/// an intermediate component, dangling symlink), does NOT probe whether
+/// `package_root` itself exists, and does NOT parse the YAML — the
+/// discipline is a next-step `ls {package_root}` for the operator, not a
+/// diagnostic tree at the primitive body. Composing this gate with
+/// downstream `crossplane xpkg build` failure surfaces is the caller's
+/// job.
+fn require_crossplane_yaml_under_package_root(package_root: &str) -> Result<()> {
+    if !Path::new(package_root).join("crossplane.yaml").exists() {
+        bail!("no crossplane.yaml under package-root {}", package_root);
+    }
+    Ok(())
+}
+
 /// Resolve the `crossplane` CLI path via `CROSSPLANE_BIN`, falling back to
 /// PATH. Every `crossplane` spawn in this module reads through this sigil
 /// so the resolve happens in exactly one place — mirrors the `helm_bin()`
@@ -107,9 +169,7 @@ pub fn function_release(
     package_ref: &str,
     tag: &str,
 ) -> Result<()> {
-    if !Path::new(package_root).join("crossplane.yaml").exists() {
-        bail!("no crossplane.yaml under package-root {}", package_root);
-    }
+    require_crossplane_yaml_under_package_root(package_root)?;
     crate::repo::require_existing_labeled(runtime_image, "runtime image tarball")?;
 
     // Typed RAII scratch surface — `_out_dir` is the guard whose `Drop`
@@ -164,9 +224,7 @@ pub fn function_release(
 /// package, a Configuration carries no runtime image — it is pure declarative
 /// YAML (the XRDs/Compositions live alongside `crossplane.yaml`).
 pub fn configuration_release(package_root: &str, package_ref: &str, tag: &str) -> Result<()> {
-    if !Path::new(package_root).join("crossplane.yaml").exists() {
-        bail!("no crossplane.yaml under package-root {}", package_root);
-    }
+    require_crossplane_yaml_under_package_root(package_root)?;
     let (_out_dir, out) = xpkg_output_file()?;
     let examples = Path::new(package_root).join("examples");
     info!(
@@ -511,6 +569,128 @@ mod tests {
             "`TempDir::Drop` must unlink the scratch dir + its contents — a \
              mid-body panic between build and push would otherwise leak \
              `/tmp/xpkg-*/package.xpkg` forever"
+        );
+    }
+
+    /// Byte-oracle: the miss-arm envelope
+    /// [`super::require_crossplane_yaml_under_package_root`] surfaces is
+    /// pinned to the exact string the pre-lift inline `bail!("no
+    /// crossplane.yaml under package-root {}", package_root)` stanza
+    /// produced. A drift that reworded to `"crossplane.yaml not found
+    /// under package-root …"`, that swapped the interpolation to
+    /// `Path::display()`, or that projected through
+    /// [`crate::repo::require_existing_labeled`]'s
+    /// `"{label} not found: {path}"` envelope (which would produce
+    /// `"crossplane.yaml not found: <package_root>/crossplane.yaml"`,
+    /// losing the "under package-root" domain framing AND surfacing the
+    /// resolved child path rather than the operator-typed root) all fail
+    /// here first, not in a downstream operator's paste of a stale
+    /// runbook.
+    #[test]
+    fn test_require_crossplane_yaml_under_package_root_bail_envelope_bytes() {
+        let missing = tempfile::tempdir().expect("tempdir");
+        let package_root: &str = missing.path().to_str().expect("utf8 tempdir path");
+        let err = super::require_crossplane_yaml_under_package_root(package_root)
+            .expect_err("missing crossplane.yaml must bail");
+        let observed = format!("{err:#}");
+        let expected = format!("no crossplane.yaml under package-root {}", package_root);
+        assert_eq!(
+            observed, expected,
+            "require_crossplane_yaml_under_package_root miss-arm wording \
+             must be byte-for-byte `no crossplane.yaml under package-root \
+             {{package_root}}`, interpolating the operator-typed &str \
+             verbatim (NOT via Path::display) — a drift would silently \
+             change every operator-facing bail across `function_release` \
+             + `configuration_release`"
+        );
+    }
+
+    /// Primitive pin — the pass-arm half: with `crossplane.yaml`
+    /// present directly under the package-root the primitive returns
+    /// `Ok(())` and does NOT parse the file (an unparseable YAML body
+    /// still passes). Pinning the "no parse" half prevents a future
+    /// edit from silently widening the gate into a schema-validate
+    /// primitive — a widening that would move a syntactic bail from
+    /// `crossplane xpkg build`'s own error surface (where the CLI's
+    /// diagnostics live) into forge's pre-check and mask them.
+    #[test]
+    fn test_require_crossplane_yaml_under_package_root_ok_when_manifest_present() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            root.path().join("crossplane.yaml"),
+            b"key: [unterminated but ignored by the gate\n",
+        )
+        .expect("seed crossplane.yaml");
+        super::require_crossplane_yaml_under_package_root(
+            root.path().to_str().expect("utf8 tempdir path"),
+        )
+        .expect("present crossplane.yaml must pass the gate even if unparseable");
+    }
+
+    /// Positive-delegation + solve-once shield: every package-root
+    /// `crossplane.yaml` existence-gate site in
+    /// `commands/crossplane.rs` routes through
+    /// [`super::require_crossplane_yaml_under_package_root`], and the
+    /// underlying
+    /// `Path::new(package_root).join("crossplane.yaml").exists()`
+    /// probe lives at exactly ONE code line — the primitive body.
+    /// Two pre-lift call sites (`function_release`,
+    /// `configuration_release`) each spelled the gate verbatim;
+    /// post-lift each is a one-line delegation and the probe is fused
+    /// at the primitive.
+    ///
+    /// Positive side: the delegation call
+    /// `require_crossplane_yaml_under_package_root(package_root)?`
+    /// must appear at exactly TWO code lines in the module body (one
+    /// per release fn), so a regression that deleted every call cannot
+    /// leave the solve-once scan trivially satisfied by absence.
+    ///
+    /// Solve-once side: the `.join("crossplane.yaml").exists()` probe
+    /// must appear at exactly ONE code line in the module body — the
+    /// primitive's own `if !Path::new(package_root).join(
+    /// "crossplane.yaml").exists()` line. THEORY §I.5 (duplication
+    /// budget zero): every consumer routes through the primitive, and
+    /// a re-inlined gate at a third release fn cannot silently ride
+    /// around the shared envelope.
+    ///
+    /// Both halves route through `code_line_hits` for
+    /// anti-docstring-self-match discipline. Same scan boundary
+    /// (first `#[cfg(test)]` marker) the sigil shields above use, so
+    /// this shield's OWN needles (living in the `#[cfg(test)]` block)
+    /// stay out of scope.
+    #[test]
+    fn test_crossplane_yaml_gates_route_through_require_primitive() {
+        const SOURCE: &str = include_str!("crossplane.rs");
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            SOURCE,
+            "commands/crossplane.rs",
+        );
+        let delegation_hits = crate::test_support::code_line_hits(
+            body,
+            "require_crossplane_yaml_under_package_root(package_root)?",
+        );
+        assert_eq!(
+            delegation_hits.len(),
+            2,
+            "commands/crossplane.rs must delegate to \
+             `require_crossplane_yaml_under_package_root(package_root)?` \
+             at exactly two code lines (function_release + \
+             configuration_release); got {} — hits: {delegation_hits:#?}",
+            delegation_hits.len(),
+        );
+        let probe_needle = ".join(\"crossplane.yaml\").exists()";
+        let probe_hits = crate::test_support::code_line_hits(body, probe_needle);
+        assert_eq!(
+            probe_hits.len(),
+            1,
+            "commands/crossplane.rs must spell the \
+             `.join(\"crossplane.yaml\").exists()` probe at exactly ONE \
+             code line — the primitive's own body inside \
+             `require_crossplane_yaml_under_package_root` — so every \
+             package-root manifest gate routes through the primitive \
+             and the miss-arm envelope stays fused at ONE body. Got \
+             {} hits: {probe_hits:#?}",
+            probe_hits.len(),
         );
     }
 }
