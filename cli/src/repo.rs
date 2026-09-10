@@ -1334,6 +1334,79 @@ pub fn require_existing_path(path: &Path, label: &str) -> Result<()> {
     Ok(())
 }
 
+/// Assert a caller-owned [`&Path`] exists on disk, bailing with the exact
+/// `"{label} not found at: {display}"` envelope on the miss arm — the
+/// **"at:"-wording** peer of [`require_existing_path`], parameterized by
+/// an independent `display: impl Display` axis so a caller whose
+/// operator-facing string DIFFERS from the guard path (a relative form
+/// resolved against `repo_root` for `.exists()`, an operator-typed
+/// pre-`.strip_prefix` fragment, a `Path::display()` projection of the
+/// guard path itself) can spell the wording verbatim without teaching
+/// the primitive about the resolution.
+///
+/// # Pre-lift sites fused into ONE body
+///
+/// Three sibling command-module sites spelled the 3-line
+///
+/// ```text
+/// if !<check_path>.exists() {
+///     bail!("<Label> not found at: {}", <display>);
+/// }
+/// ```
+///
+/// stanza verbatim, each with a different noun fixed at its own call
+/// site AND a display axis independent of the `.exists()` guard:
+///
+/// - [`crate::commands::federation`] — `"Federation directory"` on
+///   `repo_root.join(&federation_path).exists()`, displaying the
+///   relative `federation_path: String` form the operator typed.
+/// - [`crate::commands::federation`] — `"Hive Router supergraph"` on
+///   `hive_router_full_path.exists()` (an absolute [`PathBuf`]),
+///   displaying the `hive_router_path: String` form (pre-resolved by
+///   `.strip_prefix(&repo_root)`).
+/// - [`crate::commands::rust_service`] — `"deploy.yaml"` on
+///   `deploy_yaml_path.exists()`, displaying that same
+///   [`Path::display`] projection (the display and guard paths
+///   coincide here).
+///
+/// # Distinct from [`require_existing_path`]
+///
+/// [`require_existing_path`] carries the `"{label} not found: {}"`
+/// (no `"at"`) wording AND projects the guard [`Path`] itself through
+/// [`Path::display`] as the display value — the seven pre-lift
+/// consumers there all showed the SAME string they gated on. The three
+/// sibling stanzas this primitive owns spell `"not found at:"` AND
+/// separate the display axis from the guard axis, so a caller that
+/// resolves a relative operator-typed fragment against a `repo_root`
+/// before the `.exists()` gate can still surface the relative fragment
+/// to the operator (which is the only path an `ls` next-step will
+/// match) rather than the absolute resolution.
+///
+/// The two primitives partition the `"not found[ at]:"` bail-envelope
+/// duplication budget: [`require_existing_path`] for the
+/// display-equals-guard case with the shorter `"not found:"` wording,
+/// [`require_existing_path_at`] for the display-may-diverge-from-guard
+/// case with the `"not found at:"` wording.
+///
+/// # Errors
+///
+/// Returns `Err` if `check` does not exist on disk. On the miss arm
+/// the caller-facing wording is `"{label} not found at: {display}"`;
+/// the primitive does NOT probe why the path is missing (permission
+/// denied, ENOENT on an intermediate component, dangling symlink) —
+/// the discipline is a next-step `ls {display}` for the operator, not
+/// a diagnostic tree at the primitive body.
+pub fn require_existing_path_at(
+    check: &Path,
+    display: impl std::fmt::Display,
+    label: &str,
+) -> Result<()> {
+    if !check.exists() {
+        anyhow::bail!("{} not found at: {}", label, display);
+    }
+    Ok(())
+}
+
 /// Resolve a substrate-declared env var into a `String`, falling back
 /// to `default` on the unset case.
 ///
@@ -6801,6 +6874,141 @@ mod tests {
                      primitive one consumer at a time."
                 );
             }
+        }
+    }
+
+    /// Byte-oracle: [`require_existing_path_at`] returns `Ok(())` on an
+    /// existing path — the caller's binding stays in scope untouched so
+    /// downstream `.join(...)` / staging code can proceed against the
+    /// same [`&Path`] the guard already asserted.
+    #[test]
+    fn require_existing_path_at_returns_unit_on_exists_hit() {
+        let dir = std::env::temp_dir();
+        require_existing_path_at(&dir, dir.display(), "Scratch dir")
+            .expect("require_existing_path_at must succeed on an existing PathBuf");
+    }
+
+    /// [`require_existing_path_at`] bails with the exact wording
+    /// `"{label} not found at: {display}"` on the miss arm, interpolating
+    /// BOTH the caller-supplied `label` prefix AND the caller-supplied
+    /// `display` value verbatim. The display axis is INDEPENDENT of the
+    /// guard [`Path`] — two of the three pre-lift consumers surface a
+    /// relative operator-typed fragment while gating on the fragment
+    /// resolved against `repo_root`, so a drift that projected the
+    /// guard `Path` through `.display()` (as the sibling
+    /// [`require_existing_path`] primitive does) would silently
+    /// re-fuse the display and guard axes and change the operator-
+    /// facing message for those two consumers to the absolute
+    /// resolution the operator did not type.
+    #[test]
+    fn require_existing_path_at_bails_with_label_and_display_verbatim_on_miss() {
+        let sentinel = Path::new(
+            "/tmp/forge-require-existing-path-at-sigil-shield-nonexistent-path-6543210987",
+        );
+        assert!(
+            !sentinel.exists(),
+            "test sentinel must not exist for the shield to be meaningful"
+        );
+        for (label, display) in [
+            ("Federation directory", "products/example/federation"),
+            (
+                "Hive Router supergraph",
+                "products/example/hive-router/supergraph.graphql",
+            ),
+            ("deploy.yaml", "/abs/path/deploy.yaml"),
+        ] {
+            let err = require_existing_path_at(sentinel, display, label)
+                .expect_err("require_existing_path_at must bail on a nonexistent path");
+            let msg = format!("{err:#}");
+            assert_eq!(
+                msg,
+                format!("{label} not found at: {display}"),
+                "require_existing_path_at() must bail with the EXACT wording \
+                 `\"{{label}} not found at: {{display}}\"` interpolating the \
+                 caller-supplied `label` and the caller-supplied `display` \
+                 value verbatim — pre-lift each of the three consumer sites \
+                 spelled `bail!(\"<Label> not found at: {{}}\", <display>);` \
+                 with the label baked in as a fixed literal and the display \
+                 argument INDEPENDENT of the `.exists()` guard path. A drift \
+                 that dropped the ` at:` fragment or re-projected the guard \
+                 path via `.display()` in place of the caller's display \
+                 value would silently change the operator-facing wording. \
+                 Got: {msg}"
+            );
+        }
+    }
+
+    /// Post-lift the three consumer sites lifted onto
+    /// [`require_existing_path_at`] must not silently re-inline the
+    /// `if !<check>.exists() { bail!("<Label> not found at: {}",
+    /// <display>); }` shape at their call points — a re-inline would
+    /// reopen the class this lift closed. This source-scan shield
+    /// walks every hand-lifted consumer file and refuses the label-and-
+    /// display bail wordings the pre-lift sites carried.
+    #[test]
+    fn require_existing_path_at_consumers_do_not_reinline_the_primitive_shape() {
+        for (name, source) in [
+            (
+                "commands/federation.rs",
+                include_str!("commands/federation.rs"),
+            ),
+            (
+                "commands/rust_service.rs",
+                include_str!("commands/rust_service.rs"),
+            ),
+        ] {
+            for needle in [
+                "Federation directory not found at:",
+                "Hive Router supergraph not found at:",
+                "deploy.yaml not found at:",
+            ] {
+                assert!(
+                    !source.contains(needle),
+                    "{name} must NOT spell the inline `{needle}` bail \
+                     wording — that duplication was lifted onto \
+                     `crate::repo::require_existing_path_at(<check>, <display>, <label>)`. \
+                     A re-inline would silently diverge the label-and-display \
+                     envelope from the sibling consumers routing through the \
+                     primitive, and fork the `\"not found at: {{}}\"` bail \
+                     wording into a hand-typed literal that could drift from \
+                     the primitive one consumer at a time."
+                );
+            }
+        }
+    }
+
+    /// Caller shield (positive half): the two pre-lift modules MUST each
+    /// forward through [`require_existing_path_at`] at least the pre-lift
+    /// number of times, so a migration that dropped a call site outright
+    /// leaves the negative "no raw inline shape" scan trivially satisfied
+    /// by absence but the positive count still fails. `federation.rs`
+    /// carries two of the three pre-lift sites (Federation directory +
+    /// Hive Router supergraph); `rust_service.rs` carries the third
+    /// (deploy.yaml).
+    #[test]
+    fn every_prelift_module_forwards_through_require_existing_path_at() {
+        let expectations: &[(&str, &str, usize)] = &[
+            (
+                "commands/federation.rs",
+                include_str!("commands/federation.rs"),
+                2,
+            ),
+            (
+                "commands/rust_service.rs",
+                include_str!("commands/rust_service.rs"),
+                1,
+            ),
+        ];
+        let needle = "require_existing_path_at(";
+        for (name, source, min_count) in expectations {
+            let forwards = source.matches(needle).count();
+            assert!(
+                forwards >= *min_count,
+                "{name} must forward at least {min_count} `.exists()` + \
+                 `\"<Label> not found at: {{}}\"` bail site(s) through \
+                 `{needle}`; found {forwards}. A dropped call would leave \
+                 the negative raw-shape scan satisfied by absence.",
+            );
         }
     }
 

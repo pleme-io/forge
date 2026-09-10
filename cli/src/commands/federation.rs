@@ -465,18 +465,22 @@ pub async fn update_federation(
     );
 
     // Verify federation directory exists before staging
-    if !repo_root.join(&federation_path).exists() {
-        bail!("Federation directory not found at: {}", federation_path);
-    }
+    crate::repo::require_existing_path_at(
+        &repo_root.join(&federation_path),
+        &federation_path,
+        "Federation directory",
+    )?;
 
     crate::git::git_add_path(federation_path.as_str())
         .await
         .with_context(|| format!("Failed to stage federation files at: {}", federation_path))?;
 
     // Verify hive-router supergraph exists before staging
-    if !hive_router_full_path.exists() {
-        bail!("Hive Router supergraph not found at: {}", hive_router_path);
-    }
+    crate::repo::require_existing_path_at(
+        &hive_router_full_path,
+        &hive_router_path,
+        "Hive Router supergraph",
+    )?;
 
     // Also stage the hive-router supergraph copy
     crate::git::git_add_path(hive_router_path.as_str())
