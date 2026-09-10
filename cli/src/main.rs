@@ -86,6 +86,7 @@ mod kubectl_delete_job_argv;
 mod kubectl_get_job_condition_status_argv;
 mod kubectl_get_job_status_succeeded_argv;
 mod kubectl_logs_argv;
+mod list_resource_names_by_selector_argv;
 mod namespace_field;
 mod nix;
 mod nix_build_spinner;
