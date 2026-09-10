@@ -61,6 +61,7 @@ pub mod schema_validation;
 pub mod search_sync;
 pub mod seed;
 pub mod service_config;
+pub mod service_resource_positive_bail;
 pub mod sessions;
 pub mod status;
 pub mod subcommand_invocation;

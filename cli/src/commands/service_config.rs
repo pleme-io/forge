@@ -5,6 +5,10 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 
+use crate::commands::service_resource_positive_bail::{
+    bail_unless_service_resource_positive, ServiceResourceKind,
+};
+
 /// Database type for service migrations
 #[derive(Debug, Clone, PartialEq)]
 pub enum DatabaseType {
@@ -45,9 +49,7 @@ fn validate_memory_resource(s: &str) -> Result<()> {
     })?;
 
     // Validate reasonable limits (0 is invalid, max 1024Gi)
-    if value == 0 {
-        bail!("Invalid memory value '{}'. Must be greater than 0", s);
-    }
+    bail_unless_service_resource_positive(value > 0, ServiceResourceKind::Memory, s)?;
 
     if s.ends_with("Gi") && value > 1024 {
         bail!("Invalid memory value '{}'. Maximum is 1024Gi", s);
@@ -77,9 +79,7 @@ fn validate_cpu_resource(s: &str) -> Result<()> {
         })?;
 
         // Validate reasonable limits (0 is invalid, max 128000m = 128 cores)
-        if value == 0 {
-            bail!("Invalid CPU value '{}'. Must be greater than 0", s);
-        }
+        bail_unless_service_resource_positive(value > 0, ServiceResourceKind::Cpu, s)?;
 
         if value > 128000 {
             bail!("Invalid CPU value '{}'. Maximum is 128000m (128 cores)", s);
@@ -92,9 +92,7 @@ fn validate_cpu_resource(s: &str) -> Result<()> {
     let value = s.parse::<f64>()
         .map_err(|_| anyhow!("Invalid CPU format '{}'. Must be millicores (e.g., '100m') or cores (e.g., '0.5', '2')", s))?;
 
-    if value <= 0.0 {
-        bail!("Invalid CPU value '{}'. Must be greater than 0", s);
-    }
+    bail_unless_service_resource_positive(value > 0.0, ServiceResourceKind::Cpu, s)?;
 
     if value > 128.0 {
         bail!("Invalid CPU value '{}'. Maximum is 128 cores", s);
