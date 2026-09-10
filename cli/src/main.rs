@@ -95,6 +95,7 @@ mod rebac_keys_probe;
 mod registry_field;
 mod repo;
 mod retry;
+mod screenshot_diag;
 mod skipping_step;
 mod step_header;
 mod success_step;
