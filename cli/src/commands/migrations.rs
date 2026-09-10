@@ -780,15 +780,12 @@ pub async fn check_and_reset_shinka_migration(
 
     // Check if DatabaseMigration exists
     let check = kubectl_command_async()
-        .args(&[
-            "get",
-            "databasemigration",
-            &migration_name,
-            "-n",
-            namespace,
-            "-o",
-            "jsonpath={.status.phase}",
-        ])
+        .args(
+            crate::kubectl_get_databasemigration_status_phase_argv::kubectl_get_databasemigration_status_phase_argv(
+                &migration_name,
+                namespace,
+            ),
+        )
         .output()
         .await;
 
@@ -840,15 +837,9 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
 
     // Check if DatabaseMigration exists
     let check = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
-        &[
-            "get",
-            "databasemigration",
-            service,
-            "-n",
-            namespace,
-            "-o",
-            "jsonpath={.status.phase}",
-        ],
+        &crate::kubectl_get_databasemigration_status_phase_argv::kubectl_get_databasemigration_status_phase_argv(
+            service, namespace,
+        ),
         "Failed to check DatabaseMigration status",
     )
     .await?;
