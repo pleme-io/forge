@@ -952,15 +952,11 @@ pub async fn reset_migration(service: &str, namespace: &str, cleanup_jobs: bool)
 
     // Verify new status
     let mut verify_cmd = kubectl_command_async();
-    verify_cmd.args([
-        "get",
-        "databasemigration",
+    verify_cmd.args(crate::kubectl_get_databasemigration_output_argv::kubectl_get_databasemigration_output_argv(
         service,
-        "-n",
         namespace,
-        "-o",
-        "wide",
-    ]);
+        crate::kubectl_get_databasemigration_output_argv::DatabaseMigrationGetOutputFormat::Wide,
+    ));
     crate::retry::run_inherited_status(verify_cmd, "kubectl get databasemigration")
         .await
         .context("Failed to verify DatabaseMigration status")?;
@@ -1013,15 +1009,11 @@ pub async fn wait_for_shinka_migration(
 
     // Pre-check: verify the DatabaseMigration CRD exists
     let check = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
-        &[
-            "get",
-            "databasemigration",
+        &crate::kubectl_get_databasemigration_output_argv::kubectl_get_databasemigration_output_argv(
             &migration_name,
-            "-n",
             namespace,
-            "-o",
-            "name",
-        ],
+            crate::kubectl_get_databasemigration_output_argv::DatabaseMigrationGetOutputFormat::Name,
+        ),
         "Failed to check DatabaseMigration CRD",
     )
     .await?;
@@ -1232,15 +1224,11 @@ pub async fn wait_for_shinka_migration(
 /// Fetch full Shinka DatabaseMigration status as parsed JSON
 async fn fetch_shinka_status(migration_name: &str, namespace: &str) -> ShinkaCrdStatus {
     let output = kubectl_command_async()
-        .args([
-            "get",
-            "databasemigration",
+        .args(crate::kubectl_get_databasemigration_output_argv::kubectl_get_databasemigration_output_argv(
             migration_name,
-            "-n",
             namespace,
-            "-o",
-            "json",
-        ])
+            crate::kubectl_get_databasemigration_output_argv::DatabaseMigrationGetOutputFormat::Json,
+        ))
         .output()
         .await;
 
@@ -1258,15 +1246,11 @@ async fn fetch_shinka_status(migration_name: &str, namespace: &str) -> ShinkaCrd
 pub async fn set_expected_tag_if_exists(migration_name: &str, namespace: &str, expected_tag: &str) {
     // Check if DatabaseMigration CRD exists
     let check = kubectl_command_async()
-        .args([
-            "get",
-            "databasemigration",
+        .args(crate::kubectl_get_databasemigration_output_argv::kubectl_get_databasemigration_output_argv(
             migration_name,
-            "-n",
             namespace,
-            "-o",
-            "name",
-        ])
+            crate::kubectl_get_databasemigration_output_argv::DatabaseMigrationGetOutputFormat::Name,
+        ))
         .output()
         .await;
 
