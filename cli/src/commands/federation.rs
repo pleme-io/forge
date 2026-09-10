@@ -150,11 +150,7 @@ pub async fn update_federation(
 
     // Print all check results
     for check in &pre_check.checks {
-        if check.passed {
-            println!("   {}", check.message.green());
-        } else {
-            eprintln!("   {}", check.message.red());
-        }
+        crate::commands::composition_check_print::print_composition_check_result(check);
     }
 
     if !pre_check.passed {
@@ -258,13 +254,7 @@ pub async fn update_federation(
 
     // Print all check results
     for check in &post_check.checks {
-        if check.passed {
-            println!("   {}", check.message.green());
-        } else if check.message.contains("Warning") {
-            println!("   {}", check.message.yellow());
-        } else {
-            eprintln!("   {}", check.message.red());
-        }
+        crate::commands::composition_check_print::print_composition_check_result(check);
     }
 
     if !post_check.passed {
