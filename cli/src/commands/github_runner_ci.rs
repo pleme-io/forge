@@ -862,8 +862,10 @@ async fn push_with_retry(
                 .args(crate::infrastructure::registry::doca_push_argv(
                     image_path, &host, &image, tag,
                 ))
-                .env("INPUT_DEST_USER", &organization)
-                .env("INPUT_DEST_PASS", token)
+                .envs(crate::infrastructure::registry::doca_creds_env_pairs(
+                    &organization,
+                    token,
+                ))
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .output()
