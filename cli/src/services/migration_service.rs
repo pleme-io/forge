@@ -286,15 +286,11 @@ spec:
             }
 
             let output = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
-                &[
-                    "get",
-                    "job",
+                &crate::kubectl_get_job_condition_status_argv::kubectl_get_job_condition_status_argv(
+                    crate::kubectl_get_job_condition_status_argv::JobCondition::Complete,
                     name,
-                    "-n",
                     namespace,
-                    "-o",
-                    "jsonpath={.status.conditions[?(@.type==\"Complete\")].status}",
-                ],
+                ),
                 "kubectl get job (Complete condition)",
             )
             .await?;
@@ -307,15 +303,11 @@ spec:
 
             // Check for failure
             let output = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
-                &[
-                    "get",
-                    "job",
+                &crate::kubectl_get_job_condition_status_argv::kubectl_get_job_condition_status_argv(
+                    crate::kubectl_get_job_condition_status_argv::JobCondition::Failed,
                     name,
-                    "-n",
                     namespace,
-                    "-o",
-                    "jsonpath={.status.conditions[?(@.type==\"Failed\")].status}",
-                ],
+                ),
                 "kubectl get job (Failed condition)",
             )
             .await?;
