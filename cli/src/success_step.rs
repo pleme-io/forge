@@ -304,11 +304,22 @@ mod tests {
         // form is a path relative to `src/` so a crate-root
         // fusion-owner sibling (`attic_configure_step.rs`) sits
         // alongside the `commands/`-scoped consumers under one shield.
+        //
+        // `deploy.rs` further shed its ONE remaining forward when
+        // `cloudflare_purge_success_ack.rs` lifted the
+        // `"Cloudflare cache purged successfully"` success line into
+        // its own `announce_cloudflare_purge_success` single-owner
+        // primitive — the ack now belongs to `cloudflare::purge_cache`
+        // alone (the pre-lift caller-side re-emission produced a
+        // duplicate ✅ line at runtime). The primitive's own module is
+        // pinned as a `("cloudflare_purge_success_ack.rs", 1)` row so
+        // a future drop of THAT call would still be caught; deploy.rs
+        // has zero forwards remaining and is dropped from this list.
         let expectations: &[(&str, usize)] = &[
             ("attic_configure_step.rs", 1),
+            ("cloudflare_purge_success_ack.rs", 1),
             ("commands/build.rs", 2),
             ("commands/comprehensive_release.rs", 1),
-            ("commands/deploy.rs", 1),
             ("commands/flux_system_reconcile.rs", 1),
             ("commands/github_runner_ci.rs", 4),
             ("commands/integration_tests.rs", 1),

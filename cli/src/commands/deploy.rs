@@ -178,7 +178,15 @@ pub async fn execute(
 
                 match cloudflare::purge_cache(zone_id, api_token, &urls).await {
                     Ok(()) => {
-                        crate::info_success!("Cloudflare cache purged successfully");
+                        // Success ack owned by the callee — see
+                        // `cloudflare_purge_success_ack.rs`. The pre-lift
+                        // caller-side `crate::info_success!("Cloudflare
+                        // cache purged successfully")` here duplicated
+                        // the identical line `cloudflare::purge_cache`
+                        // already emitted internally, printing the ack
+                        // twice at runtime. The trailing blank stays as
+                        // structural framing before the deploy-flow
+                        // continues with `print_boxed_banner`.
                         println!();
                     }
                     Err(e) => {
