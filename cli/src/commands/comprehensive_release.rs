@@ -475,7 +475,16 @@ pub async fn execute(
                 info!("🏷️  Tagging image: {}", compose_tag);
 
                 let mut tag_cmd = Command::new(&docker);
-                tag_cmd.args(["tag", image_name, &compose_tag]);
+                // Argv routed through
+                // `crate::docker_tag_argv::docker_tag_argv` — the
+                // typed `docker tag <source> <target>` primitive
+                // shared with the sibling
+                // `commands/product_release.rs::push_prebuilt_image`
+                // Phase-1 registry retag spawn.
+                tag_cmd.args(crate::docker_tag_argv::docker_tag_argv(
+                    image_name,
+                    &compose_tag,
+                ));
                 let tag_op = format!("docker tag {} -> {}", image_name, compose_tag);
                 crate::retry::run_inherited_status(tag_cmd, &tag_op).await?;
 

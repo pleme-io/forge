@@ -184,9 +184,20 @@ async fn push_prebuilt_image(local_name: &str, registry: &str, deploy_tag: &str)
     // idiom for `run_nix_release_app` above.
     let docker = get_tool_path("DOCKER_BIN", "docker");
 
-    // Tag with registry URL and SHA
+    // Tag with registry URL and SHA. Routes the argv through
+    // `crate::docker_tag_argv::docker_tag_argv` — the typed `docker
+    // tag <source> <target>` primitive that owns the 3-element
+    // `["tag", <src>, <dst>]` shape shared with the sibling
+    // `commands/comprehensive_release.rs::execute` Phase-1 retag
+    // spawn (`docker tag <image_name> -> <registry>:latest` ahead
+    // of `docker-compose up`), so an argv drift (`--force`
+    // companion, a rename by a future Docker CLI, an argv-order
+    // swap between `<src>` and `<dst>`) hits ONE typed body rather
+    // than the two pre-lift sibling stanzas in lockstep.
     let mut tag_cmd = Command::new(&docker);
-    tag_cmd.args(["tag", &image_id, &full_tag]);
+    tag_cmd.args(crate::docker_tag_argv::docker_tag_argv(
+        &image_id, &full_tag,
+    ));
     crate::retry::run_inherited_status(tag_cmd, &format!("docker tag {} {}", image_id, full_tag))
         .await?;
 
