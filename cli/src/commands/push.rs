@@ -35,20 +35,13 @@ pub async fn get_git_sha() -> Result<String> {
     }
 
     // Fallback to git rev-parse for direct CLI usage — routed through
-    // the canonical async sibling of `git::get_short_sha`. Spawn-vs-op
-    // dispatch flows through the typed `GitError` producer; the
-    // structural `(op, exit_code, stderr)` failure tuple is preserved
-    // for the anyhow boundary while the user-facing advisory ("ensure
-    // you're in a git repository with committed changes") stays in the
-    // wrapping `.context(...)` envelope.
-    let hash = crate::git::get_short_sha_async().await.context(
-        "Failed to get git SHA for image tagging. \
-         Ensure you're in a git repository with committed changes.",
-    )?;
-    if hash.is_empty() {
-        anyhow::bail!("Git returned empty SHA - repository may be corrupted");
-    }
-    Ok(hash)
+    // the crate-scoped `crate::git::get_short_sha_async_for_image_tag`
+    // primitive so the advisory-context wording AND the
+    // empty-stdout-is-corrupted-repo guard both live at ONE body
+    // across the crate. Sibling consumer:
+    // `commands/rust_service.rs::get_tag_suffix` routes through the
+    // same primitive.
+    crate::git::get_short_sha_async_for_image_tag().await
 }
 
 /// Generate architecture-prefixed tags
