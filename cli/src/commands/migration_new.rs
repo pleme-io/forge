@@ -11,6 +11,85 @@ use chrono::Utc;
 use colored::Colorize;
 use std::path::Path;
 
+/// The verb half of a `<Verb> <path>` scaffold step-pass readout — a
+/// closed enum whose [`label`](Self::label) is the inverse of the
+/// pre-lift `format!("<Verb> {}", <path>.display())` literal that the
+/// four sibling stanzas in [`execute`] used to spell inline.
+///
+/// # Compounding
+///
+/// Pre-lift four sibling sites in [`execute`] each spelled the same
+/// `crate::ui::print_step_pass(&format!("<Verb> {}", <path>.display()))`
+/// stanza with `<Verb>` picking from a two-element vocabulary
+/// (`Created` ×3 — the schema-migration file, the optional companion
+/// data-migration file, and the freshly-created manifest — plus
+/// `Updated` ×1 for the append-to-existing-manifest branch). Post-lift
+/// each site names its verb by variant, and the `<Verb> <path>` byte
+/// template lives at exactly one line inside
+/// [`write_scaffold_path_action`]. A future gate — a `Wrote` variant
+/// for a re-emit path, a `Deleted` variant for a cleanup companion, or
+/// a JSON-per-line dialect under a `--report=json` flag — lands on the
+/// enum plus one line of `write_scaffold_path_action`, never fanned
+/// across the four call sites.
+///
+/// # Theory grounding
+///
+/// - THEORY.md §V.1 (Construction guarantees; Types → Invariants →
+///   Proofs → Render Anywhere): the paired byte-oracle sibling
+///   [`write_scaffold_path_action`] is the Render Anywhere half —
+///   pinning the exact `<Verb> <path>` rendered bytes as a
+///   `cargo test`-verifiable invariant, so a fusion that swapped the
+///   space for a colon or dropped the display projection fails at
+///   `cargo test` time rather than at operator readout.
+/// - THEORY.md §VI.1 (three-times rule): four sibling occurrences
+///   past the "two is a coincidence; three is a law" threshold, so
+///   the `format!(...)` stanza lifts onto ONE typed body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScaffoldPathVerb {
+    Created,
+    Updated,
+}
+
+impl ScaffoldPathVerb {
+    /// The rendered leading token — the inverse of the pre-lift
+    /// `"<Verb> {}"` format-string literal, exact-cased to match
+    /// operator-facing precedent.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Created => "Created",
+            Self::Updated => "Updated",
+        }
+    }
+}
+
+/// Emit the `<Verb> <path>` in-body step-pass line through
+/// [`crate::ui::print_step_pass`] (three-space indent + green `✅`
+/// glyph + message).
+///
+/// See [`ScaffoldPathVerb`] for the compounding argument. Delegates
+/// to [`write_scaffold_path_action`] against a stdout lock, matching
+/// the pre-lift `println!` semantics (panic only on formatter errors,
+/// not broken-pipe / OOM).
+pub(crate) fn print_scaffold_path_action(verb: ScaffoldPathVerb, path: &Path) {
+    let _ = write_scaffold_path_action(&mut std::io::stdout().lock(), verb, path);
+}
+
+/// Byte-oracle sibling of [`print_scaffold_path_action`] — writes the
+/// same bytes to any [`std::io::Write`] so a `#[test]` can capture
+/// and compare them.
+///
+/// Delegates to [`crate::ui::write_step_pass`] so the primitive keeps
+/// a single source of truth for the outer `   {✅} {msg}` byte
+/// template; the inner message is exactly `<Verb.label()> <path
+/// display>`.
+pub(crate) fn write_scaffold_path_action<W: std::io::Write>(
+    w: &mut W,
+    verb: ScaffoldPathVerb,
+    path: &Path,
+) -> std::io::Result<()> {
+    crate::ui::write_step_pass(w, &format!("{} {}", verb.label(), path.display()))
+}
+
 /// Execute the migration scaffold command.
 pub async fn execute(
     working_dir: String,
@@ -63,7 +142,7 @@ pub async fn execute(
     // Write the schema migration file
     let scaffold = generate_migration_scaffold(&migration_name);
     crate::repo::write_text_sync(&migration_path, &scaffold)?;
-    crate::ui::print_step_pass(&format!("Created {}", migration_path.display()));
+    print_scaffold_path_action(ScaffoldPathVerb::Created, &migration_path);
 
     // If --with-data, also create companion data migration
     let data_migration_name = if with_data {
@@ -74,7 +153,7 @@ pub async fn execute(
 
         let data_scaffold = generate_data_migration_scaffold(&data_name);
         crate::repo::write_text_sync(&data_path, &data_scaffold)?;
-        crate::ui::print_step_pass(&format!("Created {}", data_path.display()));
+        print_scaffold_path_action(ScaffoldPathVerb::Created, &data_path);
 
         Some(data_name)
     } else {
@@ -105,7 +184,7 @@ pub async fn execute(
 
         std::fs::write(&manifest_path, &content)
             .with_context(|| format!("Failed to update {}", manifest_path.display()))?;
-        crate::ui::print_step_pass(&format!("Updated {}", manifest_path.display()));
+        print_scaffold_path_action(ScaffoldPathVerb::Updated, &manifest_path);
     } else {
         // Create new manifest
         let mut content = String::from(
@@ -120,7 +199,7 @@ pub async fn execute(
         }
         std::fs::write(&manifest_path, &content)
             .with_context(|| format!("Failed to create {}", manifest_path.display()))?;
-        crate::ui::print_step_pass(&format!("Created {}", manifest_path.display()));
+        print_scaffold_path_action(ScaffoldPathVerb::Created, &manifest_path);
     }
 
     // Print instructions for lib.rs registration
@@ -304,5 +383,143 @@ mod tests {
         );
         assert!(entry.contains("classification: noop"));
         assert!(entry.contains("reason: \"Nullable column\""));
+    }
+
+    /// Byte-oracle for the `Created` variant — the four-sites-post-lift
+    /// primitive must render EXACTLY the same bytes as the pre-lift
+    /// `crate::ui::print_step_pass(&format!("Created {}", <path>.display()))`
+    /// stanza that spelled it inline. Compares against
+    /// [`crate::ui::write_step_pass`] with the composed message so the
+    /// oracle ties both sides to the same outer-line template — a fusion
+    /// that swapped `write_step_pass` for `writeln!` on the raw glyph
+    /// (or that lost the `.green()` on the ✅) fails here.
+    #[test]
+    fn write_scaffold_path_action_created_matches_step_pass_template() {
+        let path = Path::new("services/rust/migration/src/m20260209_000001_test.rs");
+        let mut got = Vec::new();
+        write_scaffold_path_action(&mut got, ScaffoldPathVerb::Created, path).unwrap();
+
+        let mut want = Vec::new();
+        crate::ui::write_step_pass(&mut want, &format!("Created {}", path.display())).unwrap();
+
+        assert_eq!(
+            got, want,
+            "Created variant must render `<step_pass> Created <path.display()>` \
+             bytes-for-bytes; a fusion that dropped the space, transposed \
+             `<Verb>` and `<path>`, or bypassed `crate::ui::write_step_pass` \
+             fails here"
+        );
+    }
+
+    /// Byte-oracle for the `Updated` variant — sibling of the `Created`
+    /// oracle. Its own presence is what forces the `label()` inverse to
+    /// stay in lockstep with the pre-lift `"<Verb> {}"` format literal
+    /// across BOTH verbs (a one-verb oracle would let `Updated` silently
+    /// drift to e.g. `"Modified"`).
+    #[test]
+    fn write_scaffold_path_action_updated_matches_step_pass_template() {
+        let path = Path::new("services/rust/migration/src/migration-manifest.yaml");
+        let mut got = Vec::new();
+        write_scaffold_path_action(&mut got, ScaffoldPathVerb::Updated, path).unwrap();
+
+        let mut want = Vec::new();
+        crate::ui::write_step_pass(&mut want, &format!("Updated {}", path.display())).unwrap();
+
+        assert_eq!(
+            got, want,
+            "Updated variant must render `<step_pass> Updated <path.display()>` \
+             bytes-for-bytes; a fusion that reused the `Created` label \
+             (via a wildcard match arm or a copy-paste in `label()`) \
+             fails here"
+        );
+    }
+
+    /// The two `ScaffoldPathVerb::label()` projections must be distinct
+    /// AND exact-cased to the pre-lift `format!("Created {}", …)` /
+    /// `format!("Updated {}", …)` literals — pin BOTH properties so a
+    /// case fusion (`"created"` / `"CREATED"`), a shortening
+    /// (`"Add"` / `"Upd"`), or a collision (`Created.label() ==
+    /// Updated.label()`) is caught at `cargo test` time rather than at
+    /// operator readout.
+    #[test]
+    fn scaffold_path_verb_labels_are_exact_and_distinct() {
+        assert_eq!(ScaffoldPathVerb::Created.label(), "Created");
+        assert_eq!(ScaffoldPathVerb::Updated.label(), "Updated");
+        assert_ne!(
+            ScaffoldPathVerb::Created.label(),
+            ScaffoldPathVerb::Updated.label(),
+            "the two variant labels must not collide — a re-inline \
+             where every stanza spells the same verb would be a silent \
+             semantic loss"
+        );
+    }
+
+    /// Negative caller shield — after the lift, NO line in the module
+    /// body (pre-`#[cfg(test)]`) may spell the pre-lift
+    /// `crate::ui::print_step_pass(&format!("Created {}", …))` /
+    /// `crate::ui::print_step_pass(&format!("Updated {}", …))` stanza
+    /// inline. A re-inline would silently reopen the four-site
+    /// duplication class this lift closes.
+    ///
+    /// The two needles are assembled at runtime via [`format!`] from a
+    /// small verb-vocabulary so this shield's own source lines do not
+    /// self-match, mirroring the discipline of
+    /// `migration_validation::write_migration_issue_report`'s caller
+    /// shield.
+    #[test]
+    fn scaffold_path_action_callers_do_not_reinline_pre_lift_shape() {
+        let source = include_str!("migration_new.rs");
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            source,
+            "commands/migration_new.rs",
+        );
+        for verb in ["Created", "Updated"] {
+            let needle = format!(
+                "{}{}(&format!(\"{} {{}}\"",
+                "crate::ui::", "print_step_pass", verb,
+            );
+            for (i, line) in body.lines().enumerate() {
+                let lineno = i + 1;
+                assert!(
+                    !line.contains(&needle),
+                    "commands/migration_new.rs:{lineno} spells the pre-lift \
+                     `print_step_pass(&format!(\"{verb} {{}}\", …))` \
+                     scaffold step-pass stanza inline — that shape was \
+                     lifted onto `print_scaffold_path_action(\
+                     ScaffoldPathVerb::{verb}, &<path>)`. A re-inline would \
+                     silently reopen the four-site duplication class this \
+                     shield exists to close. Offending line: {line:?}"
+                );
+            }
+        }
+    }
+
+    /// Positive-delegation shield — the four pre-lift sites plus the
+    /// primitive's own signature line must every one of them show up
+    /// in the pre-`#[cfg(test)]` module body as
+    /// `print_scaffold_path_action(` code-line hits. A hit-count below
+    /// 5 means either a call site was dropped (semantic loss) or the
+    /// primitive was renamed without updating this shield (drift). Pin
+    /// the exact expected count so the shield does not accept "5 or
+    /// more" and silently mask a follow-up regression.
+    #[test]
+    fn scaffold_path_action_delegation_count_pinned() {
+        let source = include_str!("migration_new.rs");
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            source,
+            "commands/migration_new.rs",
+        );
+        let hits = body
+            .lines()
+            .filter(|line| line.contains("print_scaffold_path_action("))
+            .count();
+        assert_eq!(
+            hits, 5,
+            "expected exactly 5 code-line hits for \
+             `print_scaffold_path_action(` in the pre-`#[cfg(test)]` \
+             module body (1 fn signature + 4 call sites); got {hits}. \
+             A count below 5 means a call site was dropped; a count \
+             above 5 means a new site landed without a shield refresh"
+        );
     }
 }
