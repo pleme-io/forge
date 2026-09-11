@@ -140,11 +140,19 @@ pub async fn execute(
     crate::info_deploy_target_field!(registry, git_sha);
     println!();
 
-    // Find repo root
-    let repo_root = git::get_repo_root().context("Failed to find git repository")?;
-    let repo_root_str = repo_root
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("Invalid repository path"))?;
+    // Find repo root — routes through the crate-scoped
+    // `crate::repo_root_utf8::get_repo_root_utf8_string` primitive so
+    // the `Failed to find git repository` discovery [`anyhow::Context`]
+    // and the `Invalid repository path` non-UTF-8 bail message are
+    // decided at exactly ONE body across the crate (sibling consumer:
+    // `commands/comprehensive_release.rs::execute`). A future refinement
+    // of the discovery + UTF-8-coerce shape (adding an "are we inside a
+    // git repo?" hint tail on the discovery arm, threading the
+    // offending [`std::path::PathBuf::display`] on the reject arm)
+    // lands at the primitive body and reaches this consumer by
+    // construction — THEORY §V solve-once-at-the-primitive;
+    // §VI.1 recurring-shape-to-helper.
+    let repo_root_str = crate::repo_root_utf8::get_repo_root_utf8_string()?;
 
     // Build output symlink
     let build_output = format!("{}/result-runner", working_dir);
@@ -444,7 +452,7 @@ pub async fn execute(
     crate::step_header::announce_step_header(3, 3, "GitOps Deployment");
     println!();
 
-    let manifest_path = std::path::Path::new(repo_root_str).join(&manifest);
+    let manifest_path = std::path::Path::new(&repo_root_str).join(&manifest);
 
     // Read the current `images[0].newTag` — the read+parse envelope
     // AND the not-found envelope now live at ONE typed boundary at
