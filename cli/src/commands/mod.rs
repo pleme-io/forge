@@ -52,6 +52,7 @@ pub mod post_deploy_verification;
 pub mod prerelease;
 pub mod product_release;
 pub mod push;
+pub mod rebac_check_heading_with_gap;
 pub mod rebac_check_skipped_missing_dir;
 pub mod rebac_validation;
 pub mod release_commit;
