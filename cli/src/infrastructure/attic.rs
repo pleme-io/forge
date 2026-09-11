@@ -8,7 +8,7 @@
 
 use std::process::Stdio;
 use tokio::process::Command;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::error::AtticError;
 use crate::repo::get_tool_path;
@@ -413,10 +413,14 @@ impl AtticClient {
     /// `Command::new("attic").args(["push", cache, path]).status()`
     /// (which drops all three).
     ///
-    /// The [`warn!`] on the failure arm carries the typed error, so a
-    /// downstream reader sees the offending `AtticError` variant
-    /// (`ExecFailed` vs `PushFailed`) — not just a bare
-    /// "push failed" line.
+    /// The [`crate::warn_nonfatal!`] on the failure arm carries the
+    /// typed error, so a downstream reader sees the offending
+    /// `AtticError` variant (`ExecFailed` vs `PushFailed`) — not just
+    /// a bare "push failed" line. The macro is the fleet-standard
+    /// `⚠️  <label> (non-fatal): <err>` grammar (see
+    /// [`crate::nonfatal_warning`]); routing through it keeps this
+    /// site under the caller-shield census that pins the prefix +
+    /// marker + separator at exactly one code point.
     ///
     /// # Consumers
     ///
@@ -434,7 +438,7 @@ impl AtticClient {
                 true
             }
             Err(e) => {
-                warn!("Failed to push to Attic cache (non-fatal): {}", e);
+                crate::warn_nonfatal!("Failed to push to Attic cache", e);
                 false
             }
         }
@@ -597,11 +601,15 @@ impl AtticClient {
     /// `Command::new("attic").args(["login", server, url, token]).status()`
     /// (which drops both).
     ///
-    /// The [`warn!`] on the failure arm carries the typed error, so a
-    /// downstream reader sees the offending `AtticError` variant
-    /// (`ExecFailed` vs `LoginFailed` vs `TokenRequired`) — not just a
-    /// bare "login failed" line, and not silent as the pre-migration
-    /// `Stdio::null()` + un-checked exit body was.
+    /// The [`crate::warn_nonfatal!`] on the failure arm carries the
+    /// typed error, so a downstream reader sees the offending
+    /// `AtticError` variant (`ExecFailed` vs `LoginFailed` vs
+    /// `TokenRequired`) — not just a bare "login failed" line, and not
+    /// silent as the pre-migration `Stdio::null()` + un-checked exit
+    /// body was. The macro is the fleet-standard
+    /// `⚠️  <label> (non-fatal): <err>` grammar (see
+    /// [`crate::nonfatal_warning`]); routing through it keeps this
+    /// site under the caller-shield census.
     ///
     /// # Consumers
     ///
@@ -620,7 +628,7 @@ impl AtticClient {
                 true
             }
             Err(e) => {
-                warn!("Failed to login to Attic cache (non-fatal): {}", e);
+                crate::warn_nonfatal!("Failed to login to Attic cache", e);
                 false
             }
         }

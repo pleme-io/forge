@@ -193,74 +193,94 @@ mod tests {
         crate::warn_nonfatal!("Trailing comma label", "err",);
     }
 
-    // Caller shield: no source line under `cli/src/commands/` may spell
-    // the pre-lift shape `warn!("⚠️  ... (non-fatal): {}", <expr>)`
-    // inline any more. Every non-fatal step-failure emission must
-    // route through `crate::warn_nonfatal!`, which expands to the
-    // canonical `tracing::warn!(...)` call at the caller's location.
+    // Caller shield: no source line under `cli/src/commands/` OR
+    // `cli/src/infrastructure/` may spell a raw
+    // `warn!("[⚠️  ]... (non-fatal): {}", <expr>)` stanza inline any
+    // more. Every non-fatal step-failure emission must route through
+    // `crate::warn_nonfatal!`, which expands to the canonical
+    // `tracing::warn!("⚠️  {} (non-fatal): {}", label, err)` call at
+    // the caller's location.
     //
-    // The shield scans EVERY `commands/*.rs` module rather than only
-    // the six pre-lift files so a future step-orchestrator that surfaces
-    // a new non-fatal failure (a new sub-step in a new command module)
-    // reaches for `warn_nonfatal!` on first grep of ui.rs / this module,
-    // not by copy-pasting a raw `warn!("⚠️  ... (non-fatal): {}", ...)`
-    // stanza from build.rs.
+    // The shield scans EVERY `commands/*.rs` and `infrastructure/*.rs`
+    // module rather than only the pre-lift files so a future step-
+    // orchestrator that surfaces a new non-fatal failure — in a new
+    // command module or in a new infrastructure driver — reaches for
+    // `warn_nonfatal!` on first grep of ui.rs / this module, not by
+    // copy-pasting a raw `warn!(... (non-fatal): {}", ...)` stanza
+    // from build.rs OR from a pre-widen `infrastructure/attic.rs::
+    // {push_optional,login_optional}` that was drifting on the
+    // no-emoji form. The `infrastructure/` half of the scan is the
+    // regression pin for THAT drift: those two sites spelled the
+    // marker without the `⚠️` prefix, so the pre-widen commands-only
+    // shield could not catch them.
     //
-    // The needle is anchored on the emoji + two-space gap + literal
-    // ` (non-fatal): ` marker + `{}` slot so a future variant that
-    // spells the marker differently (`--non-fatal`, `[non-fatal]`,
-    // ` non-fatal:`) is out of scope; the needle catches only the exact
-    // pre-lift shape, and the shield's positive half (the delegation-
-    // count assertion below) forces future variants of the SAME shape
+    // The needle is anchored on the literal ` (non-fatal): {}"` marker
+    // (with OR without the `⚠️  ` two-space-gap prefix) so a future
+    // variant that spells the marker differently (`--non-fatal`,
+    // `[non-fatal]`, ` non-fatal:`) is out of scope; the needle
+    // catches BOTH forms of the pre-lift shape (the six commands
+    // sites' emoji form AND the two attic sites' no-emoji drift
+    // form), and the shield's positive half (the delegation-count
+    // assertion below) forces future variants of the SAME shape
     // through the primitive too.
     #[test]
-    fn no_command_module_still_spells_raw_nonfatal_warn() {
+    fn no_command_or_infrastructure_module_still_spells_raw_nonfatal_warn() {
         use std::path::PathBuf;
-        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src")
-            .join("commands");
+        let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let scan_dirs = [src_dir.join("commands"), src_dir.join("infrastructure")];
         let mut offenders: Vec<(PathBuf, usize, String)> = Vec::new();
-        for entry in std::fs::read_dir(&commands_dir).unwrap().flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                continue;
-            }
-            let source = std::fs::read_to_string(&path).unwrap();
-            for (idx, line) in source.lines().enumerate() {
-                // Skip comment lines so this shield's own reference to
-                // the pre-lift shape in prose doesn't self-hit.
-                let trimmed = line.trim_start();
-                if trimmed.starts_with("//") || trimmed.starts_with("///") {
+        for dir in &scan_dirs {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
                     continue;
                 }
-                if line.contains("warn!(\"\u{26a0}\u{fe0f}  ")
-                    && line.contains(" (non-fatal): {}\"")
-                {
-                    offenders.push((path.clone(), idx + 1, line.to_string()));
+                let source = std::fs::read_to_string(&path).unwrap();
+                for (idx, line) in source.lines().enumerate() {
+                    // Skip comment lines so this shield's own
+                    // reference to the pre-lift shape in prose doesn't
+                    // self-hit. `//!` module docs also start with `//`
+                    // so they are covered by the `starts_with("//")`.
+                    let trimmed = line.trim_start();
+                    if trimmed.starts_with("//") {
+                        continue;
+                    }
+                    // Catch both forms: emoji-prefixed
+                    // (`warn!("⚠️  ... (non-fatal): {}", <expr>)`) and
+                    // no-emoji drift (`warn!("... (non-fatal): {}",
+                    // <expr>)`). The `warn!(` opener + the ` (non-
+                    // fatal): {}"` marker together are load-bearing;
+                    // anything not covered by either is a different
+                    // grammar and out of scope.
+                    if line.contains("warn!(\"") && line.contains(" (non-fatal): {}\"") {
+                        offenders.push((path.clone(), idx + 1, line.to_string()));
+                    }
                 }
             }
         }
         assert!(
             offenders.is_empty(),
-            "raw `warn!(\"\u{26a0}\u{fe0f}  ... (non-fatal): {{}}\", <expr>)` \
-             stanza(s) survive under `commands/` — route each through \
-             `crate::warn_nonfatal!(<label>, <err>)` instead:\n{:#?}",
+            "raw `warn!(\"[⚠️  ]... (non-fatal): {{}}\", <expr>)` stanza(s) \
+             survive under `commands/` or `infrastructure/` — route each \
+             through `crate::warn_nonfatal!(<label>, <err>)` instead \
+             (the macro renders the fleet-standard `⚠️  <label> \
+             (non-fatal): <err>` grammar exactly once):\n{:#?}",
             offenders
         );
     }
 
-    // Positive half of the shield: the six pre-lift files MUST each
-    // forward through `crate::warn_nonfatal!(` at least once, so a
-    // migration that dropped a call site outright leaves the negative
-    // "no raw inline shape" scan trivially satisfied by absence but
-    // the positive count still fails.
+    // Positive half of the shield: the pre-lift files (six under
+    // `commands/` plus the widened `infrastructure/attic.rs` peer)
+    // MUST each forward through `crate::warn_nonfatal!(` at least the
+    // pinned count, so a migration that dropped a call site outright
+    // leaves the negative "no raw inline shape" scan trivially
+    // satisfied by absence but the positive count still fails.
     #[test]
     fn every_prelift_module_forwards_through_warn_nonfatal_macro() {
         use std::path::PathBuf;
-        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src")
-            .join("commands");
-        // (module basename, minimum forward count from the pre-lift census)
+        let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        // (module-relative path under `cli/src/`, minimum forward
+        // count from the pre-lift census)
         //
         // `deploy.rs` and `github_runner_ci.rs` each shed ONE forward
         // when `commands/flux_system_reconcile.rs` lifted the
@@ -269,23 +289,75 @@ mod tests {
         // itself now carries the pre-lift call, and its own module
         // is pinned as a `("flux_system_reconcile.rs", 1)` row so a
         // future drop of THAT call would still be caught.
+        //
+        // `infrastructure/attic.rs` (2) is the widened-scan entry:
+        // its `push_optional` and `login_optional` methods each
+        // rendered the fleet non-fatal grammar by hand (missing the
+        // `⚠️` prefix) before this migration; both now forward
+        // through `crate::warn_nonfatal!(<label>, <err>)`. Pinning
+        // BOTH forwards catches a future silent drop of either arm
+        // (a regression that dropped the whole match+warn body to
+        // return the bool without warning would satisfy the negative
+        // shield trivially by absence).
         let expectations: &[(&str, usize)] = &[
-            ("build.rs", 2),
-            ("deploy.rs", 1),
-            ("flux_system_reconcile.rs", 1),
-            ("github_runner_ci.rs", 1),
+            ("commands/build.rs", 2),
+            ("commands/deploy.rs", 1),
+            ("commands/flux_system_reconcile.rs", 1),
+            ("commands/github_runner_ci.rs", 1),
+            ("infrastructure/attic.rs", 2),
         ];
-        for (basename, min_count) in expectations {
-            let path = commands_dir.join(basename);
+        for (rel, min_count) in expectations {
+            let path = src_dir.join(rel);
             let source = std::fs::read_to_string(&path).unwrap();
             let forwards = source.matches("crate::warn_nonfatal!(").count();
             assert!(
                 forwards >= *min_count,
-                "{basename} must forward at least {min_count} non-fatal \
+                "{rel} must forward at least {min_count} non-fatal \
                  warning site(s) through `crate::warn_nonfatal!(`; found \
                  {forwards}. A dropped call would leave the negative \
                  raw-shape scan satisfied by absence.",
             );
         }
+    }
+
+    // Pin the exact renders both `infrastructure/attic.rs::
+    // push_optional` and `login_optional` now emit through
+    // `write_nonfatal_warn` — i.e. the fleet-standard emoji-prefixed
+    // grammar. The two sites pre-lift spelled the message without
+    // the `⚠️` prefix, so a downstream operator reading the log
+    // stream saw a heterogeneous non-fatal-warning surface — some
+    // lines starting with `⚠️  Failed to ...`, some with bare
+    // `Failed to ...` — and could not eyeball-filter for one shape.
+    // Post-lift both sites route through `crate::warn_nonfatal!` and
+    // render the same prefix + marker + separator; this test pins
+    // the exact bytes each site MUST emit so a future regression
+    // that reverted either arm (or spelled the label differently:
+    // `Push to Attic cache failed`, `attic push (non-fatal)`) is
+    // caught by the assertion instead of surfacing as heterogeneous
+    // log output.
+    #[test]
+    fn attic_push_and_login_optional_labels_render_fleet_nonfatal_grammar() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_nonfatal_warn(&mut buf, "Failed to push to Attic cache", &"upstream 503").unwrap();
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "\u{26a0}\u{fe0f}  Failed to push to Attic cache (non-fatal): upstream 503\n",
+            "AtticClient::push_optional's non-fatal label must render as \
+             the fleet emoji-prefixed grammar via crate::warn_nonfatal!",
+        );
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_nonfatal_warn(
+            &mut buf,
+            "Failed to login to Attic cache",
+            &"token rejected",
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "\u{26a0}\u{fe0f}  Failed to login to Attic cache (non-fatal): token rejected\n",
+            "AtticClient::login_optional's non-fatal label must render as \
+             the fleet emoji-prefixed grammar via crate::warn_nonfatal!",
+        );
     }
 }
