@@ -212,10 +212,11 @@ async fn check_permission_engine_files(
     config: &RebacValidationConfig,
     result: &mut RebacValidationResult,
 ) -> Result<()> {
-    if !config.quiet {
-        println!();
-        crate::ui::print_numbered_check_heading(2, "Permission Engine Source Files");
-    }
+    crate::commands::rebac_check_heading_with_gap::print_rebac_check_heading_with_gap(
+        config.quiet,
+        2,
+        "Permission Engine Source Files",
+    );
 
     let Some(backend_dir) = &config.backend_dir else {
         crate::commands::rebac_check_skipped_missing_dir::print_rebac_check_skipped_missing_dir(
@@ -249,10 +250,11 @@ async fn check_object_type_mapping(
     config: &RebacValidationConfig,
     result: &mut RebacValidationResult,
 ) -> Result<()> {
-    if !config.quiet {
-        println!();
-        crate::ui::print_numbered_check_heading(3, "Object Type → Entity Mapping");
-    }
+    crate::commands::rebac_check_heading_with_gap::print_rebac_check_heading_with_gap(
+        config.quiet,
+        3,
+        "Object Type → Entity Mapping",
+    );
 
     let (Some(docs_dir), Some(backend_dir)) = (&config.docs_dir, &config.backend_dir) else {
         crate::commands::rebac_check_skipped_missing_dir::print_rebac_check_skipped_missing_dir(
@@ -334,10 +336,11 @@ async fn check_relation_hierarchy(
     config: &RebacValidationConfig,
     result: &mut RebacValidationResult,
 ) -> Result<()> {
-    if !config.quiet {
-        println!();
-        crate::ui::print_numbered_check_heading(4, "Relation Hierarchy Consistency");
-    }
+    crate::commands::rebac_check_heading_with_gap::print_rebac_check_heading_with_gap(
+        config.quiet,
+        4,
+        "Relation Hierarchy Consistency",
+    );
 
     let Some(backend_dir) = &config.backend_dir else {
         crate::commands::rebac_check_skipped_missing_dir::print_rebac_check_skipped_missing_dir(
@@ -426,10 +429,11 @@ async fn check_redis_key_patterns(
     config: &RebacValidationConfig,
     result: &mut RebacValidationResult,
 ) -> Result<()> {
-    if !config.quiet {
-        println!();
-        crate::ui::print_numbered_check_heading(5, "Redis Key Pattern Validation");
-    }
+    crate::commands::rebac_check_heading_with_gap::print_rebac_check_heading_with_gap(
+        config.quiet,
+        5,
+        "Redis Key Pattern Validation",
+    );
 
     let Some(docs_dir) = &config.docs_dir else {
         crate::commands::rebac_check_skipped_missing_dir::print_rebac_check_skipped_missing_dir(
@@ -482,10 +486,11 @@ async fn check_redis_connectivity(
     config: &RebacValidationConfig,
     result: &mut RebacValidationResult,
 ) -> Result<()> {
-    if !config.quiet {
-        println!();
-        crate::ui::print_numbered_check_heading(6, "Redis Connectivity");
-    }
+    crate::commands::rebac_check_heading_with_gap::print_rebac_check_heading_with_gap(
+        config.quiet,
+        6,
+        "Redis Connectivity",
+    );
 
     let redis_url = crate::repo::env_var_or_default("REDIS_URL", "redis://localhost:6379");
 
@@ -557,10 +562,11 @@ async fn check_graphql_operations(
     config: &RebacValidationConfig,
     result: &mut RebacValidationResult,
 ) -> Result<()> {
-    if !config.quiet {
-        println!();
-        crate::ui::print_numbered_check_heading(7, "GraphQL Permission Operations");
-    }
+    crate::commands::rebac_check_heading_with_gap::print_rebac_check_heading_with_gap(
+        config.quiet,
+        7,
+        "GraphQL Permission Operations",
+    );
 
     let Some(web_dir) = &config.web_dir else {
         crate::commands::rebac_check_skipped_missing_dir::print_rebac_check_skipped_missing_dir(
@@ -859,6 +865,75 @@ mod tests {
              sites (one per pre-lift check whose `let Some(<dir>) = …` \
              else-branch previously carried a raw `println!`). Found \
              code-line hits: {hits:#?}"
+        );
+    }
+
+    /// Whole-module negative caller shield: no raw
+    /// `crate::ui::print_numbered_check_heading(<N>, "<title>")` may
+    /// live in `commands/rebac_validation.rs` for `N ∈ {2..=7}`.
+    /// Every non-first per-check heading MUST route through
+    /// [`crate::commands::rebac_check_heading_with_gap::print_rebac_check_heading_with_gap`]
+    /// so the `if !config.quiet { … }` gate, the framing blank, and
+    /// the fusion of the blank with the delegated heading live at
+    /// ONE typed body (`commands/rebac_check_heading_with_gap.rs`).
+    ///
+    /// The check-1 seat (`check_rebac_documentation`) is the sole
+    /// legitimate un-gapped delegation and stays on the plain
+    /// heading adapter — the pre-lift site emitted the heading
+    /// directly at the top of the report with no upstream check to
+    /// visually separate from. The shield accepts that single
+    /// occurrence and forbids every other bare delegate reference
+    /// under the module.
+    ///
+    /// The needle scans for the fused `crate::ui::<fn>(` prefix. It
+    /// is reconstructed at test time via [`format!`] AND the
+    /// assertion message keeps the module segment and the function
+    /// segment concatenated at runtime via `format!` so this
+    /// shield's own diagnostic prose does not false-match itself.
+    #[test]
+    fn no_raw_numbered_check_heading_delegate_beyond_the_check1_seat_survives() {
+        const SOURCE: &str = include_str!("rebac_validation.rs");
+        let fn_name = "print_numbered_check_heading";
+        let needle = format!("crate::ui::{}(", fn_name);
+        let hits = crate::test_support::code_line_hits(SOURCE, &needle);
+        assert!(
+            hits.len() <= 1,
+            "commands/rebac_validation.rs must carry AT MOST ONE `{needle}` \
+             reference (the check-1 seat inside `check_rebac_documentation`). \
+             Every other per-check heading MUST route through \
+             `crate::commands::rebac_check_heading_with_gap::\
+             print_rebac_check_heading_with_gap(config.quiet, <N>, \
+             \"<title>\")` so the framing blank + heading fusion lives \
+             at ONE typed body. Found code-line hits: {hits:#?}"
+        );
+    }
+
+    /// Positive-delegation shield: `commands/rebac_validation.rs`
+    /// MUST forward through the with-gap heading primitive at ≥6
+    /// sites — the pre-lift `check_permission_engine_files`,
+    /// `check_object_type_mapping`, `check_relation_hierarchy`,
+    /// `check_redis_key_patterns`, `check_redis_connectivity`, and
+    /// `check_graphql_permissions` phase openings. A drop below the
+    /// floor cannot leave the negative shield above trivially
+    /// satisfied by absence (a "just delete the heading, the
+    /// silent check body suffices" cleanup that quietly stops
+    /// telling the operator which check is running).
+    #[test]
+    fn rebac_validation_rs_forwards_through_rebac_check_heading_with_gap_primitive_at_six_sites() {
+        const SOURCE: &str = include_str!("rebac_validation.rs");
+        let needle = format!(
+            "rebac_check_heading_with_gap::{}(",
+            "print_rebac_check_heading_with_gap",
+        );
+        let hits = crate::test_support::code_line_hits(SOURCE, &needle);
+        assert!(
+            hits.len() >= 6,
+            "commands/rebac_validation.rs must forward through the \
+             `print_rebac_check_heading_with_gap` primitive at ≥6 \
+             sites (one per pre-lift check whose \
+             `if !config.quiet {{ println!(); print_numbered_check_heading(…); }}` \
+             phase opening previously restated the fusion inline). \
+             Found code-line hits: {hits:#?}"
         );
     }
 }
