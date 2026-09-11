@@ -1418,17 +1418,12 @@ pub async fn orchestrate_release(
             );
 
             // Check and reset stuck Shinka migrations first
-            if let Ok(was_reset) = crate::commands::migrations::check_and_reset_shinka_migration(
+            crate::shinka_migration_reset_ack::try_reset_stuck_shinka_migration_with_ack(
                 &deploy_config.product.name,
                 &service,
                 &namespace,
             )
-            .await
-            {
-                if was_reset {
-                    crate::ui::print_step_pass("Shinka migration reset, will retry with new image");
-                }
-            }
+            .await;
 
             // Run migrations for this environment
             let migration_image_tag = deploy_tag.clone();
@@ -2397,17 +2392,12 @@ pub async fn release_rust_service(
 
     // Step 3: Run migrations BEFORE deploying (CRITICAL: database must be ready before new pods start)
     // Check and reset stuck Shinka migrations first
-    if let Ok(was_reset) = crate::commands::migrations::check_and_reset_shinka_migration(
+    crate::shinka_migration_reset_ack::try_reset_stuck_shinka_migration_with_ack(
         &deploy_config.product.name,
         &service,
         &deploy_config.kubernetes_namespace(),
     )
-    .await
-    {
-        if was_reset {
-            crate::ui::print_step_pass("Shinka migration reset, will retry with new image");
-        }
-    }
+    .await;
 
     println!();
     crate::ui::print_numbered_step_heading("3/9", "Running database migrations...");
