@@ -464,6 +464,59 @@ pub async fn get_short_sha_async_in(workdir: &Path) -> Result<String> {
     read_head_sha_async(HeadShaForm::Short7, Some(workdir)).await
 }
 
+/// Fetch the short (7-char) HEAD SHA for image-tagging — the
+/// spawn-error `.context(...)` advisory-wrap AND the empty-stdout
+/// `bail!` guard lifted onto a single body so the byte-form of both
+/// diagnostics is pinned at exactly one code line across the crate.
+///
+/// Pre-lift two byte-similar consumer sites — `commands/push.rs::get_git_sha`
+/// and `commands/rust_service.rs::get_tag_suffix` — each restated the
+/// same three-line stanza verbatim:
+///
+/// ```ignore
+/// let hash = crate::git::get_short_sha_async().await.context(
+///     "Failed to get git SHA for image tagging. \
+///      Ensure you're in a git repository with committed changes.",
+/// )?;
+/// if hash.is_empty() {
+///     bail!("Git returned empty SHA - repository may be corrupted");
+/// }
+/// ```
+///
+/// The pair MUST agree on both the advisory-context wording AND the
+/// empty-guard diagnostic. A drift at one site (e.g., the advisory
+/// wording softened at one caller, or the empty-check accidentally
+/// deleted at the other) would silently emit two different user-facing
+/// errors for the same SHA-fetch failure — and the mismatch would only
+/// surface as a user report of inconsistent CI diagnostics with no
+/// structural link back to the drift. Sibling of
+/// [`release_git_sha_from_env`] on the "one body owns the release-tag
+/// SHA-resolve contract" surface.
+///
+/// # Empty-stdout semantic
+///
+/// `git rev-parse --short=7 HEAD` returns non-empty stdout on any valid
+/// commit-bearing repo. An empty result surfaces as
+/// `"Git returned empty SHA - repository may be corrupted"` — the
+/// diagnostic that decouples this degenerate case from the outer
+/// `.context(...)` "no repo / no HEAD" advisory so the operator sees
+/// the exact class of breakage rather than a generic "failed to get git
+/// SHA".
+///
+/// THEORY.md §V.1 (Types → Invariants → Proofs): the "get short SHA
+/// for image tagging" contract lives as one typed primitive; §VI.1
+/// (recurring-shape-to-helper).
+pub async fn get_short_sha_async_for_image_tag() -> Result<String> {
+    let hash = get_short_sha_async().await.context(
+        "Failed to get git SHA for image tagging. \
+         Ensure you're in a git repository with committed changes.",
+    )?;
+    if hash.is_empty() {
+        anyhow::bail!("Git returned empty SHA - repository may be corrupted");
+    }
+    Ok(hash)
+}
+
 /// The async YAML read-modify-write shell.
 ///
 /// Reads `path` as UTF-8, parses it as a [`serde_yaml::Value`], hands
@@ -3619,6 +3672,146 @@ mod tests {
         let _snapshot = crate::test_support::EnvVarSnapshot::capture("RELEASE_GIT_SHA");
         std::env::set_var("RELEASE_GIT_SHA", "abc1234");
         assert_eq!(release_git_sha_from_env(), Some("abc1234".to_string()));
+    }
+
+    /// Byte-oracle for the [`get_short_sha_async_for_image_tag`]
+    /// primitive body — pins the advisory-context wording and the
+    /// empty-stdout bail wording that pre-lift lived byte-restated at
+    /// two consumer sites (`commands/push.rs::get_git_sha` +
+    /// `commands/rust_service.rs::get_tag_suffix`). A drift at either
+    /// string (softening the "for image tagging" advisory, deleting
+    /// the "repository may be corrupted" hint) would silently change
+    /// what the operator reads on a broken-git failure at BOTH
+    /// consumers by lifting through this ONE body — so the byte-form
+    /// must be pinned here rather than trusted to survive future edits.
+    ///
+    /// The delegation assertion is what closes the "primitive still
+    /// funnels through `get_short_sha_async`" contract: a refactor
+    /// that inlined the argv here would decouple this body from the
+    /// `--short=7` explicit-length invariant `get_short_sha_async`
+    /// carries, and image tags would render with whatever `core.abbrev`
+    /// happens to be on the runner's git config.
+    #[test]
+    fn test_get_short_sha_async_for_image_tag_body_pins_wording_and_delegation() {
+        const SOURCE: &str = include_str!("git.rs");
+        let fn_body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "cli/src/git.rs",
+            "pub async fn get_short_sha_async_for_image_tag()",
+            "\n}\n",
+        );
+        assert!(
+            fn_body.contains(
+                "\"Failed to get git SHA for image tagging. \\\n         \
+                 Ensure you're in a git repository with committed changes.\","
+            ),
+            "get_short_sha_async_for_image_tag body must carry the EXACT \
+             advisory-context wording verbatim — the two pre-lift consumers \
+             spelled this string byte-identically and the byte-form must \
+             live at exactly one code line across the crate. Body was:\n{fn_body}"
+        );
+        assert!(
+            fn_body.contains(
+                "anyhow::bail!(\"Git returned empty SHA - repository may be corrupted\")"
+            ),
+            "get_short_sha_async_for_image_tag body must carry the EXACT \
+             empty-stdout bail wording — a drift here would decouple the \
+             degenerate-repo diagnostic at the primitive from what the two \
+             pre-lift consumers spelled. Body was:\n{fn_body}"
+        );
+        assert!(
+            fn_body.contains("get_short_sha_async()"),
+            "get_short_sha_async_for_image_tag body must delegate to \
+             `get_short_sha_async()` — the `--short=7` explicit-length \
+             contract lives at that primitive, and inlining the argv here \
+             would silently drop it. Body was:\n{fn_body}"
+        );
+    }
+
+    /// Negative caller shield: no site under `cli/src/commands/` may
+    /// restate the pre-lift `"Failed to get git SHA for image tagging"`
+    /// advisory or the `"Git returned empty SHA - repository may be
+    /// corrupted"` bail wording verbatim. Every SHA-fetch-for-image-tag
+    /// consumer routes through [`get_short_sha_async_for_image_tag`]
+    /// so both wordings live at ONE body across the crate.
+    ///
+    /// The exact-shape needles are reconstructed here from bare bytes
+    /// via `format!` so this shield's own source text does not
+    /// false-match itself. A future consumer that copy-pasted the
+    /// stanza back inline would fire this shield rather than
+    /// silently forking the diagnostic wording.
+    #[test]
+    fn test_get_short_sha_async_for_image_tag_negative_caller_shield_under_commands() {
+        let advisory_needle = format!(
+            "\"{}Failed to get git SHA for image tagging. \\",
+            "" // keep the needle byte-identical to the primitive's opening-quote form
+        );
+        let bail_needle = format!(
+            "\"{}Git returned empty SHA - repository may be corrupted\"",
+            ""
+        );
+        for (module_path, source) in [
+            ("cli/src/commands/push.rs", include_str!("commands/push.rs")),
+            (
+                "cli/src/commands/rust_service.rs",
+                include_str!("commands/rust_service.rs"),
+            ),
+        ] {
+            assert!(
+                !source.contains(&advisory_needle),
+                "{module_path} must NOT restate the raw \
+                 `Failed to get git SHA for image tagging...` advisory — \
+                 route through `crate::git::get_short_sha_async_for_image_tag()` \
+                 so the wording lives at one body across the crate."
+            );
+            assert!(
+                !source.contains(&bail_needle),
+                "{module_path} must NOT restate the raw \
+                 `Git returned empty SHA - repository may be corrupted` \
+                 bail — route through \
+                 `crate::git::get_short_sha_async_for_image_tag()` so the \
+                 wording lives at one body across the crate."
+            );
+        }
+    }
+
+    /// Positive-delegation shield: `commands/push.rs::get_git_sha` and
+    /// `commands/rust_service.rs::get_tag_suffix` MUST route through
+    /// [`get_short_sha_async_for_image_tag`] — a silent regression
+    /// that re-inlined a `get_short_sha_async().await.context(...)`
+    /// stanza would pass the negative shield (which only catches the
+    /// pre-lift wording) if the reinlined context string drifted, so
+    /// this positive shield closes the loop by requiring the exact
+    /// delegate-call byte-form at each caller.
+    #[test]
+    fn test_get_short_sha_async_for_image_tag_positive_delegation_shield() {
+        let delegate_needle = "crate::git::get_short_sha_async_for_image_tag()";
+        for (module_path, source, fn_open) in [
+            (
+                "cli/src/commands/push.rs",
+                include_str!("commands/push.rs"),
+                "pub async fn get_git_sha()",
+            ),
+            (
+                "cli/src/commands/rust_service.rs",
+                include_str!("commands/rust_service.rs"),
+                "pub async fn get_tag_suffix()",
+            ),
+        ] {
+            let fn_body = crate::test_support::fn_body_slice_between_markers(
+                source,
+                module_path,
+                fn_open,
+                "\n}\n",
+            );
+            assert!(
+                fn_body.contains(delegate_needle),
+                "{module_path}::{fn_open} must delegate its SHA-fetch to \
+                 `{delegate_needle}` — the primitive owns both the \
+                 advisory-context wording and the empty-stdout guard. \
+                 The delegate call was not found in the fn body."
+            );
+        }
     }
 }
 

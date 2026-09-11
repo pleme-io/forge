@@ -226,19 +226,13 @@ pub async fn get_tag_suffix() -> Result<String> {
     }
 
     // Fallback to git rev-parse for direct CLI usage — routed through
-    // the canonical async sibling of `git::get_short_sha`. See
-    // `cli/src/commands/push.rs::get_git_sha` for the corresponding
-    // priority shape; both consumers share the "RELEASE_GIT_SHA env
-    // first, then bare git rev-parse" order but each defines its own
-    // env-var priority chain locally.
-    let hash = crate::git::get_short_sha_async().await.context(
-        "Failed to get git SHA for image tagging. \
-         Ensure you're in a git repository with committed changes.",
-    )?;
-    if hash.is_empty() {
-        bail!("Git returned empty SHA - repository may be corrupted");
-    }
-    Ok(hash)
+    // the crate-scoped `crate::git::get_short_sha_async_for_image_tag`
+    // primitive so the advisory-context wording AND the
+    // empty-stdout-is-corrupted-repo guard both live at ONE body
+    // across the crate. Sibling consumer:
+    // `commands/push.rs::get_git_sha` routes through the same
+    // primitive.
+    crate::git::get_short_sha_async_for_image_tag().await
 }
 
 /// Write .version file to the service directory
