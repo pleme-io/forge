@@ -98,6 +98,7 @@ mod nix;
 mod nix_build_spinner;
 mod nix_built_store_path;
 mod nix_hooks;
+mod nix_result_link_path;
 mod nonfatal_warning;
 mod observability;
 mod path_builder;
