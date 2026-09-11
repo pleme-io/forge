@@ -107,6 +107,7 @@ mod registry_field;
 mod repo;
 mod retry;
 mod screenshot_diag;
+mod shinka_migration_reset_ack;
 mod skipping_step;
 mod step_header;
 mod success_step;
