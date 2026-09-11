@@ -1294,16 +1294,14 @@ async fn set_expected_tag_annotation(migration_name: &str, namespace: &str, expe
         }
         Ok(o) => {
             let stderr = crate::repo::utf8_lossy_borrow(&o.stderr);
-            crate::ui::print_plain_step_warn(&format!(
-                "Failed to set expected-tag annotation (non-fatal): {}",
-                stderr.trim()
-            ));
+            crate::commands::expected_tag_annotation_failure_warn::warn_expected_tag_annotation_failed_nonfatal(
+                &stderr.trim(),
+            );
         }
         Err(e) => {
-            crate::ui::print_plain_step_warn(&format!(
-                "Failed to set expected-tag annotation (non-fatal): {}",
-                e
-            ));
+            crate::commands::expected_tag_annotation_failure_warn::warn_expected_tag_annotation_failed_nonfatal(
+                &e,
+            );
         }
     }
 }
