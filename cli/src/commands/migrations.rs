@@ -1276,15 +1276,14 @@ async fn set_expected_tag_annotation(migration_name: &str, namespace: &str, expe
     println!("   📌 Setting expected-tag annotation: {}", expected_tag);
 
     let result = kubectl_command_async()
-        .args([
-            "annotate",
-            "databasemigration",
-            migration_name,
-            "-n",
-            namespace,
-            &annotation,
-            "--overwrite",
-        ])
+        .args(
+            crate::kubectl_annotate_overwrite_argv::kubectl_annotate_overwrite_argv(
+                "databasemigration",
+                migration_name,
+                namespace,
+                &annotation,
+            ),
+        )
         .output()
         .await;
 

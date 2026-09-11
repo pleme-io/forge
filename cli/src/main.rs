@@ -82,6 +82,7 @@ mod indented_success_step;
 mod k8s;
 mod k8s_field_selector;
 mod k8s_label_selector;
+mod kubectl_annotate_overwrite_argv;
 mod kubectl_apply_argv;
 mod kubectl_delete_job_argv;
 mod kubectl_exec_pod_argv;
