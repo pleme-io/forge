@@ -106,6 +106,7 @@ mod pushed_image_ref_list;
 mod rebac_keys_probe;
 mod registry_field;
 mod repo;
+mod repo_root_utf8;
 mod retry;
 mod screenshot_diag;
 mod shinka_migration_reset_ack;

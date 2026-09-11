@@ -274,11 +274,13 @@ pub async fn execute(
     info!("🌍 Namespace: {} (staging)", namespace);
     println!();
 
-    // Find repo root
-    let repo_root = git::get_repo_root().context("Failed to find git repository")?;
-    let repo_root_str = repo_root
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("Invalid repository path"))?;
+    // Find repo root — routes through the crate-scoped
+    // `crate::repo_root_utf8::get_repo_root_utf8_string` primitive so
+    // the `Failed to find git repository` discovery [`anyhow::Context`]
+    // and the `Invalid repository path` non-UTF-8 bail message are
+    // decided at exactly ONE body across the crate (sibling consumer:
+    // `commands/github_runner_ci.rs::execute`).
+    let repo_root_str = crate::repo_root_utf8::get_repo_root_utf8_string()?;
 
     // ========================================================================
     // STEP 1: PRE-BUILD VALIDATION (Unit Tests)
@@ -752,7 +754,7 @@ pub async fn execute(
         println!();
 
         // Create result symlink at repo root for deploy command
-        let result_link = std::path::Path::new(repo_root_str).join("result");
+        let result_link = std::path::Path::new(&repo_root_str).join("result");
         let work_dir_result = std::path::Path::new(&working_dir).join(build_output);
 
         crate::repo::replace_symlink_async(&work_dir_result, &result_link).await?;
