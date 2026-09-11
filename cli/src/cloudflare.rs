@@ -119,7 +119,13 @@ pub async fn purge_cache(zone_id: &str, api_token: &str, urls: &[String]) -> Res
         );
     }
 
-    crate::info_success!("Cloudflare cache purged successfully");
+    // Single-owner success-ack primitive — see
+    // `cloudflare_purge_success_ack.rs` for the lift rationale and the
+    // shield tests that pin this as the SOLE emission site (the pre-lift
+    // sibling in `commands/deploy.rs::execute` re-emitted the identical
+    // line, producing a double `✅ Cloudflare cache purged successfully`
+    // at runtime).
+    crate::cloudflare_purge_success_ack::announce_cloudflare_purge_success();
     Ok(())
 }
 

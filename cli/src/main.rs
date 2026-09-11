@@ -66,6 +66,7 @@ mod bookmark_git_sha_field;
 mod bun_argv;
 mod cargo_test_argv;
 mod cloudflare;
+mod cloudflare_purge_success_ack;
 mod deploy_target_field;
 mod docker_daemon_running_preflight;
 mod docker_info_probe;
