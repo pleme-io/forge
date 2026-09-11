@@ -155,7 +155,8 @@ pub async fn execute(
     let repo_root_str = crate::repo_root_utf8::get_repo_root_utf8_string()?;
 
     // Build output symlink
-    let build_output = format!("{}/result-runner", working_dir);
+    let build_output =
+        crate::nix_result_link_path::nix_result_link_path(&working_dir, "result-runner");
 
     // Step 1: Build with Nix (unless skipped)
     if !skip_build {
@@ -354,7 +355,7 @@ pub async fn execute(
         outcome?;
 
         // Read the nix store path from result symlink
-        let result_path = format!("{}/result", working_dir);
+        let result_path = crate::nix_result_link_path::nix_result_link_path(&working_dir, "result");
         let target = tokio::fs::read_link(&result_path)
             .await
             .context("Failed to read result symlink")?;

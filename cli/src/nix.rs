@@ -549,7 +549,8 @@ pub struct NixClosureInfo {
 /// - `output_link` is the built-artifact identifier `nix path-info
 ///   --recursive` reads — a `result*` symlink path (the three call
 ///   sites' shape: `"result"`, `"result-amd64"`, `"result-arm64"`, or a
-///   `format!("{}/{}", working_dir, output)` absolute path). Passed
+///   [`crate::nix_result_link_path::nix_result_link_path`]-composed
+///   absolute path). Passed
 ///   verbatim to `nix path-info --recursive`; no grammar check is
 ///   performed here (Nix's own resolver handles the "no such symlink"
 ///   case, surfaced through [`NixBuildError::PathInfoFailed`]).

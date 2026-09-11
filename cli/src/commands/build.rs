@@ -205,8 +205,8 @@ pub async fn execute(
 
     // Create custom symlink if requested
     if output != "result" {
-        let result_path = format!("{}/result", working_dir);
-        let output_path = format!("{}/{}", working_dir, output);
+        let result_path = crate::nix_result_link_path::nix_result_link_path(&working_dir, "result");
+        let output_path = crate::nix_result_link_path::nix_result_link_path(&working_dir, &output);
 
         crate::repo::replace_symlink_async(
             std::path::Path::new(&result_path),
@@ -226,7 +226,7 @@ pub async fn execute(
         info!("📤 Pushing entire build closure to Attic cache...");
         info!("   This includes ALL derivations (granular caching)");
 
-        let result_path = format!("{}/{}", working_dir, output);
+        let result_path = crate::nix_result_link_path::nix_result_link_path(&working_dir, &output);
         let cache_ref = format!("{}:{}", attic_server, cache_name);
 
         // Enumerate the recursive closure via the canonical typed
@@ -287,7 +287,7 @@ pub async fn execute(
     }
 
     // Show image size
-    let result_path = format!("{}/{}", working_dir, output);
+    let result_path = crate::nix_result_link_path::nix_result_link_path(&working_dir, &output);
     if let Ok(metadata) = tokio::fs::metadata(&result_path).await {
         let size_mb = metadata.len() as f64 / 1024.0 / 1024.0;
         println!();
