@@ -6245,6 +6245,93 @@ mod tests {
         }
     }
 
+    /// Post-lift the three `commands/web_build_verify.rs` fs-read
+    /// stragglers that still spelled the pre-`std::fs::read_to_string`
+    /// TWO-STEP shape (`fs::File::open(&<path>)?.read_to_string(&mut
+    /// <buf>)?` with a hand-rolled open envelope AND a hand-rolled read
+    /// envelope) route through [`read_text_sync`] rather than the
+    /// inline two-step form.
+    ///
+    /// The two-step shape is a distinct pre-lift form from the one-arg
+    /// [`std::fs::read_to_string`] shape the earlier three-site sweep
+    /// closed (`read_text_sync_consumers_do_not_reinline_the_primitive_shape`
+    /// above): the two-step form pre-dates the one-arg helper on the
+    /// [`std::fs`] surface and carries TWO operator envelopes per site
+    /// (`"Failed to open <label>"` + `"Failed to read <label>"`), only
+    /// one of which included the offending `path.display()` on the
+    /// pre-lift Site 1. Post-lift every site collapses onto the
+    /// primitive's ONE canonical `"Failed to read {path}"` envelope
+    /// with the resolved `path.display()`, so the two Sites 2/3
+    /// hardcoded `"index.html"` labels are replaced by the actual
+    /// `<dist_dir>/index.html` resolved path an operator can pass to
+    /// `ls -la` without hunting the caller.
+    ///
+    /// The three pre-lift stanzas the shield forbids re-inlining:
+    ///
+    /// - `commands/web_build_verify.rs::verify_no_hardcoded_urls`
+    ///   (per-JS-file scan):
+    ///   `fs::File::open(&js_file).context(format!("Failed to open
+    ///        {}", js_file.display()))?.read_to_string(&mut content)
+    ///        .context("Failed to read JavaScript file")?;`
+    /// - `commands/web_build_verify.rs::verify_bundle_consistency`
+    ///   (index.html read):
+    ///   `fs::File::open(&index_html_path).context("Failed to open
+    ///        index.html")?.read_to_string(&mut index_html_content)
+    ///        .context("Failed to read index.html")?;`
+    /// - `commands/web_build_verify.rs::verify_cache_policy` (index.html
+    ///   read): byte-identical to `verify_bundle_consistency`'s stanza.
+    ///
+    /// Sibling of
+    /// [`read_text_sync_consumers_do_not_reinline_the_primitive_shape`]
+    /// on the delegation-shield frontier — same structural discipline,
+    /// same per-function slice discipline, complementary needle set (the
+    /// two-step `fs::File::open(` needle rather than the one-arg
+    /// `std::fs::read_to_string(` needle).
+    #[test]
+    fn read_text_sync_consumers_do_not_reinline_the_two_step_open_read_shape() {
+        const SOURCE: &str = include_str!("commands/web_build_verify.rs");
+        for (name, open_marker) in [
+            (
+                "commands/web_build_verify.rs::verify_no_hardcoded_urls",
+                "fn verify_no_hardcoded_urls(dist_dir: &Path) -> Result<()> {",
+            ),
+            (
+                "commands/web_build_verify.rs::verify_bundle_consistency",
+                "fn verify_bundle_consistency(dist_dir: &Path) -> Result<()> {",
+            ),
+            (
+                "commands/web_build_verify.rs::verify_cache_policy",
+                "fn verify_cache_policy(dist_dir: &Path) -> Result<()> {",
+            ),
+        ] {
+            let body = crate::test_support::fn_body_slice_between_markers(
+                SOURCE,
+                name,
+                open_marker,
+                "\n}",
+            );
+            assert!(
+                body.contains("crate::repo::read_text_sync("),
+                "{name} body must forward its fs-read arm to \
+                 `crate::repo::read_text_sync(<path>)` — the primitive \
+                 body every sync text-mode read in the crate now \
+                 delegates through. Post-lift body: {body}"
+            );
+            assert!(
+                !body.contains("fs::File::open("),
+                "{name} body must NOT re-spell the inline \
+                 `fs::File::open(<path>)?…read_to_string(&mut <buf>)?` \
+                 two-step shape — that duplication was lifted onto \
+                 `read_text_sync`. A re-inline would silently diverge \
+                 the read arm from the canonical `\"Failed to read \
+                 {{path}}\"` operator envelope and re-hardcode the \
+                 `\"index.html\"` label the pre-lift Sites 2/3 used \
+                 in place of the resolved `path.display()`. Post-lift \
+                 body: {body}"
+            );
+        }
+    }
+
     /// [`write_text_sync`] writes the caller's bytes verbatim, so a
     /// consumer that hands in a spliced [`crate::version`] output, a
     /// `format!("{}\n", json)` render, or a scaffold `String` gets the

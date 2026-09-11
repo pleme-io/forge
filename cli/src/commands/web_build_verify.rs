@@ -1,7 +1,6 @@
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
@@ -57,11 +56,7 @@ fn verify_no_hardcoded_urls(dist_dir: &Path) -> Result<()> {
     ];
 
     for js_file in js_files {
-        let mut content = String::new();
-        fs::File::open(&js_file)
-            .context(format!("Failed to open {}", js_file.display()))?
-            .read_to_string(&mut content)
-            .context("Failed to read JavaScript file")?;
+        let content = crate::repo::read_text_sync(&js_file)?;
 
         for pattern in &bad_patterns {
             if content.contains(pattern) {
@@ -88,11 +83,7 @@ fn verify_bundle_consistency(dist_dir: &Path) -> Result<()> {
     crate::repo::require_existing_path(&index_html_path, "index.html")?;
 
     // Read index.html
-    let mut index_html_content = String::new();
-    fs::File::open(&index_html_path)
-        .context("Failed to open index.html")?
-        .read_to_string(&mut index_html_content)
-        .context("Failed to read index.html")?;
+    let index_html_content = crate::repo::read_text_sync(&index_html_path)?;
 
     // Extract all .js file references from index.html
     let referenced_bundles: Vec<String> = index_html_content
@@ -156,11 +147,7 @@ fn verify_cache_policy(dist_dir: &Path) -> Result<()> {
     }
 
     // Read index.html
-    let mut index_html_content = String::new();
-    fs::File::open(&index_html_path)
-        .context("Failed to open index.html")?
-        .read_to_string(&mut index_html_content)
-        .context("Failed to read index.html")?;
+    let index_html_content = crate::repo::read_text_sync(&index_html_path)?;
 
     // CHECK 1: Verify env.js uses cache-busting (dynamic loading with timestamp)
     // Accepts either pattern:
