@@ -6122,6 +6122,113 @@ pub fn write_forge_invocation_example<W: std::io::Write>(
     writeln!(w, "   {} {}", "forge".bright_cyan(), suffix)
 }
 
+/// Literal heading text the [`print_usage_examples_block`] /
+/// [`write_usage_examples_block`] pair emits — every pre-lift consumer
+/// spelled this same six-byte string (`"Usage:"`) verbatim as the
+/// first argument to a `println!` above a series of
+/// [`print_forge_invocation_example`] rows. Pinned as a `pub const` so
+/// consumers that want to assert against the heading text (a
+/// fleet-wide sweep, a downstream log-shipper filtering on the label)
+/// read the same constant the writer emits rather than re-typing the
+/// string literal.
+pub const USAGE_HEADING_TEXT: &str = "Usage:";
+
+/// Prints the fused `println!("Usage:")` heading + N
+/// [`print_forge_invocation_example`] rows + trailing
+/// `println!()` blank stanza every pre-lift consumer spelled inline
+/// across `commands/{pangea (×3), bootstrap (×3)}.rs::list_*`. Marks
+/// the "how do I actually run this?" example-invocation catalog every
+/// `forge <topic> list` subcommand emits after its per-item body —
+/// the operator scans the item catalog above, then reads the
+/// `Usage:` block to see the exact `forge <subcommand>` invocations
+/// they can copy-and-run at their shell.
+///
+/// # Distinct from every peer `ui::print_*` primitive
+///
+/// [`print_next_steps_heading`] emits the plain uncolored `Next
+/// steps:` heading text alone above a numbered instruction list the
+/// caller emits itself; this primitive FUSES the `Usage:` heading
+/// with its example-invocation rows and the trailing framing blank
+/// into ONE typed body, so a caller cannot forget the trailing blank
+/// or the delegation to [`print_forge_invocation_example`].
+/// [`print_forge_invocation_example`] emits ONE example-invocation
+/// row and carries the `.bright_cyan()`-colored `forge` prefix; this
+/// primitive composes it under the `Usage:` heading, and the sibling
+/// primitive stays available for any caller that wants a bare row
+/// outside the `Usage:` block scope. [`print_shell_example_cmd`]
+/// carries a `$` shell-prompt glyph and paints its command
+/// `.yellow()` — a distinct grammar (a raw shell command inside a
+/// deployment report's VERIFICATION section vs. a `forge <subcommand>`
+/// example under a `list_*` command's `Usage:` block).
+///
+/// # `&[&str]` slice input locks the row order at the call site
+///
+/// Pre-lift every consumer spelled the row order inline as three
+/// consecutive `crate::ui::print_forge_invocation_example(<literal>)`
+/// calls, so the row-order invariant lived at the call site rather
+/// than inside the writer. The primitive preserves that: the `&[&str]`
+/// slice reaches the writer in the caller's declared order, and each
+/// element flows through [`write_forge_invocation_example`] in turn.
+/// A caller reaching for a `HashSet<&str>` argument would drop the
+/// declared order and re-emit the rows in hash-order; the `&[&str]`
+/// slice type at the boundary locks the "preserve the call-site row
+/// order" invariant per THEORY §V.1 unrepresentability.
+///
+/// # No coloring on the heading, no framing blank BEFORE the heading
+///
+/// Pre-lift every consumer spelled the heading as a plain
+/// `println!("Usage:")` with no `.dimmed()` / `.bold()` /
+/// `.italic()` chain and NO leading `println!();` framing blank —
+/// the heading reaches the terminal with the default palette and
+/// immediately follows the preceding item-catalog body. The primitive
+/// preserves that: the heading reaches the writer through no
+/// [`colored`] chain, so no `\x1b[<..>m` ANSI sequence appears on
+/// that line, and the writer emits the heading FIRST, the example
+/// rows NEXT, and ONE `writeln!()` trailing blank LAST — never a
+/// leading framing blank.
+///
+/// # Compounding
+///
+/// Pre-lift 2 sibling stanzas (each 5 lines: `println!("Usage:")` +
+/// 3 `crate::ui::print_forge_invocation_example(<literal>)` calls +
+/// `println!()`) across `commands/{pangea, bootstrap}.rs::list_*`
+/// each restated the fused shape verbatim. A future adjustment (a
+/// swap of `"Usage:"` for `"Examples:"` under a friendlier heading
+/// grammar, a promotion of the heading to `.bold()` under a leaner
+/// `list_*` layout, an OTLP `usage_block_emitted` observability event
+/// wired alongside the print, a swap of the trailing single-blank
+/// framing for a `═`-rule closing frame) had to hit 2 stanzas in
+/// lockstep or drift the visual grammar; post-lift it hits ONE typed
+/// body. Delegates to [`write_usage_examples_block`] against
+/// [`std::io::stdout()`]; the writer split exists so the fail-before-
+/// pass test can pin the heading text, the row-order preservation,
+/// the delegation to [`write_forge_invocation_example`], and the
+/// trailing single-blank framing by inspecting emitted bytes rather
+/// than shelling out and grepping stdout.
+pub fn print_usage_examples_block(examples: &[&str]) {
+    let _ = write_usage_examples_block(&mut std::io::stdout().lock(), examples);
+}
+
+/// Writer-taking sibling to [`print_usage_examples_block`]. Emits the
+/// [`USAGE_HEADING_TEXT`] heading via [`writeln!`], then delegates
+/// each element of `examples` to [`write_forge_invocation_example`]
+/// in the caller's declared order, then emits ONE `writeln!()`
+/// trailing blank against the supplied writer.
+/// [`print_usage_examples_block`] is the stdout adapter; this variant
+/// exists so tests can pin the heading text, the row-order
+/// preservation, the delegation to [`write_forge_invocation_example`],
+/// and the trailing single-blank framing without capturing stdout.
+pub fn write_usage_examples_block<W: std::io::Write>(
+    w: &mut W,
+    examples: &[&str],
+) -> std::io::Result<()> {
+    writeln!(w, "{}", USAGE_HEADING_TEXT)?;
+    for suffix in examples {
+        write_forge_invocation_example(w, suffix)?;
+    }
+    writeln!(w)
+}
+
 /// Prints the one-line `"  $ <cmd>"` (two-space indent + `$` shell
 /// prompt + single space + `.yellow()`-colored command) example-
 /// invocation grammar every pre-lift consumer spelled inline as
@@ -19579,47 +19686,63 @@ mod tests {
     }
 
     /// Post-lift the callers migrated onto
-    /// [`super::print_forge_invocation_example`] no longer spell the
-    /// `println!("   {} <literal>", "forge".bright_cyan())` shape
-    /// inline across `commands/{pangea, bootstrap}.rs`. Structural
-    /// regression shield — without it, a future refactor could
-    /// silently re-inline the one-liner (e.g. a "just call `println!`
-    /// directly, the shape is short" cleanup) and reopen the 6-site
-    /// duplication class this lift closed. Enforced against the
-    /// module body BEFORE its first `#[cfg(test)]` region so a
-    /// test-support mention of the raw shape does not defeat the
-    /// shield.
+    /// [`super::print_usage_examples_block`] no longer spell the
+    /// fused 5-line stanza inline across
+    /// `commands/{pangea, bootstrap}.rs::list_*`:
     ///
-    /// The exact-shape needle is the character sequence
-    /// `"forge".bright_cyan()` — the four-byte binary-name literal
-    /// followed by the `.bright_cyan()` coloring call — which the
-    /// primitive body itself emits at one typed site (in `ui.rs`, out
-    /// of scope for this check) and every pre-lift consumer restated
-    /// verbatim inside a `println!` template with the `"   {}"`
-    /// three-space + slot prefix. A sibling shape (`"forge"
-    /// .bright_cyan().bold()`, a `format!("   {} ...", "forge"
-    /// .bright_cyan())`) is out of scope by construction — the
-    /// needle's `"forge".bright_cyan()` character sequence flags the
-    /// exact pre-lift grammar.
+    /// ```text
+    /// println!("Usage:");
+    /// crate::ui::print_forge_invocation_example("<X>");
+    /// crate::ui::print_forge_invocation_example("<Y>");
+    /// crate::ui::print_forge_invocation_example("<Z>");
+    /// println!();
+    /// ```
     ///
-    /// The positive count is pinned at the pre-lift site count
-    /// (`pangea.rs` ×3, `bootstrap.rs` ×3). A fusion that folded two
-    /// consumer sites into one call or dropped one of the example
-    /// invocations silently fails here — the negative half above
-    /// would still pass, but the positive count would fall below the
-    /// pre-lift census.
+    /// Structural regression shield — without it, a future refactor
+    /// could silently re-inline the fused stanza (e.g. a "just spell
+    /// the 5 lines inline, the shape is short" cleanup) and reopen
+    /// the 2-stanza (10-line) duplication class this fusion closed.
+    /// Three axes shielded independently:
+    ///
+    /// 1. The inline pre-lift `"forge".bright_cyan()` example-row
+    ///    coloring must NOT reappear at consumer sites — that shape
+    ///    lives at exactly one typed body (in `ui.rs`, out of scope
+    ///    for this check by way of
+    ///    [`module_body_before_first_cfg_test`], which slices at
+    ///    the first `#[cfg(test)]` region).
+    /// 2. The bare individual
+    ///    [`super::print_forge_invocation_example`] sibling primitive
+    ///    must NOT be called at consumer sites — it is composed
+    ///    exclusively through [`super::print_usage_examples_block`]
+    ///    for the `Usage:` block scope this shield covers. The
+    ///    sibling stays public for any future caller outside the
+    ///    `Usage:` block scope, but the two `list_*` consumers here
+    ///    must reach it through the fusion primitive.
+    /// 3. The fusion primitive
+    ///    [`super::print_usage_examples_block`] must be called
+    ///    EXACTLY ONCE per consumer module — a fusion that dropped
+    ///    one of the two consumer stanzas silently fails here even
+    ///    when both negative shields pass.
+    ///
+    /// Enforced against the module body BEFORE its first
+    /// `#[cfg(test)]` region so a test-support mention of the raw
+    /// shape does not defeat the shield.
     #[test]
-    fn print_forge_invocation_example_callers_delegate_through_primitive() {
-        const CALLERS: &[(&str, &str, usize)] = &[
-            (include_str!("commands/pangea.rs"), "commands/pangea.rs", 3),
+    fn print_usage_examples_block_callers_delegate_through_primitive() {
+        const CALLERS: &[(&str, &str)] = &[
+            (include_str!("commands/pangea.rs"), "commands/pangea.rs"),
             (
                 include_str!("commands/bootstrap.rs"),
                 "commands/bootstrap.rs",
-                3,
             ),
         ];
-        for (source, module_path, expected_forwards) in CALLERS {
+        for (source, module_path) in CALLERS {
             let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
+            // Axis 1: the inline pre-lift `"forge".bright_cyan()`
+            // example-row coloring must NOT reappear at consumer
+            // sites — the fusion primitive routes every example row
+            // through `write_forge_invocation_example`, which is the
+            // single typed site emitting that coloring.
             for (i, line) in body.lines().enumerate() {
                 if !line.contains("\"forge\".bright_cyan()") {
                     continue;
@@ -19630,27 +19753,238 @@ mod tests {
                      binary-name coloring inside a `println!(\"   \
                      {{}} <literal>\", ...)` example-invocation \
                      stanza — that shape was lifted onto \
-                     `crate::ui::print_forge_invocation_example`. A \
-                     re-inline would silently reopen the 6-site \
+                     `crate::ui::write_forge_invocation_example`, \
+                     composed here through \
+                     `crate::ui::print_usage_examples_block`. A \
+                     re-inline would silently reopen the 2-stanza \
                      duplication class this shield exists to close. \
                      Offending line: {line:?}",
                     lineno = i + 1
                 );
             }
-            let forward_hits = body
+            // Axis 2: the bare sibling primitive must NOT be called
+            // at consumer sites — the fusion primitive composes it.
+            let sibling_hits = body
                 .matches("crate::ui::print_forge_invocation_example(")
                 .count();
             assert_eq!(
-                forward_hits, *expected_forwards,
+                sibling_hits, 0,
+                "{module_path} body must NOT call \
+                 `crate::ui::print_forge_invocation_example(...)` \
+                 directly — the two `list_*` consumers now compose \
+                 the example-row primitive through \
+                 `crate::ui::print_usage_examples_block(...)` under \
+                 the `Usage:` heading scope. A re-inline of the \
+                 3-row loop would silently reopen the 2-stanza \
+                 duplication class this shield exists to close. \
+                 Found {sibling_hits} bare-sibling call(s)."
+            );
+            // Axis 2b: the raw `println!(\"Usage:\")` heading must
+            // NOT reappear at consumer sites — the fusion primitive
+            // emits it through `USAGE_HEADING_TEXT`.
+            let raw_heading_hits = body.matches("println!(\"Usage:\")").count();
+            assert_eq!(
+                raw_heading_hits, 0,
+                "{module_path} body must NOT spell \
+                 `println!(\"Usage:\")` inline — the `Usage:` \
+                 heading is emitted by \
+                 `crate::ui::print_usage_examples_block(...)` \
+                 through the `USAGE_HEADING_TEXT` constant. A \
+                 re-inline would silently reopen the 2-stanza \
+                 duplication class this shield exists to close. \
+                 Found {raw_heading_hits} inline heading(s)."
+            );
+            // Axis 3: the fusion primitive is called EXACTLY ONCE
+            // per consumer module — one call per pre-lift stanza.
+            let fusion_hits = body
+                .matches("crate::ui::print_usage_examples_block(")
+                .count();
+            assert_eq!(
+                fusion_hits, 1,
                 "{module_path} body must forward to \
-                 `crate::ui::print_forge_invocation_example(...)` at \
-                 exactly {expected_forwards} site(s) — one per \
-                 pre-lift consumer in this module. A fusion that \
-                 folded two consumer sites into one call or dropped \
-                 one of the example invocations silently fails here. \
-                 Found {forward_hits} forwarding hits."
+                 `crate::ui::print_usage_examples_block(...)` at \
+                 EXACTLY one site — one per pre-lift stanza in this \
+                 module. A drop of the stanza or a re-inline would \
+                 silently reopen the duplication class this shield \
+                 exists to close. Found {fusion_hits} fusion \
+                 forwarding call(s)."
             );
         }
+    }
+
+    /// Fail-before-pass envelope for
+    /// [`super::write_usage_examples_block`]. Pins the fused stanza
+    /// every pre-lift consumer spelled verbatim
+    /// (`println!("Usage:")` + N
+    /// `crate::ui::print_forge_invocation_example(<literal>)` calls +
+    /// `println!()`): a plain uncolored `Usage:` heading with no
+    /// `\x1b[<..>m` ANSI sequence, then each example-row bytes-
+    /// identical to what [`super::write_forge_invocation_example`]
+    /// would emit for that suffix in the caller's declared order,
+    /// then ONE trailing blank line (never zero, never two). A silent
+    /// contract drift a future rewrite might introduce — dropping
+    /// the trailing blank, adding a leading framing blank BEFORE
+    /// the heading, painting the heading `.bold()` or `.dimmed()`,
+    /// re-ordering the rows through a set or a sort, swapping the
+    /// delegation from [`super::write_forge_invocation_example`] to
+    /// a bare `println!` that skipped the bright-cyan coloring — flips
+    /// this assertion rather than compiling and silently diverging
+    /// the two consumer sites' visual grammar.
+    #[test]
+    fn write_usage_examples_block_emits_heading_then_ordered_forge_rows_then_one_blank() {
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        let examples: &[&str] = &[
+            "pangea push --component <name>",
+            "pangea push-all",
+            "pangea push-all --parallel",
+        ];
+        super::write_usage_examples_block(&mut buf, examples)
+            .expect("write_usage_examples_block against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf).expect(
+            "write_usage_examples_block must emit valid UTF-8 (the pre-lift println!s did)",
+        );
+
+        // The USAGE_HEADING_TEXT constant is what the writer emits;
+        // the byte-oracle test reads through the same constant the
+        // primitive does so a rename of the heading text hits ONE
+        // typed site rather than compiling and silently diverging
+        // the test envelope from the writer.
+        assert_eq!(
+            super::USAGE_HEADING_TEXT,
+            "Usage:",
+            "USAGE_HEADING_TEXT constant must spell the six-byte \
+             `\"Usage:\"` heading verbatim — every pre-lift consumer \
+             spelled `println!(\"Usage:\")` inline, so the constant \
+             locks that exact heading text at the type boundary."
+        );
+
+        // Line 0 is the bare `Usage:` heading with no ANSI palette.
+        // Line 1..=N are the example rows in the caller's declared
+        // order, each bytes-identical to what
+        // `write_forge_invocation_example` would emit alone. Line
+        // N+1 is the trailing blank.
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            examples.len() + 2,
+            "write_usage_examples_block must emit exactly {} lines \
+             (heading + {} example rows + trailing blank); got {}:\n{}",
+            examples.len() + 2,
+            examples.len(),
+            lines.len(),
+            out
+        );
+        assert_eq!(
+            lines[0], "Usage:",
+            "line 0 must be the bare `Usage:` heading — every \
+             pre-lift consumer spelled `println!(\"Usage:\")` \
+             verbatim; got {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b["),
+            "line 0 (the `Usage:` heading) must carry NO ANSI palette \
+             sequence — every pre-lift consumer spelled the heading \
+             plain and uncolored; got {:?}",
+            lines[0]
+        );
+
+        // The example rows are bytes-identical to what
+        // `write_forge_invocation_example` would emit for the same
+        // suffix in the same caller-declared order — a re-order
+        // through a set or sort would break this ordinal alignment.
+        for (i, suffix) in examples.iter().enumerate() {
+            let mut sibling_buf: Vec<u8> = Vec::new();
+            super::write_forge_invocation_example(&mut sibling_buf, suffix)
+                .expect("write_forge_invocation_example against a Vec<u8> writer must succeed");
+            let sibling_out = String::from_utf8(sibling_buf)
+                .expect("write_forge_invocation_example must emit valid UTF-8");
+            let sibling_line = sibling_out
+                .strip_suffix('\n')
+                .expect("write_forge_invocation_example emits a trailing newline");
+            assert_eq!(
+                lines[i + 1],
+                sibling_line,
+                "line {} must be bytes-identical to what \
+                 `write_forge_invocation_example({:?})` emits — the \
+                 fusion primitive composes the example row through \
+                 the sibling primitive, not through a bare \
+                 `println!` that would skip the bright-cyan coloring. \
+                 Got {:?}, expected {:?}",
+                i + 1,
+                suffix,
+                lines[i + 1],
+                sibling_line,
+            );
+        }
+
+        // Trailing single-blank framing: the byte stream ends with
+        // `\n\n` (the last example row's `\n`, then the writer's
+        // `writeln!()` empty-line `\n`). NEVER `\n\n\n` (double
+        // trailing blank), NEVER just `\n` (dropped trailing blank).
+        assert!(
+            out.ends_with("\n\n"),
+            "byte stream must end with `\\n\\n` (the last example \
+             row's trailing newline, then the trailing blank line \
+             the fusion primitive emits) — every pre-lift consumer \
+             carried ONE `println!()` blank after the example rows; \
+             got trailing bytes {:?}",
+            &out[out.len().saturating_sub(6)..]
+        );
+        assert!(
+            !out.ends_with("\n\n\n"),
+            "byte stream must NOT end with `\\n\\n\\n` — that would \
+             mean the fusion primitive emitted a double trailing \
+             blank, drifting from the single-blank pre-lift grammar; \
+             got trailing bytes {:?}",
+            &out[out.len().saturating_sub(6)..]
+        );
+
+        // No leading framing blank BEFORE the heading — every
+        // pre-lift consumer emitted the heading FIRST, so the byte
+        // stream must NOT begin with `\n`.
+        assert!(
+            !out.starts_with('\n'),
+            "byte stream must NOT begin with `\\n` — every pre-lift \
+             consumer emitted the `Usage:` heading FIRST, with no \
+             leading framing blank. Got leading bytes {:?}",
+            &out[..out.len().min(16)]
+        );
+    }
+
+    /// Empty-slice edge case for
+    /// [`super::write_usage_examples_block`]. A caller passing an
+    /// empty slice reaches the writer at a well-defined,
+    /// non-panicking boundary: the writer emits the `Usage:`
+    /// heading, then no example rows, then ONE trailing blank line
+    /// — the same shape a two-line `println!("Usage:"); println!();`
+    /// stanza would emit. Locks the "no panic on empty" and "no
+    /// leading/trailing extra blank" invariants at the type
+    /// boundary so a future consumer that programmatically drops
+    /// its example rows to zero (a feature-flagged empty list)
+    /// still gets a well-formed `Usage:` block rather than a panic
+    /// or a bare heading with no trailing framing.
+    #[test]
+    fn write_usage_examples_block_empty_slice_emits_heading_and_one_blank() {
+        let _override_guard = AnsiOverrideForTest::acquire();
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_usage_examples_block(&mut buf, &[])
+            .expect("write_usage_examples_block against a Vec<u8> writer must succeed");
+
+        let out = String::from_utf8(buf)
+            .expect("write_usage_examples_block must emit valid UTF-8 for empty slice");
+
+        assert_eq!(
+            out, "Usage:\n\n",
+            "empty-slice call must emit exactly `Usage:\\n\\n` — \
+             the heading, then no example rows, then ONE trailing \
+             blank. Got {:?}",
+            out
+        );
     }
 
     /// Fail-before-pass envelope for [`super::write_shell_example_cmd`].

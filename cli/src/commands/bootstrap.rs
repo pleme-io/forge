@@ -413,11 +413,11 @@ pub fn list_binaries() {
         println!();
     }
 
-    println!("Usage:");
-    crate::ui::print_forge_invocation_example("bootstrap push --binary <name>");
-    crate::ui::print_forge_invocation_example("bootstrap push-all");
-    crate::ui::print_forge_invocation_example("bootstrap push-all --parallel");
-    println!();
+    crate::ui::print_usage_examples_block(&[
+        "bootstrap push --binary <name>",
+        "bootstrap push-all",
+        "bootstrap push-all --parallel",
+    ]);
 }
 
 /// Release bootstrap binaries to a target environment

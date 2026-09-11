@@ -448,11 +448,11 @@ pub fn list_components() {
         println!();
     }
 
-    println!("Usage:");
-    crate::ui::print_forge_invocation_example("pangea push --component <name>");
-    crate::ui::print_forge_invocation_example("pangea push-all");
-    crate::ui::print_forge_invocation_example("pangea push-all --parallel");
-    println!();
+    crate::ui::print_usage_examples_block(&[
+        "pangea push --component <name>",
+        "pangea push-all",
+        "pangea push-all --parallel",
+    ]);
 }
 
 /// Regenerate Cargo.nix for Pangea workspace (Rust components)
