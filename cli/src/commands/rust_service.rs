@@ -924,23 +924,71 @@ pub async fn push_rust_service_with_tag(
     push_docker_images(&images, &registry, &tag_suffix).await
 }
 
-/// Resolve namespace for an environment from deploy.yaml
-///
-/// If namespace_override is provided, uses that.
-/// Otherwise, looks up the namespace from environments.<env>.namespace in deploy.yaml.
-fn resolve_namespace_for_env(env: &str, namespace_override: Option<&str>) -> Result<String> {
-    if let Some(ns) = namespace_override {
-        return Ok(ns.to_string());
-    }
+/// Closed enum enumerating the callers of
+/// [`load_deploy_yaml_and_resolve_env`], each carrying the domain-specific
+/// `"Required for <phrase>"` trailer the pre-lift stanzas restated verbatim
+/// at their bail sites. A new consumer adds one variant + one arm here rather
+/// than restating the shared load-and-resolve preamble at its own site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeployYamlLookupPurpose {
+    /// The `resolve_namespace_for_env` consumer: navigates
+    /// `environments.<resolved_env>.namespace` after the resolve.
+    NamespaceResolution,
+    /// The `get_manifest_path_for_env` consumer: navigates
+    /// `manifests.<resolved_env>.kustomization` after the resolve.
+    ManifestPathLookup,
+}
 
-    // Read namespace from deploy.yaml based on environment
+impl DeployYamlLookupPurpose {
+    /// The `"Required for ..."` trailer for this purpose. Kept as a closed
+    /// enum arm rather than a `&'static str` field so a third consumer's
+    /// phrase must earn its own variant.
+    fn requirement_phrase(self) -> &'static str {
+        match self {
+            Self::NamespaceResolution => "environment-based namespace resolution",
+            Self::ManifestPathLookup => "manifest path lookup",
+        }
+    }
+}
+
+/// Load `deploy.yaml` (via
+/// [`resolve_deploy_yaml_from_service_dir`] + existence-gate +
+/// [`crate::repo::read_yaml_sync`]) and resolve `env` through the
+/// `environment_aliases` map, returning `(yaml, resolved_env)` for the
+/// consumer to complete its own downstream navigation.
+///
+/// Pre-lift two byte-similar consumer sites — `resolve_namespace_for_env`
+/// and `get_manifest_path_for_env` — each restated the same 14-line
+/// preamble verbatim (path resolve → `exists()`-gate with the
+/// `"deploy.yaml not found at {}\n  Required for <phrase>"` bail → YAML
+/// read → `environment_aliases` alias-resolve). The pair MUST agree on
+/// both the miss-diagnostic wording AND the `environment_aliases`
+/// projection semantic; a drift at one site (the alias-lookup skipped,
+/// or the miss diagnostic softened) would silently emit two different
+/// user-facing errors for the same deploy.yaml-missing failure and
+/// silently break alias-based environment resolution at one call site
+/// only.
+///
+/// Post-lift a future refinement of the deploy.yaml load-and-resolve
+/// contract — a swap of `environment_aliases` to a typed
+/// `substrate::EnvironmentAliases` newtype, a canonicalize hook on the
+/// resolved env, an OTLP `deploy_yaml_resolve` span wired alongside the
+/// read, a promotion of the miss diagnostic to a typed
+/// `DeployYamlError::NotFound` variant — lands at ONE body and reaches
+/// both consumers by construction (THEORY §V.1 — Types → Invariants →
+/// Proofs; §VI.1 — recurring-shape-to-helper).
+fn load_deploy_yaml_and_resolve_env(
+    env: &str,
+    purpose: DeployYamlLookupPurpose,
+) -> Result<(serde_yaml::Value, String)> {
     let deploy_yaml_path = resolve_deploy_yaml_from_service_dir()?;
 
     if !deploy_yaml_path.exists() {
         bail!(
             "deploy.yaml not found at {}\n  \
-             Required for environment-based namespace resolution",
-            deploy_yaml_path.display()
+             Required for {}",
+            deploy_yaml_path.display(),
+            purpose.requirement_phrase(),
         );
     }
 
@@ -951,12 +999,29 @@ fn resolve_namespace_for_env(env: &str, namespace_override: Option<&str>) -> Res
         .get("environment_aliases")
         .and_then(|a| a.get(env))
         .and_then(|e| e.as_str())
-        .unwrap_or(env);
+        .unwrap_or(env)
+        .to_string();
+
+    Ok((yaml, resolved_env))
+}
+
+/// Resolve namespace for an environment from deploy.yaml
+///
+/// If namespace_override is provided, uses that.
+/// Otherwise, looks up the namespace from environments.<env>.namespace in deploy.yaml.
+fn resolve_namespace_for_env(env: &str, namespace_override: Option<&str>) -> Result<String> {
+    if let Some(ns) = namespace_override {
+        return Ok(ns.to_string());
+    }
+
+    // Read namespace from deploy.yaml based on environment
+    let (yaml, resolved_env) =
+        load_deploy_yaml_and_resolve_env(env, DeployYamlLookupPurpose::NamespaceResolution)?;
 
     // Navigate to environments.<resolved_env>.namespace
     let ns = yaml
         .get("environments")
-        .and_then(|e| e.get(resolved_env))
+        .and_then(|e| e.get(&resolved_env))
         .and_then(|e| e.get("namespace"))
         .and_then(|n| n.as_str())
         .ok_or_else(|| {
@@ -982,29 +1047,13 @@ fn resolve_namespace_for_env(env: &str, namespace_override: Option<&str>) -> Res
 
 /// Get manifest path for an environment from deploy.yaml
 fn get_manifest_path_for_env(env: &str) -> Result<String> {
-    let deploy_yaml_path = resolve_deploy_yaml_from_service_dir()?;
-
-    if !deploy_yaml_path.exists() {
-        bail!(
-            "deploy.yaml not found at {}\n  \
-             Required for manifest path lookup",
-            deploy_yaml_path.display()
-        );
-    }
-
-    let yaml: serde_yaml::Value = crate::repo::read_yaml_sync(&deploy_yaml_path)?;
-
-    // First check if there's an alias for this environment
-    let resolved_env = yaml
-        .get("environment_aliases")
-        .and_then(|a| a.get(env))
-        .and_then(|e| e.as_str())
-        .unwrap_or(env);
+    let (yaml, resolved_env) =
+        load_deploy_yaml_and_resolve_env(env, DeployYamlLookupPurpose::ManifestPathLookup)?;
 
     // Navigate to manifests.<resolved_env>.kustomization
     let manifest = yaml
         .get("manifests")
-        .and_then(|m| m.get(resolved_env))
+        .and_then(|m| m.get(&resolved_env))
         .and_then(|m| m.get("kustomization"))
         .and_then(|k| k.as_str())
         .ok_or_else(|| {
@@ -3445,6 +3494,212 @@ mod push_arch_closure_lift_tests {
              whole `build_rust_service` flow via `?` propagation at \
              the caller — an outcome the pre-lift arms deliberately \
              avoided by matching-and-warning on every failure path."
+        );
+    }
+}
+
+#[cfg(test)]
+mod load_deploy_yaml_and_resolve_env_lift_tests {
+    /// Byte-oracle for the [`super::load_deploy_yaml_and_resolve_env`]
+    /// primitive body — pins the miss-diagnostic wording, the
+    /// `Required for {}` trailer interpolation, the
+    /// `resolve_deploy_yaml_from_service_dir` delegation, the
+    /// `crate::repo::read_yaml_sync` delegation, and the
+    /// `environment_aliases` alias-resolve projection at ONE code line
+    /// each. A drift at the primitive body (a softened miss diagnostic,
+    /// a dropped alias-resolve, a swap of the YAML-read primitive)
+    /// compile-flips at this test rather than surfacing as a user
+    /// report of inconsistent deploy.yaml errors across the two
+    /// consumers.
+    ///
+    /// Pre-lift two byte-similar consumer sites —
+    /// `resolve_namespace_for_env` and `get_manifest_path_for_env` —
+    /// each restated the same 14-line preamble verbatim; the primitive
+    /// owns both the `"deploy.yaml not found at {}\n  Required for
+    /// <phrase>"` bail AND the `environment_aliases` alias-resolve at
+    /// ONE body across the module.
+    #[test]
+    fn test_load_deploy_yaml_and_resolve_env_body_pins_wording_and_delegation() {
+        const SOURCE: &str = include_str!("rust_service.rs");
+        let fn_body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/rust_service.rs",
+            "fn load_deploy_yaml_and_resolve_env(",
+            "\n}\n",
+        );
+        assert!(
+            fn_body
+                .contains("\"deploy.yaml not found at {}\\n  \\\n             Required for {}\","),
+            "load_deploy_yaml_and_resolve_env body must carry the EXACT \
+             `\"deploy.yaml not found at {{}}\\n  Required for {{}}\"` \
+             bail wording that the pre-lift stanzas at \
+             `resolve_namespace_for_env` and `get_manifest_path_for_env` \
+             each restated verbatim. The `{{}}` interpolation slot for \
+             the purpose phrase decouples the two consumers' \
+             domain-specific trailers from the shared miss wording \
+             — a drift here would silently emit two different \
+             user-facing errors for the same deploy.yaml-missing \
+             failure. Body was:\n{fn_body}"
+        );
+        assert!(
+            fn_body.contains("purpose.requirement_phrase()"),
+            "load_deploy_yaml_and_resolve_env body must interpolate \
+             the `purpose.requirement_phrase()` trailer into the bail \
+             — dropping this delegation would let the miss diagnostic \
+             lose its consumer-specific trailer and read `Required for` \
+             with an empty tail. Body was:\n{fn_body}"
+        );
+        assert!(
+            fn_body.contains("resolve_deploy_yaml_from_service_dir()?"),
+            "load_deploy_yaml_and_resolve_env body must delegate the \
+             deploy.yaml path resolution to \
+             `resolve_deploy_yaml_from_service_dir()` — a hand-rolled \
+             path composition would drift from the standalone-or-\
+             monorepo resolution the shared primitive owns. Body was:\n{fn_body}"
+        );
+        assert!(
+            fn_body.contains("crate::repo::read_yaml_sync(&deploy_yaml_path)?"),
+            "load_deploy_yaml_and_resolve_env body must delegate YAML \
+             parsing to `crate::repo::read_yaml_sync` — a hand-rolled \
+             `serde_yaml::from_str(...)` would drift from the crate's \
+             canonical YAML-read surface. Body was:\n{fn_body}"
+        );
+        assert!(
+            fn_body.contains(".get(\"environment_aliases\")"),
+            "load_deploy_yaml_and_resolve_env body must spell the \
+             `environment_aliases` alias-resolve projection at ONE \
+             code line — dropping this projection would silently \
+             break alias-based environment resolution at both \
+             consumers by construction. Body was:\n{fn_body}"
+        );
+    }
+
+    /// Negative caller shield: after the lift, neither
+    /// `resolve_namespace_for_env` nor `get_manifest_path_for_env` may
+    /// restate the raw `"deploy.yaml not found at "` miss wording or
+    /// the raw `.get("environment_aliases")` alias-resolve projection
+    /// in their non-primitive bodies. A silent re-inline of the pre-lift
+    /// stanza compile-flips this shield rather than reaching operators
+    /// as inconsistent CI diagnostics.
+    ///
+    /// Scan bounds cover the whole module body before the FIRST
+    /// `\n#[cfg(test)]\n` marker via
+    /// [`crate::test_support::module_body_before_first_cfg_test`], so
+    /// this shield's own docstring mentions living inside a
+    /// `#[cfg(test)]` block below the boundary stay out of scope, and
+    /// the primitive's own body — which legitimately carries both
+    /// needles — is exempted from the caller-side scan by counting
+    /// occurrences: exactly ONE for each needle (in the primitive
+    /// body itself).
+    #[test]
+    fn test_load_deploy_yaml_and_resolve_env_negative_caller_shield_under_module() {
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            include_str!("rust_service.rs"),
+            "commands/rust_service.rs",
+        );
+        let miss_needle = "\"deploy.yaml not found at {}";
+        let miss_hits = crate::test_support::code_line_hits(body, miss_needle);
+        assert_eq!(
+            miss_hits.len(),
+            1,
+            "commands/rust_service.rs must spell the miss-diagnostic \
+             needle `{miss_needle}` at EXACTLY one code line — the \
+             `load_deploy_yaml_and_resolve_env` primitive body. Found \
+             {} code-line hit(s): {miss_hits:#?}. A hand-rolled \
+             re-inline at a consumer would push this count above one \
+             and re-open the drift class the primitive was landed to \
+             close.",
+            miss_hits.len()
+        );
+        let alias_needle = ".get(\"environment_aliases\")";
+        let alias_hits = crate::test_support::code_line_hits(body, alias_needle);
+        assert_eq!(
+            alias_hits.len(),
+            1,
+            "commands/rust_service.rs must spell the alias-resolve \
+             projection needle `{alias_needle}` at EXACTLY one code \
+             line — the `load_deploy_yaml_and_resolve_env` primitive \
+             body. Found {} code-line hit(s): {alias_hits:#?}. A \
+             consumer that re-copies the alias-resolve inline would \
+             push this count above one and drift the projection \
+             semantic away from the primitive's single point of truth.",
+            alias_hits.len()
+        );
+    }
+
+    /// Positive delegation shield: each consumer must call
+    /// [`super::load_deploy_yaml_and_resolve_env`] at least once in its
+    /// body, paired with the correct
+    /// [`super::DeployYamlLookupPurpose`] variant. A regression that
+    /// dropped the delegation would leave the negative shield above
+    /// trivially satisfied by absence — zero raw miss/alias hits, but
+    /// also zero delegating calls, and the consumer would have
+    /// stopped resolving deploy.yaml at all.
+    #[test]
+    fn test_load_deploy_yaml_and_resolve_env_positive_delegation_shield() {
+        const SOURCE: &str = include_str!("rust_service.rs");
+        let ns_body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/rust_service.rs",
+            "fn resolve_namespace_for_env(env: &str, namespace_override: Option<&str>) -> Result<String> {",
+            "\n}\n",
+        );
+        assert!(
+            ns_body.contains(
+                "load_deploy_yaml_and_resolve_env(env, DeployYamlLookupPurpose::NamespaceResolution)?"
+            ),
+            "resolve_namespace_for_env body must delegate through \
+             `load_deploy_yaml_and_resolve_env(env, \
+             DeployYamlLookupPurpose::NamespaceResolution)?` — a \
+             missing delegation would leave the negative shield's \
+             zero-hit assertion trivially satisfied by absence, with \
+             the consumer no longer resolving namespaces at all. \
+             Body was:\n{ns_body}"
+        );
+        let mp_body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/rust_service.rs",
+            "fn get_manifest_path_for_env(env: &str) -> Result<String> {",
+            "\n}\n",
+        );
+        assert!(
+            mp_body.contains(
+                "load_deploy_yaml_and_resolve_env(env, DeployYamlLookupPurpose::ManifestPathLookup)?"
+            ),
+            "get_manifest_path_for_env body must delegate through \
+             `load_deploy_yaml_and_resolve_env(env, \
+             DeployYamlLookupPurpose::ManifestPathLookup)?` — a \
+             missing delegation would leave the negative shield's \
+             zero-hit assertion trivially satisfied by absence, with \
+             the consumer no longer resolving manifest paths at all. \
+             Body was:\n{mp_body}"
+        );
+    }
+
+    /// Purpose-phrase enum shield: each
+    /// [`super::DeployYamlLookupPurpose`] variant must render the
+    /// exact `Required for <phrase>` trailer the pre-lift consumer
+    /// spelled verbatim in its bail. A drift at the enum body would
+    /// silently drift the operator-visible miss diagnostic at ONE
+    /// consumer only.
+    #[test]
+    fn test_deploy_yaml_lookup_purpose_requirement_phrase_pins_wording() {
+        use super::DeployYamlLookupPurpose;
+        assert_eq!(
+            DeployYamlLookupPurpose::NamespaceResolution.requirement_phrase(),
+            "environment-based namespace resolution",
+            "DeployYamlLookupPurpose::NamespaceResolution must render \
+             the exact `environment-based namespace resolution` \
+             trailer — the byte-form the pre-lift bail at \
+             `resolve_namespace_for_env` spelled verbatim."
+        );
+        assert_eq!(
+            DeployYamlLookupPurpose::ManifestPathLookup.requirement_phrase(),
+            "manifest path lookup",
+            "DeployYamlLookupPurpose::ManifestPathLookup must render \
+             the exact `manifest path lookup` trailer — the byte-form \
+             the pre-lift bail at `get_manifest_path_for_env` spelled \
+             verbatim."
         );
     }
 }
