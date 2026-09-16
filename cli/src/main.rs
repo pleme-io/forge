@@ -110,6 +110,7 @@ mod probe_dump;
 mod probe_verifying;
 mod product_service_id;
 mod prompt_confirm;
+mod push_op_label;
 mod pushed_image_ref_list;
 mod rebac_keys_probe;
 mod regenerated_lockfile_commit_reminder;

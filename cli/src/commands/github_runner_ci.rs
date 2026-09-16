@@ -845,7 +845,7 @@ async fn push_with_retry(
     // (the `attempts < retries || safe_mode` guard was always true).
     // The migration fixes that bug by construction.
     let policy = RetryPolicy::network_or_immediate(safe_mode);
-    let op = format!("push {}:{}", registry, tag);
+    let op = crate::push_op_label::push_op_label(registry, tag);
 
     // doca takes --registry/--image separately; a base with no '/' is refused
     // rather than guessed at (a wrong split pushes to a different repository

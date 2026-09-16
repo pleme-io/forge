@@ -549,7 +549,7 @@ pub async fn push_with_retry(
         .to_string();
 
     let policy = RetryPolicy::network();
-    let op = format!("push {}:{}", registry, tag);
+    let op = crate::push_op_label::push_op_label(registry, tag);
 
     // doca wants --registry/--image separately where skopeo took one composed
     // reference. `split_composed_registry_base` names the doca-side first-'/'
