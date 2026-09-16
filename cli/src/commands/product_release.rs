@@ -422,7 +422,7 @@ pub async fn product_release(
 
         if svc_release.should_build_artifact(target_env) {
             // Map service name to Docker image name (convention: {product}-{service})
-            let local_image = format!("{}-{}", product, svc.name);
+            let local_image = crate::product_service_id::product_service_id(&product, &svc.name);
             let registry_url =
                 DeployConfig::load_service_registry_url(&product, &svc.path, &repo_root)?;
 

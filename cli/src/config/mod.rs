@@ -937,7 +937,8 @@ impl DeployConfig {
     pub fn kubernetes_label_selector(&self) -> String {
         // Build the app label value as {product}-{service} to match K8s resource labels
         // e.g., myproduct-backend, myproduct-api
-        let app_value = format!("{}-{}", self.product.name, self.service.name);
+        let app_value =
+            crate::product_service_id::product_service_id(&self.product.name, &self.service.name);
         format!(
             "{}={},{}={}",
             self.global.kubernetes.service_label_key,

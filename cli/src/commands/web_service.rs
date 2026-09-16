@@ -110,7 +110,7 @@ pub async fn web_regenerate(product: String, service: String, repo_root: String)
     crate::ui::print_command_intro_banner(
         "🔄",
         "Regenerating",
-        &format!("{}-{}", product, service),
+        &crate::product_service_id::product_service_id(&product, &service),
         "dependencies",
     );
 

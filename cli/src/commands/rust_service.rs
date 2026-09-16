@@ -1553,7 +1553,12 @@ pub async fn orchestrate_release(
                 .migration
                 .shinka_migration_name
                 .clone()
-                .unwrap_or_else(|| format!("{}-{}", deploy_config.product.name, service));
+                .unwrap_or_else(|| {
+                    crate::product_service_id::product_service_id(
+                        &deploy_config.product.name,
+                        &service,
+                    )
+                });
             let expected_image_tag = deploy_tag.clone();
             crate::commands::migrations::set_expected_tag_if_exists(
                 &migration_name,

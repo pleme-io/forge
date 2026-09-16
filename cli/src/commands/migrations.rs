@@ -776,7 +776,7 @@ pub async fn check_and_reset_shinka_migration(
     service: &str,
     namespace: &str,
 ) -> Result<bool> {
-    let migration_name = format!("{}-{}", product, service);
+    let migration_name = crate::product_service_id::product_service_id(product, service);
 
     // Check if DatabaseMigration exists
     let check = kubectl_command_async()
@@ -995,7 +995,7 @@ pub async fn wait_for_shinka_migration(
 ) -> Result<()> {
     let migration_name = migration_name_override
         .map(|s| s.to_string())
-        .unwrap_or_else(|| format!("{}-{}", product, service));
+        .unwrap_or_else(|| crate::product_service_id::product_service_id(product, service));
 
     println!();
     println!(

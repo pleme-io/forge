@@ -106,6 +106,7 @@ mod path_builder;
 mod post_deploy_http_client;
 mod probe_dump;
 mod probe_verifying;
+mod product_service_id;
 mod pushed_image_ref_list;
 mod rebac_keys_probe;
 mod registry_field;
