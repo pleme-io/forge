@@ -372,9 +372,7 @@ pub fn bump(name: &str, language: &str, level: &str, working_dir: &str) -> Resul
             let crate2nix = crate2nix_bin();
             if which::which(&crate2nix).is_ok() {
                 info!("Regenerating Cargo.nix...");
-                let mut cmd = Command::new(&crate2nix);
-                cmd.args(["generate"]).current_dir(dir);
-                run_inherited_status_sync(cmd, "crate2nix generate")?;
+                crate::nix::run_crate2nix_in_sync(&crate2nix, &dir)?;
             }
 
             let new_ver = version::read_cargo_version(&dir.join("Cargo.toml"))?;
@@ -1432,6 +1430,17 @@ mod status_spawn_routing_tests {
     /// warnings failed (exit 101)` — pre-lift phase context PLUS the
     /// exit code the canonical envelope now carries by construction.
     ///
+    /// After the `crate::nix::run_crate2nix_in_sync` lift, `bump`'s
+    /// optional `crate2nix generate` spawn is one further hop away from
+    /// this module's `run_inherited_status_sync` frontier — the
+    /// pass-through primitive's own single body routes the spawn through
+    /// `run_inherited_status_sync` at ONE point of truth, so the module
+    /// body here counts one fewer direct delegation while the canonical
+    /// envelope reaches the operator log surface unchanged. The
+    /// `min_delegations` floor below drops from 4 to 3 to reflect that
+    /// migration; the `nix::run_crate2nix_in_sync` frontier carries its
+    /// own dedicated status-only-spawn tests.
+    ///
     /// The `run_cmd` helper migration is the load-bearing lift: `run_cmd`
     /// is called at seven sites in this module (`check`'s three cargo/zig
     /// invocations, `regenerate`'s single `crate2nix generate`,
@@ -1468,10 +1477,13 @@ mod status_spawn_routing_tests {
         crate::test_support::assert_source_routes_status_only_spawns_through_run_inherited_status_sync(
             include_str!("tool.rs"),
             "commands/tool.rs",
-            4,
-            "all four status-only spawns (`gh release create <tag>` / \
-             `crate2nix generate` / `cargo clippy -- -D warnings` / \
-             the `run_cmd(program, args)` helper body)",
+            3,
+            "the three remaining direct status-only spawns \
+             (`gh release create <tag>` / `cargo clippy -- -D warnings` / \
+             the `run_cmd(program, args)` helper body); `bump`'s \
+             `crate2nix generate` spawn now routes through \
+             `crate::nix::run_crate2nix_in_sync`, whose own body carries \
+             the sole `run_inherited_status_sync` frontier for that spawn",
         );
     }
 }

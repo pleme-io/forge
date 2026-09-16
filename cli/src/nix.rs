@@ -421,6 +421,74 @@ pub async fn run_crate2nix(crate2nix_path: &str) -> Result<()> {
     Ok(())
 }
 
+/// The `_in` sibling of [`run_crate2nix`]: `crate2nix generate` scoped to a
+/// caller-supplied working directory, so the regenerated `Cargo.nix` lands
+/// next to that directory's `Cargo.toml` rather than the caller's cwd.
+///
+/// # Arguments
+///
+/// * `crate2nix_path` - Resolved `CRATE2NIX` sigil (or `"crate2nix"` on PATH)
+/// * `dir` - Working directory to scope the spawn to; the primitive sets
+///   `.current_dir(dir)` on the spawned `tokio::process::Command`.
+///
+/// # Errors
+///
+/// Same canonical `{op} failed (exit {code})` record shape as
+/// [`run_crate2nix`], routed through the shared
+/// [`crate::retry::run_inherited_status`] envelope, with the canonical
+/// outer `"Failed to regenerate Cargo.nix"` narrative attached by
+/// construction.
+///
+/// # Duplication lift
+///
+/// Pre-lift two consumer sites in `commands/web_service.rs`
+/// (`web_regenerate`'s Hanabi `Cargo.nix` regeneration and
+/// `web_cargo_update`'s post-`cargo update` regeneration, both bound to
+/// `pkgs/platform/hanabi`) each spelled the three-line
+///
+/// ```text
+/// let mut cmd = Command::new(&crate2nix);
+/// cmd.arg("generate").current_dir(&hanabi_dir);
+/// crate::retry::run_inherited_status(cmd, "crate2nix generate")
+///     .await
+///     .context("Failed to regenerate Hanabi Cargo.nix")?;
+/// ```
+///
+/// stanza inline. Post-lift each collapses to a single
+/// `crate::nix::run_crate2nix_in(&crate2nix, &hanabi_dir).await?` call and
+/// inherits both the canonical spawn-error envelope and the canonical
+/// `"Failed to regenerate Cargo.nix"` narrative from the primitive.
+///
+/// The sync sibling [`run_crate2nix_in_sync`] carries the same shape over
+/// `std::process::Command`, closing the third pre-lift site
+/// (`commands/tool.rs::bump`'s Rust arm — `run_inherited_status_sync(cmd,
+/// "crate2nix generate")?` scoped to the per-tool `dir`).
+pub async fn run_crate2nix_in(crate2nix_path: &str, dir: impl AsRef<Path>) -> Result<()> {
+    let mut cmd = Command::new(crate2nix_path);
+    cmd.args(["generate"]).current_dir(dir.as_ref());
+    crate::retry::run_inherited_status(cmd, "crate2nix generate")
+        .await
+        .context("Failed to regenerate Cargo.nix")?;
+    Ok(())
+}
+
+/// Sync sibling of [`run_crate2nix_in`] over `std::process::Command`,
+/// routing through [`crate::retry::run_inherited_status_sync`] so the
+/// canonical `{op} failed (exit {code})` record shape and the outer
+/// `"Failed to regenerate Cargo.nix"` narrative are the same envelope the
+/// async sibling emits by construction rather than by parallel free-authored
+/// bail wording that a later edit could silently drift.
+///
+/// See [`run_crate2nix_in`] for the shared duplication-lift rationale and
+/// the pre-lift call-site inventory.
+pub fn run_crate2nix_in_sync(crate2nix_path: &str, dir: impl AsRef<Path>) -> Result<()> {
+    let mut cmd = std::process::Command::new(crate2nix_path);
+    cmd.args(["generate"]).current_dir(dir.as_ref());
+    crate::retry::run_inherited_status_sync(cmd, "crate2nix generate")
+        .context("Failed to regenerate Cargo.nix")?;
+    Ok(())
+}
+
 /// Run `nix run nixpkgs#crate2nix -- generate [extra_generate_args…]` — the
 /// nix-wrapped sibling of [`run_crate2nix`] the flake-registry consumer surface
 /// uses when a direct `crate2nix` binary is not on PATH but a `nix` binary is
@@ -856,6 +924,102 @@ mod tests {
         let chain = format!("{:?}", err);
         assert!(
             chain.contains("crate2nix generate failed (exit 9)"),
+            "must carry canonical (op, exit_code) record; got: {chain}"
+        );
+        assert!(
+            chain.contains("Failed to regenerate Cargo.nix"),
+            "must carry outer caller-narrative; got: {chain}"
+        );
+    }
+
+    /// The `_in` primitive must spawn `crate2nix generate` INSIDE the
+    /// caller-supplied working directory, not the caller's cwd. Pinned with
+    /// a shim that records `pwd` to a side-channel marker file under the
+    /// supplied dir — the assertion reads that file back and canonicalizes
+    /// both sides so an OS-level `/private` prefix on macOS doesn't false-
+    /// mismatch a Linux-hermetic build. A future regression that silently
+    /// dropped `current_dir` (e.g. a refactor that moved the builder chain)
+    /// would leave the shim writing to the caller's cwd, the marker file
+    /// missing from the expected location, and the assertion firing before
+    /// downstream sites' `Cargo.nix` regenerated in the wrong tree.
+    #[tokio::test]
+    async fn test_run_crate2nix_in_honors_working_dir() {
+        let (_shim_dir, shim) =
+            make_executable_shim("crate2nix", "#!/bin/sh\npwd > .observed-cwd\nexit 0\n");
+        let work = tempfile::tempdir().expect("temp dir");
+        let work_canonical = std::fs::canonicalize(work.path()).expect("canonicalize work");
+        run_crate2nix_in(&shim, work.path())
+            .await
+            .expect("success path");
+        let observed_raw = std::fs::read_to_string(work.path().join(".observed-cwd"))
+            .expect("shim must have written .observed-cwd inside the supplied working_dir");
+        let observed = std::fs::canonicalize(observed_raw.trim()).expect("canonicalize observed");
+        assert_eq!(
+            observed, work_canonical,
+            "shim's observed CWD must equal the working_dir passed to run_crate2nix_in"
+        );
+    }
+
+    /// Non-zero exit from the `_in` primitive must carry the canonical
+    /// (op, exit_code) record AND the outer `"Failed to regenerate
+    /// Cargo.nix"` narrative — same envelope [`run_crate2nix`]'s pinning
+    /// test asserts, so the two siblings share the operator log surface by
+    /// construction rather than by parallel free-authored bail wording that
+    /// a later edit to one half could silently drift.
+    #[tokio::test]
+    async fn test_run_crate2nix_in_nonzero_exit_carries_structural_record() {
+        let (_shim_dir, shim) = make_executable_shim("crate2nix", "#!/bin/sh\nexit 9\n");
+        let work = tempfile::tempdir().expect("temp dir");
+        let err = run_crate2nix_in(&shim, work.path())
+            .await
+            .expect_err("nonzero exit must fail");
+        let chain = format!("{:?}", err);
+        assert!(
+            chain.contains("crate2nix generate failed (exit 9)"),
+            "must carry canonical (op, exit_code) record; got: {chain}"
+        );
+        assert!(
+            chain.contains("Failed to regenerate Cargo.nix"),
+            "must carry outer caller-narrative; got: {chain}"
+        );
+    }
+
+    /// Sync sibling of [`test_run_crate2nix_in_honors_working_dir`] — the
+    /// [`run_crate2nix_in_sync`] surface over `std::process::Command`. Pinned
+    /// so a future regression that added `current_dir` to only one of the
+    /// two siblings (silently splitting the "spawn scoped to `dir`" contract
+    /// across the async/sync frontier) fails-before-passes-after here.
+    #[test]
+    fn test_run_crate2nix_in_sync_honors_working_dir() {
+        let (_shim_dir, shim) =
+            make_executable_shim("crate2nix", "#!/bin/sh\npwd > .observed-cwd\nexit 0\n");
+        let work = tempfile::tempdir().expect("temp dir");
+        let work_canonical = std::fs::canonicalize(work.path()).expect("canonicalize work");
+        run_crate2nix_in_sync(&shim, work.path()).expect("success path");
+        let observed_raw = std::fs::read_to_string(work.path().join(".observed-cwd"))
+            .expect("shim must have written .observed-cwd inside the supplied working_dir");
+        let observed = std::fs::canonicalize(observed_raw.trim()).expect("canonicalize observed");
+        assert_eq!(
+            observed, work_canonical,
+            "shim's observed CWD must equal the working_dir passed to run_crate2nix_in_sync"
+        );
+    }
+
+    /// Sync sibling of
+    /// [`test_run_crate2nix_in_nonzero_exit_carries_structural_record`]. The
+    /// sync primitive routes through
+    /// [`crate::retry::run_inherited_status_sync`], which shares the
+    /// [`crate::retry::classify_inherited_status`] tail with the async
+    /// sibling — so the record shape is the SAME envelope by construction,
+    /// not by parallel wording that could silently drift.
+    #[test]
+    fn test_run_crate2nix_in_sync_nonzero_exit_carries_structural_record() {
+        let (_shim_dir, shim) = make_executable_shim("crate2nix", "#!/bin/sh\nexit 11\n");
+        let work = tempfile::tempdir().expect("temp dir");
+        let err = run_crate2nix_in_sync(&shim, work.path()).expect_err("nonzero exit must fail");
+        let chain = format!("{:?}", err);
+        assert!(
+            chain.contains("crate2nix generate failed (exit 11)"),
             "must carry canonical (op, exit_code) record; got: {chain}"
         );
         assert!(

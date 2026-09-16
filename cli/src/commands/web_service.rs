@@ -176,9 +176,7 @@ pub async fn web_regenerate(product: String, service: String, repo_root: String)
         "(crate2nix generate)".dimmed()
     );
 
-    let mut cmd = Command::new(&crate2nix);
-    cmd.arg("generate").current_dir(&hanabi_dir);
-    crate::retry::run_inherited_status(cmd, "crate2nix generate")
+    crate::nix::run_crate2nix_in(&crate2nix, &hanabi_dir)
         .await
         .context("Failed to regenerate Hanabi Cargo.nix")?;
     crate::ui::print_step_pass("Hanabi Cargo.nix regenerated");
@@ -267,9 +265,7 @@ pub async fn web_cargo_update(product: String, service: String, repo_root: Strin
         "(crate2nix generate)".dimmed()
     );
 
-    let mut cmd = Command::new(&crate2nix);
-    cmd.arg("generate").current_dir(&hanabi_dir);
-    crate::retry::run_inherited_status(cmd, "crate2nix generate")
+    crate::nix::run_crate2nix_in(&crate2nix, &hanabi_dir)
         .await
         .context("Failed to regenerate Hanabi Cargo.nix")?;
     crate::ui::print_step_pass("Cargo.nix regenerated");
