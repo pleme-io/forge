@@ -60,6 +60,7 @@ mod version;
 
 // Legacy modules (to be migrated)
 mod advisory_warning;
+mod attic_cache_alias;
 mod attic_configure_step;
 mod attic_push_step;
 mod bookmark_git_sha_field;

@@ -760,7 +760,7 @@ impl AtticClient {
     /// compose through this method rather than spawning `attic use`
     /// directly.
     pub async fn use_cache(&self, server: &str) -> Result<(), AtticError> {
-        let cache_ref = format!("{}:{}", server, self.cache_name);
+        let cache_ref = crate::attic_cache_alias::attic_cache_alias(server, &self.cache_name);
         let mut cmd = self.command();
         cmd.args(["use", &cache_ref])
             .stdout(Stdio::piped())
@@ -777,10 +777,7 @@ impl AtticClient {
             },
         )?;
 
-        info!(
-            "Selected active Attic cache: {}:{}",
-            server, self.cache_name
-        );
+        info!("Selected active Attic cache: {}", cache_ref);
         Ok(())
     }
 

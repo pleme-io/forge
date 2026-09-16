@@ -227,7 +227,7 @@ pub async fn execute(
         info!("   This includes ALL derivations (granular caching)");
 
         let result_path = crate::nix_result_link_path::nix_result_link_path(&working_dir, &output);
-        let cache_ref = format!("{}:{}", attic_server, cache_name);
+        let cache_ref = crate::attic_cache_alias::attic_cache_alias(&attic_server, &cache_name);
 
         // Enumerate the recursive closure via the canonical typed
         // primitive `crate::nix::path_info_recursive`. Lifts the

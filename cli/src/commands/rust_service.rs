@@ -631,7 +631,8 @@ pub async fn build_rust_service(
         println!("   This includes ALL Rust crate derivations (granular caching)");
         println!();
 
-        let cache_target = format!("{}:{}", deploy_config.cache_server(), cache_name);
+        let cache_target =
+            crate::attic_cache_alias::attic_cache_alias(deploy_config.cache_server(), &cache_name);
 
         // Per-arch closure push routes through the local
         // [`push_arch_closure_to_attic`] helper below — one call per
