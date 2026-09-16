@@ -321,22 +321,17 @@ pub fn status(workspace: &str, working_dir: &str) -> Result<()> {
 
 // --- Helpers ---
 
-/// Prompt user for confirmation.
+/// Prompt user for confirmation. Wraps
+/// [`crate::prompt_confirm::prompt_confirm`] under
+/// [`crate::prompt_confirm::PromptDefault::No`] (default cancels, so
+/// an operator who pressed Enter at a terraform SDLC-phase prompt
+/// does NOT accidentally apply an infrastructure change) and elevates
+/// a cancel to an `anyhow::bail!` — the caller pipeline must NOT fall
+/// through to the next phase on a declined confirmation.
 fn confirm(message: &str) -> Result<()> {
-    use std::io::{BufRead, Write};
-
-    print!("{} [y/N] ", message);
-    std::io::stdout().flush()?;
-
-    let stdin = std::io::stdin();
-    let mut line = String::new();
-    stdin.lock().read_line(&mut line)?;
-
-    let answer = line.trim().to_lowercase();
-    if answer != "y" && answer != "yes" {
+    if !crate::prompt_confirm::prompt_confirm(message, crate::prompt_confirm::PromptDefault::No)? {
         bail!("Operation cancelled by user");
     }
-
     Ok(())
 }
 

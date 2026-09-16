@@ -9,7 +9,6 @@
 
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
-use std::io::Write;
 
 use crate::commands::cluster_overlay_release_preamble::format_amd64_release_tag;
 use crate::config::DeployConfig;
@@ -137,18 +136,14 @@ pub async fn execute(
     println!();
 
     // ─── Confirm ────────────────────────────────────────────────────────────
-    if !force {
-        print!("Proceed with rollback? [Y/n] ");
-        std::io::stdout().flush()?;
-
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-        let answer = input.trim().to_lowercase();
-
-        if !answer.is_empty() && answer != "y" && answer != "yes" {
-            println!("{}", "Rollback cancelled.".yellow());
-            return Ok(());
-        }
+    if !force
+        && !crate::prompt_confirm::prompt_confirm(
+            "Proceed with rollback?",
+            crate::prompt_confirm::PromptDefault::Yes,
+        )?
+    {
+        println!("{}", "Rollback cancelled.".yellow());
+        return Ok(());
     }
 
     // ─── Resolve target environments ────────────────────────────────────────
