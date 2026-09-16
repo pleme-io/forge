@@ -74,6 +74,7 @@ mod docker_installed_preflight;
 mod docker_tag_argv;
 mod first_pod_field_argv;
 mod flake_attr_ref;
+mod flux_gitops_monitor_hint;
 mod generate_cargo_nix_step;
 mod git;
 mod git_sha_field;

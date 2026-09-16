@@ -541,10 +541,7 @@ pub async fn update_federation(
     crate::commands::flux::reconcile(namespace.clone()).await?;
 
     crate::ui::print_step_success("Hive Router update triggered via GitOps");
-    crate::ui::print_step_info(&format!(
-        "Flux will handle deployment - use 'kubectl get pods -n {}' to monitor",
-        namespace
-    ));
+    crate::flux_gitops_monitor_hint::print_flux_gitops_monitor_hint(&namespace);
 
     // Notify BFF to reload supergraph (if configured)
     // This provides instant propagation without waiting for file watcher polling

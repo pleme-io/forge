@@ -2015,10 +2015,7 @@ pub async fn deploy_rust_service_with_tag(
 
     if watch {
         println!();
-        crate::ui::print_step_info(&format!(
-            "Flux will handle deployment - use 'kubectl get pods -n {}' to monitor",
-            namespace
-        ));
+        crate::flux_gitops_monitor_hint::print_flux_gitops_monitor_hint(&namespace);
     }
 
     crate::stage_completion_ack::print_stage_completion_ack("GitOps deployment triggered!");
