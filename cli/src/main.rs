@@ -115,6 +115,7 @@ mod retry;
 mod screenshot_diag;
 mod shinka_migration_reset_ack;
 mod skipping_step;
+mod stage_completion_ack;
 mod step_header;
 mod success_step;
 mod supergraph_content_hash;

@@ -9016,9 +9016,11 @@ mod tests {
             "line 0 must NOT carry the `green` + `bold` compound ANSI \
              sequence — every pre-lift consumer spelled plain \
              `.green()` on the message, and `.green().bold()` belongs \
-             to the two straggler milestone sites (`rust_service.rs` \
-             lines 700 and 1975) deliberately excluded from this \
-             lift's sibling class; got {:?}",
+             to the heavier stage-completion grammar now lifted onto \
+             [`crate::stage_completion_ack::print_stage_completion_ack`] \
+             (the two `commands/rust_service.rs` terminator sites, \
+             deliberately excluded from this lift's sibling class); \
+             got {:?}",
             lines[0]
         );
 
@@ -9045,11 +9047,13 @@ mod tests {
     /// shield. The exact-shape needle `println!("✅ {}", "` co-occurring
     /// with `".green());` on the SAME line uniquely identifies the
     /// pre-lift restatement — the two straggler `.green().bold()` sites
-    /// (`rust_service.rs` lines 700 and 1975) carry a heavier
-    /// milestone-level grammar deliberately excluded from this lift's
-    /// sibling class, and their `".green().bold());` suffix does not
-    /// match this shield's `".green());" needle, so they survive
-    /// untouched.
+    /// in `rust_service.rs` carried a heavier stage-completion grammar
+    /// deliberately excluded from this lift's sibling class; those two
+    /// sites are now lifted onto
+    /// [`crate::stage_completion_ack::print_stage_completion_ack`],
+    /// closing the carve-out. This shield's `".green());"` needle
+    /// still does not match their `".green().bold());"` suffix, so
+    /// the two shields remain independent.
     #[test]
     fn print_step_success_callers_delegate_through_primitive() {
         const CALLERS: &[(&str, &str)] = &[

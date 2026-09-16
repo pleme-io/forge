@@ -663,8 +663,7 @@ pub async fn build_rust_service(
         );
     }
 
-    println!();
-    println!("✅ {}", "Build complete!".green().bold());
+    crate::stage_completion_ack::print_stage_completion_ack("Build complete!");
     println!("   AMD64: result-amd64");
     if should_build_arm64 {
         println!("   ARM64: result-arm64");
@@ -2017,8 +2016,7 @@ pub async fn deploy_rust_service_with_tag(
         ));
     }
 
-    println!();
-    println!("✅ {}", "GitOps deployment triggered!".green().bold());
+    crate::stage_completion_ack::print_stage_completion_ack("GitOps deployment triggered!");
 
     Ok(tag_suffix)
 }
