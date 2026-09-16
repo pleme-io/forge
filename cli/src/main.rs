@@ -110,6 +110,7 @@ mod probe_verifying;
 mod product_service_id;
 mod pushed_image_ref_list;
 mod rebac_keys_probe;
+mod regenerated_lockfile_commit_reminder;
 mod registry_field;
 mod repo;
 mod repo_root_utf8;

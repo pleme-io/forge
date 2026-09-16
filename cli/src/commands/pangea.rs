@@ -491,7 +491,9 @@ pub async fn regenerate(pangea_dir: Option<String>) -> Result<()> {
             .bright_green()
             .bold()
     );
-    println!("   Don't forget to commit the updated Cargo.lock and Cargo.nix files.");
+    crate::regenerated_lockfile_commit_reminder::print_regenerated_lockfile_commit_reminder(
+        crate::regenerated_lockfile_commit_reminder::RegeneratedLockfilePair::CargoNix,
+    );
     println!();
 
     Ok(())
@@ -557,7 +559,9 @@ pub async fn regenerate_compiler() -> Result<()> {
             .bright_green()
             .bold()
     );
-    println!("   Don't forget to commit the updated Gemfile.lock and gemset.nix files.");
+    crate::regenerated_lockfile_commit_reminder::print_regenerated_lockfile_commit_reminder(
+        crate::regenerated_lockfile_commit_reminder::RegeneratedLockfilePair::GemsetNix,
+    );
     println!();
 
     Ok(())

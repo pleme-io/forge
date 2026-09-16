@@ -632,7 +632,9 @@ pub async fn regenerate() -> Result<()> {
 
     println!();
     crate::ui::print_success("Bootstrap Cargo.nix regenerated successfully!");
-    println!("   Don't forget to commit the updated Cargo.lock and Cargo.nix files.");
+    crate::regenerated_lockfile_commit_reminder::print_regenerated_lockfile_commit_reminder(
+        crate::regenerated_lockfile_commit_reminder::RegeneratedLockfilePair::CargoNix,
+    );
     println!();
 
     Ok(())
