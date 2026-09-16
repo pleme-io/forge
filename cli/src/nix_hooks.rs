@@ -35,7 +35,7 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use tokio::process::Command;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::store_path::StorePath;
 
@@ -74,8 +74,8 @@ impl NixHooks {
                     package_path: Some(path_buf),
                 });
             } else {
-                warn!(
-                    "⚠️  NIX_HOOKS_PATH is set but path doesn't exist: {}",
+                crate::warn_advisory!(
+                    "NIX_HOOKS_PATH is set but path doesn't exist: {}",
                     path_buf.display()
                 );
             }
@@ -173,7 +173,7 @@ impl NixHooks {
         {
             Ok(sp) => sp,
             Err(e) => {
-                warn!("⚠️  Failed to build nix-hooks package: {}", e);
+                crate::warn_advisory!("Failed to build nix-hooks package: {}", e);
                 return Ok(None);
             }
         };
@@ -191,7 +191,7 @@ impl NixHooks {
         let path_buf: PathBuf = <StorePath as AsRef<Path>>::as_ref(&store_path).to_path_buf();
 
         if !path_buf.exists() {
-            warn!("⚠️  nix-hooks store path doesn't exist: {}", store_path);
+            crate::warn_advisory!("nix-hooks store path doesn't exist: {}", store_path);
             return Ok(None);
         }
 
@@ -209,8 +209,8 @@ impl NixHooks {
         if hook_path.exists() {
             Some(crate::repo::path_to_string_lossy(&hook_path))
         } else {
-            warn!(
-                "⚠️  attic-push-hook binary not found at expected path: {:?}",
+            crate::warn_advisory!(
+                "attic-push-hook binary not found at expected path: {:?}",
                 hook_path
             );
             None
@@ -325,7 +325,7 @@ pub async fn configure_post_build_hook(
     let hooks = match NixHooks::discover().await {
         Ok(h) => h,
         Err(e) => {
-            warn!("⚠️  Failed to discover nix-hooks: {}", e);
+            crate::warn_advisory!("Failed to discover nix-hooks: {}", e);
             return false;
         }
     };

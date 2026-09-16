@@ -1,6 +1,6 @@
 //! Operator-facing advisory-warning grammar.
 //!
-//! Fourteen pre-lift sibling sites across
+//! Nineteen pre-lift sibling sites across
 //! `commands/{deploy (×1: Cloudflare-enabled-but-missing-configuration
 //! guard), github_runner_ci (×3: rollout-timeout + image-mismatch +
 //! could-not-verify-deployed-image branches on the watch path),
@@ -11,13 +11,19 @@
 //! branches on the test orchestrator), web_build_verify (×5: env.js /
 //! version.json not-referenced, no-JS/CSS-assets-found,
 //! non-hashed-asset-name, assets-directory-not-found branches on the
-//! bundle-consistency probe)}.rs` each restated the
-//! `warn!("⚠️  <message>", <args?>)` stanza verbatim — a `⚠️` emoji
-//! glyph followed by two ASCII spaces, then a caller-composed message
-//! (which may or may not carry `format_args!`-style interpolation),
-//! routed through [`tracing::warn!`]. Post-lift the 14 sites reach
-//! for [`warn_advisory!`], and the prefix + glyph + spacing are
-//! decided once here.
+//! bundle-consistency probe)}.rs` and `nix_hooks.rs` (×5:
+//! NIX_HOOKS_PATH-set-but-path-missing on the env-var override branch,
+//! nix-hooks-build-failed and nix-hooks-store-path-missing on the
+//! `build_and_get_path_with_bin` fallback, attic-push-hook-binary-
+//! missing on the `attic_push_hook_path` accessor, and
+//! nix-hooks-discovery-failed on `configure_post_build_hook`) each
+//! restated the `warn!("⚠️  <message>", <args?>)` stanza verbatim —
+//! a `⚠️` emoji glyph followed by two ASCII spaces, then a
+//! caller-composed message (which may or may not carry
+//! `format_args!`-style interpolation), routed through
+//! [`tracing::warn!`]. Post-lift the 19 sites reach for
+//! [`warn_advisory!`], and the prefix + glyph + spacing are decided
+//! once here.
 //!
 //! # Distinct from the sibling warn primitives
 //!
@@ -267,18 +273,23 @@ mod tests {
     }
 
     /// Caller shield — asserts no source line under `cli/src/commands/`
-    /// still spells the pre-lift shape `warn!("⚠️  ...")` inline. Every
+    /// or the sibling module `cli/src/nix_hooks.rs` still spells the
+    /// pre-lift shape `warn!("⚠️  ...")` inline. Every
     /// non-`(non-fatal)` advisory-warning emission that carries the
     /// `⚠️  ` glyph prefix must route through
     /// [`crate::warn_advisory!`], which expands to the canonical
     /// `tracing::warn!(...)` call at the caller's location.
     ///
     /// The shield scans EVERY `commands/*.rs` module rather than only
-    /// the eight pre-lift files so a future orchestrator that
+    /// the pre-lift files so a future orchestrator that
     /// surfaces a new advisory (a new sub-step in a new command
     /// module) reaches for `warn_advisory!` on first grep of `ui.rs`
     /// / this module, not by copy-pasting a raw `warn!("⚠️  ...", ...)`
-    /// stanza from `github_runner_ci.rs`.
+    /// stanza from `github_runner_ci.rs`. `nix_hooks.rs` joins the
+    /// scan surface post-migration so the five nix-hooks-discovery
+    /// advisories (NIX_HOOKS_PATH-missing, build-failed,
+    /// store-path-missing, hook-binary-missing, discovery-failed)
+    /// cannot regress to a raw `warn!("⚠️  ...")` spelling either.
     ///
     /// The `.contains` needle is the pre-lift `warn!("⚠️  ` opener
     /// (the emoji-glyph prefix combined with the `warn!` macro-call
@@ -293,16 +304,23 @@ mod tests {
     #[test]
     fn no_command_module_still_spells_raw_advisory_warn() {
         use std::path::PathBuf;
-        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src")
-            .join("commands");
-        let mut offenders: Vec<(PathBuf, usize, String)> = Vec::new();
+        let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let commands_dir = src_dir.join("commands");
+        let mut scan_targets: Vec<PathBuf> = Vec::new();
         for entry in std::fs::read_dir(&commands_dir).unwrap().flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                continue;
+            if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                scan_targets.push(path);
             }
-            let source = std::fs::read_to_string(&path).unwrap();
+        }
+        // Extend the scan surface to include the sibling
+        // `nix_hooks.rs` post-migration site so a regression there is
+        // caught by the same negative shield.
+        scan_targets.push(src_dir.join("nix_hooks.rs"));
+
+        let mut offenders: Vec<(PathBuf, usize, String)> = Vec::new();
+        for path in &scan_targets {
+            let source = std::fs::read_to_string(path).unwrap();
             for (idx, line) in source.lines().enumerate() {
                 let trimmed = line.trim_start();
                 if trimmed.starts_with("//") || trimmed.starts_with("///") {
@@ -321,37 +339,49 @@ mod tests {
         assert!(
             offenders.is_empty(),
             "raw `warn!(\"\u{26a0}\u{fe0f}  ...\", <args?>)` advisory-warning \
-             stanza(s) survive under `commands/` — route each through \
-             `crate::warn_advisory!(<fmt>, <args?>)` instead (or through \
+             stanza(s) survive under `commands/` or `nix_hooks.rs` — route each \
+             through `crate::warn_advisory!(<fmt>, <args?>)` instead (or through \
              `crate::warn_nonfatal!` when the advisory carries a caught error \
              with a `(non-fatal)` marker):\n{:#?}",
             offenders
         );
     }
 
-    /// Positive half of the shield: the eight pre-lift files MUST
+    /// Positive half of the shield: the pre-lift files MUST
     /// each forward through `crate::warn_advisory!(` at least once,
     /// so a migration that dropped a call site outright leaves the
     /// negative "no raw inline shape" scan trivially satisfied by
     /// absence but the positive count still fails.
+    ///
+    /// `nix_hooks.rs` joins the positive census with the five
+    /// nix-hooks-discovery advisory sites — three of which the
+    /// negative single-line shield already catches
+    /// (`Failed to build nix-hooks package`, `nix-hooks store path
+    /// doesn't exist`, `Failed to discover nix-hooks`), plus two the
+    /// negative shield MISSES because the `warn!(` opener wraps to a
+    /// separate line from the `"⚠️  ...` body (the
+    /// `NIX_HOOKS_PATH is set but path doesn't exist` and
+    /// `attic-push-hook binary not found` sites). The positive count
+    /// closes that single-line grep blind spot for the pre-lift
+    /// census.
     #[test]
     fn every_prelift_module_forwards_through_warn_advisory_macro() {
         use std::path::PathBuf;
-        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src")
-            .join("commands");
-        // (module basename, minimum forward count from the pre-lift census)
-        let expectations: &[(&str, usize)] = &[
-            ("deploy.rs", 1),
-            ("github_runner_ci.rs", 3),
-            ("comprehensive_release.rs", 2),
-            ("integration_tests.rs", 3),
-            ("web_build_verify.rs", 5),
+        let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let commands_dir = src_dir.join("commands");
+        // (module path relative to `src/`, minimum forward count from the pre-lift census)
+        let expectations: &[(PathBuf, usize)] = &[
+            (commands_dir.join("deploy.rs"), 1),
+            (commands_dir.join("github_runner_ci.rs"), 3),
+            (commands_dir.join("comprehensive_release.rs"), 2),
+            (commands_dir.join("integration_tests.rs"), 3),
+            (commands_dir.join("web_build_verify.rs"), 5),
+            (src_dir.join("nix_hooks.rs"), 5),
         ];
-        for (basename, min_count) in expectations {
-            let path = commands_dir.join(basename);
-            let source = std::fs::read_to_string(&path).unwrap();
+        for (path, min_count) in expectations {
+            let source = std::fs::read_to_string(path).unwrap();
             let forwards = source.matches("crate::warn_advisory!(").count();
+            let basename = path.file_name().unwrap().to_string_lossy();
             assert!(
                 forwards >= *min_count,
                 "{basename} must forward at least {min_count} advisory-warning \
