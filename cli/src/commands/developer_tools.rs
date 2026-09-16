@@ -439,13 +439,12 @@ pub async fn rust_dev(
     use std::time::Duration;
     use tokio::time::sleep;
 
-    println!(
-        "🚀 {} {} {}",
-        service.cyan().bold(),
-        "Local Development".bold(),
-        "(powered by forge)".dimmed()
+    crate::release_workflow_intro_banner::print_release_workflow_intro_banner(
+        &service,
+        "Local Development",
+        "(powered by forge)",
+        50,
     );
-    crate::ui::print_ascii_title_underline(50);
 
     // Get paths from environment
     let service_path = service_path_from_env()?;

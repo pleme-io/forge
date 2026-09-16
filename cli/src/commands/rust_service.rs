@@ -1207,18 +1207,17 @@ pub async fn orchestrate_release(
         "Build-Once-Promote Release"
     };
 
-    println!(
-        "🚀 {} {} {}",
-        service.cyan().bold(),
-        mode_label.bold(),
-        format!(
-            "({} environment{})",
-            environments.len(),
-            if environments.len() == 1 { "" } else { "s" }
-        )
-        .dimmed()
+    let env_count_detail = format!(
+        "({} environment{})",
+        environments.len(),
+        if environments.len() == 1 { "" } else { "s" }
     );
-    crate::ui::print_ascii_title_underline(60);
+    crate::release_workflow_intro_banner::print_release_workflow_intro_banner(
+        &service,
+        mode_label,
+        &env_count_detail,
+        60,
+    );
 
     // Show active vs available environments (skip for push-only)
     if !push_only {
@@ -1745,13 +1744,12 @@ pub async fn orchestrate_standalone_release(
         bail!("--deploy-only is not supported in standalone mode (no deploy.yaml). Use --image-path/--image-path-arm64 to push directly.");
     }
 
-    println!(
-        "🚀 {} {} {}",
-        service.cyan().bold(),
-        "Standalone Release".bold(),
-        "(no deploy.yaml — push only)".dimmed()
+    crate::release_workflow_intro_banner::print_release_workflow_intro_banner(
+        &service,
+        "Standalone Release",
+        "(no deploy.yaml — push only)",
+        60,
     );
-    crate::ui::print_ascii_title_underline(60);
 
     if image_path.is_none() && image_path_arm64.is_none() {
         bail!("Standalone release requires --image-path and/or --image-path-arm64");
@@ -2346,13 +2344,12 @@ pub async fn release_rust_service(
     _attic_token: String,
     _github_token: String,
 ) -> Result<()> {
-    println!(
-        "🚀 {} {} {}",
-        service.cyan().bold(),
-        "Service Release Workflow".bold(),
-        "(crate2nix)".dimmed()
+    crate::release_workflow_intro_banner::print_release_workflow_intro_banner(
+        &service,
+        "Service Release Workflow",
+        "(crate2nix)",
+        50,
     );
-    crate::ui::print_ascii_title_underline(50);
 
     // Load deployment configuration first (hierarchical: global → product → service)
     let deploy_config = DeployConfig::load_for_service(&service)?;

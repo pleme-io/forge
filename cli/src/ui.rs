@@ -14910,10 +14910,6 @@ mod tests {
     fn print_ascii_title_underline_callers_delegate_through_primitive() {
         const CALLERS: &[(&str, &str)] = &[
             (
-                include_str!("commands/rust_service.rs"),
-                "commands/rust_service.rs",
-            ),
-            (
                 include_str!("commands/developer_tools.rs"),
                 "commands/developer_tools.rs",
             ),
@@ -14935,6 +14931,21 @@ mod tests {
         // through the fused primitive. The negative re-inline check
         // still runs for this module below as part of a
         // whole-crate sweep.
+        //
+        // `commands/rust_service.rs` is likewise deliberately
+        // absent post-lift: its three pre-lift consumers of
+        // `crate::ui::print_ascii_title_underline(60|50)` — the
+        // `orchestrate_release`, `orchestrate_standalone_release`,
+        // and `release_rust_service` release-workflow intro banners
+        // — migrated onto the fused
+        // [`crate::release_workflow_intro_banner::print_release_workflow_intro_banner`]
+        // primitive, which delegates internally to
+        // [`super::write_ascii_title_underline`]. Post-lift the
+        // module has NO direct call to `print_ascii_title_underline`
+        // — the underline reaches its rendered banner transitively
+        // through the fused primitive, exactly as
+        // `commands/web_service.rs` does above. The negative
+        // re-inline check still runs for this module below.
         for (source, module_path) in CALLERS {
             let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
             for (i, line) in body.lines().enumerate() {
