@@ -117,6 +117,7 @@ mod shinka_migration_reset_ack;
 mod skipping_step;
 mod step_header;
 mod success_step;
+mod supergraph_content_hash;
 mod tags_field;
 mod tools;
 mod updated_field;

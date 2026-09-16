@@ -8,7 +8,6 @@
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::fs;
@@ -210,11 +209,20 @@ impl SupergraphMetadata {
     }
 }
 
-/// Calculate SHA256 hash of content
+/// Calculate SHA256 hex hash of content.
+///
+/// Delegates to [`crate::supergraph_content_hash::hash_supergraph_content`],
+/// the single canonical spelling both this module (via
+/// [`SupergraphMetadata::verify`]) and the sibling
+/// `commands/federation.rs::update_federation` (ConfigMap-annotation write
+/// path) forward through so the two supergraph-content-hash sites cannot
+/// silently diverge. Preserved as a thin `pub` wrapper because
+/// `SupergraphMetadata::verify` and the module's own
+/// `test_calculate_hash` regression already anchor this name; the primitive's
+/// byte-oracles now live at `crate::supergraph_content_hash` alongside the
+/// implementation.
 pub fn calculate_hash(content: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(content);
-    format!("{:x}", hasher.finalize())
+    crate::supergraph_content_hash::hash_supergraph_content(content)
 }
 
 /// Count number of GraphQL type definitions in schema

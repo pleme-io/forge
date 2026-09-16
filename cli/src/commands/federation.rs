@@ -337,11 +337,13 @@ pub async fn update_federation(
         .await
         .context("Failed to read supergraph for hashing")?;
 
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(&supergraph_content);
-    let hash_bytes = hasher.finalize();
-    let supergraph_hash = format!("{:x}", hash_bytes);
+    // Forward through the canonical typed primitive so this ConfigMap-annotation
+    // write path and the sibling `SupergraphMetadata::verify` read path
+    // (`commands/supergraph_verification.rs::calculate_hash`) cannot silently
+    // diverge on digest algorithm, encoding, or return length. See
+    // `crate::supergraph_content_hash` for the byte-oracles.
+    let supergraph_hash =
+        crate::supergraph_content_hash::hash_supergraph_content(&supergraph_content);
     let supergraph_hash_short = &supergraph_hash[..16]; // First 16 chars
 
     crate::ui::print_field("Hash", supergraph_hash_short);
