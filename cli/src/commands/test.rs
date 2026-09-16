@@ -10,7 +10,6 @@
 //! Each test type has its own `enabled` flag for granular control.
 
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -451,14 +450,16 @@ async fn run_test_suite(
         );
 
         let result = timeout(test_timeout, async {
-            let output = Command::new(crate::repo::get_tool_path("SH_BIN", "sh"))
-                .arg("-c")
-                .arg(&config.command)
-                .current_dir(&working_dir)
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
-                .status()
-                .await?;
+            let output = {
+                use crate::tokio_command_inherit_stdio::InheritChildStdio;
+                Command::new(crate::repo::get_tool_path("SH_BIN", "sh"))
+                    .arg("-c")
+                    .arg(&config.command)
+                    .current_dir(&working_dir)
+                    .inherit_child_stdio()
+                    .status()
+                    .await?
+            };
 
             Ok::<_, anyhow::Error>(output.success())
         })

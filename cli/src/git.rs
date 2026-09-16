@@ -1262,10 +1262,10 @@ where
 /// `"git commit"` op label through
 /// [`crate::retry::classify_inherited_status`] and bails.
 pub async fn git_commit_idempotent(commit_msg: &str, spawn_context: &str) -> anyhow::Result<()> {
+    use crate::tokio_command_inherit_stdio::InheritChildStdio;
     let status = git_command_async()
         .args(["commit", "-m", commit_msg])
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
+        .inherit_child_stdio()
         .status()
         .await
         .with_context(|| spawn_context.to_string())?;

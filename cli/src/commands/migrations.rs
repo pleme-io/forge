@@ -30,7 +30,6 @@ use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use serde::Deserialize;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 /// Reserve an on-disk scratch slot for the migration-job manifest
@@ -600,20 +599,22 @@ spec:
         crate::workload_field::KubernetesWorkloadKind::Job,
         &job_name,
     );
-    let wait_result = kubectl_command_async()
-        .args(&[
-            "wait",
-            "--for=condition=complete",
-            &job_ref,
-            "-n",
-            &namespace,
-            "--timeout",
-            &timeout_str,
-        ])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .await;
+    let wait_result = {
+        use crate::tokio_command_inherit_stdio::InheritChildStdio;
+        kubectl_command_async()
+            .args(&[
+                "wait",
+                "--for=condition=complete",
+                &job_ref,
+                "-n",
+                &namespace,
+                "--timeout",
+                &timeout_str,
+            ])
+            .inherit_child_stdio()
+            .status()
+            .await
+    };
 
     // Check if wait succeeded OR if job actually completed (handles race condition)
     let job_succeeded = if wait_result.as_ref().map(|s| s.success()).unwrap_or(false) {
@@ -658,16 +659,18 @@ spec:
         let mut logs_tail = None;
         if let Some(pod) = pod_name.as_deref() {
             // Get logs for display
-            kubectl_command_async()
-                .args(crate::kubectl_logs_argv::kubectl_logs_tail_argv(
-                    pod,
-                    &namespace,
-                    crate::kubectl_logs_argv::KubectlLogsTail::N100,
-                ))
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
-                .status()
-                .await?;
+            {
+                use crate::tokio_command_inherit_stdio::InheritChildStdio;
+                kubectl_command_async()
+                    .args(crate::kubectl_logs_argv::kubectl_logs_tail_argv(
+                        pod,
+                        &namespace,
+                        crate::kubectl_logs_argv::KubectlLogsTail::N100,
+                    ))
+                    .inherit_child_stdio()
+                    .status()
+                    .await?;
+            }
 
             // Also capture logs for event
             let logs_output = kubectl_command_async()

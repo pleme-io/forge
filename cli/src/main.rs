@@ -129,6 +129,7 @@ mod step_header;
 mod success_step;
 mod supergraph_content_hash;
 mod tags_field;
+mod tokio_command_inherit_stdio;
 mod tools;
 mod updated_field;
 mod using_pod_field;

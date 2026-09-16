@@ -41,7 +41,6 @@ use anyhow::{anyhow, bail, Context, Result};
 use colored::Colorize;
 use std::env;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use tokio::process::Command;
 use tokio::select;
 
@@ -505,11 +504,12 @@ pub async fn build_rust_service(
         }
     }
 
-    let amd64_build = cmd
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .context("Failed to spawn AMD64 build")?;
+    let amd64_build = {
+        use crate::tokio_command_inherit_stdio::InheritChildStdio;
+        cmd.inherit_child_stdio()
+            .spawn()
+            .context("Failed to spawn AMD64 build")?
+    };
 
     // Build ARM64 (conditional)
     // Note: ARM64 packages not yet exposed in root flake, skip for now

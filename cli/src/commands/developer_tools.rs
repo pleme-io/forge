@@ -4,7 +4,6 @@
 
 use std::env;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 
 use anyhow::{anyhow, bail, Context, Result};
 use colored::Colorize;
@@ -554,12 +553,14 @@ pub async fn rust_dev(
                 .clone()
                 .unwrap_or_else(|| get_tool_path("SQLX_BIN", "sqlx"));
 
-            let status = Command::new(&sqlx_cmd)
-                .args(&["migrate", "run", "--source", "./migrations"])
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
-                .status()
-                .await;
+            let status = {
+                use crate::tokio_command_inherit_stdio::InheritChildStdio;
+                Command::new(&sqlx_cmd)
+                    .args(&["migrate", "run", "--source", "./migrations"])
+                    .inherit_child_stdio()
+                    .status()
+                    .await
+            };
 
             match status {
                 Ok(s) if s.success() => {
