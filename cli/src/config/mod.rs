@@ -373,6 +373,82 @@ pub fn write_artifact_info(
     Ok(json_path)
 }
 
+/// Product + service + config-path 4-tuple resolved from
+/// `(product, service_path, repo_root)`.
+///
+/// Owns the 4-line preamble that three sibling
+/// `DeployConfig::load_service_*` methods each spelled verbatim before
+/// their yaml-parse step: [`DeployConfig::load_service_release_config`],
+/// [`DeployConfig::load_service_registry_url`], and
+/// [`DeployConfig::load_service_namespace`]. The four fields
+/// (`product_dir`, `service_dir`, `service_name`, `config_path`) are
+/// pure derivations of the input triple — a caller that has already
+/// resolved them once should never re-derive.
+///
+/// Fields are exposed directly (public struct) rather than through
+/// accessors so callers keep pattern-binding at the destructure site,
+/// matching the pre-lift shape where the four bindings landed as four
+/// `let` statements.
+#[derive(Debug, Clone)]
+pub struct ServiceDeployYamlLocation {
+    /// Product-scoped directory: `resolve_product_dir(repo_root, product)`.
+    pub product_dir: PathBuf,
+    /// Service-scoped directory: `product_dir.join(service_path)`.
+    pub service_dir: PathBuf,
+    /// Service base name — the final path component of `service_path`,
+    /// falling back to the full `service_path` when the input has no
+    /// file-name component.
+    pub service_name: String,
+    /// Resolved `deploy.yaml` path via
+    /// [`resolve_deploy_yaml_path(product_dir, service_name,
+    /// service_dir)`](resolve_deploy_yaml_path).
+    pub config_path: PathBuf,
+}
+
+/// Resolve the [`ServiceDeployYamlLocation`] 4-tuple from the
+/// `(product, service_path, repo_root)` input triple that three sibling
+/// `DeployConfig::load_service_*` methods each take.
+///
+/// # Pre-lift shape
+///
+/// ```ignore
+/// let product_dir = resolve_product_dir(Path::new(repo_root), product);
+/// let service_dir = product_dir.join(service_path);
+/// let service_name = Path::new(service_path)
+///     .file_name()
+///     .and_then(|n| n.to_str())
+///     .unwrap_or(service_path);
+/// let config_path = resolve_deploy_yaml_path(&product_dir, service_name, &service_dir);
+/// ```
+///
+/// Three consumer sites in this module spelled the stanza verbatim —
+/// [`DeployConfig::load_service_release_config`],
+/// [`DeployConfig::load_service_registry_url`], and
+/// [`DeployConfig::load_service_namespace`] — before this primitive
+/// landed. Post-lift each collapses onto
+/// `let loc = locate_service_deploy_yaml(product, service_path, repo_root);`
+/// and destructures the four fields at the caller.
+pub fn locate_service_deploy_yaml(
+    product: &str,
+    service_path: &str,
+    repo_root: &str,
+) -> ServiceDeployYamlLocation {
+    let product_dir = resolve_product_dir(Path::new(repo_root), product);
+    let service_dir = product_dir.join(service_path);
+    let service_name = Path::new(service_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(service_path)
+        .to_string();
+    let config_path = resolve_deploy_yaml_path(&product_dir, &service_name, &service_dir);
+    ServiceDeployYamlLocation {
+        product_dir,
+        service_dir,
+        service_name,
+        config_path,
+    }
+}
+
 /// Complete deployment configuration (merged from all levels)
 #[derive(Debug, Clone)]
 pub struct DeployConfig {
@@ -691,13 +767,12 @@ impl DeployConfig {
         service_path: &str,
         repo_root: &str,
     ) -> Result<ReleaseConfig> {
-        let product_dir = resolve_product_dir(Path::new(repo_root), product);
-        let service_dir = product_dir.join(service_path);
-        let service_name = Path::new(service_path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(service_path);
-        let config_path = resolve_deploy_yaml_path(&product_dir, service_name, &service_dir);
+        let ServiceDeployYamlLocation {
+            product_dir,
+            service_dir,
+            service_name,
+            config_path,
+        } = locate_service_deploy_yaml(product, service_path, repo_root);
 
         if !config_path.exists() {
             return Ok(ReleaseConfig::default());
@@ -716,7 +791,8 @@ impl DeployConfig {
                     })?;
 
                 // Override artifact from JSON file (machine-managed, takes priority)
-                if let Some(artifact) = load_artifact_info(&product_dir, service_name, &service_dir)
+                if let Some(artifact) =
+                    load_artifact_info(&product_dir, &service_name, &service_dir)
                 {
                     release_config.artifact = Some(artifact);
                 }
@@ -735,13 +811,8 @@ impl DeployConfig {
         service_path: &str,
         repo_root: &str,
     ) -> Result<String> {
-        let product_dir = resolve_product_dir(Path::new(repo_root), product);
-        let service_dir = product_dir.join(service_path);
-        let service_name = Path::new(service_path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(service_path);
-        let config_path = resolve_deploy_yaml_path(&product_dir, service_name, &service_dir);
+        let ServiceDeployYamlLocation { config_path, .. } =
+            locate_service_deploy_yaml(product, service_path, repo_root);
 
         let yaml: serde_yaml::Value = crate::repo::read_yaml_sync(&config_path)?;
 
@@ -762,13 +833,8 @@ impl DeployConfig {
         repo_root: &str,
         env_name: &str,
     ) -> Result<String> {
-        let product_dir = resolve_product_dir(Path::new(repo_root), product);
-        let service_dir = product_dir.join(service_path);
-        let service_name = Path::new(service_path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(service_path);
-        let config_path = resolve_deploy_yaml_path(&product_dir, service_name, &service_dir);
+        let ServiceDeployYamlLocation { config_path, .. } =
+            locate_service_deploy_yaml(product, service_path, repo_root);
 
         let yaml: serde_yaml::Value = crate::repo::read_yaml_sync(&config_path)?;
 
@@ -1987,6 +2053,146 @@ mod tests {
              Every other site must delegate through \
              `DeployConfig::service_directory_under` (config/mod.rs), \
              which owns the `paths.services_path` join internally.",
+            hits.len(),
+        );
+    }
+
+    /// Byte-oracle for [`locate_service_deploy_yaml`] under a
+    /// monorepo layout: with `repo_root` at a tempdir root and a
+    /// `services/rust/backend` service path, the four fields
+    /// (`product_dir`, `service_dir`, `service_name`, `config_path`)
+    /// must compose exactly the pre-lift 4-line stanza. The stanza's
+    /// verbatim shape is what three sibling
+    /// `DeployConfig::load_service_*` methods each spelled before
+    /// this primitive landed; a drift in any of the four fields
+    /// (a swapped file-name projection, a lost `services/rust/`
+    /// segment, a `deploy.yaml`-file-path swap for `deploy/`
+    /// -directory-file-path) would silently mis-route the deploy
+    /// pipeline. No filesystem-side surprises: the primitive is a
+    /// pure path composition (the `resolve_deploy_yaml_path` new-
+    /// path branch only fires when `{product_dir}/deploy/{svc}.yaml`
+    /// exists on disk, which this test does not create).
+    #[test]
+    fn test_locate_service_deploy_yaml_byte_oracle_monorepo_shape() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path();
+        let repo_root_str = repo_root.to_str().expect("utf-8 repo root");
+
+        let loc = locate_service_deploy_yaml("myproduct", "services/rust/backend", repo_root_str);
+
+        assert_eq!(
+            loc.product_dir,
+            repo_root.join("pkgs/products/myproduct"),
+            "product_dir must equal `resolve_product_dir(repo_root, \
+             product)` — the pre-lift `let product_dir = \
+             resolve_product_dir(Path::new(repo_root), product);` \
+             line."
+        );
+        assert_eq!(
+            loc.service_dir,
+            repo_root.join("pkgs/products/myproduct/services/rust/backend"),
+            "service_dir must equal `product_dir.join(service_path)` \
+             — the pre-lift `let service_dir = \
+             product_dir.join(service_path);` line, with the full \
+             `services/rust/<name>` monorepo layout preserved."
+        );
+        assert_eq!(
+            loc.service_name, "backend",
+            "service_name must equal `Path::new(service_path).file_name() \
+             .and_then(|n| n.to_str()).unwrap_or(service_path)` — the \
+             pre-lift 3-line stanza projected to the base name."
+        );
+        assert_eq!(
+            loc.config_path,
+            repo_root.join("pkgs/products/myproduct/services/rust/backend/deploy.yaml"),
+            "config_path must equal \
+             `resolve_deploy_yaml_path(&product_dir, &service_name, \
+             &service_dir)` under the fallback (service-scoped \
+             deploy.yaml) branch — the pre-lift final line of the \
+             4-line stanza. The `deploy/`-directory branch is a \
+             disk-conditional switch; with nothing created on disk, \
+             the primitive must return the fallback shape."
+        );
+    }
+
+    /// The single-segment `service_path` case — a caller that passes
+    /// just `"web"` rather than `"services/rust/web"` — must project
+    /// `service_name` to the input verbatim (its own file-name) and
+    /// compose `service_dir` as `{product_dir}/web`. Pins the
+    /// pre-lift `unwrap_or(service_path)` fallback that fires when
+    /// `Path::new(service_path).file_name()` is `None` for a rootless
+    /// single-component path (empirically it does yield `Some("web")`
+    /// here, but the semantic is the same: the base-name projection
+    /// is idempotent on a single segment).
+    #[test]
+    fn test_locate_service_deploy_yaml_single_segment_service_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root_str = tmp.path().to_str().expect("utf-8 repo root");
+
+        let loc = locate_service_deploy_yaml("myproduct", "web", repo_root_str);
+
+        assert_eq!(loc.service_name, "web");
+        assert_eq!(
+            loc.service_dir,
+            tmp.path().join("pkgs/products/myproduct/web"),
+        );
+        assert_eq!(
+            loc.config_path,
+            tmp.path().join("pkgs/products/myproduct/web/deploy.yaml"),
+        );
+    }
+
+    /// Positive-delegation shield: this module's non-test body must
+    /// call `locate_service_deploy_yaml(` at AT LEAST 3 sites — the
+    /// three `DeployConfig::load_service_*` methods
+    /// (`load_service_release_config`, `load_service_registry_url`,
+    /// `load_service_namespace`) that shared the pre-lift 4-line
+    /// preamble. A regression that re-inlines the preamble at any of
+    /// the three sites drops this count below 3 and fails the shield
+    /// before the drift can spread past `cargo test`.
+    #[test]
+    fn test_config_delegates_through_locate_service_deploy_yaml() {
+        let body =
+            crate::test_support::module_body_before_tests(include_str!("mod.rs"), "config/mod.rs");
+        let hits = crate::test_support::code_line_hits(body, "locate_service_deploy_yaml(");
+        assert!(
+            hits.len() >= 3,
+            "config/mod.rs must forward through \
+             `locate_service_deploy_yaml(...)` at AT LEAST 3 \
+             call-sites — the three `DeployConfig::load_service_*` \
+             methods that shared the pre-lift 4-line preamble. Found \
+             only {} hit(s): {hits:#?}. A caller re-inlining the raw \
+             preamble re-opens the drift class the primitive was \
+             landed to close.",
+            hits.len(),
+        );
+    }
+
+    /// Bounded caller shield: this module's non-test body must
+    /// spell the file-name projection
+    /// `let service_name = Path::new(service_path)` AT MOST once —
+    /// the sole legitimate hit is the primitive
+    /// [`locate_service_deploy_yaml`] itself. Every other consumer
+    /// must destructure the 4-tuple that primitive returns; a
+    /// regression that re-inlines the projection at any of the three
+    /// sibling `DeployConfig::load_service_*` methods (or at any new
+    /// caller) drives this count to ≥2 and fails the shield before
+    /// the drift can spread past `cargo test`.
+    #[test]
+    fn test_config_service_name_projection_bounded_to_primitive() {
+        let body =
+            crate::test_support::module_body_before_tests(include_str!("mod.rs"), "config/mod.rs");
+        let needle = "let service_name = Path::new(service_path)";
+        let hits = crate::test_support::code_line_hits(body, needle);
+        assert!(
+            hits.len() <= 1,
+            "config/mod.rs must spell `{needle}` AT MOST once — the \
+             single legitimate site is the primitive \
+             `locate_service_deploy_yaml`. Found {} code-line \
+             hit(s): {hits:#?}. Every other consumer must \
+             destructure the 4-tuple `locate_service_deploy_yaml` \
+             returns; a hand-rolled inline copy re-opens the drift \
+             class the primitive was landed to close.",
             hits.len(),
         );
     }
