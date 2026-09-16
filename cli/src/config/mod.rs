@@ -901,6 +901,62 @@ impl DeployConfig {
             .replace("{port}", &federation.port.to_string())
     }
 
+    /// Build path to the product directory under a caller-supplied
+    /// `repo_root`. Structural base for every product-scoped path
+    /// composition: `{repo_root}/{paths.products_root}/{product.name}`.
+    ///
+    /// Pure — no filesystem I/O, no `Result`. The caller resolves
+    /// `repo_root` once (via `crate::git::get_repo_root()?`, a passed-in
+    /// `k8s_repo_root`, or a test fixture) and hands it in.
+    ///
+    /// Sibling of [`Self::federation_directory`] which appends
+    /// `paths.federation_path` to this same base; delegates through
+    /// this method so the 2-hop `products_root + product.name` prefix
+    /// lives at ONE body.
+    ///
+    /// Consumers under `commands/rust_service.rs` route
+    /// `.version`-file writes, service-directory resolution for the
+    /// pre-deployment / post-deployment test lookups, and the
+    /// `product_dir` binding used by `resolve_deploy_yaml_path`
+    /// through this same primitive — the 5 raw
+    /// `repo_root.join(&deploy_config.global.paths.products_root)
+    /// .join(&deploy_config.product.name)` stanzas collapsed onto
+    /// this single method, and the negative caller shield below
+    /// forbids the raw form under `cli/src/commands/`.
+    pub fn product_directory_under(&self, repo_root: &Path) -> PathBuf {
+        repo_root
+            .join(&self.global.paths.products_root)
+            .join(&self.product.name)
+    }
+
+    /// Build path to the service directory under a caller-supplied
+    /// `repo_root`, branching on the `service == "web"` frontend
+    /// convention: `web` lives at `{product_dir}/web` while every
+    /// other (rust-service) name lives at
+    /// `{product_dir}/{paths.services_path}/{service}`.
+    ///
+    /// Two byte-identical stanzas in
+    /// `commands/rust_service.rs::deploy_and_verify` (the pre-
+    /// deployment-test service-dir bind and the post-deployment-
+    /// integration-tests service-dir bind) collapsed onto this
+    /// method; the negative caller shield forbids the raw
+    /// `if service == "web" { … .join("web") } else { … }` branching
+    /// under `cli/src/commands/`.
+    ///
+    /// Delegates to [`Self::product_directory_under`] for the 2-hop
+    /// base so a future change to that prefix ripples through both
+    /// primitives.
+    pub fn service_directory_under(&self, repo_root: &Path, service: &str) -> PathBuf {
+        let product_dir = self.product_directory_under(repo_root);
+        if service == "web" {
+            product_dir.join("web")
+        } else {
+            product_dir
+                .join(&self.global.paths.services_path)
+                .join(service)
+        }
+    }
+
     /// Build path to Hive Router federation directory
     ///
     /// Example: `../../../../../../pkgs/products/{product}/infrastructure/hive-router`
@@ -909,9 +965,8 @@ impl DeployConfig {
     /// Returns error if current directory is inaccessible or not in a git repository
     pub fn federation_directory(&self) -> Result<PathBuf> {
         let repo_root = Self::get_repo_root()?;
-        Ok(repo_root
-            .join(&self.global.paths.products_root)
-            .join(&self.product.name)
+        Ok(self
+            .product_directory_under(&repo_root)
             .join(&self.global.paths.federation_path))
     }
 
@@ -1712,5 +1767,227 @@ mod tests {
                 hits.len(),
             );
         }
+    }
+
+    // -------------------------------------------------------------------
+    // product_directory_under / service_directory_under — the typed
+    // product-scoped path-composition primitives that fold the pre-lift
+    // 5 raw `repo_root.join(&deploy_config.global.paths.products_root)
+    // .join(&deploy_config.product.name)[…]` stanzas across
+    // `commands/rust_service.rs` (write_version_file × 1, deploy_and_verify
+    // × 4) onto ONE body across the crate.
+    // -------------------------------------------------------------------
+
+    /// Byte-oracle for [`DeployConfig::product_directory_under`]:
+    /// composes `{repo_root}/{paths.products_root}/{product.name}` on
+    /// a defaults-config with `paths.products_root = "pkgs/products"`
+    /// and `product.name = "myproduct"`, and pins the composed suffix
+    /// on top of a fixed `/tmp/forge-fixture` repo-root prefix. Also
+    /// pins the property that the primitive is PURE — repeated calls
+    /// with the same inputs produce byte-identical outputs and no FS
+    /// I/O side-effects (call twice, compare).
+    #[test]
+    fn test_product_directory_under_byte_oracle() {
+        let config = DeployConfig {
+            global: GlobalConfig::default(),
+            product: ProductConfig {
+                name: "myproduct".to_string(),
+                environment: "staging".to_string(),
+                cluster: "mycluster".to_string(),
+                release: None,
+                k8s: None,
+                domain: None,
+                observability: Default::default(),
+                seed: Default::default(),
+                dirs: Default::default(),
+                endpoints: Default::default(),
+            },
+            service: make_test_service_config("api"),
+        };
+        let repo_root = Path::new("/tmp/forge-fixture");
+        let dir = config.product_directory_under(repo_root);
+        assert_eq!(
+            dir,
+            PathBuf::from("/tmp/forge-fixture/pkgs/products/myproduct"),
+            "product_directory_under must compose \
+             `{{repo_root}}/{{paths.products_root}}/{{product.name}}` \
+             exactly — a divergence at this byte-oracle means the 5 \
+             pre-lift raw-join callers in commands/rust_service.rs \
+             now compose a different service directory than they did \
+             pre-lift, and the .version-file writes / integration-test \
+             lookups target the wrong on-disk path"
+        );
+        let dir_again = config.product_directory_under(repo_root);
+        assert_eq!(
+            dir, dir_again,
+            "product_directory_under must be pure — repeated calls with \
+             the same (repo_root, config) inputs must produce \
+             byte-identical outputs"
+        );
+    }
+
+    /// Byte-oracle for [`DeployConfig::service_directory_under`]'s two
+    /// arms: the `service == "web"` branch composes
+    /// `{product_dir}/web` (no `paths.services_path` hop), while every
+    /// other name composes `{product_dir}/{paths.services_path}/{service}`.
+    /// Pins the exact split so the two sibling stanzas in
+    /// `commands/rust_service.rs::deploy_and_verify` (the Step-0.5 pre-
+    /// deployment-test service-dir bind and the Step-8 post-deployment-
+    /// integration-tests service-dir bind) cannot drift on either side.
+    #[test]
+    fn test_service_directory_under_web_vs_rust_byte_oracle() {
+        let config = DeployConfig {
+            global: GlobalConfig::default(),
+            product: ProductConfig {
+                name: "myproduct".to_string(),
+                environment: "staging".to_string(),
+                cluster: "mycluster".to_string(),
+                release: None,
+                k8s: None,
+                domain: None,
+                observability: Default::default(),
+                seed: Default::default(),
+                dirs: Default::default(),
+                endpoints: Default::default(),
+            },
+            service: make_test_service_config("api"),
+        };
+        let repo_root = Path::new("/tmp/forge-fixture");
+        assert_eq!(
+            config.service_directory_under(repo_root, "web"),
+            PathBuf::from("/tmp/forge-fixture/pkgs/products/myproduct/web"),
+            "web-branch must resolve to `{{product_dir}}/web` with NO \
+             `paths.services_path` hop — the frontend convention"
+        );
+        assert_eq!(
+            config.service_directory_under(repo_root, "backend"),
+            PathBuf::from("/tmp/forge-fixture/pkgs/products/myproduct/services/rust/backend"),
+            "rust-service branch must resolve to \
+             `{{product_dir}}/{{paths.services_path}}/{{service}}`"
+        );
+        assert_eq!(
+            config.service_directory_under(repo_root, "cart"),
+            PathBuf::from("/tmp/forge-fixture/pkgs/products/myproduct/services/rust/cart"),
+            "rust-service branch must vary only on the trailing \
+             `{{service}}` segment"
+        );
+    }
+
+    /// Positive-delegation shield: `commands/rust_service.rs` must
+    /// forward through [`DeployConfig::product_directory_under`] at
+    /// AT LEAST the pre-lift consumer count so the ONE-body invariant
+    /// is not silently rescinded by a caller re-inlining the raw
+    /// 2-hop join. Pre-lift consumer count: 2 direct callers
+    /// (`write_version_file`'s `.version`-file service-dir base, and
+    /// `deploy_and_verify`'s `product_dir` bind under Step 8); the
+    /// other 3 pre-lift sites forward through the sibling
+    /// [`DeployConfig::service_directory_under`] (which itself
+    /// delegates through `product_directory_under`).
+    #[test]
+    fn test_commands_rust_service_delegates_through_product_directory_under() {
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            include_str!("../commands/rust_service.rs"),
+            "commands/rust_service.rs",
+        );
+        let hits = crate::test_support::code_line_hits(body, ".product_directory_under(");
+        assert!(
+            hits.len() >= 2,
+            "commands/rust_service.rs must forward through \
+             `DeployConfig::product_directory_under` at AT LEAST 2 \
+             call-sites — one for `write_version_file`'s \
+             `.version`-file service-dir base, one for \
+             `deploy_and_verify`'s `product_dir` bind. Found only \
+             {} hit(s): {hits:#?}. A caller re-inlining the raw \
+             `.join(&paths.products_root).join(&product.name)` 2-hop \
+             re-opens the drift class the primitive was landed to close.",
+            hits.len(),
+        );
+    }
+
+    /// Positive-delegation shield: `commands/rust_service.rs` must
+    /// forward through [`DeployConfig::service_directory_under`] at
+    /// AT LEAST the pre-lift consumer count — 2 direct callers
+    /// (`deploy_and_verify`'s Step-0.5 pre-deployment-test service-dir
+    /// bind and the Step-8 post-deployment-integration-tests
+    /// service-dir bind, both formerly spelling the identical
+    /// `if service == "web" { … } else { … }` branching stanza).
+    #[test]
+    fn test_commands_rust_service_delegates_through_service_directory_under() {
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            include_str!("../commands/rust_service.rs"),
+            "commands/rust_service.rs",
+        );
+        let hits = crate::test_support::code_line_hits(body, ".service_directory_under(");
+        assert!(
+            hits.len() >= 2,
+            "commands/rust_service.rs must forward through \
+             `DeployConfig::service_directory_under` at AT LEAST 2 \
+             call-sites — the two identical Step-0.5 / Step-8 \
+             service-dir bind stanzas in `deploy_and_verify`. Found \
+             only {} hit(s): {hits:#?}. A caller re-inlining the raw \
+             `if service == \"web\" {{ … .join(\"web\") }} else {{ … \
+             .join(&paths.services_path).join(&service) }}` branching \
+             re-opens the drift class the primitive was landed to close.",
+            hits.len(),
+        );
+    }
+
+    /// Negative caller shield: `commands/rust_service.rs` must NOT
+    /// spell the raw 2-hop
+    /// `.join(&deploy_config.global.paths.products_root)` stanza
+    /// inline in its module body. The typed
+    /// [`DeployConfig::product_directory_under`] /
+    /// [`DeployConfig::service_directory_under`] primitives own the
+    /// composition at ONE body; a hand-rolled inline copy re-opens
+    /// the drift class the primitives were landed to close.
+    #[test]
+    fn test_commands_rust_service_no_raw_products_root_join() {
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            include_str!("../commands/rust_service.rs"),
+            "commands/rust_service.rs",
+        );
+        let needle = ".join(&deploy_config.global.paths.products_root)";
+        let hits = crate::test_support::code_line_hits(body, needle);
+        assert!(
+            hits.is_empty(),
+            "commands/rust_service.rs must NOT spell `{needle}` inline \
+             — route through `DeployConfig::product_directory_under` \
+             (config/mod.rs) instead. Found {} code-line hit(s): \
+             {hits:#?}. A hand-rolled inline copy re-opens the drift \
+             class the primitive was landed to close.",
+            hits.len(),
+        );
+    }
+
+    /// Negative caller shield: `commands/rust_service.rs` must NOT
+    /// spell the raw
+    /// `.join(&deploy_config.global.paths.services_path)` stanza
+    /// inline in its module body. The one legitimate consumer inside
+    /// this module is `write_version_file`, which layers this join
+    /// on top of [`DeployConfig::product_directory_under`] — that
+    /// call-site is exempted by matching only the `deploy_config`-
+    /// bound spelling and letting `write_version_file`'s local
+    /// `deploy_config` binding count as the sole positive site.
+    /// Every OTHER site must delegate through
+    /// [`DeployConfig::service_directory_under`], which owns the
+    /// `paths.services_path` join internally.
+    #[test]
+    fn test_commands_rust_service_services_path_join_bounded() {
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            include_str!("../commands/rust_service.rs"),
+            "commands/rust_service.rs",
+        );
+        let needle = ".join(&deploy_config.global.paths.services_path)";
+        let hits = crate::test_support::code_line_hits(body, needle);
+        assert!(
+            hits.len() <= 1,
+            "commands/rust_service.rs must spell \
+             `{needle}` AT MOST once (the `write_version_file` \
+             rust-only service-dir tail). Found {} hit(s): {hits:#?}. \
+             Every other site must delegate through \
+             `DeployConfig::service_directory_under` (config/mod.rs), \
+             which owns the `paths.services_path` join internally.",
+            hits.len(),
+        );
     }
 }

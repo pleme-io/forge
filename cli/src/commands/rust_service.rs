@@ -244,10 +244,16 @@ async fn write_version_file(
 ) -> Result<std::path::PathBuf> {
     // Get the actual writable service directory in the git repository
     // Structure: {repo_root}/pkgs/products/{product}/services/rust/{service}
+    // Route through `DeployConfig::product_directory_under` (config/mod.rs)
+    // so the `{products_root}/{product.name}` 2-hop base lives at ONE
+    // body across the crate; the tail `{services_path}/{service.name}`
+    // stays inline here because `write_version_file` is by construction
+    // rust-only (never called with `service.name == "web"`, per the
+    // structure comment above) and must not take the `service_directory_under`
+    // web-branch by accident on a future rename.
     let repo_root = crate::git::get_repo_root()?;
-    let service_dir = repo_root
-        .join(&deploy_config.global.paths.products_root)
-        .join(&deploy_config.product.name)
+    let service_dir = deploy_config
+        .product_directory_under(&repo_root)
         .join(&deploy_config.global.paths.services_path)
         .join(&deploy_config.service.name);
 
@@ -1327,19 +1333,12 @@ pub async fn orchestrate_release(
     };
     let k8s_branch = deploy_config.product.k8s.as_ref().map(|k| k.branch.clone());
 
-    // Determine the service directory for pre-deployment tests
-    let pre_deploy_service_dir = if service == "web" {
-        repo_root
-            .join(&deploy_config.global.paths.products_root)
-            .join(&deploy_config.product.name)
-            .join("web")
-    } else {
-        repo_root
-            .join(&deploy_config.global.paths.products_root)
-            .join(&deploy_config.product.name)
-            .join(&deploy_config.global.paths.services_path)
-            .join(&service)
-    };
+    // Determine the service directory for pre-deployment tests.
+    // Route through `DeployConfig::service_directory_under` so the
+    // `web`-vs-rust-service branching lives at ONE body — the sibling
+    // stanza in the Step-8 post-deployment integration-tests bind
+    // (below) delegates through the same primitive.
+    let pre_deploy_service_dir = deploy_config.service_directory_under(&repo_root, &service);
 
     // Step 0.5: Run pre-deployment tests (BEFORE push/deploy)
     // Skip if deploy-only (tests already ran during push phase)
@@ -1643,25 +1642,17 @@ pub async fn orchestrate_release(
     // Step 8: Run integration tests (if configured in deploy.yaml)
     // CRITICAL: Tests run AFTER Hive Router is updated and FluxCD has reconciled
     // This ensures we're testing against the latest federated schema
+    // Route the service-dir (web-vs-rust) and product-dir binds
+    // through the `DeployConfig::service_directory_under` /
+    // `product_directory_under` primitives so the `{products_root}/
+    // {product.name}[/web | /{services_path}/{service}]` grammar
+    // lives at ONE body across the crate — the sibling stanza in
+    // the Step-0.5 pre-deployment-test service-dir bind (above)
+    // delegates through the same `service_directory_under`
+    // primitive.
     let repo_root = crate::git::get_repo_root()?;
-    let service_dir = if service == "web" {
-        // Web service: pkgs/products/{product}/web
-        repo_root
-            .join(&deploy_config.global.paths.products_root)
-            .join(&deploy_config.product.name)
-            .join("web")
-    } else {
-        // Rust service: pkgs/products/{product}/services/rust/{service}
-        repo_root
-            .join(&deploy_config.global.paths.products_root)
-            .join(&deploy_config.product.name)
-            .join(&deploy_config.global.paths.services_path)
-            .join(&service)
-    };
-
-    let product_dir = repo_root
-        .join(&deploy_config.global.paths.products_root)
-        .join(&deploy_config.product.name);
+    let service_dir = deploy_config.service_directory_under(&repo_root, &service);
+    let product_dir = deploy_config.product_directory_under(&repo_root);
     let deploy_yaml_path = resolve_deploy_yaml_path(&product_dir, &service, &service_dir);
     if deploy_yaml_path.exists() {
         // Try to load integration test config from deploy.yaml
