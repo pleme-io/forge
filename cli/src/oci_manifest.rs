@@ -18550,6 +18550,111 @@ mod tests {
         }
     }
 
+    /// Negative caller shield: the pre-lift `format!("{}:{}", <ref>, <tag>)`
+    /// bare 2-slot composition MUST NOT reappear on a code line in the two
+    /// argv-composition sites the primitive's final stragglers were folded
+    /// into.
+    ///
+    /// # The two stragglers this shield pins closed
+    ///
+    /// - `commands/attestation.rs` — the `full_ref` bind ahead of the
+    ///   `doca inspect --ref <full_ref>` argv slice in the same function
+    ///   whose L~778 sibling (`cosign_image_ref`) already routed through
+    ///   [`image_reference`]. The pre-lift line spelled
+    ///   `let full_ref = format!("{}:{}", image_ref, tag);` and lived
+    ///   invisibly beside its already-lifted twin until this shield was
+    ///   added.
+    /// - `infrastructure/registry.rs` — `verify_tag_exists`'s
+    ///   `["inspect", "--ref", &format!("{}:{}", registry, tag), "--digest-only"]`
+    ///   argv slice, whose sibling `push_tags` at L~387 already routed
+    ///   through [`image_reference`].
+    ///
+    /// # Why the needle is `format!("{}:{}"` (with the trailing quote-open)
+    ///
+    /// The literal `"{}:{}"` distinguishes the pre-lift bare composition
+    /// from framed peers that legitimately restate the `<host>:<port>`
+    /// grammar inside a narration / error / progress-bar template:
+    ///
+    /// - `info!("Pushing {}:{}", registry, tag)` — narration, `info!` not
+    ///   `format!`.
+    /// - `format!("push {}:{}", registry, tag)` — op label, `"push "`
+    ///   prefix ahead of the composition.
+    /// - `format!("inspect {}:{}", registry, tag)` — op label, `"inspect "`
+    ///   prefix.
+    /// - `pb.set_message(format!("Pushing {}:{}", registry, tag))` —
+    ///   progress-bar message, `"Pushing "` prefix.
+    ///
+    /// Each of those legitimately carries a framing verb; only the bare
+    /// `format!("{}:{}", …, …)` shape composed the reference in isolation
+    /// for consumption as an argv arg. A future consumer that reintroduces
+    /// the pre-lift stanza pushes this count above zero and fails the
+    /// shield before it can drift on separator (`:` vs `/` vs `::`) or
+    /// order (`format!("{}:{}", tag, registry)`) at that one site — the
+    /// crate-wide drift the primitive body was built to close.
+    #[test]
+    fn no_raw_registry_tag_format_survives_in_lifted_sites() {
+        const NEEDLE: &str = "format!(\"{}:{}\"";
+        const FILES: &[(&str, &str)] = &[
+            (
+                "cli/src/commands/attestation.rs",
+                include_str!("commands/attestation.rs"),
+            ),
+            (
+                "cli/src/infrastructure/registry.rs",
+                include_str!("infrastructure/registry.rs"),
+            ),
+        ];
+        for (name, src) in FILES {
+            let hits = crate::test_support::code_line_hits(src, NEEDLE);
+            assert!(
+                hits.is_empty(),
+                "{name} must NOT restate `{NEEDLE}...)` post-lift — route \
+                 through `crate::oci_manifest::image_reference(<ref>, <tag>)`. \
+                 Found hits: {hits:#?}"
+            );
+        }
+    }
+
+    /// Positive-delegation shield: each lifted file must forward through
+    /// [`image_reference`] at least the post-lift count of times. A
+    /// future refactor that folds one call site into another without
+    /// adding a new caller elsewhere fails the shield.
+    ///
+    /// Counts:
+    /// - `commands/attestation.rs` — 2 forwards: the newly-lifted
+    ///   `full_ref` bind ahead of the `doca inspect` argv, and the
+    ///   pre-existing `cosign_image_ref` bind ahead of the
+    ///   `cosign verify` argv. The two `<image_ref>:<tag>` compositions
+    ///   in the enclosing function now share ONE typed body.
+    /// - `infrastructure/registry.rs` — 2 forwards: the newly-lifted
+    ///   `verify_tag_exists` argv-composition, and the pre-existing
+    ///   `push_tags` result-list composition at L~387.
+    #[test]
+    fn lifted_image_reference_sites_forward_through_primitive() {
+        const NEEDLE: &str = "crate::oci_manifest::image_reference(";
+        const FILES: &[(&str, &str, usize)] = &[
+            (
+                "cli/src/commands/attestation.rs",
+                include_str!("commands/attestation.rs"),
+                2,
+            ),
+            (
+                "cli/src/infrastructure/registry.rs",
+                include_str!("infrastructure/registry.rs"),
+                2,
+            ),
+        ];
+        for (name, src, min_count) in FILES {
+            let hits = crate::test_support::code_line_hits(src, NEEDLE);
+            assert!(
+                hits.len() >= *min_count,
+                "{name} must forward through `{NEEDLE}...)` at least \
+                 {min_count} times — found {} hits: {hits:#?}",
+                hits.len(),
+            );
+        }
+    }
+
     /// Regression pin for the two `commands/status.rs` call sites this
     /// primitive replaces: on the three input shapes the naïve
     /// `image_str.rsplit_once(':')` predecessor got wrong, the primitive

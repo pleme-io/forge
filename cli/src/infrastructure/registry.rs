@@ -338,13 +338,20 @@ impl RegistryClient {
         // `--digest-only` replaces skopeo's `--format {{.Digest}}`: both print
         // the OCI manifest digest (`sha256:…`) and nothing else, so the caller's
         // parsing is unchanged.
+        // Compose the `<registry>:<tag>` reference through
+        // `crate::oci_manifest::image_reference` — the ONE crate-canonical site
+        // for building this shape (oci_manifest.rs::L9320). The pre-lift
+        // `format!("{}:{}", registry, tag)` here was the last straggler in
+        // this file's argv-composition surface; the sibling `push_tags` helper
+        // at L~387 had already been routed through the primitive, so the two
+        // `<registry>:<tag>` argv slots in this module now share ONE typed
+        // body and inherit its `image_repository_and_tag` roundtrip guarantee
+        // by construction. Pinned by the negative caller shield
+        // `no_raw_registry_tag_format_survives_in_lifted_sites` at
+        // `crate::oci_manifest::tests`.
+        let full_ref = crate::oci_manifest::image_reference(registry, tag);
         let captured = Command::new(&doca)
-            .args([
-                "inspect",
-                "--ref",
-                &format!("{}:{}", registry, tag),
-                "--digest-only",
-            ])
+            .args(["inspect", "--ref", &full_ref, "--digest-only"])
             .env("INPUT_USER", &self.credentials.organization)
             .env("INPUT_PASS", &self.credentials.token)
             .output()

@@ -704,7 +704,18 @@ pub async fn compute_image_attestation(image_ref: &str, tag: &str) -> Result<Ima
     // conversion was deferred one tick: the claim needed checking, not
     // assuming.) doca takes a bare reference; the `docker://` scheme was
     // skopeo's transport syntax, not part of the reference.
-    let full_ref = format!("{}:{}", image_ref, tag);
+    //
+    // Compose the `<image_ref>:<tag>` reference through
+    // `crate::oci_manifest::image_reference` — the ONE crate-canonical site for
+    // building this shape (oci_manifest.rs::L9320 + the negative caller shield
+    // over this file at `no_raw_registry_tag_format_survives_in_lifted_sites`).
+    // The pre-lift `format!("{}:{}", image_ref, tag)` this call replaces was
+    // the last straggler in this function; its sibling at L~778
+    // (`cosign_image_ref`) had already been routed through the primitive, so
+    // the two `<image_ref>:<tag>` compositions in this function now share ONE
+    // typed body and inherit its `image_repository_and_tag` roundtrip
+    // guarantee by construction.
+    let full_ref = crate::oci_manifest::image_reference(image_ref, tag);
     let (manifest_hash, architecture) = match run_command_output(
         Path::new("."),
         "oci-push",
