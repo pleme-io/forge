@@ -429,12 +429,16 @@ pub async fn execute(
         let pb = styled_progress_bar(2);
 
         // Push latest tag
-        pb.set_message(format!("Pushing {}:latest", registry));
+        pb.set_message(crate::pushing_progress_message::pushing_progress_message(
+            &registry, "latest",
+        ));
         push_with_retry(&build_output, &registry, "latest", &ghcr_token, 10).await?;
         pb.inc(1);
 
         // Push git SHA tag
-        pb.set_message(format!("Pushing {}:{}", registry, git_sha));
+        pb.set_message(crate::pushing_progress_message::pushing_progress_message(
+            &registry, &git_sha,
+        ));
         push_with_retry(&build_output, &registry, &git_sha, &ghcr_token, 10).await?;
         pb.inc(1);
 

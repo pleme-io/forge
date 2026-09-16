@@ -622,7 +622,9 @@ pub async fn push_tags_with_progress(
 ) -> Result<()> {
     let pb = styled_progress_bar(tags.len() as u64);
     for tag in tags {
-        pb.set_message(format!("Pushing {}:{}", registry, tag));
+        pb.set_message(crate::pushing_progress_message::pushing_progress_message(
+            registry, tag,
+        ));
         push_with_retry(image_path, registry, tag, ghcr_token, retries).await?;
         pb.inc(1);
     }
