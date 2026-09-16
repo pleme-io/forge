@@ -214,6 +214,110 @@ pub(crate) fn write_migration_issue_report<W: std::io::Write>(
     Ok(())
 }
 
+/// Emit the "pass-if-empty-else-failure-and-report" verdict a migration
+/// validation gate announces at the tail of its check function — either
+/// a green [`crate::ui::print_step_pass`] step-pass line carrying the
+/// caller's success message, or the paired red
+/// [`crate::ui::print_step_failure`] `"Found <N> <noun>"` header
+/// followed immediately by the [`print_migration_issue_report`] enumeration
+/// of the offending issues.
+///
+/// # Compounding
+///
+/// Pre-lift 3 sibling stanzas — the tail branches of `check_migrations`
+/// (SQLx idempotency + soft-delete, `"All migrations valid"` /
+/// `"Found {} issues"`), `check_seaorm_migrations` (SeaORM production
+/// safety, `"All SeaORM migrations safe"` / `"Found {} safety issues"`),
+/// and `validate_migration_manifest` (manifest completeness,
+/// `"All {} migrations assessed in manifest"` / `"Found {} manifest
+/// issues"`) — each restated the identical
+///
+/// ```ignore
+/// if <issues>.is_empty() {
+///     crate::ui::print_step_pass(<pass-msg>);
+/// } else {
+///     crate::ui::print_step_failure(&format!("Found {} <adj>issues", <issues>.len()));
+///     print_migration_issue_report(&<issues>);
+/// }
+/// ```
+///
+/// three-line branching stanza verbatim, varying only in the pass
+/// message and the noun spliced into the failure header
+/// (`"issues"` / `"safety issues"` / `"manifest issues"`). The
+/// three-times threshold (THEORY §VI.1: "two occurrences is a
+/// coincidence; three is a law") is crossed exactly here, so the
+/// verdict-branching shape lifts onto ONE typed body — the pass-branch
+/// glyph, the failure-branch `"Found {} <noun>"` grammar, the ordering
+/// (failure header BEFORE the enumeration), and the delegation into
+/// [`print_migration_issue_report`] are decided once.
+///
+/// # Contract
+///
+/// - `issues.is_empty()` → exactly one [`crate::ui::print_step_pass`]
+///   line with `pass_message` verbatim; NO enumeration.
+/// - `!issues.is_empty()` → exactly one [`crate::ui::print_step_failure`]
+///   line reading `"Found {N} {failure_issue_noun}"` (with `N =
+///   issues.len()`), IMMEDIATELY followed by
+///   [`print_migration_issue_report`] over the same slice.
+///
+/// A future gate — the pending `check_rollback_compatibility` verdict,
+/// a JSON-per-line dialect under a `--report=json` flag, a
+/// `validation_gate_verdict` structured telemetry event, or a
+/// paginated enumeration for a long issue list — lands at ONE typed
+/// body rather than three copy-pasted lockstep edits.
+///
+/// # Theory grounding
+///
+/// THEORY.md §VI.1 (three-times rule): three sibling occurrences past
+/// the "two is a coincidence; three is a law" threshold; a fourth
+/// gate joining forwards through this primitive by construction.
+/// THEORY.md §V.1 (Types → Invariants → Proofs → Render Anywhere):
+/// the writer-form sibling [`write_migration_validation_verdict`] is
+/// the Render Anywhere half — the pass-then-nothing / failure-then-
+/// enumeration byte invariant lives in a `#[test]` bytes-in-bytes-out
+/// comparison rather than a captured-stdout dance.
+pub(crate) fn print_migration_validation_verdict(
+    issues: &[MigrationIssue],
+    pass_message: &str,
+    failure_issue_noun: &str,
+) {
+    if issues.is_empty() {
+        crate::ui::print_step_pass(pass_message);
+    } else {
+        crate::ui::print_step_failure(&format!("Found {} {}", issues.len(), failure_issue_noun));
+        print_migration_issue_report(issues);
+    }
+}
+
+/// Byte-oracle sibling of [`print_migration_validation_verdict`] —
+/// writes the same bytes to any [`std::io::Write`] so a `#[test]` can
+/// pin the empty (pass-only) vs. non-empty (failure header + enumeration)
+/// branching, the `"Found {N} {noun}"` interpolation, and the emit
+/// order (failure header BEFORE enumeration) as bytes-in-bytes-out.
+///
+/// Delegates to [`crate::ui::write_step_pass`] /
+/// [`crate::ui::write_step_failure`] for the branch headers and to
+/// [`write_migration_issue_report`] for the enumeration, so a shift in
+/// the underlying per-primitive byte template propagates through
+/// automatically and the byte-oracle here asserts only the composition
+/// discipline this primitive owns (which branch, in which order).
+pub(crate) fn write_migration_validation_verdict<W: std::io::Write>(
+    w: &mut W,
+    issues: &[MigrationIssue],
+    pass_message: &str,
+    failure_issue_noun: &str,
+) -> std::io::Result<()> {
+    if issues.is_empty() {
+        crate::ui::write_step_pass(w, pass_message)
+    } else {
+        crate::ui::write_step_failure(
+            w,
+            &format!("Found {} {}", issues.len(), failure_issue_noun),
+        )?;
+        write_migration_issue_report(w, issues)
+    }
+}
+
 /// Check migrations for idempotency patterns
 ///
 /// Validates that migrations use IF NOT EXISTS / IF EXISTS patterns
@@ -634,12 +738,7 @@ pub async fn validate_migrations_with_config(
         }
     }
 
-    if all_issues.is_empty() {
-        crate::ui::print_step_pass("All migrations valid");
-    } else {
-        crate::ui::print_step_failure(&format!("Found {} issues", all_issues.len()));
-        print_migration_issue_report(&all_issues);
-    }
+    print_migration_validation_verdict(&all_issues, "All migrations valid", "issues");
 
     Ok(MigrationValidationResult {
         files_checked,
@@ -999,12 +1098,7 @@ pub async fn validate_seaorm_migrations(
         all_issues.extend(issues);
     }
 
-    if all_issues.is_empty() {
-        crate::ui::print_step_pass("All SeaORM migrations safe");
-    } else {
-        crate::ui::print_step_failure(&format!("Found {} safety issues", all_issues.len()));
-        print_migration_issue_report(&all_issues);
-    }
+    print_migration_validation_verdict(&all_issues, "All SeaORM migrations safe", "safety issues");
 
     Ok(SeaOrmValidationResult {
         files_checked,
@@ -1262,15 +1356,11 @@ pub async fn validate_migration_manifest(
 
     let assessed_count = manifest.migrations.len();
 
-    if issues.is_empty() {
-        crate::ui::print_step_pass(&format!(
-            "All {} migrations assessed in manifest",
-            assessed_count
-        ));
-    } else {
-        crate::ui::print_step_failure(&format!("Found {} manifest issues", issues.len()));
-        print_migration_issue_report(&issues);
-    }
+    print_migration_validation_verdict(
+        &issues,
+        &format!("All {} migrations assessed in manifest", assessed_count),
+        "manifest issues",
+    );
 
     Ok(ManifestValidationResult {
         assessed_count,
@@ -2214,25 +2304,224 @@ migrations:
         );
     }
 
-    /// Positive-delegation shield: at least 3 call sites forward
-    /// through `print_migration_issue_report(` — one per validation
-    /// gate (SQLx `check_migrations`, SeaORM
-    /// `check_seaorm_migrations`, manifest
-    /// `validate_migration_manifest`). Plus the fn-signature line
-    /// itself contributes one hit. A future gate added without
-    /// threading through the primitive drops the delegation count and
-    /// fails this shield.
+    /// Positive-delegation shield: `print_migration_issue_report(`
+    /// still forwards through the codebase — post-verdict-lift the
+    /// 3 pre-lift call sites (SQLx `check_migrations`, SeaORM
+    /// `check_seaorm_migrations`, manifest `validate_migration_manifest`)
+    /// now reach the enumeration through
+    /// [`print_migration_validation_verdict`], which owns the SINGLE
+    /// forward. The fn-signature line for [`print_migration_issue_report`]
+    /// contributes one hit and the delegation from the verdict primitive
+    /// contributes the second, so the floor is `>= 2` here; a future
+    /// gate that inlined the enumeration outside the verdict primitive
+    /// would need to raise this floor AND fail the sibling
+    /// [`test_migration_validation_verdict_forwards_meet_call_site_floor`]
+    /// shield below.
     #[test]
     fn test_migration_issue_report_forwards_meet_call_site_floor() {
         const SOURCE: &str = include_str!("migration_validation.rs");
         let forwards = crate::test_support::code_line_hits(SOURCE, "print_migration_issue_report(");
         assert!(
-            forwards.len() >= 4,
+            forwards.len() >= 2,
             "commands/migration_validation.rs must forward every \
              migration-issue report through `print_migration_issue_report(` \
+             — post-verdict-lift the 3 call-site forwards fold into the \
+             single delegation inside `print_migration_validation_verdict`, \
+             so the fn-signature line plus that one forward means >= 2 \
+             code-line hits. Found {}.\n{}",
+            forwards.len(),
+            forwards.join("\n")
+        );
+    }
+
+    /// Byte-oracle: [`write_migration_validation_verdict`] on an empty
+    /// issue slice writes EXACTLY the bytes
+    /// [`crate::ui::write_step_pass`] emits for `pass_message` and
+    /// NOTHING ELSE — no failure header, no enumeration framing, no
+    /// trailing blank. Pins the pass-branch shape so a future edit that
+    /// unconditionally emits an enumeration header, appends a footer,
+    /// or swaps the pass primitive fails here.
+    #[test]
+    fn test_write_migration_validation_verdict_empty_matches_step_pass_bytes() {
+        let mut got: Vec<u8> = Vec::new();
+        write_migration_validation_verdict(&mut got, &[], "All migrations valid", "issues")
+            .unwrap();
+        let mut expected: Vec<u8> = Vec::new();
+        crate::ui::write_step_pass(&mut expected, "All migrations valid").unwrap();
+        assert_eq!(
+            got, expected,
+            "empty-issue branch must equal exactly one \
+             `crate::ui::write_step_pass(pass_message)` invocation — the \
+             primitive must NOT emit a failure header, an enumeration \
+             stub, or a trailing blank on the pass branch"
+        );
+    }
+
+    /// Byte-oracle: [`write_migration_validation_verdict`] on a single-
+    /// issue slice writes EXACTLY the concatenation of
+    /// [`crate::ui::write_step_failure`] with the `"Found 1 {noun}"`
+    /// header AND [`write_migration_issue_report`] over that single
+    /// issue, in THAT order. Pins the failure-branch composition, the
+    /// interpolation grammar (`"Found {} {}"` with `issues.len()` and
+    /// `failure_issue_noun`), and the failure-header-BEFORE-enumeration
+    /// discipline every operator relies on for the top-down readout.
+    /// A future edit that reversed the two, dropped the count, or
+    /// pluralized the noun independently fails here.
+    #[test]
+    fn test_write_migration_validation_verdict_nonempty_matches_failure_plus_report_bytes() {
+        let issue = MigrationIssue::HardDelete {
+            file: PathBuf::from("m1.sql"),
+            line_number: 7,
+            statement: "DELETE FROM users".to_string(),
+            suggestion: "use soft delete".to_string(),
+        };
+        let slice = std::slice::from_ref(&issue);
+        let mut got: Vec<u8> = Vec::new();
+        write_migration_validation_verdict(
+            &mut got,
+            slice,
+            "All migrations valid",
+            "safety issues",
+        )
+        .unwrap();
+        let mut expected: Vec<u8> = Vec::new();
+        crate::ui::write_step_failure(&mut expected, "Found 1 safety issues").unwrap();
+        write_migration_issue_report(&mut expected, slice).unwrap();
+        assert_eq!(
+            got, expected,
+            "single-issue failure branch must equal `write_step_failure(\
+             \"Found 1 <noun>\")` immediately followed by \
+             `write_migration_issue_report(slice)` — no reversal, no \
+             count drift, no dropped enumeration"
+        );
+    }
+
+    /// Byte-oracle: [`write_migration_validation_verdict`] on a
+    /// multi-issue slice honors the `"Found {N} {noun}"` count
+    /// (N = issues.len()) and enumerates every issue through
+    /// [`write_migration_issue_report`]. Pins the plural-count arithmetic
+    /// so a future edit that off-by-one'd the count, or that dropped a
+    /// trailing issue from the enumeration to "keep the output short",
+    /// fails here.
+    #[test]
+    fn test_write_migration_validation_verdict_multi_issue_count_and_enumeration() {
+        let a = MigrationIssue::IdempotencyViolation {
+            file: PathBuf::from("a.sql"),
+            line_number: 1,
+            statement: "CREATE TABLE t".to_string(),
+            suggestion: "add IF NOT EXISTS".to_string(),
+        };
+        let b = MigrationIssue::UnsafeDrop {
+            file: PathBuf::from("b.sql"),
+            line_number: 2,
+            statement: "DROP TABLE t".to_string(),
+            suggestion: "guard with IF EXISTS".to_string(),
+        };
+        let issues = vec![a, b];
+        let mut got: Vec<u8> = Vec::new();
+        write_migration_validation_verdict(
+            &mut got,
+            &issues,
+            "All migrations valid",
+            "manifest issues",
+        )
+        .unwrap();
+        let mut expected: Vec<u8> = Vec::new();
+        crate::ui::write_step_failure(&mut expected, "Found 2 manifest issues").unwrap();
+        write_migration_issue_report(&mut expected, &issues).unwrap();
+        assert_eq!(
+            got, expected,
+            "multi-issue failure branch must equal `write_step_failure(\
+             &format!(\"Found {{}} {{}}\", issues.len(), noun))` \
+             immediately followed by `write_migration_issue_report(&issues)` \
+             — no off-by-one, no dropped issue"
+        );
+    }
+
+    /// Negative caller shield: no raw
+    /// `crate::ui::print_step_failure(&format!("Found {} <noun>",
+    /// <issues>.len())); print_migration_issue_report(&<issues>);`
+    /// fused failure-header + enumeration stanza remains under
+    /// `commands/migration_validation.rs` outside
+    /// [`print_migration_validation_verdict`]. A future gate that
+    /// copy-pasted the pre-lift branching (whether to add a fourth
+    /// dialect, restore a debug probe during triage, or bypass the
+    /// primitive to add per-gate palette variance) reintroduces the
+    /// three-line stanza and fails this shield.
+    ///
+    /// # Needle construction
+    ///
+    /// The `"Found {} "` fragment is assembled at test time via
+    /// `format!` from two pieces — `"Found {}"` and a trailing single
+    /// ASCII space — so this shield's own body does NOT contain the
+    /// concatenated substring on any single code line (the format
+    /// literal alone matches, but the composition with the
+    /// downstream `print_migration_issue_report(` needle requires
+    /// both fragments on the same line). Mirrors the discipline in
+    /// [`test_no_raw_migration_issue_report_println_outside_primitive`]
+    /// and the sibling
+    /// [`test_migration_validation_tests_route_scratch_through_named_scratch_dir`]
+    /// (a `format!("std::env::{}()", "temp_dir")` construction).
+    #[test]
+    fn test_no_raw_migration_validation_verdict_stanza_outside_primitive() {
+        const SOURCE: &str = include_str!("migration_validation.rs");
+        let failure_needle = format!("crate::ui::print_step_failure(&format!(\"{}", "Found {} ");
+        let report_needle = "print_migration_issue_report(&";
+        let residue: Vec<String> = SOURCE
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| {
+                let t = l.trim_start();
+                !t.starts_with("///") && !t.starts_with("//!") && !t.starts_with("//")
+            })
+            .collect::<Vec<_>>()
+            .windows(2)
+            .filter_map(|w| {
+                let (i, a) = w[0];
+                let (_, b) = w[1];
+                if a.contains(&failure_needle) && b.contains(report_needle) {
+                    Some(format!("line {}: {} / {}", i + 1, a.trim(), b.trim()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            residue.is_empty(),
+            "commands/migration_validation.rs must NOT reintroduce the \
+             pre-lift `print_step_failure(&format!(\"Found {{}} <noun>\", \
+             <x>.len())); print_migration_issue_report(&<x>);` fused \
+             failure-header + enumeration stanza — every verdict emit \
+             routes through `print_migration_validation_verdict(...)`, \
+             which the byte-oracle sibling \
+             `write_migration_validation_verdict<W>` pins to exact bytes.\n{}",
+            residue.join("\n")
+        );
+    }
+
+    /// Positive-delegation shield: at least 3 call sites forward
+    /// through `print_migration_validation_verdict(` — one per
+    /// validation gate (SQLx `check_migrations`, SeaORM
+    /// `check_seaorm_migrations`, manifest `validate_migration_manifest`).
+    /// Plus the fn-signature line itself contributes one hit, so
+    /// `>= 4` code-line hits. A future gate added without threading
+    /// through the primitive drops the delegation count and fails
+    /// this shield — the sibling negative caller shield
+    /// [`test_no_raw_migration_validation_verdict_stanza_outside_primitive`]
+    /// forbids the pre-lift stanza; this positive floor forbids
+    /// silently dropping a call site outright.
+    #[test]
+    fn test_migration_validation_verdict_forwards_meet_call_site_floor() {
+        const SOURCE: &str = include_str!("migration_validation.rs");
+        let forwards =
+            crate::test_support::code_line_hits(SOURCE, "print_migration_validation_verdict(");
+        assert!(
+            forwards.len() >= 4,
+            "commands/migration_validation.rs must forward every \
+             verdict-announce through `print_migration_validation_verdict(` \
              — 3 call sites (SQLx idempotency+soft-delete, SeaORM safety, \
-             manifest completeness) plus the fn-signature line itself, i.e. \
-             >= 4 code-line hits. Found {}.\n{}",
+             manifest completeness) plus the fn-signature line itself, \
+             i.e. >= 4 code-line hits. Found {}.\n{}",
             forwards.len(),
             forwards.join("\n")
         );
