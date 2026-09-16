@@ -390,7 +390,9 @@ async fn push_all_sequential(
     let mut results = Vec::new();
 
     for component in PANGEA_COMPONENTS {
-        pb.set_message(format!("Building {}", component.name));
+        pb.set_message(crate::building_progress_message::building_progress_message(
+            component.name,
+        ));
 
         let result = build_and_push_component(component, tags, ghcr_token, retries).await?;
         results.push(result);

@@ -382,7 +382,9 @@ async fn push_all_sequential(
     let mut results = Vec::new();
 
     for binary in BOOTSTRAP_BINARIES {
-        pb.set_message(format!("Building {}", binary.name));
+        pb.set_message(crate::building_progress_message::building_progress_message(
+            binary.name,
+        ));
 
         let result = build_and_push_binary(binary, tags, ghcr_token, retries).await?;
         results.push(result);
