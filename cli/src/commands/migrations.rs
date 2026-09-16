@@ -1217,8 +1217,11 @@ pub async fn wait_for_shinka_migration(
             }
             _ => {
                 // Still waiting — phase is Pending, Migrating, CheckingHealth, or tag doesn't match yet
-                tokio::time::sleep(shinka_migration_poll_delay(backoff_attempt)).await;
-                backoff_attempt = backoff_attempt.saturating_add(1);
+                crate::poll_backoff_advance::advance_poll_backoff_tokio(
+                    &mut backoff_attempt,
+                    shinka_migration_poll_delay,
+                )
+                .await;
             }
         }
     }
@@ -1569,13 +1572,16 @@ mod tests {
              `RetryPolicy::compute_delay`. Found code-line hits: {:#?}",
             mut_backoff_hits,
         );
-        let delegation_hits =
-            code_line_hits(module_body, "shinka_migration_poll_delay(backoff_attempt)");
+        let delegation_hits = code_line_hits(module_body, "shinka_migration_poll_delay");
         assert!(
-            !delegation_hits.is_empty(),
+            delegation_hits.len() >= 2,
             "migrations.rs must consume the typed poll-delay helper at \
-             the reconcile-loop's sleep site — the canonical delegation \
-             call was not found at any code line.",
+             the reconcile-loop's sleep site — post-lift the \
+             `shinka_migration_poll_delay` function pointer is passed \
+             to `crate::poll_backoff_advance::advance_poll_backoff_tokio` \
+             at 1 call site, plus the fn-definition line contributes \
+             one hit, so the floor is `>= 2` code-line hits. Found:\n{}",
+            delegation_hits.join("\n"),
         );
     }
 

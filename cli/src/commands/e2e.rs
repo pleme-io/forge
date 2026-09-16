@@ -9,7 +9,6 @@
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 use std::process::Command;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::repo::get_tool_path;
@@ -1217,8 +1216,10 @@ pub fn ensure_docker_running() -> Result<()> {
         let mut backoff_attempt: u32 = 0;
         let mut last_report = start;
         loop {
-            thread::sleep(docker_startup_poll_delay(backoff_attempt));
-            backoff_attempt = backoff_attempt.saturating_add(1);
+            crate::poll_backoff_advance::advance_poll_backoff_thread(
+                &mut backoff_attempt,
+                docker_startup_poll_delay,
+            );
 
             // Daemon-liveness probe. Owns the pre-lift 4-line
             // `Command::new(docker_bin()).arg("info").output()
@@ -2216,15 +2217,17 @@ mod docker_startup_poll_backoff_tests {
              `RetryPolicy::compute_delay`. Found code-line hits: {:#?}",
             bespoke_hits,
         );
-        let delegation_hits = crate::test_support::code_line_hits(
-            fn_body,
-            "docker_startup_poll_delay(backoff_attempt)",
-        );
+        let delegation_hits =
+            crate::test_support::code_line_hits(fn_body, "docker_startup_poll_delay");
         assert!(
             !delegation_hits.is_empty(),
             "ensure_docker_running() must consume the typed \
-             poll-delay helper at the poll loop's sleep site — the \
-             canonical delegation call was not found at any code line.",
+             poll-delay helper at the poll loop's sleep site — post-lift \
+             the `docker_startup_poll_delay` function pointer is passed \
+             to `crate::poll_backoff_advance::advance_poll_backoff_thread` \
+             (the sync sibling — this is the sole synchronous poll site \
+             across the fleet). Found:\n{}",
+            delegation_hits.join("\n"),
         );
     }
 }

@@ -596,8 +596,11 @@ pub async fn execute(
                 break;
             }
             _ => {
-                sleep(post_deployment_readiness_poll_delay(backoff_attempt)).await;
-                backoff_attempt = backoff_attempt.saturating_add(1);
+                crate::poll_backoff_advance::advance_poll_backoff_tokio(
+                    &mut backoff_attempt,
+                    post_deployment_readiness_poll_delay,
+                )
+                .await;
             }
         }
     }
@@ -2226,14 +2229,19 @@ mod post_deployment_readiness_poll_backoff_tests {
         );
         let delegation_hits = crate::test_support::code_line_hits(
             execute_body,
-            "post_deployment_readiness_poll_delay(backoff_attempt)",
+            "post_deployment_readiness_poll_delay",
         );
         assert!(
             !delegation_hits.is_empty(),
             "commands/integration_tests.rs::execute must consume the \
              typed readiness-poll-delay helper at the poll loop's sleep \
-             site — the canonical delegation call was not found at any \
-             code line inside `pub async fn execute`.",
+             site — post-lift the `post_deployment_readiness_poll_delay` \
+             function pointer is passed to \
+             `crate::poll_backoff_advance::advance_poll_backoff_tokio` \
+             at 1 call site (the fn-definition line lives outside \
+             `execute`, so the floor scoped to this body is `>= 1`). \
+             Found:\n{}",
+            delegation_hits.join("\n"),
         );
     }
 }

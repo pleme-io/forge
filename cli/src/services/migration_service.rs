@@ -317,8 +317,11 @@ spec:
                 anyhow::bail!("Migration job failed");
             }
 
-            tokio::time::sleep(migration_job_poll_delay(backoff_attempt)).await;
-            backoff_attempt = backoff_attempt.saturating_add(1);
+            crate::poll_backoff_advance::advance_poll_backoff_tokio(
+                &mut backoff_attempt,
+                migration_job_poll_delay,
+            )
+            .await;
         }
     }
 
@@ -565,15 +568,17 @@ mod tests {
              code-line hits: {:#?}",
             bespoke_hits,
         );
-        let delegation_hits = crate::test_support::code_line_hits(
-            module_body,
-            "migration_job_poll_delay(backoff_attempt)",
-        );
+        let delegation_hits =
+            crate::test_support::code_line_hits(module_body, "migration_job_poll_delay");
         assert!(
-            !delegation_hits.is_empty(),
+            delegation_hits.len() >= 2,
             "migration_service.rs must consume the typed poll-delay \
-             helper at the poll loop's sleep site — the canonical \
-             delegation call was not found at any code line.",
+             helper at the poll loop's sleep site — post-lift the \
+             `migration_job_poll_delay` function pointer is passed to \
+             `crate::poll_backoff_advance::advance_poll_backoff_tokio` \
+             at 1 call site, plus the fn-definition line contributes \
+             one hit, so the floor is `>= 2` code-line hits. Found:\n{}",
+            delegation_hits.join("\n"),
         );
     }
 

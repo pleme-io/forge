@@ -730,9 +730,15 @@ pub async fn execute(
             // Wait before next check — schedule owned by
             // `GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF` +
             // `github_runner_rollout_poll_delay` (both grounding through
-            // `RetryPolicy::compute_delay`).
-            tokio::time::sleep(github_runner_rollout_poll_delay(backoff_attempt)).await;
-            backoff_attempt = backoff_attempt.saturating_add(1);
+            // `RetryPolicy::compute_delay`); the sleep-then-bump pair
+            // rides on `crate::poll_backoff_advance` (see its module
+            // docstring for the two invariants — pre-bump delay,
+            // saturating semantics — the primitive owns).
+            crate::poll_backoff_advance::advance_poll_backoff_tokio(
+                &mut backoff_attempt,
+                github_runner_rollout_poll_delay,
+            )
+            .await;
         }
 
         // Verify the new image is deployed
@@ -1601,15 +1607,17 @@ mod tests {
             bespoke_needle,
             bespoke_hits,
         );
-        let delegation_hits = code_line_hits(
-            module_body,
-            "github_runner_rollout_poll_delay(backoff_attempt)",
-        );
+        let delegation_hits = code_line_hits(module_body, "github_runner_rollout_poll_delay");
         assert!(
-            !delegation_hits.is_empty(),
+            delegation_hits.len() >= 2,
             "github_runner_ci.rs must consume the typed poll-delay \
-             helper at the rollout-watch loop's sleep site — the \
-             canonical delegation call was not found at any code line.",
+             helper at the rollout-watch loop's sleep site — post-lift \
+             the `github_runner_rollout_poll_delay` function pointer is \
+             passed to `crate::poll_backoff_advance::\
+             advance_poll_backoff_tokio` at 1 call site, plus the \
+             fn-definition line contributes one hit, so the floor is \
+             `>= 2` code-line hits. Found:\n{}",
+            delegation_hits.join("\n"),
         );
     }
 }

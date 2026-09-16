@@ -106,6 +106,7 @@ mod observability;
 mod package_phase_announce;
 mod path_builder;
 mod pod_probe_pending_wait_line;
+mod poll_backoff_advance;
 mod post_deploy_http_client;
 mod probe_dump;
 mod probe_verifying;

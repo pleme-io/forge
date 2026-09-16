@@ -549,8 +549,11 @@ pub async fn verify_deployment_image(
             println!("{}", diag);
         }
 
-        sleep(flux_poll_delay(backoff_attempt)).await;
-        backoff_attempt = backoff_attempt.saturating_add(1);
+        crate::poll_backoff_advance::advance_poll_backoff_tokio(
+            &mut backoff_attempt,
+            flux_poll_delay,
+        )
+        .await;
     }
 }
 
@@ -653,8 +656,11 @@ pub async fn wait_for_deployment(
             println!("{}", diag);
         }
 
-        sleep(flux_poll_delay(backoff_attempt)).await;
-        backoff_attempt = backoff_attempt.saturating_add(1);
+        crate::poll_backoff_advance::advance_poll_backoff_tokio(
+            &mut backoff_attempt,
+            flux_poll_delay,
+        )
+        .await;
     }
 }
 
@@ -1160,16 +1166,21 @@ mod tests {
             wait_call_hits.is_empty(),
             "flux.rs must NOT drive the polling loops through a \
              bespoke `backoff.wait().await` method — the sleep site \
-             must consume `sleep(flux_poll_delay(backoff_attempt))`. \
-             Found code-line hits: {:#?}",
+             must consume `crate::poll_backoff_advance::\
+             advance_poll_backoff_tokio(&mut backoff_attempt, \
+             flux_poll_delay)`. Found code-line hits: {:#?}",
             wait_call_hits,
         );
-        let delegation_hits = code_line_hits(module_body, "flux_poll_delay(backoff_attempt)");
+        let delegation_hits = code_line_hits(module_body, "flux_poll_delay");
         assert!(
-            !delegation_hits.is_empty(),
+            delegation_hits.len() >= 3,
             "flux.rs must consume the typed poll-delay helper at both \
-             polling loops' sleep sites — the canonical delegation \
-             call was not found at any code line.",
+             polling loops' sleep sites — post-lift the `flux_poll_delay` \
+             function pointer is passed to \
+             `crate::poll_backoff_advance::advance_poll_backoff_tokio` \
+             at 2 call sites, plus the fn-definition line contributes \
+             one hit, so the floor is `>= 3` code-line hits. Found:\n{}",
+            delegation_hits.join("\n"),
         );
     }
 
