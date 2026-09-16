@@ -534,7 +534,11 @@ pub async fn verify_deployment_image(
                 );
             }
             Err(e) => {
-                println!("   ⏳ Waiting for deployment ({}, {}s elapsed)", e, elapsed);
+                crate::pod_probe_pending_wait_line::print_pod_probe_pending_wait_line(
+                    crate::pod_probe_pending_wait_line::PodPollTargetLabel::Deployment,
+                    &e,
+                    elapsed,
+                );
             }
         }
 
@@ -634,7 +638,11 @@ pub async fn wait_for_deployment(
                 }
             }
             Err(e) => {
-                println!("   ⏳ Waiting for pod ({}, {}s elapsed)", e, elapsed);
+                crate::pod_probe_pending_wait_line::print_pod_probe_pending_wait_line(
+                    crate::pod_probe_pending_wait_line::PodPollTargetLabel::Pod,
+                    &e,
+                    elapsed,
+                );
             }
         }
 
