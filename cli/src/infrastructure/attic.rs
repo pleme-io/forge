@@ -16,6 +16,7 @@ use crate::retry::{
     classify_attempt_failure, classify_capture, retry_command_logged, CommandAttemptFailure,
     RetryPolicy,
 };
+use crate::tokio_command_piped_stdio::PipedChildStdio;
 
 /// Module-scoped sigil: resolve the `attic` binary via the canonical
 /// two-argument `get_tool_path("ATTIC_BIN", "attic")` call. Every
@@ -383,9 +384,7 @@ impl AtticClient {
             let token = token.clone();
             async move {
                 let mut cmd = Command::new(&attic_bin);
-                cmd.args(["push", &cache, store_path])
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped());
+                cmd.args(["push", &cache, store_path]).piped_child_stdio();
                 if let Some(t) = token.as_deref() {
                     cmd.env("ATTIC_TOKEN", t);
                 }
@@ -504,8 +503,7 @@ impl AtticClient {
         let mut cmd = self.command();
         cmd.args(["push", &self.cache_name, "--stdin"])
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .piped_child_stdio();
         if let Some(t) = self.token.as_deref() {
             cmd.env("ATTIC_TOKEN", t);
         }
@@ -572,8 +570,7 @@ impl AtticClient {
 
         let mut cmd = self.command();
         cmd.args(["login", &self.cache_name, server_url, token])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .piped_child_stdio();
 
         classify_capture(
             cmd.output().await,
@@ -700,8 +697,7 @@ impl AtticClient {
             async move {
                 let mut cmd = Command::new(&attic_bin);
                 cmd.args(["login", &cache, &server_url_owned, &token_owned])
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped());
+                    .piped_child_stdio();
                 cmd.output().await
             }
         })
@@ -762,9 +758,7 @@ impl AtticClient {
     pub async fn use_cache(&self, server: &str) -> Result<(), AtticError> {
         let cache_ref = crate::attic_cache_alias::attic_cache_alias(server, &self.cache_name);
         let mut cmd = self.command();
-        cmd.args(["use", &cache_ref])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        cmd.args(["use", &cache_ref]).piped_child_stdio();
 
         classify_capture(
             cmd.output().await,

@@ -5,7 +5,6 @@
 
 use anyhow::{Context, Result};
 use std::path::Path;
-use std::process::Stdio;
 use tokio::process::Command;
 use tracing::{debug, info};
 
@@ -13,6 +12,7 @@ use crate::error::NixBuildError;
 use crate::repo::get_tool_path;
 use crate::retry::{classify_capture, classify_capture_query};
 use crate::store_path::StorePath;
+use crate::tokio_command_piped_stdio::PipedChildStdio;
 
 /// Resolve the `nix` binary via the `NIX_BIN` env override, falling
 /// back to `nix` on `PATH`. Wired through [`crate::repo::get_tool_path`]
@@ -146,7 +146,7 @@ pub(crate) async fn run_nix_build_typed(
     debug!("{} {}", nix_bin, args.join(" "));
 
     let mut cmd = Command::new(nix_bin);
-    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.args(args).piped_child_stdio();
     if let Some(dir) = working_dir {
         cmd.current_dir(dir);
     }
@@ -597,8 +597,7 @@ async fn path_info_recursive_with_bin(
 ) -> Result<NixClosureInfo, NixBuildError> {
     let mut cmd = Command::new(nix_bin);
     cmd.args(["path-info", "--recursive", output_link])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .piped_child_stdio();
 
     // Spawn-vs-op dispatch flows through the canonical
     // [`classify_capture`] primitive — same shape as

@@ -4,7 +4,6 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -13,6 +12,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::infrastructure::kubectl::kubectl_capture_anyhow;
 use crate::retry::RetryPolicy;
+use crate::tokio_command_piped_stdio::PipedChildStdio;
 use crate::ui::{styled_spinner, SpinnerStyle};
 
 /// The typed exponential-backoff policy for [`execute_suite`]'s
@@ -858,8 +858,7 @@ async fn execute_suite(
             .arg(&suite.command)
             .current_dir(&suite_working_dir)
             .envs(env_vars)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .piped_child_stdio();
 
         debug!("Executing: {} in {:?}", suite.command, suite_working_dir);
 
@@ -1371,8 +1370,7 @@ pub async fn execute_pre_deployment_tests(
             let child = Command::new(cmd)
                 .args(args)
                 .current_dir(&suite_working_dir)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
+                .piped_child_stdio()
                 .spawn();
 
             let result = match child {
