@@ -328,10 +328,9 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
     println!();
 
     // Step 2: Generate new Cargo.lock
-    println!(
-        "📦 {} {}",
-        "Generating new Cargo.lock".bold(),
-        "(cargo generate-lockfile)".dimmed()
+    crate::package_phase_announce::print_package_phase_announce(
+        "Generating new Cargo.lock",
+        "(cargo generate-lockfile)",
     );
     crate::retry::run_bin_args_inherited_status(
         &cargo_bin(),
@@ -394,10 +393,9 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
     crate::repo::set_current_dir_labeled(workspace_root, "workspace")?;
 
     // Step 1: Update dependencies
-    println!(
-        "📦 {} {}",
-        "Updating dependencies".bold(),
-        "(cargo update)".dimmed()
+    crate::package_phase_announce::print_package_phase_announce(
+        "Updating dependencies",
+        "(cargo update)",
     );
     crate::nix::run_cargo_update(&cargo_bin()).await?;
     crate::ui::print_step_pass("Dependencies updated");

@@ -149,10 +149,9 @@ pub async fn web_regenerate(product: String, service: String, repo_root: String)
     println!();
 
     // Step 1: Regenerate frontend deps.nix using pleme-linker
-    println!(
-        "📦 {} {}",
-        "Regenerating frontend deps.nix".bold(),
-        "(pleme-linker regen)".dimmed()
+    crate::package_phase_announce::print_package_phase_announce(
+        "Regenerating frontend deps.nix",
+        "(pleme-linker regen)",
     );
 
     let mut cmd = Command::new(&pleme_linker);
@@ -248,10 +247,9 @@ pub async fn web_cargo_update(product: String, service: String, repo_root: Strin
     println!();
 
     // Step 1: Run cargo update
-    println!(
-        "📦 {} {}",
-        "Updating dependencies".bold(),
-        "(cargo update)".dimmed()
+    crate::package_phase_announce::print_package_phase_announce(
+        "Updating dependencies",
+        "(cargo update)",
     );
 
     let mut cmd = Command::new(&cargo);

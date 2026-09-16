@@ -79,7 +79,6 @@
 use std::io;
 
 use anyhow::{Context, Result};
-use colored::Colorize;
 
 /// The bold-rendered announce label body two pre-lift sites spelled
 /// inline as `"Generating Cargo.nix".bold()` on the `📦 <bold>
@@ -128,24 +127,32 @@ pub const CARGO_NIX_GENERATE_ARGV: &[&str] = &["-f", "Cargo.toml", "-o", "Cargo.
                     // peer of the production
                     // `print_generate_cargo_nix_announce`.
 pub fn write_generate_cargo_nix_announce<W: io::Write>(w: &mut W) -> io::Result<()> {
-    writeln!(
+    crate::package_phase_announce::write_package_phase_announce(
         w,
-        "\u{1F4E6} {} {}",
-        GENERATE_CARGO_NIX_ANNOUNCE_LABEL, GENERATE_CARGO_NIX_ANNOUNCE_DETAIL
+        GENERATE_CARGO_NIX_ANNOUNCE_LABEL,
+        GENERATE_CARGO_NIX_ANNOUNCE_DETAIL,
     )
 }
 
 /// Print the colored announce line to stdout — the production entry
 /// point pre-lift sites reached for via
 /// `println!("📦 {} {}", "Generating Cargo.nix".bold(),
-/// "(crate2nix generate)".dimmed())`. The label is `.bold()`, the
-/// parenthesized detail is `.dimmed()`, the `📦` glyph and the ASCII
-/// spaces flanking it carry no ANSI colorization.
+/// "(crate2nix generate)".dimmed())`.
+///
+/// Delegates through
+/// [`crate::package_phase_announce::print_package_phase_announce`] so
+/// the shared `📦 <bold-label> <dimmed-detail>` package-phase
+/// announce grammar has ONE landing point — a future re-branding of
+/// the glyph or a widening of the flanking space gap lands at the
+/// shared primitive and rides through this specialization by
+/// construction. The label body remains
+/// [`GENERATE_CARGO_NIX_ANNOUNCE_LABEL`] and the parenthesized detail
+/// remains [`GENERATE_CARGO_NIX_ANNOUNCE_DETAIL`] — the specialization
+/// owns the two literals, the shared primitive owns the grammar.
 pub fn print_generate_cargo_nix_announce() {
-    println!(
-        "\u{1F4E6} {} {}",
-        GENERATE_CARGO_NIX_ANNOUNCE_LABEL.bold(),
-        GENERATE_CARGO_NIX_ANNOUNCE_DETAIL.dimmed()
+    crate::package_phase_announce::print_package_phase_announce(
+        GENERATE_CARGO_NIX_ANNOUNCE_LABEL,
+        GENERATE_CARGO_NIX_ANNOUNCE_DETAIL,
     );
 }
 

@@ -101,6 +101,7 @@ mod nix_hooks;
 mod nix_result_link_path;
 mod nonfatal_warning;
 mod observability;
+mod package_phase_announce;
 mod path_builder;
 mod post_deploy_http_client;
 mod probe_dump;
