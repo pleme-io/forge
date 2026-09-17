@@ -325,34 +325,47 @@ mod tests {
         );
     }
 
-    /// Caller shield (positive half): the three pre-lift modules MUST
-    /// each forward through [`bun_x_graphql_codegen_argv`] at least
-    /// once, so a migration that dropped a call site outright leaves
-    /// the negative "no raw inline shape" scan trivially satisfied by
-    /// absence but the positive count still fails.
+    /// Caller shield (positive half): the sole post-lift consumer of
+    /// [`bun_x_graphql_codegen_argv`] — the
+    /// [`crate::bun_x_graphql_codegen_capture`] captured-output spawn
+    /// primitive's `build_bun_x_graphql_codegen_capture_command` body
+    /// — MUST forward through it at least once. Pre-lift the three
+    /// consumer modules (`commands/{codegen,codegen_validation,sync}.rs`)
+    /// each spelled the `.args(crate::bun_argv::bun_x_graphql_codegen_argv())`
+    /// call inline on their `Command::new(&bun)` chain; post-lift the
+    /// same three modules delegate to
+    /// `crate::bun_x_graphql_codegen_capture::run_bun_x_graphql_codegen_capture_at`,
+    /// which owns the argv-carrying builder body. This shield tracks
+    /// the routing to the new one-owner spawn primitive so a
+    /// migration that dropped the argv routing outright leaves the
+    /// negative "no raw inline shape" scan trivially satisfied by
+    /// absence but the positive count still fails. The per-caller
+    /// forward-count for the three `commands/` modules is retained
+    /// by the sibling
+    /// `bun_x_graphql_codegen_capture::tests::every_prelift_module_forwards_through_bun_x_graphql_codegen_capture`
+    /// shield.
     #[test]
     fn every_prelift_module_forwards_through_bun_x_graphql_codegen_argv() {
         use std::path::PathBuf;
-        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let capture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("src")
-            .join("commands");
-        let expectations: &[(&str, usize)] = &[
-            ("codegen.rs", 1),
-            ("codegen_validation.rs", 1),
-            ("sync.rs", 1),
-        ];
+            .join("bun_x_graphql_codegen_capture.rs");
         let needle = "bun_x_graphql_codegen_argv(";
-        for (basename, min_count) in expectations {
-            let path = commands_dir.join(basename);
-            let source = std::fs::read_to_string(&path).unwrap();
-            let forwards = source.matches(needle).count();
-            assert!(
-                forwards >= *min_count,
-                "{basename} must forward at least {min_count} bun-x-graphql-codegen \
-                 spawn site(s) through `{needle}`; found {forwards}. \
-                 A dropped call would leave the negative raw-shape scan \
-                 satisfied by absence.",
-            );
-        }
+        let source = std::fs::read_to_string(&capture_path).unwrap_or_else(|_| {
+            panic!(
+                "expected {} to exist — the sole post-lift consumer of \
+                 the `bun_x_graphql_codegen_argv` primitive",
+                capture_path.display()
+            )
+        });
+        let forwards = source.matches(needle).count();
+        assert!(
+            forwards >= 1,
+            "bun_x_graphql_codegen_capture.rs must forward through `{needle}` \
+             at least once — the fusion primitive's `build_..._command` body \
+             is the sole post-lift caller of `bun_x_graphql_codegen_argv`. \
+             A dropped call would leave the negative raw-shape scan (under \
+             `commands/`) trivially satisfied by absence.",
+        );
     }
 }

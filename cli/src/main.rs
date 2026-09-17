@@ -68,6 +68,7 @@ mod backend_frontend_dirs_preamble;
 mod bookmark_git_sha_field;
 mod building_progress_message;
 mod bun_argv;
+mod bun_x_graphql_codegen_capture;
 mod cargo_nix_ceremony_banner;
 mod cargo_test_argv;
 mod cloudflare;

@@ -224,10 +224,11 @@ pub async fn execute_drift_check(working_dir: &Path) -> Result<DriftCheckResult>
     }
 
     // Run codegen
-    let codegen_output = Command::new(&bun)
-        .args(crate::bun_argv::bun_x_graphql_codegen_argv())
-        .current_dir(&config.web_dir)
-        .output()
+    let codegen_output =
+        crate::bun_x_graphql_codegen_capture::run_bun_x_graphql_codegen_capture_at(
+            &bun,
+            &config.web_dir,
+        )
         .await
         .context("Failed to run graphql-codegen")?;
 

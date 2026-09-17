@@ -151,12 +151,10 @@ pub async fn validate_codegen_with_autocommit(
     }
 
     // Run codegen
-    let codegen_output = Command::new(&bun)
-        .args(crate::bun_argv::bun_x_graphql_codegen_argv())
-        .current_dir(web_dir)
-        .output()
-        .await
-        .with_context(|| format!("Failed to run graphql-codegen in {}", web_dir.display()))?;
+    let codegen_output =
+        crate::bun_x_graphql_codegen_capture::run_bun_x_graphql_codegen_capture_at(&bun, web_dir)
+            .await
+            .with_context(|| format!("Failed to run graphql-codegen in {}", web_dir.display()))?;
 
     if !codegen_output.status.success() {
         // Check for specific drift errors
