@@ -37,9 +37,10 @@ pub async fn up(name: &str, flake_attr: &str, port: u16, compose_file: Option<&s
     // If a compose file is provided, use docker compose instead
     if let Some(cf) = compose_file {
         info!("Starting {} via docker compose...", name);
+        let argv = crate::docker_compose_argv::docker_compose_argv(cf, &["up", "-d", name]);
         crate::retry::run_bin_args_inherited_status_sync(
             &docker_bin(),
-            &["compose", "-f", cf, "up", "-d", name],
+            &argv,
             "docker compose up",
         )?;
 
@@ -96,9 +97,10 @@ pub async fn up(name: &str, flake_attr: &str, port: u16, compose_file: Option<&s
 pub fn down(name: &str, compose_file: Option<&str>) -> Result<()> {
     if let Some(cf) = compose_file {
         info!("Stopping {} via docker compose...", name);
+        let argv = crate::docker_compose_argv::docker_compose_argv(cf, &["down"]);
         crate::retry::run_bin_args_inherited_status_sync(
             &docker_bin(),
-            &["compose", "-f", cf, "down"],
+            &argv,
             "docker compose down",
         )?;
 

@@ -71,6 +71,7 @@ mod cargo_test_argv;
 mod cloudflare;
 mod cloudflare_purge_success_ack;
 mod deploy_target_field;
+mod docker_compose_argv;
 mod docker_daemon_running_preflight;
 mod docker_info_probe;
 mod docker_installed_preflight;

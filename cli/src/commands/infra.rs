@@ -41,20 +41,15 @@ pub fn up(working_dir: &str, services: &[String]) -> Result<()> {
 
     info!("Starting infrastructure services...");
 
-    let mut args = vec![
-        "compose".to_string(),
-        "-f".to_string(),
-        crate::repo::path_to_string_lossy(&compose_file),
-        "up".to_string(),
-        "-d".to_string(),
-    ];
-
+    let compose_path = crate::repo::path_to_string_lossy(&compose_file);
+    let mut suffix: Vec<&str> = vec!["up", "-d"];
     for svc in services {
-        args.push(svc.clone());
+        suffix.push(svc.as_str());
     }
+    let argv = crate::docker_compose_argv::docker_compose_argv(&compose_path, &suffix);
 
     let mut cmd = Command::new(docker_bin());
-    cmd.args(&args).current_dir(&repo_root);
+    cmd.args(&argv).current_dir(&repo_root);
     run_inherited_status_sync(cmd, "docker compose up")?;
 
     info!("Infrastructure services started");
@@ -68,9 +63,10 @@ pub fn down(working_dir: &str) -> Result<()> {
 
     info!("Stopping infrastructure services...");
 
+    let compose_path = compose_file.to_string_lossy();
+    let argv = crate::docker_compose_argv::docker_compose_argv(&compose_path, &["down"]);
     let mut cmd = Command::new(docker_bin());
-    cmd.args(["compose", "-f", &compose_file.to_string_lossy(), "down"])
-        .current_dir(&repo_root);
+    cmd.args(&argv).current_dir(&repo_root);
     run_inherited_status_sync(cmd, "docker compose down")?;
 
     info!("Infrastructure services stopped");
@@ -84,16 +80,13 @@ pub fn clean(working_dir: &str) -> Result<()> {
 
     info!("Cleaning infrastructure (removing volumes and orphans)...");
 
+    let compose_path = compose_file.to_string_lossy();
+    let argv = crate::docker_compose_argv::docker_compose_argv(
+        &compose_path,
+        &["down", "-v", "--remove-orphans"],
+    );
     let mut cmd = Command::new(docker_bin());
-    cmd.args([
-        "compose",
-        "-f",
-        &compose_file.to_string_lossy(),
-        "down",
-        "-v",
-        "--remove-orphans",
-    ])
-    .current_dir(&repo_root);
+    cmd.args(&argv).current_dir(&repo_root);
     run_inherited_status_sync(cmd, "docker compose clean")?;
 
     info!("Infrastructure cleaned");
