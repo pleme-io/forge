@@ -9,7 +9,6 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use std::time::Instant;
 use tokio::fs;
-use tokio::process::Command;
 
 use crate::repo::get_tool_path;
 
@@ -109,17 +108,22 @@ pub async fn execute(backend_dir: &Path, web_dir: &Path) -> Result<CodegenResult
 
     let bun = bun_bin();
     // Owns the async captured-output spawn + classify ritual at the
-    // canonical `crate::retry::run_capture_anyhow` primitive.
-    // `.current_dir(web_dir)` is preserved through the builder chain;
-    // the surrounding `.with_context(...)` retains the web_dir hint
-    // for the spawn-arm diagnostic.
-    let mut install_cmd = Command::new(&bun);
-    install_cmd
-        .args(crate::bun_argv::bun_install_frozen_lockfile_argv())
-        .current_dir(web_dir);
-    crate::retry::run_capture_anyhow(install_cmd, "bun install")
-        .await
-        .with_context(|| format!("bun install in {}", web_dir.display()))?;
+    // canonical `crate::retry::run_capture_anyhow` primitive. The
+    // tokio-`Command` construction (argv + `.current_dir(web_dir)`)
+    // is fanned in through
+    // `crate::bun_install_frozen_lockfile_capture::build_bun_install_frozen_lockfile_capture_command`
+    // so the three schema/codegen consumers of `bun install
+    // --frozen-lockfile` share one builder body; the surrounding
+    // `.with_context(...)` retains the web_dir hint for the
+    // spawn-arm diagnostic.
+    crate::retry::run_capture_anyhow(
+        crate::bun_install_frozen_lockfile_capture::build_bun_install_frozen_lockfile_capture_command(
+            &bun, web_dir,
+        ),
+        "bun install",
+    )
+    .await
+    .with_context(|| format!("bun install in {}", web_dir.display()))?;
 
     crate::ui::print_step_check(&crate::repo::msg_with_secs_1(
         "Dependencies installed",

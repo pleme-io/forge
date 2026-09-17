@@ -208,10 +208,11 @@ pub async fn execute_drift_check(working_dir: &Path) -> Result<DriftCheckResult>
 
     // Install deps first
     let bun = bun_bin();
-    let install_output = Command::new(&bun)
-        .args(crate::bun_argv::bun_install_frozen_lockfile_argv())
-        .current_dir(&config.web_dir)
-        .output()
+    let install_output =
+        crate::bun_install_frozen_lockfile_capture::run_bun_install_frozen_lockfile_capture_at(
+            &bun,
+            &config.web_dir,
+        )
         .await
         .context("Failed to run bun install")?;
 

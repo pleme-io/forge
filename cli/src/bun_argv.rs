@@ -207,34 +207,70 @@ mod tests {
         );
     }
 
-    /// Caller shield (positive half): the four pre-lift modules MUST
-    /// each forward through
-    /// [`bun_install_frozen_lockfile_argv`] at least once, so a
-    /// migration that dropped a call site outright leaves the negative
-    /// "no raw inline shape" scan trivially satisfied by absence but the
-    /// positive count still fails. Mirrors the sibling
-    /// `every_prelift_module_forwards_through_*` shields the crate
-    /// carries against every other typed primitive.
+    /// Caller shield (positive half): the two remaining post-lift
+    /// direct consumers of [`bun_install_frozen_lockfile_argv`] MUST
+    /// each forward through it at least once, so a migration that
+    /// dropped a call site outright leaves the negative "no raw
+    /// inline shape" scan trivially satisfied by absence but the
+    /// positive count still fails.
+    ///
+    /// Pre-lift four consumer modules
+    /// (`commands/{codegen,codegen_validation,sync,frontend_validation}.rs`)
+    /// each spelled the
+    /// `.args(crate::bun_argv::bun_install_frozen_lockfile_argv())`
+    /// call inline on their own `Command::new(&bun)` chain
+    /// (`codegen_validation`, `sync`) or handed the slice through a
+    /// helper (`codegen`'s `run_capture_anyhow` prep, `frontend_validation`'s
+    /// generic `bun_output_at` wrapper). Post-lift the three
+    /// captured-output spawn consumers
+    /// (`commands/{codegen,codegen_validation,sync}.rs`) delegate to
+    /// [`crate::bun_install_frozen_lockfile_capture`], which owns
+    /// the argv-carrying builder body; the argv routing for those
+    /// three sites is tracked by the sibling
+    /// `bun_install_frozen_lockfile_capture::tests::every_prelift_module_forwards_through_bun_install_frozen_lockfile_capture`
+    /// shield.
+    ///
+    /// The two remaining direct consumers of the argv slice are:
+    ///
+    /// 1. [`crate::bun_install_frozen_lockfile_capture`] — the
+    ///    captured-output spawn primitive's
+    ///    `build_bun_install_frozen_lockfile_capture_command` body,
+    ///    which is the sole post-lift caller for the three
+    ///    `Command::new(&bun).args(...).current_dir(<web_dir>).output().await`
+    ///    consumers.
+    /// 2. `commands/frontend_validation.rs::validate_frontend` — hands
+    ///    the argv slice to a module-local `bun_output_at(args:
+    ///    &[&str], cwd: &Path, op: &str)` helper that also serves
+    ///    `bun run typecheck`, `bun test`, and `bunx biome check`
+    ///    spawns; the generic helper is a different lift axis
+    ///    (multi-argv wrapper, not a `bun install`-specialized
+    ///    Command factory), so its argv routing stays direct.
     #[test]
     fn every_prelift_module_forwards_through_bun_install_frozen_lockfile_argv() {
         use std::path::PathBuf;
-        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src")
-            .join("commands");
-        let expectations: &[(&str, usize)] = &[
-            ("codegen.rs", 1),
-            ("codegen_validation.rs", 1),
-            ("sync.rs", 1),
-            ("frontend_validation.rs", 1),
+        let manifest_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let expectations: &[(PathBuf, &str, usize)] = &[
+            (
+                manifest_root.join("bun_install_frozen_lockfile_capture.rs"),
+                "bun_install_frozen_lockfile_capture.rs",
+                1,
+            ),
+            (
+                manifest_root
+                    .join("commands")
+                    .join("frontend_validation.rs"),
+                "commands/frontend_validation.rs",
+                1,
+            ),
         ];
         let needle = "bun_install_frozen_lockfile_argv(";
-        for (basename, min_count) in expectations {
-            let path = commands_dir.join(basename);
-            let source = std::fs::read_to_string(&path).unwrap();
+        for (path, label, min_count) in expectations {
+            let source = std::fs::read_to_string(path)
+                .unwrap_or_else(|_| panic!("expected {} to exist", path.display()));
             let forwards = source.matches(needle).count();
             assert!(
                 forwards >= *min_count,
-                "{basename} must forward at least {min_count} bun-install \
+                "{label} must forward at least {min_count} bun-install \
                  spawn site(s) through `{needle}`; found {forwards}. \
                  A dropped call would leave the negative raw-shape scan \
                  satisfied by absence.",
