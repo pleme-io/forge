@@ -948,6 +948,44 @@ impl DeployConfig {
         )
     }
 
+    /// Resolve the effective [`DeploymentConfig`] for this service:
+    /// service-level override if present, otherwise the global default.
+    ///
+    /// Pre-this-lift each consumer that read a single deployment field
+    /// spelled the 5-line
+    /// `self.service.deployment.as_ref().map(|d| d.<field>).unwrap_or(self.global.deployment.<field>)`
+    /// stanza inline — 4 sites across `commands/rust_service.rs`
+    /// (`deploy_service_across_environments` :1297-1302 for
+    /// `skip_flux_health_check`, :1578-1583 for `wait_for_rollout`;
+    /// `deploy_and_verify` :2358-2363 for `skip_flux_health_check`,
+    /// :2493-2498 for `wait_for_rollout`). This method routes all 4
+    /// through ONE body and every future
+    /// [`DeploymentConfig`] field the callers reach for
+    /// (`deployment_wait_timeout_secs`, `flux_commands`,
+    /// `production_strategy`, …) rides the same override discipline
+    /// without a fresh 5-line stanza per field.
+    ///
+    /// The override semantic matches the validator at
+    /// [`validate_deploy_config`]: when
+    /// [`ServiceConfig::deployment`] is `Some`, that struct's fields
+    /// (with their `serde` defaults) supply every value; when `None`,
+    /// [`GlobalConfig::deployment`] does. This is a whole-struct
+    /// override, not a field-level merge — the pattern this lift
+    /// preserves byte-for-byte across the 4 pre-lift sites.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let deployment = deploy_config.resolved_deployment();
+    /// if deployment.wait_for_rollout { … }
+    /// ```
+    pub fn resolved_deployment(&self) -> &DeploymentConfig {
+        self.service
+            .deployment
+            .as_ref()
+            .unwrap_or(&self.global.deployment)
+    }
+
     /// Build federation routing URL for a service
     ///
     /// Example: `http://{service}.{product}-{environment}:8080/graphql`
@@ -2195,6 +2233,120 @@ mod tests {
              returns; a hand-rolled inline copy re-opens the drift \
              class the primitive was landed to close.",
             hits.len(),
+        );
+    }
+
+    /// Behavioral oracle for [`DeployConfig::resolved_deployment`]:
+    /// when the service supplies a `deployment` override, that struct
+    /// wins as a WHOLE (every field the service's struct exposes) —
+    /// the global config is untouched. When the service does not
+    /// override, the global deployment struct is returned. Pre-lift
+    /// each field-read spelled the resolution inline (4 sites across
+    /// `commands/rust_service.rs`); the primitive now owns the
+    /// whole-struct override discipline and the callers project
+    /// individual fields off the returned reference.
+    #[test]
+    fn test_resolved_deployment_service_override_wins_and_global_fallback_kicks_in() {
+        let mut global = GlobalConfig::default();
+        global.deployment.wait_for_rollout = true;
+        global.deployment.skip_flux_health_check = false;
+
+        // No service-level override → the global deployment struct
+        // is what `resolved_deployment` returns.
+        let config_global_only = DeployConfig {
+            global: global.clone(),
+            product: ProductConfig {
+                name: "myproduct".to_string(),
+                environment: "staging".to_string(),
+                cluster: "mycluster".to_string(),
+                release: None,
+                k8s: None,
+                domain: None,
+                observability: Default::default(),
+                seed: Default::default(),
+                dirs: Default::default(),
+                endpoints: Default::default(),
+            },
+            service: make_test_service_config("api"),
+        };
+        let resolved = config_global_only.resolved_deployment();
+        assert!(
+            resolved.wait_for_rollout,
+            "resolved_deployment() must fall back to the GLOBAL \
+             deployment struct when the service supplies no override; \
+             global.wait_for_rollout=true was not preserved."
+        );
+        assert!(
+            !resolved.skip_flux_health_check,
+            "resolved_deployment() must fall back to the GLOBAL \
+             deployment struct when the service supplies no override; \
+             global.skip_flux_health_check=false was not preserved."
+        );
+
+        // Service-level override present with inverted values → the
+        // service struct wins across both fields, whole-struct.
+        let service_override = DeploymentConfig {
+            wait_for_rollout: false,
+            skip_flux_health_check: true,
+            ..DeploymentConfig::default()
+        };
+        let mut service = make_test_service_config("api");
+        service.deployment = Some(service_override);
+        let config_with_override = DeployConfig {
+            global,
+            product: ProductConfig {
+                name: "myproduct".to_string(),
+                environment: "staging".to_string(),
+                cluster: "mycluster".to_string(),
+                release: None,
+                k8s: None,
+                domain: None,
+                observability: Default::default(),
+                seed: Default::default(),
+                dirs: Default::default(),
+                endpoints: Default::default(),
+            },
+            service,
+        };
+        let resolved = config_with_override.resolved_deployment();
+        assert!(
+            !resolved.wait_for_rollout,
+            "resolved_deployment() must return the SERVICE deployment \
+             struct when the service overrides — got the global \
+             wait_for_rollout=true instead of the override's `false`."
+        );
+        assert!(
+            resolved.skip_flux_health_check,
+            "resolved_deployment() must return the SERVICE deployment \
+             struct when the service overrides — got the global \
+             skip_flux_health_check=false instead of the override's \
+             `true`."
+        );
+    }
+
+    /// Negative caller shield: no non-test consumer under
+    /// `cli/src/commands/` may spell the pre-lift inline resolution
+    /// stanza — every read of a `DeploymentConfig` field under a
+    /// service-level-first-then-global override discipline must route
+    /// through [`DeployConfig::resolved_deployment`]. Pre-lift the
+    /// 4 sites in `commands/rust_service.rs` each spelled
+    /// `.service.deployment.as_ref().map(|d| d.<field>).unwrap_or(...)`
+    /// verbatim; a future consumer that copy-pasted the stanza back
+    /// inline would fire this shield rather than silently forking
+    /// the whole-struct override discipline into per-field merges.
+    #[test]
+    fn test_resolved_deployment_negative_caller_shield_under_commands() {
+        let needle = ".service\n        .deployment\n        .as_ref()";
+        let module_path = "cli/src/commands/rust_service.rs";
+        let source = include_str!("../commands/rust_service.rs");
+        assert!(
+            !source.contains(needle),
+            "{module_path} must NOT spell the pre-lift \
+             `.service.deployment.as_ref()...unwrap_or(global...)` \
+             field-resolution stanza inline — route through \
+             `crate::config::DeployConfig::resolved_deployment()` \
+             so the whole-struct override discipline lives at ONE \
+             body across the crate."
         );
     }
 }

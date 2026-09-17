@@ -1294,12 +1294,7 @@ pub async fn orchestrate_release(
     });
 
     // Step 0: Pre-release FluxCD health check (can be skipped via config)
-    let skip_flux_health_check = deploy_config
-        .service
-        .deployment
-        .as_ref()
-        .map(|d| d.skip_flux_health_check)
-        .unwrap_or(deploy_config.global.deployment.skip_flux_health_check);
+    let skip_flux_health_check = deploy_config.resolved_deployment().skip_flux_health_check;
 
     if !deploy_only {
         if skip_flux_health_check {
@@ -1575,12 +1570,7 @@ pub async fn orchestrate_release(
     let git_sha = last_git_sha;
 
     // Step 4: Wait for deployment to be ready
-    let wait_for_rollout = deploy_config
-        .service
-        .deployment
-        .as_ref()
-        .map(|d| d.wait_for_rollout)
-        .unwrap_or(deploy_config.global.deployment.wait_for_rollout);
+    let wait_for_rollout = deploy_config.resolved_deployment().wait_for_rollout;
 
     if wait_for_rollout {
         crate::ui::print_numbered_step_heading("4", "Waiting for deployment rollout...");
@@ -2355,12 +2345,7 @@ pub async fn release_rust_service(
     let deploy_config = DeployConfig::load_for_service(&service)?;
 
     // Step 0: Pre-release FluxCD health check (can be skipped via config)
-    let skip_flux_health_check = deploy_config
-        .service
-        .deployment
-        .as_ref()
-        .map(|d| d.skip_flux_health_check)
-        .unwrap_or(deploy_config.global.deployment.skip_flux_health_check);
+    let skip_flux_health_check = deploy_config.resolved_deployment().skip_flux_health_check;
 
     if skip_flux_health_check {
         println!(
@@ -2489,13 +2474,10 @@ pub async fn release_rust_service(
     }
 
     // Step 6: Wait for deployment to be ready
-    // Check service-level config first, then global
-    let wait_for_rollout = deploy_config
-        .service
-        .deployment
-        .as_ref()
-        .map(|d| d.wait_for_rollout)
-        .unwrap_or(deploy_config.global.deployment.wait_for_rollout);
+    // Service-level override wins over global — see
+    // `DeployConfig::resolved_deployment` for the whole-struct override
+    // discipline.
+    let wait_for_rollout = deploy_config.resolved_deployment().wait_for_rollout;
 
     if wait_for_rollout {
         println!();
