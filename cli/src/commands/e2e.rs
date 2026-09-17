@@ -763,6 +763,37 @@ pub fn cleanup_all() -> Result<()> {
     Ok(())
 }
 
+/// Post-run E2E cleanup fused into ONE call: fires
+/// [`cleanup_testcontainers`] followed by [`cleanup_e2e_images`] with
+/// both `Result` values discarded. For arms of a match on a test
+/// process's `Result<Result<Output>, Elapsed>` where the arm has
+/// already produced its pass/fail verdict from the test outcome and a
+/// cleanup failure must NOT fail the gate.
+///
+/// Pre-lift three sibling `let _ = e2e::cleanup_testcontainers(); let _
+/// = e2e::cleanup_e2e_images();` fused two-line stanzas in
+/// [`commands/prerelease.rs::run_e2e_gate`](super::prerelease) each
+/// spelled the same discard-error fusion verbatim — one per match arm
+/// on `tokio::time::timeout(cmd.output()).await`'s
+/// `Ok(Ok(_))` / `Ok(Err(_))` / `Err(_)` outcome. Three occurrences
+/// past THEORY.md §VI.1's three-is-a-law threshold. A drifting arm
+/// (a fourth stanza silently dropping the `_e2e_images` half, or the
+/// order flipping so images clean up before their consumer containers
+/// exit) would fork one arm at a time from its siblings — the fusion
+/// pins both calls in one order at one body.
+///
+/// The propagating sibling is [`cleanup_all`] above, which spells the
+/// same two calls with `?` propagation for the `forge e2e-cleanup` CLI
+/// surface where a cleanup failure IS the exit code. The two functions
+/// share ordering (containers before images: Ryuk sidecars must exit
+/// before their `testcontainers/ryuk` image can be removed cleanly)
+/// but diverge on error semantics, which is the reason a single
+/// primitive can't cover both call frontiers.
+pub fn discard_post_run_e2e_cleanup() {
+    let _ = cleanup_testcontainers();
+    let _ = cleanup_e2e_images();
+}
+
 /// Resolve repository root from argument or git
 fn resolve_repo_root(repo_root: Option<String>) -> Result<String> {
     if let Some(root) = repo_root {
@@ -2596,6 +2627,65 @@ mod cleanup_testcontainers_ps_filter_rm_f_delegation_tests {
              delegations would silently satisfy the negative shield above \
              by absence.",
             delegation_hits.len(),
+        );
+    }
+}
+
+#[cfg(test)]
+mod discard_post_run_e2e_cleanup_body_tests {
+    /// Body pin: [`super::discard_post_run_e2e_cleanup`] fuses exactly
+    /// two calls — [`super::cleanup_testcontainers`] followed by
+    /// [`super::cleanup_e2e_images`], both with `Result` values
+    /// discarded — in that pinned order. Containers must exit before
+    /// their `testcontainers/ryuk` image can be removed cleanly, so a
+    /// silent reorder that ran `cleanup_e2e_images` first would leave
+    /// live Ryuk sidecars pinning their image via a `Cannot remove
+    /// image: image is being used by running container` and quietly
+    /// re-diverge the two-call sequence one arm at a time from its
+    /// [`super::cleanup_all`] propagating sibling — the exact drift
+    /// the fusion primitive was lifted to close.
+    ///
+    /// A regression that (a) dropped the `_e2e_images` call, (b)
+    /// reordered the pair, (c) let one of the two panic-propagate
+    /// (`.unwrap()`, `.expect(...)`, or a bare `?` upgraded to caller-
+    /// visible failure), or (d) added a third call is caught here
+    /// against the module's own source.
+    #[test]
+    fn discard_post_run_e2e_cleanup_body_calls_both_in_pinned_order() {
+        const SOURCE: &str = include_str!("e2e.rs");
+        let body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/e2e.rs",
+            "pub fn discard_post_run_e2e_cleanup() {",
+            "\n}\n",
+        );
+        let containers_pos = body.find("let _ = cleanup_testcontainers();").expect(
+            "commands/e2e.rs::discard_post_run_e2e_cleanup body must spell \
+             `let _ = cleanup_testcontainers();` — the discard-error \
+             containers-first half of the fused pair",
+        );
+        let images_pos = body.find("let _ = cleanup_e2e_images();").expect(
+            "commands/e2e.rs::discard_post_run_e2e_cleanup body must spell \
+             `let _ = cleanup_e2e_images();` — the discard-error \
+             images-second half of the fused pair",
+        );
+        assert!(
+            containers_pos < images_pos,
+            "commands/e2e.rs::discard_post_run_e2e_cleanup MUST run \
+             `cleanup_testcontainers` before `cleanup_e2e_images` — Ryuk \
+             sidecars pin `testcontainers/ryuk` via a live container, so \
+             an image prune ahead of container teardown fails with `image \
+             is being used by running container`. containers_pos={containers_pos}, \
+             images_pos={images_pos}",
+        );
+        assert!(
+            !body.contains(".unwrap()") && !body.contains(".expect("),
+            "commands/e2e.rs::discard_post_run_e2e_cleanup MUST discard \
+             both cleanup Results — a panic-on-error via `.unwrap()` or \
+             `.expect(...)` would upgrade a best-effort cleanup miss into \
+             a caller-visible crash, defeating the whole discard-error \
+             semantics the primitive delivers to `run_e2e_gate`'s match \
+             arms. Offending body: {body:?}",
         );
     }
 }

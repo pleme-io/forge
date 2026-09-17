@@ -1062,8 +1062,7 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
     match output {
         Ok(Ok(output)) => {
             // Post-cleanup: containers + images (prerelease force-rebuilds each run)
-            let _ = e2e::cleanup_testcontainers();
-            let _ = e2e::cleanup_e2e_images();
+            e2e::discard_post_run_e2e_cleanup();
 
             if output.status.success() {
                 crate::ui::print_step_pass_timed("E2E tests passed", duration);
@@ -1106,8 +1105,7 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
         }
         Ok(Err(e)) => {
             // Post-cleanup on spawn error
-            let _ = e2e::cleanup_testcontainers();
-            let _ = e2e::cleanup_e2e_images();
+            e2e::discard_post_run_e2e_cleanup();
 
             crate::ui::print_step_failure_with_error("Failed to run E2E tests", &e);
             print_e2e_diagnostics(&config.backend_dir);
@@ -1115,8 +1113,7 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
         }
         Err(_) => {
             // Post-cleanup on timeout (most critical — Ryuk won't clean up after force-kill)
-            let _ = e2e::cleanup_testcontainers();
-            let _ = e2e::cleanup_e2e_images();
+            e2e::discard_post_run_e2e_cleanup();
 
             crate::ui::print_step_failure(&format!(
                 "E2E tests timed out after {}s ({:.1}s elapsed)",
@@ -1985,6 +1982,71 @@ mod tests {
              absence. The five load-bearing sites are G1 `run_cargo_check`, \
              G2 `run_cargo_clippy`, G3 `run_cargo_fmt_check` (fix + check \
              arms), and G4 `run_cargo_test`.",
+        );
+    }
+
+    /// Whole-module shield: `run_e2e_gate` must not re-inline the pre-lift
+    /// fused pair of `let _ = e2e::cleanup_testcontainers(); let _ =
+    /// e2e::cleanup_e2e_images();` at any of its three post-test match
+    /// arms — every arm routes through
+    /// [`super::e2e::discard_post_run_e2e_cleanup`], the fusion primitive
+    /// that pins containers-before-images ordering at one body.
+    ///
+    /// # Two-arm pin
+    ///
+    /// Negative side pins that neither `let _ = e2e::cleanup_testcontainers()`
+    /// nor `let _ = e2e::cleanup_e2e_images()` (the two half-stanzas the
+    /// pre-lift arms fused into a two-line block) appears in the module
+    /// body — a regression that re-inlined one half of the pair while
+    /// leaving the other routed through the primitive would drift the
+    /// two-call sequence one arm at a time. Positive side pins ≥3
+    /// `discard_post_run_e2e_cleanup(` delegation call sites — one per
+    /// `run_e2e_gate`'s `Ok(Ok(_))` / `Ok(Err(_))` / `Err(_)` timeout-
+    /// wrapper match arm; a deletion drops the count and fails the
+    /// shield, so the negative-side scan cannot be trivially satisfied
+    /// by absence.
+    ///
+    /// Mirrors the sibling shield discipline the whole-module CARGO /
+    /// DOCKER routing shields carry above (envelope-string count-eq-0
+    /// paired with a delegation-count-floor), which is the same
+    /// composition every delegation-count-floor shield across
+    /// `commands/e2e.rs` (`docker_bin_routing_tests`,
+    /// `ps_filter_rm_f`-count pin) uses to prove that the primitive
+    /// carries the load the shield forbids inlining.
+    #[test]
+    fn run_e2e_gate_post_cleanup_routes_through_discard_post_run_e2e_cleanup() {
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("prerelease.rs"),
+            "commands/prerelease.rs",
+        );
+        for needle in [
+            "let _ = e2e::cleanup_testcontainers()",
+            "let _ = e2e::cleanup_e2e_images()",
+        ] {
+            let hits = crate::test_support::code_line_hits(body, needle);
+            assert!(
+                hits.is_empty(),
+                "commands/prerelease.rs must NOT spell the pre-lift \
+                 discard-error half `{needle};` at any `run_e2e_gate` \
+                 arm — the fused `cleanup_testcontainers` + \
+                 `cleanup_e2e_images` pair lifted onto \
+                 `e2e::discard_post_run_e2e_cleanup()`, and re-inlining \
+                 one half would drift the two-call sequence one arm at \
+                 a time from its siblings. Offending hits: {hits:?}",
+            );
+        }
+        let delegations =
+            crate::test_support::code_line_hits(body, "discard_post_run_e2e_cleanup(").len();
+        assert!(
+            delegations >= 3,
+            "commands/prerelease.rs must route `run_e2e_gate`'s three \
+             post-test match arms (`Ok(Ok(_))` success/failure fork, \
+             `Ok(Err(_))` spawn error, `Err(_)` timeout) through \
+             `e2e::discard_post_run_e2e_cleanup()` — found only \
+             {delegations} delegation call(s); a dropped call would leave \
+             the negative-side scan trivially satisfied by absence, and \
+             a `run_e2e_gate` arm that skipped cleanup would leak \
+             containers past the gate boundary.",
         );
     }
 }
