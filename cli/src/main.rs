@@ -33,6 +33,7 @@ mod flux_source_verification;
 #[cfg(feature = "attestation")]
 mod git_signature;
 mod graphql_schema;
+mod hanabi_dir;
 #[cfg(feature = "attestation")]
 mod helm_lint;
 mod helm_provenance;
