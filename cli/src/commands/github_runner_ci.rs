@@ -3,7 +3,6 @@ use std::time::Duration;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
-use crate::git;
 use crate::infrastructure::kubectl::kubectl_command_async;
 use crate::repo::get_tool_path;
 use crate::retry::{debug_log_capture_streams, retry_command_logged, RetryPolicy};
@@ -134,9 +133,15 @@ pub async fn execute(
         "GitHub Runner CI Workflow",
     );
 
-    // Get git SHA for tagging
-    let git_sha = git::get_short_sha()?;
-    crate::info_git_sha_field!(git_sha);
+    // Resolve short SHA + emit the `📦 Git SHA:` announcement through
+    // the crate-scoped
+    // `crate::short_sha_tagging_preamble::
+    //  resolve_and_announce_short_sha_for_tagging` primitive so the
+    // sync `git::get_short_sha()?` I/O, the
+    // `crate::info_git_sha_field!(git_sha)` narration, and the "in that
+    // order" composition are decided at ONE body across the crate
+    // (sibling consumer: `commands/comprehensive_release.rs::execute`).
+    let git_sha = crate::short_sha_tagging_preamble::resolve_and_announce_short_sha_for_tagging()?;
     crate::info_deploy_target_field!(registry, git_sha);
     println!();
 

@@ -130,6 +130,7 @@ mod retry;
 mod rust_test_diagnostic_env;
 mod screenshot_diag;
 mod shinka_migration_reset_ack;
+mod short_sha_tagging_preamble;
 mod skipping_step;
 mod stage_completion_ack;
 mod step_header;

@@ -345,11 +345,23 @@ mod tests {
         );
     }
 
-    // Positive half of the shield: the three pre-lift files MUST each
+    // Positive half of the shield: the pre-lift files MUST each
     // forward through `crate::info_git_sha_field!(` at least once, so
     // a migration that dropped a call site outright leaves the negative
     // "no raw inline shape" scan trivially satisfied by absence but the
     // positive count still fails.
+    //
+    // Only `build.rs` still spells `crate::info_git_sha_field!(` inline:
+    // it forwards the `get_full_sha`-flavored preamble, a shape distinct
+    // from the sync short-SHA preamble the two other pre-lift modules
+    // carried. Those two modules
+    // (`comprehensive_release.rs`, `github_runner_ci.rs`) migrated to
+    // `crate::short_sha_tagging_preamble::
+    //  resolve_and_announce_short_sha_for_tagging`, which delegates the
+    // macro emission internally; their positive-delegation defense lives
+    // at `short_sha_tagging_preamble::tests::
+    //  every_prelift_consumer_forwards_through_resolve_and_announce_short_sha`
+    // so a dropped call still trips a hard assertion at cargo-test time.
     #[test]
     fn every_prelift_module_forwards_through_info_git_sha_field_macro() {
         use std::path::PathBuf;
@@ -357,11 +369,7 @@ mod tests {
             .join("src")
             .join("commands");
         // (module basename, minimum forward count from the pre-lift census)
-        let expectations: &[(&str, usize)] = &[
-            ("build.rs", 1),
-            ("comprehensive_release.rs", 1),
-            ("github_runner_ci.rs", 1),
-        ];
+        let expectations: &[(&str, usize)] = &[("build.rs", 1)];
         for (basename, min_count) in expectations {
             let path = commands_dir.join(basename);
             let source = std::fs::read_to_string(&path).unwrap();

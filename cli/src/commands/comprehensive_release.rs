@@ -4,10 +4,10 @@ use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
+use crate::commands;
 use crate::repo::get_tool_path;
 use crate::retry::RetryPolicy;
 use crate::ui::{styled_spinner, SpinnerStyle};
-use crate::{commands, git};
 
 /// The typed exponential-backoff policy for the docker-compose services-
 /// healthy status-poll cadence in [`execute`]'s integration-test step —
@@ -267,9 +267,15 @@ pub async fn execute(
     crate::info_success!("Input validation complete");
     println!();
 
-    // Get git SHA for tagging
-    let git_sha = git::get_short_sha()?;
-    crate::info_git_sha_field!(git_sha);
+    // Resolve short SHA + emit the `📦 Git SHA:` announcement through
+    // the crate-scoped
+    // `crate::short_sha_tagging_preamble::
+    //  resolve_and_announce_short_sha_for_tagging` primitive so the
+    // sync `git::get_short_sha()?` I/O, the
+    // `crate::info_git_sha_field!(git_sha)` narration, and the "in that
+    // order" composition are decided at ONE body across the crate
+    // (sibling consumer: `commands/github_runner_ci.rs::execute`).
+    let git_sha = crate::short_sha_tagging_preamble::resolve_and_announce_short_sha_for_tagging()?;
     crate::info_registry_field!(registry);
     info!("🌍 Namespace: {} (staging)", namespace);
     println!();
