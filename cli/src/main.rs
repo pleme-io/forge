@@ -64,6 +64,7 @@ mod advisory_warning;
 mod attic_cache_alias;
 mod attic_configure_step;
 mod attic_push_step;
+mod backend_frontend_dirs_preamble;
 mod bookmark_git_sha_field;
 mod building_progress_message;
 mod bun_argv;

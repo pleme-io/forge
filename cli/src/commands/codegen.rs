@@ -69,8 +69,10 @@ pub async fn execute(backend_dir: &Path, web_dir: &Path) -> Result<CodegenResult
     let start = Instant::now();
 
     crate::ui::print_section_header("Schema Export + Codegen");
-    println!("Backend: {}", backend_dir.display());
-    println!("Frontend: {}", web_dir.display());
+    crate::backend_frontend_dirs_preamble::print_backend_frontend_dirs_preamble(
+        backend_dir,
+        web_dir,
+    );
     println!();
 
     // Step 1: Export schema from backend

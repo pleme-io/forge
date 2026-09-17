@@ -386,8 +386,10 @@ pub async fn execute(
 
     crate::ui::print_section_header("Pre-Release Gates");
     println!("Working directory: {}", config.working_dir.display());
-    println!("Backend: {}", config.backend_dir.display());
-    println!("Frontend: {}", config.web_dir.display());
+    crate::backend_frontend_dirs_preamble::print_backend_frontend_dirs_preamble(
+        &config.backend_dir,
+        &config.web_dir,
+    );
     println!(
         "Fail on error: {}",
         if config.gates.fail_on_error {
