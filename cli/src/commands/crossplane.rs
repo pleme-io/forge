@@ -155,6 +155,145 @@ fn xpkg_output_file() -> Result<(tempfile::TempDir, PathBuf)> {
     crate::hermetic_scratch::hermetic_scratch_file("xpkg-", "package.xpkg")
 }
 
+/// The op label the pre-lift two sibling
+/// `run_inherited_status_sync(build, "crossplane xpkg build")` calls
+/// spelled inline — `"crossplane xpkg build"` (verb + subcommand,
+/// no trailing space). Named as a `const` so a future re-tuning of
+/// the operator-facing op label (which the retry primitive stamps
+/// into the canonical `"{op} failed (exit {code})"` envelope on
+/// non-zero exit) flows through ONE edit rather than through two
+/// inline literal edits.
+const XPKG_BUILD_OP_LABEL: &str = "crossplane xpkg build";
+
+/// Which shape the leading `crossplane xpkg build` invocation carries
+/// — the two sibling [`function_release`] / [`configuration_release`]
+/// stanzas differ only on whether an `--embed-runtime-image-tarball
+/// <runtime>` argv pair rides between `--package-root <root>` and
+/// `--package-file <out>`.
+///
+/// Sibling of the data-less
+/// [`crate::commands::crossplane_xpkg_push::CrossplanePackageKind`]
+/// enum that owns the correlated `Function|Configuration` adjective
+/// on the DOWNSTREAM push + report grammar. The build phase's
+/// runtime axis carries the runtime tarball as data on the `Function`
+/// arm — the two enums stay distinct rather than one enum with two
+/// dimensions because the push grammar's adjective is invariant
+/// across a Function that happens to have zero embedded runtimes.
+enum CrossplaneXpkgBuildRuntime<'a> {
+    /// Function package — embeds a Nix-built `docker save` runtime
+    /// image tarball under the `--embed-runtime-image-tarball
+    /// <runtime_image_tarball>` argv pair spliced between
+    /// `--package-root <root>` and `--package-file <out>`.
+    Function { runtime_image_tarball: &'a str },
+    /// Configuration package — pure declarative YAML (XRDs +
+    /// Compositions), no runtime image. The
+    /// `--embed-runtime-image-tarball` argv pair is omitted; the
+    /// trailing `--package-file <out>` rides immediately after
+    /// `--package-root <root>`.
+    Configuration,
+}
+
+/// Spawn `crossplane xpkg build --package-root <root>
+/// [--embed-runtime-image-tarball <runtime>] --package-file <out>
+/// --examples-root <examples>` and route the exit through
+/// [`crate::retry::run_inherited_status_sync`], stamping the
+/// canonical `"crossplane xpkg build failed (exit {code})"` envelope
+/// on non-zero exit.
+///
+/// # Pre-lift census — two sibling stanzas, one build shape
+///
+/// Two consumer sites in this module each spelled the same
+/// `Command::new(&crossplane) + .args([...]) +
+/// .arg(&out).arg("--examples-root").arg(&examples) +
+/// run_inherited_status_sync(build, "crossplane xpkg build")`
+/// composition, diverging only on the two-token
+/// `["--embed-runtime-image-tarball", <runtime_image>]` pair riding
+/// between `--package-root <root>` and `--package-file <out>` on the
+/// `Function` arm:
+///
+/// 1. [`function_release`] — Function xpkg build with
+///    `--embed-runtime-image-tarball <runtime_image>` at indices 4-5,
+///    `<out>` at index 7, `--examples-root <examples>` at 8-9.
+/// 2. [`configuration_release`] — Configuration xpkg build with the
+///    `--embed-runtime-image-tarball` argv pair elided; `<out>` rides
+///    at index 5, `--examples-root <examples>` at 6-7.
+///
+/// Post-lift both sites reach [`run_crossplane_xpkg_build`] and the
+/// runtime axis is encoded as [`CrossplaneXpkgBuildRuntime`]. A
+/// future re-tuning of the argv shape (a rename of `--package-root`,
+/// a swap of `--package-file` for the plural `--package-files` that
+/// the sibling
+/// [`crate::commands::crossplane_xpkg_push::XPKG_PUSH_ARGV`] carries
+/// on the push half, a swap of the positional `--package-root <root>`
+/// for a bare `<root>`, an argv-order discipline pass across the
+/// crate, a re-branding of the `"crossplane xpkg build"` op label)
+/// lands at ONE typed body and every consumer inherits the change.
+///
+/// # Sibling shape discipline
+///
+/// Mirrors the fusion primitive in
+/// [`crate::commands::crossplane_xpkg_push::xpkg_push_and_report`] on
+/// the downstream push half — that primitive owns the announce +
+/// push + report grammar around ONE `crossplane xpkg push` spawn;
+/// this one owns the argv + spawn + classify grammar around ONE
+/// `crossplane xpkg build` spawn. Together the pair reduces the
+/// pre-lift 4-spawn cluster (function build+push + config build+push)
+/// to two typed bodies keyed by the [`CrossplaneXpkgBuildRuntime`] /
+/// [`crate::commands::crossplane_xpkg_push::CrossplanePackageKind`]
+/// enum pair.
+/// Build the `Command` [`run_crossplane_xpkg_build`] passes to
+/// [`crate::retry::run_inherited_status_sync`]. Split from the runner
+/// so the two byte-oracle shields
+/// [`test_run_crossplane_xpkg_build_function_argv_matches_pre_lift_bytes`]
+/// and
+/// [`test_run_crossplane_xpkg_build_configuration_argv_matches_pre_lift_bytes`]
+/// can project [`std::process::Command::get_args`] over the same argv
+/// composition the runner drives without actually spawning a
+/// `crossplane` process.
+///
+/// A drift that reordered the argv on either arm would surface at the
+/// oracles first — as a mismatched `Vec<OsString>` — rather than as a
+/// downstream `crossplane` CLI parse error on an operator's machine.
+fn build_crossplane_xpkg_build_command(
+    crossplane: &str,
+    package_root: &str,
+    runtime: CrossplaneXpkgBuildRuntime<'_>,
+    output: &Path,
+    examples_root: &Path,
+) -> Command {
+    let mut build = Command::new(crossplane);
+    build.args(["xpkg", "build", "--package-root", package_root]);
+    if let CrossplaneXpkgBuildRuntime::Function {
+        runtime_image_tarball,
+    } = runtime
+    {
+        build.args(["--embed-runtime-image-tarball", runtime_image_tarball]);
+    }
+    build
+        .arg("--package-file")
+        .arg(output)
+        .arg("--examples-root")
+        .arg(examples_root);
+    build
+}
+
+fn run_crossplane_xpkg_build(
+    crossplane: &str,
+    package_root: &str,
+    runtime: CrossplaneXpkgBuildRuntime<'_>,
+    output: &Path,
+    examples_root: &Path,
+) -> Result<()> {
+    let build = build_crossplane_xpkg_build_command(
+        crossplane,
+        package_root,
+        runtime,
+        output,
+        examples_root,
+    );
+    run_inherited_status_sync(build, XPKG_BUILD_OP_LABEL)
+}
+
 /// Build a Crossplane Function package (xpkg) from a Nix-built runtime image and
 /// a `package/` root, then push it to `package_ref:tag`.
 ///
@@ -190,21 +329,15 @@ pub fn function_release(
         out.display()
     );
     let crossplane = crossplane_bin();
-    let mut build = Command::new(&crossplane);
-    build
-        .args([
-            "xpkg",
-            "build",
-            "--package-root",
-            package_root,
-            "--embed-runtime-image-tarball",
-            runtime_image,
-            "--package-file",
-        ])
-        .arg(&out)
-        .arg("--examples-root")
-        .arg(&examples);
-    run_inherited_status_sync(build, "crossplane xpkg build")?;
+    run_crossplane_xpkg_build(
+        &crossplane,
+        package_root,
+        CrossplaneXpkgBuildRuntime::Function {
+            runtime_image_tarball: runtime_image,
+        },
+        &out,
+        &examples,
+    )?;
 
     // Fused announce-push-report stanza — see
     // [`crate::commands::crossplane_xpkg_push`] for the correlated-
@@ -233,19 +366,13 @@ pub fn configuration_release(package_root: &str, package_ref: &str, tag: &str) -
         out.display()
     );
     let crossplane = crossplane_bin();
-    let mut build = Command::new(&crossplane);
-    build
-        .args([
-            "xpkg",
-            "build",
-            "--package-root",
-            package_root,
-            "--package-file",
-        ])
-        .arg(&out)
-        .arg("--examples-root")
-        .arg(&examples);
-    run_inherited_status_sync(build, "crossplane xpkg build")?;
+    run_crossplane_xpkg_build(
+        &crossplane,
+        package_root,
+        CrossplaneXpkgBuildRuntime::Configuration,
+        &out,
+        &examples,
+    )?;
     // Fused announce-push-report stanza — see
     // [`crate::commands::crossplane_xpkg_push`] for the correlated-
     // adjective enum + byte-oracle grammar shared with
@@ -408,15 +535,24 @@ mod tests {
     /// migrated into
     /// [`crate::commands::crossplane_xpkg_push::xpkg_push_and_report`],
     /// where the fusion primitive still routes through
-    /// `run_inherited_status_sync`. Four in-module status-only spawns
-    /// remain here (`function_release` xpkg build, `configuration_release`
-    /// xpkg build, `render` crossplane render, `validate` crossplane beta
-    /// validate); the push shield lives in the new module's own tests.
+    /// `run_inherited_status_sync`.
+    ///
+    /// Post-`run_crossplane_xpkg_build`-lift: the two xpkg build
+    /// spawns (`function_release` + `configuration_release`)
+    /// migrated into the module-local
+    /// [`super::run_crossplane_xpkg_build`] primitive, which still
+    /// routes the fused spawn through `run_inherited_status_sync`.
+    /// Three in-module status-only spawn sites remain here (the
+    /// [`super::run_crossplane_xpkg_build`] fusion primitive's own
+    /// `crossplane xpkg build` spawn, `render`'s `crossplane render`,
+    /// `validate`'s `crossplane beta validate`); the push shield
+    /// lives in the [`crate::commands::crossplane_xpkg_push`]
+    /// module's own tests.
     ///
     /// Negative side: the inline `.status()` builder-terminator must not
     /// reappear at any code line in the module body (a re-inlined spawn
     /// would bypass the primitive and re-drop the exit code). Positive
-    /// side: the delegation call must appear at ≥4 code lines (one per
+    /// side: the delegation call must appear at ≥3 code lines (one per
     /// remaining in-module spawn), so a regression that deleted every
     /// primitive call cannot leave the negative scan trivially satisfied
     /// by absence. Both hits route through `code_line_hits` for anti-
@@ -427,10 +563,10 @@ mod tests {
         crate::test_support::assert_source_routes_status_only_spawns_through_run_inherited_status_sync(
             include_str!("crossplane.rs"),
             "commands/crossplane.rs",
-            4,
-            "the four remaining in-module crossplane spawns \
-             (`function_release` xpkg build, `configuration_release` \
-             xpkg build, `render`, `validate`)",
+            3,
+            "the three remaining in-module crossplane spawns \
+             (`run_crossplane_xpkg_build` fusion primitive, `render`, \
+             `validate`)",
         );
     }
 
@@ -691,6 +827,193 @@ mod tests {
              and the miss-arm envelope stays fused at ONE body. Got \
              {} hits: {probe_hits:#?}",
             probe_hits.len(),
+        );
+    }
+
+    /// Byte-oracle — `Function` arm:
+    /// [`super::build_crossplane_xpkg_build_command`] composes the
+    /// `xpkg build` argv as
+    /// `["xpkg", "build", "--package-root", <root>,
+    /// "--embed-runtime-image-tarball", <runtime>,
+    /// "--package-file", <out>, "--examples-root", <examples>]`
+    /// byte-for-byte, matching the pre-lift `function_release`
+    /// `.args([...])` + `.arg(&out) + .arg("--examples-root") +
+    /// .arg(&examples)` composition.
+    ///
+    /// The test projects [`std::process::Command::get_args`] over the
+    /// primitive's returned `Command` and compares to a hand-spelled
+    /// argv oracle, so a drift that reorders the argv or drops the
+    /// `--embed-runtime-image-tarball` pair from the `Function` arm
+    /// fails HERE, not as a downstream `crossplane` CLI parse error
+    /// on an operator's machine. Sibling shape discipline to the argv
+    /// byte-oracles at [`crate::kubectl_annotate_overwrite_argv`] and
+    /// [`crate::docker_tag_argv`] — both hand-projected slices that
+    /// pin argv byte layouts against pre-lift restatement.
+    #[test]
+    fn test_run_crossplane_xpkg_build_function_argv_matches_pre_lift_bytes() {
+        let cmd = super::build_crossplane_xpkg_build_command(
+            "/bin/true",
+            "pkg",
+            super::CrossplaneXpkgBuildRuntime::Function {
+                runtime_image_tarball: "runtime.tar",
+            },
+            std::path::Path::new("/tmp/out.xpkg"),
+            std::path::Path::new("pkg/examples"),
+        );
+        let observed: Vec<std::ffi::OsString> = cmd.get_args().map(|a| a.to_os_string()).collect();
+
+        // Independent oracle: hand-spell the expected argv as the
+        // pre-lift `.args([...])` + trailing `.arg`s produced.
+        let expected: Vec<std::ffi::OsString> = [
+            "xpkg",
+            "build",
+            "--package-root",
+            "pkg",
+            "--embed-runtime-image-tarball",
+            "runtime.tar",
+            "--package-file",
+            "/tmp/out.xpkg",
+            "--examples-root",
+            "pkg/examples",
+        ]
+        .iter()
+        .map(std::ffi::OsString::from)
+        .collect();
+
+        assert_eq!(
+            observed, expected,
+            "build_crossplane_xpkg_build_command's Function-arm argv \
+             composition must match the pre-lift `function_release` \
+             byte layout — `[xpkg, build, --package-root, <root>, \
+             --embed-runtime-image-tarball, <runtime>, --package-file, \
+             <out>, --examples-root, <examples>]`. A drift that \
+             reordered the argv or dropped the runtime-tarball pair \
+             would fail here first"
+        );
+    }
+
+    /// Byte-oracle — `Configuration` arm:
+    /// `build_crossplane_xpkg_build_command` composes the argv without
+    /// the `--embed-runtime-image-tarball <runtime>` pair — the
+    /// trailing `--package-file <out> --examples-root <examples>`
+    /// rides immediately after `--package-root <root>`. Sibling of
+    /// the Function-arm oracle above.
+    #[test]
+    fn test_run_crossplane_xpkg_build_configuration_argv_matches_pre_lift_bytes() {
+        let cmd = super::build_crossplane_xpkg_build_command(
+            "/bin/true",
+            "pkg",
+            super::CrossplaneXpkgBuildRuntime::Configuration,
+            std::path::Path::new("/tmp/out.xpkg"),
+            std::path::Path::new("pkg/examples"),
+        );
+        let observed: Vec<std::ffi::OsString> = cmd.get_args().map(|a| a.to_os_string()).collect();
+
+        let expected: Vec<std::ffi::OsString> = [
+            "xpkg",
+            "build",
+            "--package-root",
+            "pkg",
+            "--package-file",
+            "/tmp/out.xpkg",
+            "--examples-root",
+            "pkg/examples",
+        ]
+        .iter()
+        .map(std::ffi::OsString::from)
+        .collect();
+
+        assert_eq!(
+            observed, expected,
+            "build_crossplane_xpkg_build_command's Configuration-arm \
+             argv composition must match the pre-lift \
+             `configuration_release` byte layout — no \
+             `--embed-runtime-image-tarball` argv pair; \
+             `[xpkg, build, --package-root, <root>, --package-file, \
+             <out>, --examples-root, <examples>]`. A drift that spliced \
+             the runtime-tarball pair onto the Configuration arm would \
+             fail here first"
+        );
+    }
+
+    /// Positive-delegation + solve-once shield: both release fns route
+    /// their `crossplane xpkg build` spawn through the module-local
+    /// [`super::run_crossplane_xpkg_build`] primitive, and the invariant
+    /// argv tokens the primitive owns
+    /// (`--embed-runtime-image-tarball`, the exact
+    /// `"crossplane xpkg build"` op label, and the fused
+    /// `["xpkg", "build", "--package-root", package_root]` head slice)
+    /// each live at exactly ONE code line in the module body — the
+    /// primitive body itself.
+    ///
+    /// Positive side: the delegation call `run_crossplane_xpkg_build(`
+    /// must appear at exactly THREE code lines (one per release fn call
+    /// site + the primitive's own defining line), so a regression that
+    /// deleted every caller cannot leave the solve-once scan trivially
+    /// satisfied by absence.
+    ///
+    /// Solve-once side: the pre-lift `--embed-runtime-image-tarball`
+    /// argv token must appear at exactly ONE code line — the primitive
+    /// body's `Function`-arm splice. A re-inlined build stanza at a
+    /// third release fn would bump the count and fail here.
+    ///
+    /// Both halves route through `code_line_hits` for
+    /// anti-docstring-self-match discipline. Same scan boundary
+    /// (first `#[cfg(test)]` marker) the sibling shields above use, so
+    /// this shield's OWN needles (living in the `#[cfg(test)]` block)
+    /// stay out of scope.
+    #[test]
+    fn test_crossplane_xpkg_build_routes_through_run_crossplane_xpkg_build() {
+        const SOURCE: &str = include_str!("crossplane.rs");
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            SOURCE,
+            "commands/crossplane.rs",
+        );
+
+        // Positive: three delegation call-sites (two callers +
+        // primitive's own `fn` line).
+        let delegation_hits =
+            crate::test_support::code_line_hits(body, "run_crossplane_xpkg_build(");
+        assert_eq!(
+            delegation_hits.len(),
+            3,
+            "commands/crossplane.rs must spell `run_crossplane_xpkg_build(` \
+             at exactly three code lines (function_release call + \
+             configuration_release call + the primitive's own `fn` line); \
+             got {} — hits: {delegation_hits:#?}",
+            delegation_hits.len(),
+        );
+
+        // Solve-once: the `--embed-runtime-image-tarball` argv token
+        // lives at exactly ONE code line — the primitive body's
+        // `Function`-arm splice.
+        let runtime_hits =
+            crate::test_support::code_line_hits(body, "--embed-runtime-image-tarball");
+        assert_eq!(
+            runtime_hits.len(),
+            1,
+            "commands/crossplane.rs must spell the \
+             `--embed-runtime-image-tarball` argv token at exactly ONE \
+             code line — the `run_crossplane_xpkg_build` primitive's \
+             `Function`-arm splice. A re-inlined build stanza at a \
+             third release fn would bump this count. Got {} hits: \
+             {runtime_hits:#?}",
+            runtime_hits.len(),
+        );
+
+        // Solve-once: the `"--package-file"` argv literal lives at
+        // exactly ONE code line — the primitive body's trailing splice.
+        // A pre-lift restatement at a caller would show up here.
+        let package_file_hits = crate::test_support::code_line_hits(body, "\"--package-file\"");
+        assert_eq!(
+            package_file_hits.len(),
+            1,
+            "commands/crossplane.rs must spell the `\"--package-file\"` \
+             argv literal at exactly ONE code line — the \
+             `run_crossplane_xpkg_build` primitive body. A re-inlined \
+             build argv at a third release fn would bump this count. \
+             Got {} hits: {package_file_hits:#?}",
+            package_file_hits.len(),
         );
     }
 }
