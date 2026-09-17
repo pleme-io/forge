@@ -498,16 +498,11 @@ pub async fn quick_health_check(url: &str) -> Result<bool> {
 /// # Returns
 /// Tuple of (health_url, graphql_url)
 pub fn get_product_endpoints(product_domain: &str, environment: &str) -> (String, String) {
-    match environment {
-        "production" => (
-            format!("https://{}/health", product_domain),
-            format!("https://{}/graphql", product_domain),
-        ),
-        env => (
-            format!("https://{}.{}/health", env, product_domain),
-            format!("https://{}.{}/graphql", env, product_domain),
-        ),
-    }
+    let base = match environment {
+        "production" => format!("https://{}", product_domain),
+        env => format!("https://{}.{}", env, product_domain),
+    };
+    crate::health_graphql_endpoint_pair::health_graphql_endpoint_pair(&base)
 }
 
 #[cfg(test)]

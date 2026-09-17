@@ -81,6 +81,7 @@ mod flux_gitops_monitor_hint;
 mod generate_cargo_nix_step;
 mod git;
 mod git_sha_field;
+mod health_graphql_endpoint_pair;
 mod hermetic_scratch;
 mod image_field;
 mod indented_success_step;
@@ -1322,10 +1323,10 @@ async fn main() -> Result<()> {
             let (default_health, default_graphql) = if let Some(d) = domain {
                 get_product_endpoints(&d, &environment)
             } else {
-                (
-                    format!("https://{}.{}.app/health", environment, service),
-                    format!("https://{}.{}.app/graphql", environment, service),
-                )
+                crate::health_graphql_endpoint_pair::health_graphql_endpoint_pair(&format!(
+                    "https://{}.{}.app",
+                    environment, service
+                ))
             };
 
             let config = PostDeployConfig {
