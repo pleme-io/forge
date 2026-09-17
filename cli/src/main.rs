@@ -124,6 +124,7 @@ mod release_workflow_intro_banner;
 mod repo;
 mod repo_root_utf8;
 mod retry;
+mod rust_test_diagnostic_env;
 mod screenshot_diag;
 mod shinka_migration_reset_ack;
 mod skipping_step;

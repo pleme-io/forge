@@ -327,12 +327,12 @@ pub async fn execute(
         // and `commands/github_runner_ci.rs::execute` (4510026) —
         // three `spinner + status-only cargo/nix spawn` sites past
         // THEORY §VI.1's three-times-is-a-law threshold.
+        use crate::rust_test_diagnostic_env::RustTestDiagnosticEnv;
         let mut test_cmd = Command::new(&cargo);
         test_cmd
             .current_dir(&working_dir)
             .args(&["test", "--lib", "--bins", "--", "--show-output"])
-            .env("RUST_LOG", "info")
-            .env("RUST_BACKTRACE", "1")
+            .rust_test_diagnostic_env()
             .env("SQLX_OFFLINE", "true");
         let outcome = crate::retry::run_inherited_status(test_cmd, "unit tests").await;
 
@@ -651,11 +651,11 @@ pub async fn execute(
                 // runner via the module's single point of truth.
                 let cargo = cargo_bin();
 
+                use crate::rust_test_diagnostic_env::RustTestDiagnosticEnv;
                 let integration_test_result = Command::new(&cargo)
                     .current_dir(&working_dir)
                     .args(&["test", "--test", "*", "--", "--ignored", "--test-threads=1"])
-                    .env("RUST_LOG", "info")
-                    .env("RUST_BACKTRACE", "1")
+                    .rust_test_diagnostic_env()
                     .status()
                     .await;
 
