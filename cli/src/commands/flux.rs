@@ -2,6 +2,7 @@
 
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
+use std::io;
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -100,15 +101,55 @@ fn flux_poll_delay(attempt: u32) -> Duration {
     FLUX_POLL_BACKOFF.poll_iteration_delay(attempt)
 }
 
+/// The invariant `🩺` glyph both [`health_check`] and
+/// [`health_check_with_retry`] spelled as the leading emoji of their
+/// running-branch announce line. Named as a `const` so a future
+/// re-branding (a swap for `⚕️`, a promotion to a themed glyph via
+/// [`crate::ui`], or a drop of the glyph entirely) reaches ONE site
+/// rather than two lockstep string literals.
+const FLUX_HEALTH_CHECK_RUNNING_ANNOUNCE_GLYPH: &str = "🩺";
+
+/// Emit the canonical `🩺 FluxCD health check (<context>)....bold()\n`
+/// running-branch announce line to stdout. Called from
+/// [`health_check`] and [`health_check_with_retry`] as their opening
+/// line.
+///
+/// Delegates to [`write_flux_health_check_running_announce_line`]
+/// against [`std::io::stdout`]; the writer split exists so the
+/// fail-before-pass byte-oracle tests pin the exact rendered bytes
+/// without capturing stdout.
+fn print_flux_health_check_running_announce_line(context: &str) {
+    let _ = write_flux_health_check_running_announce_line(&mut io::stdout().lock(), context);
+}
+
+/// Writer-taking sibling to
+/// [`print_flux_health_check_running_announce_line`]. Emits the single
+/// `🩺 FluxCD health check (<context>)....bold()\n` line via
+/// [`writeln!`] against the supplied writer.
+///
+/// Tests can pin the exact byte shape — the
+/// [`FLUX_HEALTH_CHECK_RUNNING_ANNOUNCE_GLYPH`] prefix, the single
+/// space after it, the plain ASCII `FluxCD health check (` prefix, the
+/// caller's `<context>` verbatim, the trailing `)...`, and the
+/// `.bold()` ANSI envelope — without capturing stdout.
+fn write_flux_health_check_running_announce_line<W: io::Write>(
+    w: &mut W,
+    context: &str,
+) -> io::Result<()> {
+    writeln!(
+        w,
+        "{} {}",
+        FLUX_HEALTH_CHECK_RUNNING_ANNOUNCE_GLYPH,
+        format!("FluxCD health check ({})...", context).bold()
+    )
+}
+
 /// FluxCD health check before and after deployments.
 ///
 /// This verifies the GitOps system is healthy before and after deployments.
 /// Returns an error if any kustomization is not Ready.
 pub async fn health_check(context: &str) -> Result<()> {
-    println!(
-        "🩺 {}",
-        format!("FluxCD health check ({})...", context).bold()
-    );
+    print_flux_health_check_running_announce_line(context);
 
     // Route through the canonical `flux_get::list_kustomizations_all_namespaces`
     // primitive so this site honors `FLUX_BIN` (via `get_tool_path("flux")`)
@@ -170,10 +211,7 @@ pub async fn health_check_with_retry(
     timeout_secs: u64,
     interval_secs: u64,
 ) -> Result<()> {
-    println!(
-        "🩺 {}",
-        format!("FluxCD health check ({})...", context).bold()
-    );
+    print_flux_health_check_running_announce_line(context);
     println!(
         "   ⏳ Waiting up to {} seconds for Flux to reconcile...",
         timeout_secs
@@ -1041,7 +1079,10 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
 
 #[cfg(test)]
 mod tests {
-    use super::{flux_poll_delay, FLUX_POLL_BACKOFF};
+    use super::{
+        flux_poll_delay, write_flux_health_check_running_announce_line,
+        FLUX_HEALTH_CHECK_RUNNING_ANNOUNCE_GLYPH, FLUX_POLL_BACKOFF,
+    };
     use crate::test_support::code_line_hits;
     use std::time::Duration;
 
@@ -1517,6 +1558,184 @@ mod tests {
             total,
             raw_hits,
             fused_hits,
+        );
+    }
+
+    // ====================================================================
+    // FluxCD-health-check running-branch announce line —
+    // `print_flux_health_check_running_announce_line` fuser
+    // ====================================================================
+    //
+    // These shields pin the lift of the two sibling `println!("🩺 {}",
+    // format!("FluxCD health check ({})...", context).bold())` running-
+    // branch announce stanzas that opened `pub async fn health_check`
+    // and `pub async fn health_check_with_retry` verbatim before the
+    // lift onto `print_flux_health_check_running_announce_line`. Same
+    // byte-oracle + delegation-shield pattern the sibling
+    // `pre_release_flux_health_check_step` and
+    // `post_release_flux_health_check_step` modules carry — but
+    // module-local here because both consumers live in `flux.rs`.
+
+    /// Byte-oracle for `write_flux_health_check_running_announce_line`
+    /// on the `"pre-release"` context — the exact spelling
+    /// [`health_check`]'s callers (both `commands/
+    /// pre_release_flux_health_check_step::run_pre_release_flux_health_check_step`
+    /// and the direct-invocation sites) hand in. A silent drift a
+    /// future rewrite might introduce — dropping the `🩺` glyph,
+    /// renaming the title, dropping the `.bold()` chain, dropping the
+    /// trailing `\n` — flips this assertion rather than compiling and
+    /// silently diverging the two consumer sites' visual grammar.
+    #[test]
+    fn write_running_announce_line_emits_pre_release_context_verbatim() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_flux_health_check_running_announce_line(&mut buf, "pre-release")
+            .expect("write against a Vec<u8> sink must succeed");
+        let out = String::from_utf8(buf).expect(
+            "running-branch announce line must emit valid UTF-8 (the pre-lift println! did)",
+        );
+        // `colored` is detect-terminal-aware, so at test time (no tty)
+        // the ANSI envelope collapses to the bare bytes — assert on the
+        // un-ANSI'd shape so this test survives both tty-and-piped runs.
+        assert!(
+            out.contains("🩺 "),
+            "announce line must open with the `🩺 ` glyph + space \
+             prefix (pre-lift literal at both consumer sites). Got {out:?}"
+        );
+        assert!(
+            out.contains("FluxCD health check (pre-release)..."),
+            "announce line must carry the plain-ASCII title body \
+             verbatim under the `pre-release` context. Got {out:?}"
+        );
+        assert!(
+            out.ends_with('\n'),
+            "announce line must terminate with a single `\\n` \
+             (pre-lift `println!` did). Got {out:?}"
+        );
+    }
+
+    /// Byte-oracle sibling for the `"post-release"` context — the exact
+    /// spelling [`health_check_with_retry`]'s callers (both
+    /// `commands/post_release_flux_health_check_step::
+    /// run_post_release_flux_health_check_step` and the direct-
+    /// invocation sites) hand in. Pins the second consumer's context
+    /// projection so a variant-dispatch regression that hard-coded the
+    /// primitive on `"pre-release"` — silently mislabeling the
+    /// `health_check_with_retry` announce line — surfaces here rather
+    /// than in production.
+    #[test]
+    fn write_running_announce_line_emits_post_release_context_verbatim() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_flux_health_check_running_announce_line(&mut buf, "post-release").unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.contains("🩺 "),
+            "announce line must open with the `🩺 ` glyph + space \
+             prefix under the `post-release` context. Got {out:?}"
+        );
+        assert!(
+            out.contains("FluxCD health check (post-release)..."),
+            "announce line must carry the plain-ASCII title body \
+             verbatim under the `post-release` context. Got {out:?}"
+        );
+    }
+
+    /// The primitive MUST NOT emit anything beyond the exact context
+    /// handed in — no trimming, case-folding, punctuation injection. A
+    /// future normalisation at the primitive boundary would silently
+    /// diverge from what the pre-lift inline `format!("FluxCD health
+    /// check ({})...", context)` did with the literal context. Pin the
+    /// verbatim-forwarding contract with a gnarly input.
+    #[test]
+    fn write_running_announce_line_forwards_context_verbatim_no_normalisation() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_flux_health_check_running_announce_line(&mut buf, "STAGE-7/9").unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.contains("FluxCD health check (STAGE-7/9)..."),
+            "announce line must forward the context verbatim — no \
+             trim, no case-fold, no punctuation injection. Got {out:?}"
+        );
+    }
+
+    /// Pin the `🩺` glyph constant — pre-lift both sites spelled the
+    /// literal `"🩺 "` as the leading `println!` prefix. A drift (a
+    /// swap to `⚕️`, a drop of the glyph, a promotion to
+    /// `crate::ui::print_running_step_heading`) reaches ONE site
+    /// through the const.
+    #[test]
+    fn announce_line_glyph_constant_is_pre_lift_literal() {
+        assert_eq!(
+            FLUX_HEALTH_CHECK_RUNNING_ANNOUNCE_GLYPH, "🩺",
+            "FLUX_HEALTH_CHECK_RUNNING_ANNOUNCE_GLYPH must project the \
+             pre-lift `🩺` glyph both `health_check` and \
+             `health_check_with_retry` spelled as their announce-line \
+             prefix. Got {:?}",
+            FLUX_HEALTH_CHECK_RUNNING_ANNOUNCE_GLYPH,
+        );
+    }
+
+    /// Whole-module negative caller shield: no raw `"FluxCD health
+    /// check ({})..."` template literal may live in the pre-tests body
+    /// of `commands/flux.rs` outside of
+    /// `write_flux_health_check_running_announce_line`. Post-lift the
+    /// two pre-lift consumer sites each forward through
+    /// `print_flux_health_check_running_announce_line`; a future
+    /// re-inline (a "just call `println!` directly, it's shorter"
+    /// cleanup) silently reopens the two-site duplication class this
+    /// lift closed. The shield asserts the template survives at
+    /// EXACTLY one code line — the writer body — so a re-inline at
+    /// either consumer bumps the count above 1 and trips the test.
+    #[test]
+    fn no_raw_running_announce_template_survives_outside_writer_body() {
+        const SOURCE: &str = include_str!("flux.rs");
+        let body = crate::test_support::module_body_before_tests(SOURCE, "commands/flux.rs");
+        const NEEDLE: &str = "\"FluxCD health check ({})...\"";
+        let hits = code_line_hits(body, NEEDLE);
+        assert_eq!(
+            hits.len(),
+            1,
+            "commands/flux.rs pre-tests body must spell the raw \
+             `\"FluxCD health check ({{}})...\"` template at EXACTLY \
+             one code line — the writer body of \
+             `write_flux_health_check_running_announce_line`. A hit \
+             count above 1 means a re-inline at one of the two \
+             pre-lift consumer sites silently reopened the two-site \
+             duplication class this lift closed. Got {} hits: {:#?}",
+            hits.len(),
+            hits,
+        );
+    }
+
+    /// Positive delegation shield — `commands/flux.rs` must forward
+    /// through `print_flux_health_check_running_announce_line` at
+    /// exactly 2 call sites (one per pre-lift consumer:
+    /// [`health_check`] and [`health_check_with_retry`]). A fusion
+    /// that folded the two sites into one call or dropped one of the
+    /// consumers silently fails here — the negative half above would
+    /// still pass, but the positive count would fall below the
+    /// pre-lift census.
+    ///
+    /// The primitive's own `fn` definition line matches the needle
+    /// too, so the shield filters out lines whose trimmed prefix
+    /// starts with `fn ` to count only invocation sites.
+    #[test]
+    fn flux_module_forwards_through_running_announce_line_primitive_twice() {
+        const SOURCE: &str = include_str!("flux.rs");
+        let body = crate::test_support::module_body_before_tests(SOURCE, "commands/flux.rs");
+        const FORWARD_NEEDLE: &str = "print_flux_health_check_running_announce_line(";
+        let call_site_hits: Vec<String> = code_line_hits(body, FORWARD_NEEDLE)
+            .into_iter()
+            .filter(|line| !line.contains(": fn "))
+            .collect();
+        assert_eq!(
+            call_site_hits.len(),
+            2,
+            "commands/flux.rs pre-tests body must forward to \
+             `print_flux_health_check_running_announce_line(...)` at \
+             exactly 2 call sites — one per pre-lift consumer (`health_check` \
+             and `health_check_with_retry`). Found {} call-site hits: {:#?}",
+            call_site_hits.len(),
+            call_site_hits,
         );
     }
 }
