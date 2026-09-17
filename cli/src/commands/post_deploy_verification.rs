@@ -10,6 +10,8 @@
 
 use anyhow::Result;
 use colored::Colorize;
+use std::fmt;
+use std::io;
 use std::time::{Duration, Instant};
 
 use crate::retry::RetryPolicy;
@@ -75,6 +77,142 @@ const HEALTH_ENDPOINT_BACKOFF: RetryPolicy =
 /// without panic.
 fn health_endpoint_retry_delay(attempt: u32) -> Duration {
     HEALTH_ENDPOINT_BACKOFF.poll_iteration_delay(attempt)
+}
+
+/// The closed reason-classification the two pre-lift
+/// [`verify_health_endpoint`] retry-attempt announce-then-delay stanzas
+/// discriminated between: an HTTP response whose status is not
+/// `is_success()` (the `Ok` branch of the inner `client.get(...).send()`
+/// match) and a transport-layer send error (the `Err` branch). The
+/// [`fmt::Display`] projection RE-RENDERS the exact pre-lift detail
+/// forms verbatim — `"Status <code>"` for [`Self::Status`] (matching the
+/// pre-lift `format!("Status {}", status)` template at
+/// [`verify_health_endpoint`] line 165–170) and `<error>` for
+/// [`Self::TransportError`] (matching the pre-lift `format!("{}", e)`
+/// template at line 183–188) — so the announce line is byte-identical
+/// to the pre-lift stanza at both stanzas' respective consumer sites.
+///
+/// # Why a closed enum
+///
+/// The two branches carry structurally different payloads — an owned
+/// `reqwest::StatusCode` versus a borrowed `&reqwest::Error` — and the
+/// pre-lift stanzas spell distinct format-string prefixes (`"Status
+/// {}"` vs `"{}"`). A `&dyn fmt::Display` collapse would erase both the
+/// payload type AND the prefix-owner distinction at the call site,
+/// pushing the "which branch am I on" decision into the caller's
+/// `format!` template rather than the typed primitive. The closed enum
+/// keeps the branch-classifier where the pre-lift `match` already put
+/// it (a structural distinction between transport failure and HTTP
+/// non-2xx), and its [`fmt::Display`] arm owns the "Status " prefix
+/// once — a third detail form (say, a body-parse error or a timeout
+/// classification) earns its own variant rather than a caller-side
+/// prefix rebuild.
+///
+/// The borrow lifetime `'a` on [`Self::TransportError`] avoids
+/// allocating a `String` for the error at the retry-announce site: the
+/// pre-lift stanza already spelled `format!("{}", e)` against the
+/// borrowed `&reqwest::Error` from the outer `Err(e) => { … }` arm, and
+/// the lift preserves that zero-copy shape.
+enum HealthEndpointRetryReason<'a> {
+    /// The HTTP response arrived but its status was not `is_success()`.
+    /// Displays as `"Status <code>"` — the pre-lift `format!("Status
+    /// {}", status)` template at [`verify_health_endpoint`] line
+    /// 165–170.
+    Status(reqwest::StatusCode),
+    /// The `client.get(...).send()` future returned an `Err` before the
+    /// response arrived (transport failure, DNS, connect timeout,
+    /// TLS, …). Displays as the borrowed error's own [`fmt::Display`]
+    /// projection — the pre-lift `format!("{}", e)` template at
+    /// [`verify_health_endpoint`] line 183–188.
+    TransportError(&'a reqwest::Error),
+}
+
+impl fmt::Display for HealthEndpointRetryReason<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Status(status) => write!(f, "Status {}", status),
+            Self::TransportError(err) => write!(f, "{}", err),
+        }
+    }
+}
+
+/// Writer-taking sibling to [`announce_and_delay_health_endpoint_retry`]
+/// that emits ONLY the retry-attempt announce line (no sleep) via
+/// [`crate::ui::write_step_warn`] against the supplied writer.
+///
+/// Owns the byte-exact `"Attempt {}/{}: {} (retrying...)"` grammar
+/// — the 1-indexed `attempt + 1` / `retries + 1` promotion, the `":"`
+/// separator, the space-delimited reason interpolation, and the
+/// trailing `" (retrying...)"` cue — at ONE body across the module.
+/// The stdout-then-sleep adapter [`announce_and_delay_health_endpoint_retry`]
+/// delegates to this writer against a locked stdout handle rather than
+/// respelling the format template, so the announce grammar has ONE
+/// authoritative site the byte-oracle tests pin and any drift lands at
+/// that one line.
+pub(crate) fn write_health_endpoint_retry_announce<W: io::Write>(
+    w: &mut W,
+    attempt: u32,
+    retries: u32,
+    reason: HealthEndpointRetryReason<'_>,
+) -> io::Result<()> {
+    crate::ui::write_step_warn(
+        w,
+        &format!(
+            "Attempt {}/{}: {} (retrying...)",
+            attempt + 1,
+            retries + 1,
+            reason,
+        ),
+    )
+}
+
+/// Announce a `verify_health_endpoint` retry attempt and delay the
+/// caller by [`health_endpoint_retry_delay(attempt)`] before the loop
+/// resumes.
+///
+/// Lifts the 2 sibling `crate::ui::print_step_warn(&format!("Attempt
+/// {}/{}: <detail> (retrying...)", attempt + 1, retries + 1, <detail>))
+/// + tokio::time::sleep(health_endpoint_retry_delay(attempt)).await`
+/// fused announce-then-delay stanzas at [`verify_health_endpoint`]
+/// (line 165–171: `Ok` branch, `Status {}` detail on
+/// `response.status()`; line 183–189: `Err` branch, `{}` detail on the
+/// send error) onto ONE typed body. The two pre-lift stanzas differed
+/// only in the `<detail>` payload — a status code vs. a transport
+/// error — which the [`HealthEndpointRetryReason`] closed enum's
+/// [`fmt::Display`] projection re-renders verbatim.
+///
+/// # Why fuse announce + delay
+///
+/// The two pre-lift stanzas each spelled the announce and the sleep as
+/// a fused pair — the retry-loop discipline requires ONE per pre-retry
+/// iteration, not a bare announce or a bare sleep. A split lift (an
+/// `announce_only` primitive + a bare `sleep(health_endpoint_retry_delay(
+/// attempt)).await` at the caller) would silently allow a future caller
+/// to drift the announce and the sleep out of sync — a bare announce
+/// without a sleep would spin the retry loop at wire speed, and a bare
+/// sleep without an announce would silently hold the loop with no
+/// operator-visible cue. The fusion keeps the two invariant-linked
+/// steps in one body: a caller cannot emit the announce without the
+/// sleep, and vice versa.
+///
+/// # Compounding
+///
+/// Post-lift a future refinement of the retry-announce contract — a
+/// promotion of `⚠️ ` to `🔁` under a retry-specific glyph, a wire-up
+/// of an OTLP `health_endpoint_retry` span with `attempt` /
+/// `retries` / `reason` as attributes, a promotion of the sleep to
+/// `tokio::time::timeout(sleep, cancel_token)` under a cancellation-
+/// aware retry loop, a swap of the plain `Status <code>` prefix for a
+/// canonical-reason-inclusive `Status <code> <reason>` form — lands at
+/// ONE body and reaches both consumers by construction.
+async fn announce_and_delay_health_endpoint_retry(
+    attempt: u32,
+    retries: u32,
+    reason: HealthEndpointRetryReason<'_>,
+) {
+    let _ =
+        write_health_endpoint_retry_announce(&mut io::stdout().lock(), attempt, retries, reason);
+    tokio::time::sleep(health_endpoint_retry_delay(attempt)).await;
 }
 
 /// Configuration for post-deploy verification
@@ -162,13 +300,12 @@ pub async fn verify_health_endpoint(
                 } else {
                     let status = response.status();
                     if attempt < retries {
-                        crate::ui::print_step_warn(&format!(
-                            "Attempt {}/{}: Status {} (retrying...)",
-                            attempt + 1,
-                            retries + 1,
-                            status
-                        ));
-                        tokio::time::sleep(health_endpoint_retry_delay(attempt)).await;
+                        announce_and_delay_health_endpoint_retry(
+                            attempt,
+                            retries,
+                            HealthEndpointRetryReason::Status(status),
+                        )
+                        .await;
                     } else {
                         crate::ui::print_step_failure(&format!(
                             "Health check failed: Status {}",
@@ -180,13 +317,12 @@ pub async fn verify_health_endpoint(
             }
             Err(e) => {
                 if attempt < retries {
-                    crate::ui::print_step_warn(&format!(
-                        "Attempt {}/{}: {} (retrying...)",
-                        attempt + 1,
-                        retries + 1,
-                        e
-                    ));
-                    tokio::time::sleep(health_endpoint_retry_delay(attempt)).await;
+                    announce_and_delay_health_endpoint_retry(
+                        attempt,
+                        retries,
+                        HealthEndpointRetryReason::TransportError(&e),
+                    )
+                    .await;
                 } else {
                     crate::ui::print_step_failure_with_error("Health check failed", &e);
                     return Ok((false, None));
@@ -834,6 +970,171 @@ mod tests {
         assert_eq!(
             health_endpoint_retry_delay(u32::MAX),
             Duration::from_secs(30)
+        );
+    }
+
+    // ====================================================================
+    // health-endpoint retry announce — `HealthEndpointRetryReason` +
+    // `write_health_endpoint_retry_announce` +
+    // `announce_and_delay_health_endpoint_retry` fusion lift
+    // ====================================================================
+    //
+    // These pin the byte-exact `"Attempt {}/{}: {} (retrying...)"`
+    // grammar that lifts the 2 sibling
+    // `print_step_warn(&format!("Attempt {}/{}: <detail> (retrying...)"))
+    // + tokio::time::sleep(health_endpoint_retry_delay(attempt)).await`
+    // fused announce-then-delay stanzas at `verify_health_endpoint`
+    // (line 165–171: `Ok` branch, `Status {}` detail on
+    // `response.status()`; line 183–189: `Err` branch, `{}` detail on
+    // the send error) onto one typed body.
+    //
+    // Test 1 pins the [`HealthEndpointRetryReason::Status`] Display
+    // projection at the pre-lift `"Status <code>"` form. A drift of the
+    // arm's `write!` template (say to `"HTTP {}"` or bare `"{}"`) would
+    // change the byte grammar the pre-lift line 165–170 stanza emitted
+    // and this test compile-flips at the byte level.
+    //
+    // Test 2 pins the `write_health_endpoint_retry_announce` byte
+    // oracle against a fixture attempt / retries / status: the emitted
+    // bytes must be the standard `write_step_warn` `"   ⚠️  <message>"`
+    // envelope wrapped around the exact
+    // `"Attempt {}/{}: Status <code> (retrying...)"` payload — the
+    // 1-indexed `attempt + 1` / `retries + 1` promotion, the `:`
+    // separator, the space-delimited reason interpolation, and the
+    // trailing `" (retrying...)"` cue. A drift of any of these four
+    // grammar pieces compile-flips at the byte level.
+    //
+    // Test 3 is the caller-shield: the whole pre-`#[cfg(test)]` module
+    // body must hold EXACTLY ONE code-line hit for the raw
+    // `"Attempt {}/{}: {} (retrying...)"` format-string needle — the
+    // ONE hit lives in the byte oracle
+    // [`write_health_endpoint_retry_announce`], which the stdout
+    // adapter [`announce_and_delay_health_endpoint_retry`] delegates to
+    // via `write_health_endpoint_retry_announce(&mut io::stdout().lock(),
+    // …)` rather than respelling the format template. A re-inline at
+    // either pre-lift consumer site pushes the count above one and
+    // compile-flips the shield; a rename of the byte oracle without
+    // updating this shield drops the count to zero and compile-flips
+    // the same shield.
+
+    #[test]
+    fn test_health_endpoint_retry_reason_status_display_renders_status_prefix() {
+        // Pre-lift line 165–170 spelled `format!("Status {}", status)`
+        // verbatim. The lift's Display arm must render byte-identical
+        // output at every legal StatusCode.
+        assert_eq!(
+            HealthEndpointRetryReason::Status(reqwest::StatusCode::OK).to_string(),
+            "Status 200 OK",
+        );
+        assert_eq!(
+            HealthEndpointRetryReason::Status(reqwest::StatusCode::NOT_FOUND).to_string(),
+            "Status 404 Not Found",
+        );
+        assert_eq!(
+            HealthEndpointRetryReason::Status(reqwest::StatusCode::INTERNAL_SERVER_ERROR)
+                .to_string(),
+            "Status 500 Internal Server Error",
+        );
+    }
+
+    #[test]
+    fn test_write_health_endpoint_retry_announce_pins_1_indexed_status_grammar() {
+        // Pre-lift line 165–170 spelled the announce as
+        //     `println!("   ⚠️  Attempt {}/{}: Status {} (retrying...)",
+        //      attempt + 1, retries + 1, status)`
+        // via `print_step_warn(&format!(…))` — the `write_step_warn`
+        // envelope emits `"   ⚠️  <message>\n"` with `⚠️` rendered
+        // through `.yellow()` (`\x1b[33m…\x1b[0m`). Pin the byte grammar
+        // at attempt=0, retries=3 (the "first retry after a burst of 4
+        // attempts" fixture): the promoted 1-indexed slot must render
+        // as `1/4`, the separator must be `:`, the reason must be
+        // space-delimited, and the trailer must be `" (retrying...)"`.
+        let mut buf = Vec::new();
+        write_health_endpoint_retry_announce(
+            &mut buf,
+            0,
+            3,
+            HealthEndpointRetryReason::Status(reqwest::StatusCode::BAD_GATEWAY),
+        )
+        .expect("byte-oracle write should not fail against Vec<u8>");
+        let out = String::from_utf8(buf).expect("byte oracle emits valid UTF-8");
+        // Match the full envelope: three-space indent + `.yellow()` glyph
+        // + one space + payload + trailing newline. The glyph rendering
+        // depends on `colored`'s runtime color mode, so anchor on the
+        // payload substring rather than the raw ANSI bytes.
+        assert!(
+            out.starts_with("   "),
+            "byte oracle must preserve the three-space indent — pre-lift \
+             `print_step_warn` grammar. Got {out:?}",
+        );
+        assert!(
+            out.ends_with("Attempt 1/4: Status 502 Bad Gateway (retrying...)\n"),
+            "byte oracle must emit the exact 1-indexed announce grammar \
+             `Attempt 1/4: Status 502 Bad Gateway (retrying...)` followed \
+             by a newline. Got {out:?}",
+        );
+    }
+
+    #[test]
+    fn test_write_health_endpoint_retry_announce_promotes_zero_indexed_counters() {
+        // Cross-check the 1-indexed promotion at a distinct fixture so
+        // a `attempt / retries` swap (or a drop of one of the `+ 1`s)
+        // compile-flips loudly rather than silently symmetrizing under
+        // the attempt=0 / retries=0 degenerate case.
+        let mut buf = Vec::new();
+        write_health_endpoint_retry_announce(
+            &mut buf,
+            2,
+            5,
+            HealthEndpointRetryReason::Status(reqwest::StatusCode::SERVICE_UNAVAILABLE),
+        )
+        .expect("byte-oracle write should not fail against Vec<u8>");
+        let out = String::from_utf8(buf).expect("byte oracle emits valid UTF-8");
+        assert!(
+            out.ends_with("Attempt 3/6: Status 503 Service Unavailable (retrying...)\n"),
+            "byte oracle at (attempt=2, retries=5) must render \
+             `Attempt 3/6: Status 503 Service Unavailable (retrying...)` \
+             — the 1-indexed promotion is per-counter, not a shared \
+             `+ 1`. Got {out:?}",
+        );
+    }
+
+    #[test]
+    fn test_verify_health_endpoint_holds_no_reinlined_attempt_retrying_stanza() {
+        // Whole-module caller shield: the pre-`#[cfg(test)]` module
+        // body must hold EXACTLY TWO code-line hits for the raw
+        // `"Attempt {}/{}: "` prefix needle — one in
+        // `write_health_endpoint_retry_announce` (the byte oracle) and
+        // one in `announce_and_delay_health_endpoint_retry` (the
+        // stdout adapter). A re-inline at either pre-lift consumer
+        // site pushes the count above two and compile-flips this
+        // shield; a rename of the typed primitive without updating
+        // both bodies drops the count below two and compile-flips the
+        // same shield. The needle is assembled at runtime via
+        // `format!` from a small vocabulary so this shield's own
+        // source lines do not self-match.
+        let source = include_str!("post_deploy_verification.rs");
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            source,
+            "commands/post_deploy_verification.rs",
+        );
+        let needle = format!("\"{}{}{}", "Attempt {}", "/{}: ", "{} (retrying...)\"",);
+        let hits = crate::test_support::code_line_hits(body, &needle);
+        assert_eq!(
+            hits.len(),
+            1,
+            "expected exactly 1 code-line hit for the raw \
+             `\"Attempt {{}}/{{}}: {{}} (retrying...)\"` format string \
+             in the pre-`#[cfg(test)]` module body (the byte oracle \
+             `write_health_endpoint_retry_announce`; the stdout \
+             adapter `announce_and_delay_health_endpoint_retry` \
+             delegates to it and does NOT respell the template); \
+             got {}. A count above 1 means a caller site (or the \
+             stdout adapter) re-inlined the pre-lift stanza; a count \
+             of 0 means the byte oracle was renamed without updating \
+             this shield. Offending lines: {:#?}",
+            hits.len(),
+            hits,
         );
     }
 }
