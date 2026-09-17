@@ -1,10 +1,7 @@
 use anyhow::{anyhow, Context, Result};
-use std::process::Stdio;
-use tokio::process::Command;
 use tracing::info;
 
 use crate::infrastructure::registry::{split_composed_registry_base, RegistryRef};
-use crate::repo::get_tool_path;
 use crate::retry::{retry_command_logged, RetryPolicy};
 use crate::ui::styled_progress_bar;
 
@@ -565,7 +562,6 @@ pub async fn push_with_retry(
         let host = host.clone();
         let image = image.clone();
         async move {
-            let doca = get_tool_path("DOCA_BIN", "oci-push");
             // ── CREDENTIALS BY ENV, NEVER ARGV. ─────────────────────────────
             // `--dest-creds=<org>:<token>` put the token in /proc/<pid>/cmdline,
             // world-readable on a shared runner for the life of the push.
@@ -574,18 +570,25 @@ pub async fn push_with_retry(
             // nested inside retry_command above, and doca's push_with_retry
             // already backs off exponentially while telling transient failures
             // apart from permanent ones (a 401 does not burn the budget).
-            Command::new(&doca)
-                .args(crate::infrastructure::registry::doca_push_argv(
-                    image_path, &host, &image, tag,
-                ))
-                .envs(crate::infrastructure::registry::doca_creds_env_pairs(
-                    &organization,
-                    token,
-                ))
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .output()
-                .await
+            //
+            // The 8-line `Command::new(&doca).args(doca_push_argv(...))
+            // .envs(doca_creds_env_pairs(...)).stdout(Stdio::null())
+            // .stderr(Stdio::piped()).output().await` captured-output
+            // spawn stanza lifts onto
+            // `crate::infrastructure::registry::spawn_doca_push_capture_silent`,
+            // sibling of the `push_with_retries` retry-loop body in
+            // `infrastructure/registry.rs` — the two `(null-stdout,
+            // piped-stderr)` retry-classify sites route through one
+            // typed body so a future stdio-posture edit lands once.
+            crate::infrastructure::registry::spawn_doca_push_capture_silent(
+                image_path,
+                &host,
+                &image,
+                tag,
+                &organization,
+                token,
+            )
+            .await
         }
     })
     .await;
@@ -713,5 +716,80 @@ mod push_tags_with_progress_tests {
                  in the fn."
             );
         }
+    }
+
+    /// Positive-delegation-plus-negative-caller shield: the retry-loop
+    /// body of `push_with_retry` routes the doca-push captured-output
+    /// spawn through
+    /// [`crate::infrastructure::registry::spawn_doca_push_capture_silent`],
+    /// not a re-inlined `Command::new(&get_tool_path("DOCA_BIN",
+    /// "oci-push")).args(doca_push_argv(...)).envs(doca_creds_env_pairs(...))
+    /// .stdout(Stdio::null()).stderr(Stdio::piped()).output().await`
+    /// 8-line chain.
+    ///
+    /// Pre-lift the retry-loop body inlined the full chain verbatim
+    /// across TWO sibling sites (this module and
+    /// `infrastructure/registry.rs::RegistryClient::push_with_retries`);
+    /// post-lift both consume one typed primitive so a future
+    /// stdio-posture edit (a `.kill_on_drop(true)`, a stderr-tap for
+    /// per-attempt debug bytes, a `.spawn().wait_with_output()` swap)
+    /// lands once. The negative half of the shield asserts the raw
+    /// spawn fingerprints (`Command::new(`, `Stdio::null()`,
+    /// `Stdio::piped()`, `get_tool_path("DOCA_BIN"`) no longer appear
+    /// at any code line of the non-test module body; the positive
+    /// half asserts the delegation to
+    /// `spawn_doca_push_capture_silent(` fires at ≥1 code line.
+    /// Fingerprints are reconstructed via `format!` so this test's
+    /// own docstring prose does not false-match.
+    #[test]
+    fn push_with_retry_routes_doca_push_spawn_through_spawn_doca_push_capture_silent() {
+        // `push_with_retry` sits BETWEEN two `#[cfg(test)]` blocks in
+        // this module, so `module_body_before_tests` (which slices at
+        // the FIRST `\n#[cfg(test)]\nmod tests {` marker) would miss
+        // the retry-closure body. Scope the shield to the
+        // `push_with_retry` fn body explicitly via
+        // `fn_body_slice_between_markers`, sibling of the
+        // `every_pre_lift_sibling_call_site_routes_through_push_tags_with_progress`
+        // per-fn scoping above.
+        let fn_body = crate::test_support::fn_body_slice_between_markers(
+            include_str!("push.rs"),
+            "commands/push.rs",
+            "pub async fn push_with_retry(",
+            "\n/// Push every tag of an image to a registry",
+        );
+
+        for fingerprint in [
+            format!("Command::{}(", "new"),
+            format!("Stdio::{}()", "null"),
+            format!("Stdio::{}()", "piped"),
+            format!("get_tool_path(\"{}\"", "DOCA_BIN"),
+        ] {
+            let hits = crate::test_support::code_line_hits(fn_body, &fingerprint);
+            assert!(
+                hits.is_empty(),
+                "commands/push.rs::push_with_retry must NOT carry the \
+                 pre-lift doca-push spawn fingerprint {fingerprint:?} \
+                 at any code line — the retry-closure MUST route the \
+                 `(null-stdout, piped-stderr)` captured-output spawn \
+                 through \
+                 `crate::infrastructure::registry::spawn_doca_push_capture_silent(...)`. \
+                 Any hit signals the closure re-inlined the 8-line \
+                 `Command::new(&doca).args(doca_push_argv(...)) \
+                 .envs(doca_creds_env_pairs(...)).stdout(Stdio::null()) \
+                 .stderr(Stdio::piped()).output().await` stanza. \
+                 Offending hits: {hits:#?}"
+            );
+        }
+
+        let delegation_needle = format!("{}(", "spawn_doca_push_capture_silent");
+        let delegation_hits = crate::test_support::code_line_hits(fn_body, &delegation_needle);
+        assert!(
+            !delegation_hits.is_empty(),
+            "commands/push.rs::push_with_retry must delegate to \
+             `spawn_doca_push_capture_silent(` at ≥1 code line (the \
+             retry-closure body). Absence would leave the negative \
+             fingerprint scan trivially satisfied by absence with no \
+             actual doca-push spawn wired. Hits: {delegation_hits:#?}"
+        );
     }
 }

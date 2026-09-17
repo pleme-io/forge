@@ -275,7 +275,6 @@ impl RegistryClient {
             let host = host.clone();
             let image = image.clone();
             async move {
-                let doca = doca_bin();
                 // ── CREDENTIALS BY ENV, NEVER ARGV. ─────────────────────────
                 // This previously passed `--dest-creds=<org>:<token>` on the
                 // command line. /proc/<pid>/cmdline is world-readable, so on a
@@ -288,16 +287,25 @@ impl RegistryClient {
                 // retry_command above, and doca's push_with_retry already backs
                 // off exponentially while distinguishing transient failures
                 // from permanent ones (a 401 does not burn the budget).
-                Command::new(&doca)
-                    .args(doca_push_argv(image_path, &host, &image, tag))
-                    .envs(doca_creds_env_pairs(
-                        &self.credentials.organization,
-                        &self.credentials.token,
-                    ))
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::piped())
-                    .output()
-                    .await
+                //
+                // The 8-line `Command::new(&doca).args(doca_push_argv(...))
+                // .envs(doca_creds_env_pairs(...)).stdout(Stdio::null())
+                // .stderr(Stdio::piped()).output().await` captured-output
+                // spawn stanza lifts onto
+                // [`spawn_doca_push_capture_silent`], sibling of the
+                // `commands/push.rs::push_with_retry` retry-loop body —
+                // the two `(null-stdout, piped-stderr)` retry-classify
+                // sites route through one typed body so a future
+                // stdio-posture edit lands once.
+                spawn_doca_push_capture_silent(
+                    image_path,
+                    &host,
+                    &image,
+                    tag,
+                    &self.credentials.organization,
+                    &self.credentials.token,
+                )
+                .await
             }
         })
         .await;
@@ -861,6 +869,92 @@ pub fn doca_source_creds_env_pairs<'a>(
     token: &'a str,
 ) -> [(&'static str, &'a str); 2] {
     [("INPUT_USER", organization), ("INPUT_PASS", token)]
+}
+
+/// Spawn a doca `oci-push` for `<image_path>` targeting
+/// `<host>/<image>:<tag>` with `<organization>/<token>` credentials
+/// carried through the destination env pair (never argv), discarding
+/// stdout, piping stderr for the retry-classify chain, and awaiting
+/// the captured [`std::process::Output`].
+///
+/// Fuses the 8-line
+///
+/// ```ignore
+/// Command::new(&doca_bin())
+///     .args(doca_push_argv(image_path, host, image, tag))
+///     .envs(doca_creds_env_pairs(organization, token))
+///     .stdout(Stdio::null())
+///     .stderr(Stdio::piped())
+///     .output()
+///     .await
+/// ```
+///
+/// captured-output-with-retry-classify spawn stanza across the TWO
+/// sibling `(null-stdout, piped-stderr)` doca-push retry-loop bodies:
+///
+/// 1. [`RegistryClient::push_with_retries`] in this module — the
+///    typed-error path whose `Err(CommandAttemptFailure)` routes
+///    through `classify_push_failure` into a [`RegistryError`].
+/// 2. `commands/push.rs::push_with_retry` — the [`anyhow::Result`]
+///    path whose `Err(CommandAttemptFailure)` collapses via
+///    `anyhow!("{}", e)`.
+///
+/// Both live inside a [`retry_command_logged`] closure keyed on
+/// [`crate::push_op_label::push_op_label`]; both share the same
+/// stdout=`null` / stderr=`piped` capture posture because their
+/// error dispatch reads stderr but not stdout. A future edit to
+/// that posture (a `.kill_on_drop(true)`, a `--verbose` telemetry
+/// toggle threaded through env, a stdout-tap for progress bytes,
+/// a swap to `.spawn()` with explicit `.wait_with_output()`) lands
+/// on ONE typed body and both consumers inherit; pre-lift the
+/// same edit had to hit both spawn stanzas in lockstep.
+///
+/// # Why NOT consumed by the `github_runner_ci.rs` doca-push site
+///
+/// `commands/github_runner_ci.rs::push_with_retry` uses
+/// `.stdout(Stdio::piped())` (not `Stdio::null()`) because its
+/// non-success arm tees BOTH streams through
+/// [`crate::debug_log_capture_streams`] — a `null`-stdout would
+/// drop the debug observability the CI-side site needs. That third
+/// doca-push spawn keeps its own inline stanza; this primitive
+/// owns only the `(null, piped)` retry-classify siblings whose
+/// stderr-only classification does not need stdout retained.
+///
+/// # Why NOT consumed by the `image_release.rs` doca-push site
+///
+/// `commands/image_release.rs::push_image` builds a
+/// `std::process::Command` (not `tokio::process::Command`) for the
+/// sync ambient-auth flow that runs before the async retry substrate
+/// is on the caller's thread; its spawn shape (`.status()?`, not
+/// `.output().await`) is structurally different and this primitive's
+/// async captured-output return type does not compose there.
+///
+/// # Theory grounding
+///
+/// - THEORY.md §V.1 (Types → Invariants → Proofs → Render Anywhere):
+///   the stdio posture + argv + env-pair triple is pinned by one
+///   typed body so a future stdio-posture drift surfaces as a
+///   compile error at the primitive rather than as a diverging
+///   pair of retry-classify sites.
+/// - THEORY.md §VI.1 (three-times rule threshold): two sibling
+///   occurrences of an 8-line fused chain, matched to already-lifted
+///   `doca_push_argv` / `doca_creds_env_pairs` sub-shapes, so the
+///   full spawn stanza lifts onto ONE typed body.
+pub async fn spawn_doca_push_capture_silent(
+    image_path: &str,
+    host: &str,
+    image: &str,
+    tag: &str,
+    organization: &str,
+    token: &str,
+) -> std::io::Result<std::process::Output> {
+    Command::new(doca_bin())
+        .args(doca_push_argv(image_path, host, image, tag))
+        .envs(doca_creds_env_pairs(organization, token))
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .await
 }
 
 /// Generate architecture-prefixed tags
@@ -1719,6 +1813,67 @@ mod tests {
              doca-inspect capture). Absence would leave the negative \
              raw-pair scan trivially satisfied by absence with no \
              actual inspect capture wired. Hits: {delegation_hits:#?}",
+        );
+    }
+
+    /// Positive-delegation shield: the `(null-stdout, piped-stderr)`
+    /// doca-push captured-output spawn under
+    /// [`RegistryClient::push_with_retries`] routes through the typed
+    /// [`spawn_doca_push_capture_silent`] primitive, not a re-inlined
+    /// `Command::new(&doca_bin()).args(doca_push_argv(...))
+    /// .envs(doca_creds_env_pairs(...)).stdout(Stdio::null())
+    /// .stderr(Stdio::piped()).output().await` chain.
+    ///
+    /// Pre-lift the retry-loop body inlined the full 8-line chain
+    /// verbatim across two sibling sites (this module and
+    /// `commands/push.rs::push_with_retry`); post-lift both consume
+    /// the primitive and the stdio-posture edit lands at one body.
+    /// The `spawn_doca_push_capture_silent(` code-line count is
+    /// expected to be 2 in this module — once at the `pub async fn`
+    /// definition and once at the retry-closure caller.
+    ///
+    /// The `Stdio::null()` needle is deliberately narrow: doca-push
+    /// is the ONLY `null-stdout` spawn in the whole non-test module
+    /// body pre-lift, so a `code_line_hits == 1` assertion (the
+    /// primitive body's own `.stdout(Stdio::null())`) fails
+    /// fail-before at 2 with the caller's re-inlined stanza and
+    /// passes-after at 1 with only the primitive body.
+    #[test]
+    fn test_registry_routes_doca_push_spawn_through_spawn_doca_push_capture_silent() {
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("registry.rs"),
+            "infrastructure/registry.rs",
+        );
+
+        let stdio_null_needle = format!("Stdio::{}()", "null");
+        let stdio_null_hits = crate::test_support::code_line_hits(module_body, &stdio_null_needle);
+        assert_eq!(
+            stdio_null_hits.len(),
+            1,
+            "infrastructure/registry.rs must carry `Stdio::null()` at \
+             EXACTLY one code line (the `spawn_doca_push_capture_silent` \
+             primitive body). A count of 2 signals the \
+             `RegistryClient::push_with_retries` retry-closure has \
+             re-inlined the pre-lift `.stdout(Stdio::null()) \
+             .stderr(Stdio::piped()).output().await` doca-push chain \
+             — every `(null-stdout, piped-stderr)` doca-push spawn \
+             MUST route through `spawn_doca_push_capture_silent(...)` \
+             so a future stdio-posture edit lands on ONE typed body. \
+             Hits: {stdio_null_hits:#?}",
+        );
+
+        let delegation_hits =
+            crate::test_support::code_line_hits(module_body, "spawn_doca_push_capture_silent(");
+        assert_eq!(
+            delegation_hits.len(),
+            2,
+            "infrastructure/registry.rs must reference \
+             `spawn_doca_push_capture_silent(` at EXACTLY two code \
+             lines: the `pub async fn` definition AND the \
+             `RegistryClient::push_with_retries` retry-closure \
+             caller. A count of 1 signals the caller stopped \
+             delegating; a count of 0 signals the primitive was \
+             removed. Hits: {delegation_hits:#?}",
         );
     }
 }
