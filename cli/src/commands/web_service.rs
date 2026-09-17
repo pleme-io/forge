@@ -14,7 +14,6 @@ use colored::Colorize;
 use tokio::process::Command;
 
 use crate::repo::get_tool_path;
-use crate::ui::print_success_banner;
 
 /// Resolve the `crate2nix` binary via the `CRATE2NIX` env override,
 /// falling back to `crate2nix` on PATH. Every `crate2nix` spawn in this
@@ -183,9 +182,9 @@ pub async fn web_regenerate(product: String, service: String, repo_root: String)
     println!();
 
     // Success summary
-    print_success_banner(80, "✅ REGENERATION COMPLETE");
-    println!();
-    crate::ui::print_generated_files_heading();
+    crate::cargo_nix_ceremony_banner::print_cargo_nix_ceremony_banner(
+        crate::cargo_nix_ceremony_banner::CargoNixCeremony::Regeneration,
+    );
     crate::ui::print_bullet_path(&service_dir.join("deps.nix"));
     crate::ui::print_bullet_path(&hanabi_dir.join("Cargo.nix"));
     println!();
@@ -272,9 +271,9 @@ pub async fn web_cargo_update(product: String, service: String, repo_root: Strin
     println!();
 
     // Success summary
-    print_success_banner(80, "✅ UPDATE COMPLETE");
-    println!();
-    crate::ui::print_updated_files_heading();
+    crate::cargo_nix_ceremony_banner::print_cargo_nix_ceremony_banner(
+        crate::cargo_nix_ceremony_banner::CargoNixCeremony::Update,
+    );
     crate::ui::print_bullet_path(&hanabi_dir.join("Cargo.lock"));
     crate::ui::print_bullet_path(&hanabi_dir.join("Cargo.nix"));
     println!();

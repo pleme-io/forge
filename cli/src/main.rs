@@ -66,6 +66,7 @@ mod attic_push_step;
 mod bookmark_git_sha_field;
 mod building_progress_message;
 mod bun_argv;
+mod cargo_nix_ceremony_banner;
 mod cargo_test_argv;
 mod cloudflare;
 mod cloudflare_purge_success_ack;

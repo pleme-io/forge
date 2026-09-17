@@ -17158,32 +17158,38 @@ mod tests {
     /// `println!("Generated files: {}", ...)` widening) flips the
     /// shield.
     ///
-    /// The positive count is pinned per-module at the pre-lift site
-    /// count (`codegen.rs` ×1, `developer_tools.rs` ×1,
-    /// `web_service.rs` ×1). A fusion that folded two consumer sites
-    /// into one call or dropped one of the headings silently fails
-    /// here — the negative half above would still pass, but the
-    /// positive count would fall below the pre-lift census.
+    /// # Positive count after the cargo-nix ceremony fusion lift
+    ///
+    /// After the cargo-nix ceremony banner fusion (the
+    /// [`crate::cargo_nix_ceremony_banner::print_cargo_nix_ceremony_banner`]
+    /// primitive that fuses the `print_success_banner(80, "✅ REGENERATION
+    /// COMPLETE") + println!() + print_generated_files_heading()` three-line
+    /// stanza), `developer_tools.rs` and `web_service.rs` no longer
+    /// call [`super::print_generated_files_heading`] directly — the
+    /// ceremony primitive owns the delegation, and its own module-local
+    /// shield
+    /// (`every_prelift_module_forwards_through_print_cargo_nix_ceremony_banner`)
+    /// pins that both consumers still forward through the ceremony.
+    /// The positive count here therefore covers only the remaining
+    /// direct caller in `commands/codegen.rs` (whose call site is not
+    /// part of the ceremony-shape sibling class); the two indirect
+    /// consumers (`developer_tools.rs`, `web_service.rs`) still pass
+    /// the negative-shield half above because they carry no
+    /// re-inlined `println!("Generated files:")` shape.
     #[test]
     fn print_generated_files_heading_callers_delegate_through_primitive() {
-        const CALLERS: &[(&str, &str, usize)] = &[
-            (
-                include_str!("commands/codegen.rs"),
-                "commands/codegen.rs",
-                1,
-            ),
+        const NEGATIVE_SHIELD_MODULES: &[(&str, &str)] = &[
+            (include_str!("commands/codegen.rs"), "commands/codegen.rs"),
             (
                 include_str!("commands/developer_tools.rs"),
                 "commands/developer_tools.rs",
-                1,
             ),
             (
                 include_str!("commands/web_service.rs"),
                 "commands/web_service.rs",
-                1,
             ),
         ];
-        for (source, module_path, expected_forwards) in CALLERS {
+        for (source, module_path) in NEGATIVE_SHIELD_MODULES {
             let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
             for (i, line) in body.lines().enumerate() {
                 if !line.contains("println!(\"Generated files:") {
@@ -17201,20 +17207,29 @@ mod tests {
                     lineno = i + 1
                 );
             }
-            let forward_hits = body
-                .matches("crate::ui::print_generated_files_heading(")
-                .count();
-            assert_eq!(
-                forward_hits, *expected_forwards,
-                "{module_path} body must forward to \
-                 `crate::ui::print_generated_files_heading()` at exactly \
-                 {expected_forwards} site(s) — one per pre-lift \
-                 consumer in this module. A fusion that folded two \
-                 consumer sites into one call or dropped one of the \
-                 headings silently fails here. Found {forward_hits} \
-                 forwarding hits."
-            );
         }
+
+        // Positive half: the remaining direct caller (`commands/codegen.rs`)
+        // still routes through the primitive. `developer_tools.rs` and
+        // `web_service.rs` moved to indirect callers via
+        // `print_cargo_nix_ceremony_banner`; their forwarding is pinned by
+        // that module's own `every_prelift_module_forwards_through_print_cargo_nix_ceremony_banner`
+        // shield.
+        let codegen_body = crate::test_support::module_body_before_first_cfg_test(
+            include_str!("commands/codegen.rs"),
+            "commands/codegen.rs",
+        );
+        let codegen_forward_hits = codegen_body
+            .matches("crate::ui::print_generated_files_heading(")
+            .count();
+        assert_eq!(
+            codegen_forward_hits, 1,
+            "commands/codegen.rs must forward to \
+             `crate::ui::print_generated_files_heading()` at exactly \
+             1 site — the sole remaining direct caller after the \
+             cargo-nix ceremony fusion lift. Found {codegen_forward_hits} \
+             forwarding hits."
+        );
     }
 
     /// Fail-before-pass envelope for
@@ -17424,27 +17439,35 @@ mod tests {
     /// `println!("Updated files: {}", ...)` widening) flips the
     /// shield.
     ///
-    /// The positive count is pinned per-module at the pre-lift site
-    /// count (`developer_tools.rs` ×1, `web_service.rs` ×1). A
-    /// fusion that folded the two consumer sites into one call or
-    /// dropped one of the headings silently fails here — the
-    /// negative half above would still pass, but the positive count
-    /// would fall below the pre-lift census.
+    /// # Positive count after the cargo-nix ceremony fusion lift
+    ///
+    /// After the cargo-nix ceremony banner fusion (the
+    /// [`crate::cargo_nix_ceremony_banner::print_cargo_nix_ceremony_banner`]
+    /// primitive that fuses the `print_success_banner(80, "✅ UPDATE
+    /// COMPLETE") + println!() + print_updated_files_heading()`
+    /// three-line stanza), neither `developer_tools.rs` nor
+    /// `web_service.rs` calls [`super::print_updated_files_heading`]
+    /// directly any more — the ceremony primitive owns the delegation,
+    /// and its own module-local shield
+    /// (`every_prelift_module_forwards_through_print_cargo_nix_ceremony_banner`)
+    /// pins that both consumers still forward through the ceremony.
+    /// The sole remaining direct caller is
+    /// `cargo_nix_ceremony_banner.rs` itself; the positive half below
+    /// pins that forwarding so a future edit that inlined the
+    /// heading render there would fail the primitive's own coverage.
     #[test]
     fn print_updated_files_heading_callers_delegate_through_primitive() {
-        const CALLERS: &[(&str, &str, usize)] = &[
+        const NEGATIVE_SHIELD_MODULES: &[(&str, &str)] = &[
             (
                 include_str!("commands/developer_tools.rs"),
                 "commands/developer_tools.rs",
-                1,
             ),
             (
                 include_str!("commands/web_service.rs"),
                 "commands/web_service.rs",
-                1,
             ),
         ];
-        for (source, module_path, expected_forwards) in CALLERS {
+        for (source, module_path) in NEGATIVE_SHIELD_MODULES {
             let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
             for (i, line) in body.lines().enumerate() {
                 if !line.contains("println!(\"Updated files:") {
@@ -17462,20 +17485,29 @@ mod tests {
                     lineno = i + 1
                 );
             }
-            let forward_hits = body
-                .matches("crate::ui::print_updated_files_heading(")
-                .count();
-            assert_eq!(
-                forward_hits, *expected_forwards,
-                "{module_path} body must forward to \
-                 `crate::ui::print_updated_files_heading()` at exactly \
-                 {expected_forwards} site(s) — one per pre-lift \
-                 consumer in this module. A fusion that folded the two \
-                 consumer sites into one call or dropped one of the \
-                 headings silently fails here. Found {forward_hits} \
-                 forwarding hits."
-            );
         }
+
+        // Positive half: the sole remaining direct caller
+        // (`cargo_nix_ceremony_banner.rs`) still routes through the
+        // primitive. `developer_tools.rs` and `web_service.rs` moved
+        // to indirect callers via `print_cargo_nix_ceremony_banner`;
+        // their forwarding is pinned by that module's own
+        // `every_prelift_module_forwards_through_print_cargo_nix_ceremony_banner`
+        // shield.
+        let ceremony_body = crate::test_support::module_body_before_first_cfg_test(
+            include_str!("cargo_nix_ceremony_banner.rs"),
+            "cargo_nix_ceremony_banner.rs",
+        );
+        let ceremony_forward_hits = ceremony_body
+            .matches("crate::ui::print_updated_files_heading(")
+            .count();
+        assert_eq!(
+            ceremony_forward_hits, 1,
+            "cargo_nix_ceremony_banner.rs must forward to \
+             `crate::ui::print_updated_files_heading()` at exactly \
+             1 site — the ceremony primitive's `Update` arm. Found \
+             {ceremony_forward_hits} forwarding hits."
+        );
     }
 
     /// Fail-before-pass envelope for

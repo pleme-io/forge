@@ -10,7 +10,6 @@ use colored::Colorize;
 use tokio::process::Command;
 
 use crate::repo::get_tool_path;
-use crate::ui::print_success_banner;
 
 /// Resolve the `cargo` binary via the `CARGO` env override, falling
 /// back to PATH. Every `cargo` spawn in this module reads through this
@@ -345,9 +344,9 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
     crate::generate_cargo_nix_step::announce_and_generate_cargo_nix(&nix_bin()).await?;
 
     // Success summary
-    print_success_banner(80, "✅ REGENERATION COMPLETE");
-    println!();
-    crate::ui::print_generated_files_heading();
+    crate::cargo_nix_ceremony_banner::print_cargo_nix_ceremony_banner(
+        crate::cargo_nix_ceremony_banner::CargoNixCeremony::Regeneration,
+    );
     crate::ui::print_bullet_path(&cargo_lock);
     crate::ui::print_bullet_path(&workspace_root.join("Cargo.nix"));
     println!();
@@ -404,9 +403,9 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
     crate::generate_cargo_nix_step::announce_and_generate_cargo_nix(&nix_bin()).await?;
 
     // Success summary
-    print_success_banner(80, "✅ UPDATE COMPLETE");
-    println!();
-    crate::ui::print_updated_files_heading();
+    crate::cargo_nix_ceremony_banner::print_cargo_nix_ceremony_banner(
+        crate::cargo_nix_ceremony_banner::CargoNixCeremony::Update,
+    );
     crate::ui::print_bullet_path(&workspace_root.join("Cargo.lock"));
     crate::ui::print_bullet_path(&workspace_root.join("Cargo.nix"));
     println!();
