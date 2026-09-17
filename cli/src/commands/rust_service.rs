@@ -33,7 +33,9 @@
 use crate::commands::service_config::{DatabaseType, ServiceConfig};
 use crate::config::{resolve_deploy_yaml_path, DeployConfig};
 use crate::infrastructure::kubectl::kubectl_command_async;
-use crate::infrastructure::registry::{ArchImage, RegistryClient, RegistryCredentials};
+use crate::infrastructure::registry::{
+    doca_source_creds_env_pairs, ArchImage, RegistryClient, RegistryCredentials,
+};
 use crate::path_builder::PathBuilder;
 use crate::repo::get_tool_path;
 use crate::ui::print_success_banner;
@@ -775,8 +777,7 @@ async fn verify_image_in_registry(registry: &str, full_tag_suffix: &str) -> Resu
     // manifest digest (`sha256:…`) and nothing else, so parsing is unchanged.
     let output = Command::new(&doca)
         .args(["inspect", "--ref", &full_tag, "--digest-only"])
-        .env("INPUT_USER", organization)
-        .env("INPUT_PASS", &github_token)
+        .envs(doca_source_creds_env_pairs(organization, &github_token))
         .output()
         .await
         .context("Failed to run doca inspect")?;
@@ -3630,6 +3631,58 @@ mod load_deploy_yaml_and_resolve_env_lift_tests {
              zero-hit assertion trivially satisfied by absence, with \
              the consumer no longer resolving manifest paths at all. \
              Body was:\n{mp_body}"
+        );
+    }
+
+    /// Positive-delegation-plus-negative-caller shield: the module's
+    /// post-push image verification probe (the `doca inspect --ref`
+    /// capture at `commands/rust_service.rs`'s registry-verify site)
+    /// routes through
+    /// [`crate::infrastructure::registry::doca_source_creds_env_pairs`]
+    /// via `Command::envs(...)` rather than spelling the raw
+    /// `.env("INPUT_USER", …).env("INPUT_PASS", …)` pair inline. A
+    /// regression that re-inlined the raw pair would silently drift
+    /// off the byte oracle in `infrastructure/registry.rs` and
+    /// diverge whenever the pair set is next refined (e.g., an
+    /// `INPUT_TLSVERIFY` addition, or a short-lived-token rotation
+    /// hook wrapping the pair). Sibling to
+    /// `test_registry_routes_doca_source_creds_through_doca_source_creds_env_pairs`
+    /// in `infrastructure/registry.rs`, which pins the same
+    /// discipline on the other consumer.
+    ///
+    /// Needles are reconstructed via `format!` so this test's own
+    /// docstring prose does not false-match.
+    #[test]
+    fn test_rust_service_routes_doca_source_creds_through_doca_source_creds_env_pairs() {
+        let module_body = crate::test_support::module_body_before_first_cfg_test(
+            include_str!("rust_service.rs"),
+            "commands/rust_service.rs",
+        );
+
+        let user_needle = format!(".env(\"{}\",", "INPUT_USER");
+        let pass_needle = format!(".env(\"{}\",", "INPUT_PASS");
+        let user_hits = crate::test_support::code_line_hits(module_body, &user_needle);
+        let pass_hits = crate::test_support::code_line_hits(module_body, &pass_needle);
+        assert!(
+            user_hits.is_empty() && pass_hits.is_empty(),
+            "commands/rust_service.rs must NOT spell the raw \
+             `.env(\"INPUT_USER\", …)` / `.env(\"INPUT_PASS\", …)` \
+             pair at any code line — the module's doca-inspect probe \
+             routes through `doca_source_creds_env_pairs(org, \
+             &github_token)` via `Command::envs(...)`. Offending \
+             USER: {user_hits:#?}, PASS: {pass_hits:#?}",
+        );
+
+        let delegation_hits =
+            crate::test_support::code_line_hits(module_body, "doca_source_creds_env_pairs(");
+        assert!(
+            !delegation_hits.is_empty(),
+            "commands/rust_service.rs must delegate to \
+             `doca_source_creds_env_pairs(` at ≥1 code line (the \
+             post-push registry-verify probe). Absence would leave \
+             the negative raw-pair scan trivially satisfied by \
+             absence with the inspect capture no longer carrying \
+             credentials at all. Hits: {delegation_hits:#?}",
         );
     }
 

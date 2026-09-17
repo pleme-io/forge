@@ -352,8 +352,10 @@ impl RegistryClient {
         let full_ref = crate::oci_manifest::image_reference(registry, tag);
         let captured = Command::new(&doca)
             .args(["inspect", "--ref", &full_ref, "--digest-only"])
-            .env("INPUT_USER", &self.credentials.organization)
-            .env("INPUT_PASS", &self.credentials.token)
+            .envs(doca_source_creds_env_pairs(
+                &self.credentials.organization,
+                &self.credentials.token,
+            ))
             .output()
             .await;
 
@@ -776,6 +778,89 @@ pub fn doca_creds_env_pairs<'a>(
         ("INPUT_DEST_USER", organization),
         ("INPUT_DEST_PASS", token),
     ]
+}
+
+/// Canonical `(env-var, value)` pair vector doca reads GHCR
+/// **source-side** credentials from: `INPUT_USER` = organization,
+/// `INPUT_PASS` = token. Sibling to [`doca_creds_env_pairs`] — which
+/// pins the destination-side push credentials (`INPUT_DEST_USER` /
+/// `INPUT_DEST_PASS`) — but structurally distinct: doca reads two
+/// separate env-var families, and inspect / read paths route through
+/// the un-suffixed source pair here while push paths route through the
+/// `DEST`-suffixed destination pair there.
+///
+/// Consumed by every doca-inspect site that carries explicit
+/// credentials (both pre-lift `doca inspect --ref` capture consumers —
+/// [`RegistryClient::verify_tag_exists`] in this module's async
+/// registry client and `commands/rust_service.rs`'s post-push image
+/// verification probe) via `Command::envs(...)`, mirroring how the
+/// push pair is consumed via `Command::envs(doca_creds_env_pairs(...))`.
+/// The two `.env("INPUT_USER", <org>).env("INPUT_PASS", <token>)` calls
+/// that lived at each of the two inspect sites now collapse onto one
+/// `.envs(doca_source_creds_env_pairs(&org, token))` call whose pair
+/// set is defined once here.
+///
+/// # Why the credentials go through the environment, not argv
+///
+/// The pre-migration `--creds=<org>:<token>` argv-carried shape put
+/// the token in `/proc/<pid>/cmdline` — world-readable on a shared
+/// runner for the life of the inspect. doca reads `INPUT_USER` /
+/// `INPUT_PASS` from the environment, which is not; a co-tenant
+/// process cannot enumerate `/proc/<pid>/environ` on a hardened
+/// runner. Centralizing the exact pair names here forecloses the
+/// class of drift where a future consumer copy-pastes only one of the
+/// two env vars or spells one of them slightly wrong
+/// (`INPUT_USERNAME`, the natural expansion, is silently ignored by
+/// doca and the inspect then fails with a 401 that reads as a
+/// token-scope error, not a wiring error).
+///
+/// # Why source and destination pairs are separate primitives
+///
+/// A single `doca_creds_env_pairs(mode, org, token)` parameterized on
+/// a `CredsSide` enum would compile-check for arity but not for the
+/// key drift that both pairs actually shield against: routing an
+/// inspect through the destination env pair (`INPUT_DEST_USER` etc.)
+/// leaves doca reading empty source credentials and the inspect fails
+/// with a 401. Two typed nullary-mode primitives make the wrong pair
+/// unspellable at each site — the source pair carries `INPUT_*` names
+/// only, the destination pair carries `INPUT_DEST_*` names only —
+/// rather than making it merely a runtime-parameter mistake.
+///
+/// # Why an env-pair vector, not a `Command`-mutating helper
+///
+/// The two consumers differ AFTER the env pair on stdio capture (one
+/// pipes stderr through
+/// [`crate::retry::classify_capture_query`], the other calls
+/// [`Command::output`] plain and consumes `stderr` directly) and on
+/// downstream error-mapping shape (typed [`RegistryError`] vs.
+/// [`anyhow::Context`]). A `Command`-mutating helper would have to
+/// expose a follow-on chain axis for each of those; the env-pair
+/// vector owns only the shape `Command::envs(...)` consumes
+/// identically, mirroring the argv-slice discipline the sibling
+/// [`doca_push_argv`] carries.
+///
+/// The `(&'static str, &'a str)` element type pins the env-var
+/// keys at the call site — a future edit that swapped a key for
+/// a borrowed local (a plausible mistake if the pair were built
+/// via `format!`) is a compile error, not a runtime auth failure.
+///
+/// # Theory grounding
+///
+/// - THEORY.md §V.1 (Types → Invariants → Proofs → Render Anywhere):
+///   the paired byte-oracle test pins both env-var names as
+///   `cargo test`-verifiable invariants, so a fusion that renamed a
+///   key or crossed the slot order fails at test time rather than as
+///   a downstream 401 on the shared runner.
+/// - THEORY.md §VI.1 (three-times rule threshold): two sibling
+///   occurrences past the coincidence tier, matched to a directly
+///   analogous already-lifted destination-side pair, so the
+///   `.env("INPUT_USER", …).env("INPUT_PASS", …)` stanza lifts onto
+///   ONE typed body.
+pub fn doca_source_creds_env_pairs<'a>(
+    organization: &'a str,
+    token: &'a str,
+) -> [(&'static str, &'a str); 2] {
+    [("INPUT_USER", organization), ("INPUT_PASS", token)]
 }
 
 /// Generate architecture-prefixed tags
@@ -1535,6 +1620,105 @@ mod tests {
              `doca_creds_env_pairs(` at ≥1 code line (the module's own \
              `RegistryClient::push_with_retries` doca-push closure). \
              Hits: {delegation_hits:#?}",
+        );
+    }
+
+    /// Byte-oracle for [`doca_source_creds_env_pairs`]: pin both
+    /// env-var names and their interpolation slots. A regression that
+    /// swapped a key for a borrowed local (a plausible mistake if the
+    /// pair vector were built via `format!`), typo'd one of the two
+    /// names into a doca-ignored spelling (`INPUT_USERNAME`, the
+    /// natural expansion, is silently dropped by doca and the inspect
+    /// then fails with a 401 that reads as a token-scope error), or
+    /// crossed the two slots (organization → `INPUT_PASS`) fails here
+    /// rather than as a downstream 401 chain on the shared runner.
+    /// Sibling to `test_doca_creds_env_pairs_pins_both_pairs_byte_for_byte`
+    /// above.
+    #[test]
+    fn test_doca_source_creds_env_pairs_pins_both_pairs_byte_for_byte() {
+        let pairs = doca_source_creds_env_pairs("pleme-io", "ghp_token_placeholder_do_not_use");
+        assert_eq!(
+            pairs.len(),
+            2,
+            "doca_source_creds_env_pairs must return exactly two \
+             entries — adding a third silently is a drift class this \
+             fixed-arity `[(_, _); 2]` return closes at monomorphization. \
+             Got: {pairs:?}",
+        );
+        assert_eq!(
+            pairs[0].0, "INPUT_USER",
+            "pairs[0].0 must be the exact literal `INPUT_USER` — \
+             doca ignores unrecognized `INPUT_*` names silently, so a \
+             typo (e.g., `INPUT_USERNAME`, the natural expansion) \
+             surfaces as a 401 at inspect time, not as a wiring \
+             error. Also load-bearing: crossing to `INPUT_DEST_USER` \
+             would route the inspect through the destination-side \
+             env family that doca reads only for push, leaving the \
+             source-side credentials empty and the inspect always \
+             failing 401.",
+        );
+        assert_eq!(
+            pairs[0].1, "pleme-io",
+            "pairs[0].1 must be the interpolated `<organization>` — a \
+             regression that crossed the org and token slots would \
+             ship the token as the username and fail all downstream \
+             inspects.",
+        );
+        assert_eq!(
+            pairs[1].0, "INPUT_PASS",
+            "pairs[1].0 must be the exact literal `INPUT_PASS` — \
+             same drift class as `INPUT_USER` above (including the \
+             cross-family risk to `INPUT_DEST_PASS`).",
+        );
+        assert_eq!(
+            pairs[1].1, "ghp_token_placeholder_do_not_use",
+            "pairs[1].1 must be the interpolated `<token>`.",
+        );
+    }
+
+    /// Positive-delegation-plus-negative-caller shield: every
+    /// doca-inspect site under the non-test module body that pairs
+    /// `.env("INPUT_USER", …).env("INPUT_PASS", …)` routes through
+    /// `doca_source_creds_env_pairs(…)` via `Command::envs(…)`. A
+    /// future consumer that reintroduced the raw pair would silently
+    /// drift off the byte oracle above and diverge whenever the pair
+    /// set is next refined (e.g., an `INPUT_TLSVERIFY` addition, or a
+    /// short-lived-token rotation hook wrapping the pair). Needles are
+    /// reconstructed via `format!` so this test's own docstring prose
+    /// does not false-match. Mirrors the sibling
+    /// `test_registry_routes_doca_creds_through_doca_creds_env_pairs`
+    /// above for the destination-side pair.
+    #[test]
+    fn test_registry_routes_doca_source_creds_through_doca_source_creds_env_pairs() {
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("registry.rs"),
+            "infrastructure/registry.rs",
+        );
+
+        let user_needle = format!(".env(\"{}\",", "INPUT_USER");
+        let pass_needle = format!(".env(\"{}\",", "INPUT_PASS");
+        let user_hits = crate::test_support::code_line_hits(module_body, &user_needle);
+        let pass_hits = crate::test_support::code_line_hits(module_body, &pass_needle);
+        assert!(
+            user_hits.is_empty() && pass_hits.is_empty(),
+            "infrastructure/registry.rs must NOT spell the raw \
+             `.env(\"INPUT_USER\", …)` / `.env(\"INPUT_PASS\", …)` \
+             pair at any code line — every doca-inspect site routes \
+             through `doca_source_creds_env_pairs(&org, token)` via \
+             `Command::envs(...)`. Offending USER: {user_hits:#?}, \
+             PASS: {pass_hits:#?}",
+        );
+
+        let delegation_hits =
+            crate::test_support::code_line_hits(module_body, "doca_source_creds_env_pairs(");
+        assert!(
+            !delegation_hits.is_empty(),
+            "infrastructure/registry.rs must delegate to \
+             `doca_source_creds_env_pairs(` at ≥1 code line (the \
+             module's own `RegistryClient::verify_tag_exists` \
+             doca-inspect capture). Absence would leave the negative \
+             raw-pair scan trivially satisfied by absence with no \
+             actual inspect capture wired. Hits: {delegation_hits:#?}",
         );
     }
 }
