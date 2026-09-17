@@ -542,12 +542,13 @@ pub async fn verify_deployment_image(
             }
         }
 
-        // Print diagnostics every 120s for visibility
-        if elapsed - last_diag_at >= 120 && elapsed > 0 {
-            last_diag_at = elapsed;
-            let diag = gather_deployment_diagnostics(namespace, deployment_name).await;
-            println!("{}", diag);
-        }
+        emit_periodic_deployment_diagnostics_burst(
+            namespace,
+            deployment_name,
+            elapsed,
+            &mut last_diag_at,
+        )
+        .await;
 
         crate::poll_backoff_advance::advance_poll_backoff_tokio(
             &mut backoff_attempt,
@@ -649,18 +650,75 @@ pub async fn wait_for_deployment(
             }
         }
 
-        // Print diagnostics every 120s for visibility
-        if elapsed - last_diag_at >= 120 && elapsed > 0 {
-            last_diag_at = elapsed;
-            let diag = gather_deployment_diagnostics(&namespace, &deployment_name).await;
-            println!("{}", diag);
-        }
+        emit_periodic_deployment_diagnostics_burst(
+            &namespace,
+            &deployment_name,
+            elapsed,
+            &mut last_diag_at,
+        )
+        .await;
 
         crate::poll_backoff_advance::advance_poll_backoff_tokio(
             &mut backoff_attempt,
             flux_poll_delay,
         )
         .await;
+    }
+}
+
+/// Load-bearing 120-second cadence for the periodic diagnostic burst
+/// emitted from the two deployment-poll loops
+/// ([`verify_deployment_image`] and [`wait_for_deployment`]).
+///
+/// Pinned at ONE code point so a future re-tuning of the burst
+/// frequency lands at one edit rather than silently drifting across the
+/// two callers. Pre-lift both consumer sites spelled `120` inline as a
+/// magic literal (`if elapsed - last_diag_at >= 120 && elapsed > 0
+/// { … }`) — a bump at one site alone would have silently desynced the
+/// two operator-visible diagnostic cadences on the same deployment
+/// verification surface.
+const DEPLOYMENT_DIAG_BURST_INTERVAL_SECS: u64 = 120;
+
+/// Emit a diagnostic burst to stdout when at least
+/// [`DEPLOYMENT_DIAG_BURST_INTERVAL_SECS`] seconds have elapsed since
+/// the last burst (`last_diag_at` cursor), gated by `elapsed > 0` so
+/// the very first poll iteration (before any wall time has passed)
+/// never fires.
+///
+/// Both consumer sites — [`verify_deployment_image`] and
+/// [`wait_for_deployment`] — pre-lift spelled the 4-line stanza
+/// (`if elapsed - last_diag_at >= 120 && elapsed > 0 { last_diag_at =
+/// elapsed; let diag = gather_deployment_diagnostics(<ns>,
+/// <deploy>).await; println!("{}", diag); }`) verbatim, differing only
+/// in whether `namespace` / `deployment_name` were already `&str` refs
+/// or `String` bindings taken by `&`. Post-lift the burst frequency,
+/// the `elapsed > 0` first-tick suppression, the cursor-update ordering
+/// (advance BEFORE the diagnostics call so a slow `kubectl` probe
+/// cannot silently double-fire the burst on the same interval boundary),
+/// and the `println!("{}", diag)` render surface all live at ONE code
+/// point.
+///
+/// # Underflow-safe cursor arithmetic
+///
+/// `saturating_sub` replaces the pre-lift bare subtraction as a
+/// defense in depth. Under the poll-loop invariant `elapsed >=
+/// *last_diag_at` (both consumers seed `last_diag_at = 0u64` and only
+/// overwrite it with a past `elapsed` value under the guard), the two
+/// shapes are bit-identical; but a future edit that re-seeded the
+/// cursor with a non-zero placeholder — or a caller that read the
+/// elapsed value from a monotonic clock racing against a wall-clock
+/// snapshot — cannot silently underflow the `u64` and turn the guard
+/// into a "burst every tick" storm.
+async fn emit_periodic_deployment_diagnostics_burst(
+    namespace: &str,
+    deployment_name: &str,
+    elapsed: u64,
+    last_diag_at: &mut u64,
+) {
+    if elapsed.saturating_sub(*last_diag_at) >= DEPLOYMENT_DIAG_BURST_INTERVAL_SECS && elapsed > 0 {
+        *last_diag_at = elapsed;
+        let diag = gather_deployment_diagnostics(namespace, deployment_name).await;
+        println!("{}", diag);
     }
 }
 
@@ -1312,6 +1370,104 @@ mod tests {
             body,
             "commands/flux.rs::get_pod_status_full",
             1,
+        );
+    }
+
+    /// Whole-module lift shield for the two pre-lift sibling 4-line
+    /// `if elapsed - last_diag_at >= 120 && elapsed > 0 { last_diag_at
+    /// = elapsed; let diag = gather_deployment_diagnostics(<ns>,
+    /// <deploy>).await; println!("{}", diag); }` "every-120s poll-loop
+    /// diagnostic burst" stanzas — one in
+    /// [`super::verify_deployment_image`] and one in
+    /// [`super::wait_for_deployment`], which formerly differed only in
+    /// whether `namespace` / `deployment_name` were already `&str` refs
+    /// or `String` bindings taken by `&`.
+    ///
+    /// Post-lift both consumer sites delegate through
+    /// [`super::emit_periodic_deployment_diagnostics_burst`] and the
+    /// 120-second cadence lives at ONE code point on
+    /// [`super::DEPLOYMENT_DIAG_BURST_INTERVAL_SECS`]. This shield pins
+    /// three invariants:
+    ///
+    /// 1. The pre-lift `elapsed - last_diag_at >= 120` guard does NOT
+    ///    reappear anywhere in the module's non-test body — a
+    ///    regression that re-fuses either 4-line stanza fails here
+    ///    rather than silently desyncing the two operator-visible
+    ///    diagnostic cadences.
+    /// 2. `emit_periodic_deployment_diagnostics_burst(` appears at
+    ///    exactly 2 call sites in the module body (both consumer
+    ///    loops), plus one hit for the primitive's own `fn` definition
+    ///    line, so the floor is `>= 3` code-line hits — a future edit
+    ///    that dropped the delegation at either consumer cannot leave
+    ///    the negative scan trivially satisfied by absence.
+    /// 3. The `120` literal appears at exactly ONE code line: the
+    ///    primitive's own const definition. A future edit that
+    ///    re-inlined the burst frequency at either consumer fails
+    ///    here.
+    ///
+    /// Scan bounded strictly to the module's non-test body (file start
+    /// to the FIRST `\n#[cfg(test)]\nmod tests {` marker) so this
+    /// shield's own docstring mentions of the pre-lift shape stay out
+    /// of scope. Sibling of the `flux_poll_delay` whole-module
+    /// boundary shield at
+    /// [`test_flux_polling_loops_consume_typed_poll_delay_not_bespoke_backoff_struct`]
+    /// above — same "one const + one delegation-helper + whole-module
+    /// negative + positive-floor" quadruple discipline both polling
+    /// loops share.
+    #[test]
+    fn test_flux_polling_loops_route_periodic_diag_burst_through_typed_primitive() {
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("flux.rs"),
+            "commands/flux.rs",
+        );
+
+        // (1) Pre-lift guard shape must not reappear at any code line.
+        let pre_lift_hits = code_line_hits(module_body, "elapsed - last_diag_at >= 120");
+        assert!(
+            pre_lift_hits.is_empty(),
+            "commands/flux.rs must NOT re-fuse the pre-lift 4-line \
+             `if elapsed - last_diag_at >= 120 && elapsed > 0 {{ … }}` \
+             periodic-diagnostic-burst stanza at either polling loop — \
+             route through \
+             `emit_periodic_deployment_diagnostics_burst(namespace, \
+             deployment_name, elapsed, &mut last_diag_at).await` \
+             instead. Found code-line hits: {:#?}",
+            pre_lift_hits,
+        );
+
+        // (2) Post-lift delegation must appear at ≥3 code lines
+        // (two callers + the primitive's own `fn` definition line).
+        let delegation_hits =
+            code_line_hits(module_body, "emit_periodic_deployment_diagnostics_burst(");
+        assert!(
+            delegation_hits.len() >= 3,
+            "commands/flux.rs must consume the typed \
+             `emit_periodic_deployment_diagnostics_burst` primitive at \
+             both polling loops — post-lift the primitive is invoked \
+             at 2 call sites (`verify_deployment_image`, \
+             `wait_for_deployment`) plus the `fn`-definition line \
+             contributes one hit, so the floor is `>= 3` code-line \
+             hits. Found:\n{}",
+            delegation_hits.join("\n"),
+        );
+
+        // (3) The 120-second cadence literal must live at ONE code
+        // point — the primitive's own const definition. Anchor the
+        // needle to the const's `= 120;` suffix so a future
+        // `RetryPolicy::max_attempts = 120` or an unrelated 120
+        // elsewhere in the module cannot false-positive.
+        let cadence_const_hits = code_line_hits(
+            module_body,
+            "const DEPLOYMENT_DIAG_BURST_INTERVAL_SECS: u64 = 120;",
+        );
+        assert_eq!(
+            cadence_const_hits.len(),
+            1,
+            "commands/flux.rs must pin the 120-second periodic-diagnostic \
+             burst cadence at exactly ONE code point — the \
+             `DEPLOYMENT_DIAG_BURST_INTERVAL_SECS` const's own \
+             definition line. Found code-line hits: {:#?}",
+            cadence_const_hits,
         );
     }
 
