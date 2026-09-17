@@ -1614,18 +1614,11 @@ pub async fn orchestrate_release(
     // CRITICAL: Verify GitOps system is still healthy after deployment
     // Wait for Flux to finish reconciling changes before declaring success
     // This ensures the release didn't break the cluster reconciliation
-    if skip_flux_health_check {
-        println!(
-            "Step 7: {}",
-            "Skipping post-release FluxCD health check (skip_flux_health_check: true)".dimmed()
-        );
-    } else {
-        crate::ui::print_numbered_step_heading("7", "Post-release FluxCD health check...");
-        // Wait up to 10 minutes for all kustomizations to reconcile (was 5 minutes)
-        // Longer timeout handles complex deployments with multiple services
-        crate::commands::flux::health_check_with_retry("post-release", 600, 10).await?;
-    }
-    println!();
+    crate::commands::post_release_flux_health_check_step::run_post_release_flux_health_check_step(
+        "7",
+        skip_flux_health_check,
+    )
+    .await?;
 
     // Step 8: Run integration tests (if configured in deploy.yaml)
     // CRITICAL: Tests run AFTER Hive Router is updated and FluxCD has reconciled
@@ -2671,21 +2664,12 @@ pub async fn release_rust_service(
     // Wait for Flux to finish reconciling changes before declaring success
     // This ensures the release didn't break the cluster reconciliation
     println!();
-    if skip_flux_health_check {
-        println!(
-            "Step 9/9: {}",
-            "Skipping post-release FluxCD health check (skip_flux_health_check: true)"
-                .bold()
-                .dimmed()
-        );
-    } else {
-        crate::ui::print_numbered_step_heading("9/9", "Post-release FluxCD health check...");
-        // Wait up to 10 minutes for all kustomizations to reconcile (was 5 minutes)
-        // Longer timeout handles complex deployments with multiple services
-        crate::commands::flux::health_check_with_retry("post-release", 600, 10).await?;
-    }
+    crate::commands::post_release_flux_health_check_step::run_post_release_flux_health_check_step(
+        "9/9",
+        skip_flux_health_check,
+    )
+    .await?;
 
-    println!();
     print_success_banner(80, "✅ RELEASE COMPLETE");
 
     Ok(())
