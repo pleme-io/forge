@@ -130,6 +130,7 @@ mod repo;
 mod repo_root_utf8;
 mod retry;
 mod rust_test_diagnostic_env;
+mod rust_toolchain_phase_announce;
 mod screenshot_diag;
 mod shinka_migration_reset_ack;
 mod short_sha_tagging_preamble;

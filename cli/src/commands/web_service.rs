@@ -10,7 +10,6 @@
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use colored::Colorize;
 use tokio::process::Command;
 
 use crate::repo::get_tool_path;
@@ -169,10 +168,9 @@ pub async fn web_regenerate(product: String, service: String, repo_root: String)
     println!();
 
     // Step 2: Regenerate Hanabi Cargo.nix using crate2nix
-    println!(
-        "🦀 {} {}",
-        "Regenerating Hanabi Cargo.nix".bold(),
-        "(crate2nix generate)".dimmed()
+    crate::rust_toolchain_phase_announce::print_rust_toolchain_phase_announce(
+        "Regenerating Hanabi Cargo.nix",
+        "(crate2nix generate)",
     );
 
     crate::nix::run_crate2nix_in(&crate2nix, &hanabi_dir)
@@ -258,10 +256,9 @@ pub async fn web_cargo_update(product: String, service: String, repo_root: Strin
     println!();
 
     // Step 2: Regenerate Cargo.nix
-    println!(
-        "🦀 {} {}",
-        "Regenerating Cargo.nix".bold(),
-        "(crate2nix generate)".dimmed()
+    crate::rust_toolchain_phase_announce::print_rust_toolchain_phase_announce(
+        "Regenerating Cargo.nix",
+        "(crate2nix generate)",
     );
 
     crate::nix::run_crate2nix_in(&crate2nix, &hanabi_dir)
