@@ -119,6 +119,7 @@ mod pushing_progress_message;
 mod rebac_keys_probe;
 mod regenerated_lockfile_commit_reminder;
 mod registry_field;
+mod release_flake_app_ref;
 mod release_workflow_intro_banner;
 mod repo;
 mod repo_root_utf8;

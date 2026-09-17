@@ -516,19 +516,21 @@ pub async fn compute_build_attestation(
     repo_root: &Path,
 ) -> Result<BuildAttestation> {
     // Get nix derivation path
+    let release_app_ref = crate::release_flake_app_ref::format_release_flake_app_ref(
+        crate::release_flake_app_ref::ReleaseAppScope::Standalone { service },
+    );
     let derivation = run_command_output(
         repo_root,
         "nix",
-        &[
-            "path-info",
-            "--derivation",
-            &format!(".#release:{}", service),
-        ],
+        &["path-info", "--derivation", &release_app_ref],
     )
     .await
     .unwrap_or_else(|_| format!("/nix/store/unknown-{}.drv", service));
 
     // Compute closure hash from nix path-info
+    let closure_release_app_ref = crate::release_flake_app_ref::format_release_flake_app_ref(
+        crate::release_flake_app_ref::ReleaseAppScope::Standalone { service },
+    );
     let closure_info = run_command_output(
         repo_root,
         "nix",
@@ -536,7 +538,7 @@ pub async fn compute_build_attestation(
             "path-info",
             "--recursive",
             "--json",
-            &format!(".#release:{}", service),
+            &closure_release_app_ref,
         ],
     )
     .await

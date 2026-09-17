@@ -47,11 +47,11 @@ async fn run_nix_release_app(
     standalone: bool,
     extra_args: &[&str],
 ) -> Result<()> {
-    let app = if standalone {
-        format!(".#release:{}", service)
+    let app = crate::release_flake_app_ref::format_release_flake_app_ref(if standalone {
+        crate::release_flake_app_ref::ReleaseAppScope::Standalone { service }
     } else {
-        format!(".#release:{}:{}", product, service)
-    };
+        crate::release_flake_app_ref::ReleaseAppScope::Monorepo { product, service }
+    });
     let mut args = vec!["run", &app, "--"];
     args.extend_from_slice(extra_args);
 
