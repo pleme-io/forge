@@ -548,16 +548,13 @@ pub async fn execute(
 
             // Get pod status
             let pod_status_result = kubectl_command_async()
-                .args(&[
-                    "get",
-                    "pods",
-                    "-n",
-                    &namespace,
-                    "-l",
-                    &crate::k8s_label_selector::format_app_label_selector(&name),
-                    "-o",
-                    "json",
-                ])
+                .args(
+                    crate::kubectl_get_pods_by_selector_argv::kubectl_get_pods_by_selector_argv(
+                        &namespace,
+                        &crate::k8s_label_selector::format_app_label_selector(&name),
+                        crate::kubectl_get_pods_by_selector_argv::PodListingOutput::Json,
+                    ),
+                )
                 .output()
                 .await;
 

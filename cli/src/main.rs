@@ -96,6 +96,7 @@ mod kubectl_get_databasemigration_output_argv;
 mod kubectl_get_databasemigration_status_phase_argv;
 mod kubectl_get_job_condition_status_argv;
 mod kubectl_get_job_status_succeeded_argv;
+mod kubectl_get_pods_by_selector_argv;
 mod kubectl_logs_argv;
 mod list_resource_names_by_selector_argv;
 mod namespace_field;

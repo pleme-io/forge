@@ -422,16 +422,13 @@ fn extract_conditions(deployment: &serde_json::Value) -> Vec<ConditionStatus> {
 }
 
 async fn fetch_pods(namespace: &str, deployment_name: &str) -> Result<Vec<serde_json::Value>> {
-    kubectl_list_items(&[
-        "get",
-        "pods",
-        "-n",
-        namespace,
-        "-l",
-        &crate::k8s_label_selector::format_app_label_selector(&deployment_name),
-        "-o",
-        "json",
-    ])
+    kubectl_list_items(
+        &crate::kubectl_get_pods_by_selector_argv::kubectl_get_pods_by_selector_argv(
+            namespace,
+            &crate::k8s_label_selector::format_app_label_selector(&deployment_name),
+            crate::kubectl_get_pods_by_selector_argv::PodListingOutput::Json,
+        ),
+    )
     .await
 }
 

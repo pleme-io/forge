@@ -758,16 +758,11 @@ async fn get_pod_status_full(namespace: &str, deployment_name: &str) -> Result<P
     // two occurrences the fusion primitive consolidates (sibling:
     // `crate::commands::integration_tests::fetch_secret`).
     let output = kubectl_capture_anyhow(
-        &[
-            "get",
-            "pods",
-            "-n",
+        &crate::kubectl_get_pods_by_selector_argv::kubectl_get_pods_by_selector_argv(
             namespace,
-            "-l",
             &crate::k8s_label_selector::format_app_label_selector(&deployment_name),
-            "-o",
-            "json",
-        ],
+            crate::kubectl_get_pods_by_selector_argv::PodListingOutput::Json,
+        ),
         "kubectl get pods",
     )
     .await?;
@@ -890,16 +885,11 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
     kubectl_probe_push_nonempty_section_4sp(
         &mut diag,
         "All Pods",
-        &[
-            "get",
-            "pods",
-            "-n",
+        &crate::kubectl_get_pods_by_selector_argv::kubectl_get_pods_by_selector_argv(
             namespace,
-            "-l",
             &crate::k8s_label_selector::format_app_label_selector(&deployment_name),
-            "-o",
-            "wide",
-        ],
+            crate::kubectl_get_pods_by_selector_argv::PodListingOutput::Wide,
+        ),
     )
     .await;
 
