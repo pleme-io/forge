@@ -49,6 +49,7 @@ pub mod nix_builder;
 pub mod pangea;
 pub mod pangea_infra;
 pub mod post_deploy_verification;
+pub mod pre_release_flux_health_check_step;
 pub mod prerelease;
 pub mod product_release;
 pub mod push;

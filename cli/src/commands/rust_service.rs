@@ -1297,18 +1297,11 @@ pub async fn orchestrate_release(
     let skip_flux_health_check = deploy_config.resolved_deployment().skip_flux_health_check;
 
     if !deploy_only {
-        if skip_flux_health_check {
-            println!(
-                "Step 0: {}",
-                "Skipping FluxCD health check (skip_flux_health_check: true)"
-                    .bold()
-                    .dimmed()
-            );
-        } else {
-            crate::ui::print_numbered_step_heading("0", "Pre-release FluxCD health check...");
-            crate::commands::flux::health_check("pre-release").await?;
-        }
-        println!();
+        crate::commands::pre_release_flux_health_check_step::run_pre_release_flux_health_check_step(
+            "0",
+            skip_flux_health_check,
+        )
+        .await?;
     }
 
     // Create service configuration from deploy.yaml
@@ -2347,18 +2340,11 @@ pub async fn release_rust_service(
     // Step 0: Pre-release FluxCD health check (can be skipped via config)
     let skip_flux_health_check = deploy_config.resolved_deployment().skip_flux_health_check;
 
-    if skip_flux_health_check {
-        println!(
-            "Step 0/8: {}",
-            "Skipping FluxCD health check (skip_flux_health_check: true)"
-                .bold()
-                .dimmed()
-        );
-    } else {
-        crate::ui::print_numbered_step_heading("0/8", "Pre-release FluxCD health check...");
-        crate::commands::flux::health_check("pre-release").await?;
-    }
-    println!();
+    crate::commands::pre_release_flux_health_check_step::run_pre_release_flux_health_check_step(
+        "0/8",
+        skip_flux_health_check,
+    )
+    .await?;
 
     // Compute manifest path from configuration
     let manifest_path = deploy_config.k8s_manifest_path()?;
