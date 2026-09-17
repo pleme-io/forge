@@ -124,6 +124,52 @@ fn service_path_from_env() -> Result<PathBuf> {
     )
 }
 
+/// Common preamble for the two workspace-scoped ceremony commands
+/// (`rust_regenerate`, `rust_cargo_update`): read `SERVICE_DIR` via the
+/// module-local [`service_path_from_env`] sigil, compute the workspace
+/// root as its parent directory, emit the paired
+/// `print_path_label("Service", …)` / `print_path_label("Workspace", …)`
+/// operator lines, and chdir to the workspace root via
+/// [`crate::repo::set_current_dir_labeled`].
+///
+/// Returns the owned `workspace_root` so downstream steps
+/// (`workspace_root.join("Cargo.lock")`, `workspace_root.join("Cargo.nix")`)
+/// keep their existing bindings.
+///
+/// Pre-lift two byte-similar consumer sites — `rust_regenerate` and
+/// `rust_cargo_update` — each restated the same 8-line preamble
+/// verbatim (`service_path_from_env()?` read + `.parent()` +
+/// `anyhow!("Failed to find workspace root (parent of service directory)")`
+/// miss + labeled-path pair + trailing blank + chdir). The pair MUST
+/// agree on both the miss-diagnostic wording AND the `"workspace"` chdir
+/// label semantic; a drift at one site (a softened miss diagnostic, a
+/// swap of the labeled-path pair to a bare `Path::display()` println,
+/// a chdir label typo) would silently emit two different operator
+/// experiences for the same command-family preamble.
+///
+/// Post-lift a future refinement of the workspace-scoped preamble — a
+/// canonicalize hook on the workspace root, a `SERVICE_DIR` provenance
+/// telemetry span, a swap to a typed
+/// `substrate::WorkspaceRoot(PathBuf)` newtype, or an OTLP
+/// `workspace_resolve` span wired alongside the chdir — lands at ONE
+/// body and reaches both consumers by construction (THEORY §V.1 —
+/// Types → Invariants → Proofs; §VI.1 — recurring-shape-to-helper).
+fn read_service_env_and_chdir_to_workspace() -> Result<PathBuf> {
+    let service_path = service_path_from_env()?;
+    let workspace_root = service_path
+        .parent()
+        .ok_or_else(|| anyhow!("Failed to find workspace root (parent of service directory)"))?
+        .to_path_buf();
+
+    crate::ui::print_path_label("Service", &service_path);
+    crate::ui::print_path_label("Workspace", &workspace_root);
+    println!();
+
+    crate::repo::set_current_dir_labeled(&workspace_root, "workspace")?;
+
+    Ok(workspace_root)
+}
+
 /// Run Rust unit tests
 pub async fn rust_test(service: String) -> Result<()> {
     crate::commands::developer_tool_phase_open::print_developer_tool_phase_open(
@@ -295,22 +341,9 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
         &format!("for {} workspace", service),
     );
 
-    // Get workspace root from environment (set by setup_service_directory)
-    let service_path = service_path_from_env()?;
-
-    // Workspace root is the parent directory of the service
-    // Structure: {repo_root}/pkgs/products/{product}/services/rust/{service}
-    //           └─────────────────────── workspace root ─────────────────────┘
-    let workspace_root = service_path
-        .parent()
-        .ok_or_else(|| anyhow!("Failed to find workspace root (parent of service directory)"))?;
-
-    crate::ui::print_path_label("Service", &service_path);
-    crate::ui::print_path_label("Workspace", workspace_root);
-    println!();
-
-    // Change to workspace root
-    crate::repo::set_current_dir_labeled(workspace_root, "workspace")?;
+    // Read `SERVICE_DIR`, compute workspace root, print labeled paths,
+    // and chdir — all via the shared preamble primitive.
+    let workspace_root = read_service_env_and_chdir_to_workspace()?;
 
     // Step 1: Remove old Cargo.lock
     let cargo_lock = workspace_root.join("Cargo.lock");
@@ -373,22 +406,9 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
         &format!("for {} workspace", service),
     );
 
-    // Get workspace root from environment (set by setup_service_directory)
-    let service_path = service_path_from_env()?;
-
-    // Workspace root is the parent directory of the service
-    // Structure: {repo_root}/pkgs/products/{product}/services/rust/{service}
-    //           └─────────────────────── workspace root ─────────────────────┘
-    let workspace_root = service_path
-        .parent()
-        .ok_or_else(|| anyhow!("Failed to find workspace root (parent of service directory)"))?;
-
-    crate::ui::print_path_label("Service", &service_path);
-    crate::ui::print_path_label("Workspace", workspace_root);
-    println!();
-
-    // Change to workspace root
-    crate::repo::set_current_dir_labeled(workspace_root, "workspace")?;
+    // Read `SERVICE_DIR`, compute workspace root, print labeled paths,
+    // and chdir — all via the shared preamble primitive.
+    let workspace_root = read_service_env_and_chdir_to_workspace()?;
 
     // Step 1: Update dependencies
     crate::package_phase_announce::print_package_phase_announce(
@@ -1208,23 +1228,24 @@ mod tests {
              `docker_compose_bin()` sigils above on this same module.",
             sigil_def_hits.len()
         );
-        // Positive-side sibling: at least four consumers in this
+        // Positive-side sibling: at least three consumers in this
         // module route through the sigil. A regression that dropped
         // every `service_path_from_env()` call from this module would
         // leave the negative scan trivially satisfied by an
-        // env-var-free body, so pin the positive presence too — the
-        // four pre-lift sites (`rust_regenerate`, `rust_cargo_update`,
-        // `rust_dev`, `rust_dev_down`) each land one
-        // `service_path_from_env()?` hit.
+        // env-var-free body, so pin the positive presence too — post
+        // the `read_service_env_and_chdir_to_workspace` preamble-primitive
+        // lift, the three consumer sites (`read_service_env_and_chdir_to_workspace`
+        // — which serves `rust_regenerate` + `rust_cargo_update` — `rust_dev`,
+        // `rust_dev_down`) each land one `service_path_from_env()?` hit.
         let call_needle = "service_path_from_env()?";
         let call_hits = crate::test_support::code_line_hits(body, call_needle);
         assert!(
-            call_hits.len() >= 4,
+            call_hits.len() >= 3,
             "commands/developer_tools.rs must delegate `SERVICE_DIR` \
-             reads through `{call_needle}` at at least four code lines \
-             (one per pre-lift consumer: `rust_regenerate`, \
-             `rust_cargo_update`, `rust_dev`, `rust_dev_down`). Found \
-             {} code-line hit(s): {call_hits:#?}.",
+             reads through `{call_needle}` at at least three code lines \
+             (one per post-lift consumer: \
+             `read_service_env_and_chdir_to_workspace`, `rust_dev`, \
+             `rust_dev_down`). Found {} code-line hit(s): {call_hits:#?}.",
             call_hits.len()
         );
     }
@@ -1295,6 +1316,179 @@ mod tests {
             "service_path_from_env() must return `PathBuf::from(SERVICE_DIR)` \
              verbatim — the projection every pre-lift consumer site \
              spelled via `Path::new(&service_dir)`."
+        );
+    }
+
+    /// Byte-oracle for the
+    /// [`super::read_service_env_and_chdir_to_workspace`] primitive body
+    /// — pins the miss-diagnostic wording, the `service_path_from_env`
+    /// delegation, the `.parent()` computation, the paired
+    /// `print_path_label("Service"…)` / `print_path_label("Workspace"…)`
+    /// operator lines, and the `set_current_dir_labeled(…, "workspace")`
+    /// chdir at ONE code line each. A drift at the primitive body (a
+    /// softened miss diagnostic, a dropped labeled-path line, a chdir
+    /// label typo) compile-flips at this test rather than surfacing as
+    /// two operators seeing different preamble ceremonies for the two
+    /// sibling workspace-scoped commands.
+    ///
+    /// Pre-lift two byte-similar consumer sites — `rust_regenerate` and
+    /// `rust_cargo_update` — each restated the same 8-line preamble
+    /// verbatim; the primitive owns both the miss wording AND the
+    /// labeled-path pair AND the `"workspace"` chdir label at ONE body
+    /// across the module.
+    #[test]
+    fn test_read_service_env_and_chdir_to_workspace_body_pins_wording_and_delegation() {
+        const SOURCE: &str = include_str!("developer_tools.rs");
+        let fn_body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/developer_tools.rs",
+            "fn read_service_env_and_chdir_to_workspace(",
+            "\n}\n",
+        );
+        assert!(
+            fn_body.contains("\"Failed to find workspace root (parent of service directory)\""),
+            "read_service_env_and_chdir_to_workspace body must carry the \
+             EXACT `\"Failed to find workspace root (parent of service \
+             directory)\"` miss wording that the pre-lift stanzas at \
+             `rust_regenerate` and `rust_cargo_update` each restated \
+             verbatim. A drift here would silently emit two different \
+             operator-facing errors for the same workspace-root-missing \
+             failure. Body was:\n{fn_body}"
+        );
+        assert!(
+            fn_body.contains("service_path_from_env()?"),
+            "read_service_env_and_chdir_to_workspace body must delegate \
+             the `SERVICE_DIR` read through `service_path_from_env()?` — \
+             a hand-rolled `env::var(\"SERVICE_DIR\")` re-inline would \
+             drift from the sigil the whole-module SERVICE_DIR shield \
+             above pins. Body was:\n{fn_body}"
+        );
+        assert!(
+            fn_body.contains(".parent()"),
+            "read_service_env_and_chdir_to_workspace body must compute \
+             the workspace root via `.parent()` on the service path — \
+             a hand-rolled `PathBuf` slice or `.join(\"..\")` would \
+             drift from the pre-lift semantic. Body was:\n{fn_body}"
+        );
+        assert!(
+            fn_body.contains("crate::ui::print_path_label(\"Service\", &service_path)"),
+            "read_service_env_and_chdir_to_workspace body must emit the \
+             `Service` labeled-path line via \
+             `crate::ui::print_path_label(\"Service\", &service_path)` \
+             — dropping this line would silently omit the operator's \
+             service-path context. Body was:\n{fn_body}"
+        );
+        assert!(
+            fn_body.contains("crate::ui::print_path_label(\"Workspace\", &workspace_root)"),
+            "read_service_env_and_chdir_to_workspace body must emit the \
+             `Workspace` labeled-path line via \
+             `crate::ui::print_path_label(\"Workspace\", &workspace_root)` \
+             — dropping this line would silently omit the operator's \
+             workspace-path context. Body was:\n{fn_body}"
+        );
+        assert!(
+            fn_body
+                .contains("crate::repo::set_current_dir_labeled(&workspace_root, \"workspace\")?"),
+            "read_service_env_and_chdir_to_workspace body must chdir via \
+             `crate::repo::set_current_dir_labeled(&workspace_root, \
+             \"workspace\")?` — a hand-rolled `std::env::set_current_dir` \
+             or a drifted label (`\"workspace-root\"`, `\"ws\"`) would \
+             silently diverge from the pre-lift chdir semantic. Body \
+             was:\n{fn_body}"
+        );
+    }
+
+    /// Negative caller shield: after the lift, neither `rust_regenerate`
+    /// nor `rust_cargo_update` may restate the raw
+    /// `"Failed to find workspace root"` miss wording in their
+    /// non-primitive bodies. A silent re-inline of the pre-lift stanza
+    /// compile-flips this shield rather than reaching operators as
+    /// inconsistent workspace-root-missing diagnostics.
+    ///
+    /// Scan bounds cover the whole module body before the FIRST
+    /// `\n#[cfg(test)]\n` marker via
+    /// [`crate::test_support::module_body_before_first_cfg_test`], so
+    /// this shield's own docstring mention of the miss wording — living
+    /// inside a `#[cfg(test)]` block below the boundary — stays out of
+    /// scope, and the primitive's own body (which legitimately carries
+    /// the needle) is exempted by counting occurrences: exactly ONE
+    /// (only in the primitive body itself).
+    #[test]
+    fn test_read_service_env_and_chdir_to_workspace_negative_caller_shield_under_module() {
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            include_str!("developer_tools.rs"),
+            "commands/developer_tools.rs",
+        );
+        let miss_needle = "Failed to find workspace root";
+        let miss_hits = crate::test_support::code_line_hits(body, miss_needle);
+        assert_eq!(
+            miss_hits.len(),
+            1,
+            "commands/developer_tools.rs must spell the miss-diagnostic \
+             needle `{miss_needle}` at EXACTLY one code line — the \
+             `read_service_env_and_chdir_to_workspace` primitive body. \
+             Found {} code-line hit(s): {miss_hits:#?}. A hand-rolled \
+             re-inline at a consumer would push this count above one \
+             and re-open the drift class the primitive was landed to \
+             close.",
+            miss_hits.len()
+        );
+        // Also pin the `"workspace"` chdir label at exactly one code
+        // line — the primitive body. A consumer that re-copied the
+        // chdir inline with a drifted label (`"workspace-root"`,
+        // `"ws"`) would push this count above one.
+        let chdir_needle = "crate::repo::set_current_dir_labeled(&workspace_root, \"workspace\")";
+        let chdir_hits = crate::test_support::code_line_hits(body, chdir_needle);
+        assert_eq!(
+            chdir_hits.len(),
+            1,
+            "commands/developer_tools.rs must spell the workspace-chdir \
+             needle `{chdir_needle}` at EXACTLY one code line — the \
+             `read_service_env_and_chdir_to_workspace` primitive body. \
+             Found {} code-line hit(s): {chdir_hits:#?}.",
+            chdir_hits.len()
+        );
+    }
+
+    /// Positive delegation shield: each consumer must call
+    /// [`super::read_service_env_and_chdir_to_workspace`] at least once
+    /// in its body. A regression that dropped the delegation would
+    /// leave the negative shield above trivially satisfied by absence —
+    /// zero raw miss/chdir hits, but also zero delegating calls, and
+    /// the consumer would have stopped resolving the workspace root at
+    /// all.
+    #[test]
+    fn test_read_service_env_and_chdir_to_workspace_positive_delegation_shield() {
+        const SOURCE: &str = include_str!("developer_tools.rs");
+        let regenerate_body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/developer_tools.rs",
+            "pub async fn rust_regenerate(",
+            "\npub async fn rust_cargo_update(",
+        );
+        assert!(
+            regenerate_body.contains("read_service_env_and_chdir_to_workspace()?"),
+            "rust_regenerate body must delegate through \
+             `read_service_env_and_chdir_to_workspace()?` — a missing \
+             delegation would leave the negative shield's one-hit \
+             assertion trivially satisfied, with the consumer no longer \
+             resolving the workspace root at all. Body was:\n\
+             {regenerate_body}"
+        );
+        let update_body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/developer_tools.rs",
+            "pub async fn rust_cargo_update(",
+            "\npub async fn rust_dev(",
+        );
+        assert!(
+            update_body.contains("read_service_env_and_chdir_to_workspace()?"),
+            "rust_cargo_update body must delegate through \
+             `read_service_env_and_chdir_to_workspace()?` — a missing \
+             delegation would leave the negative shield's one-hit \
+             assertion trivially satisfied, with the consumer no longer \
+             resolving the workspace root at all. Body was:\n\
+             {update_body}"
         );
     }
 }

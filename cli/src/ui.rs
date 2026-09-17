@@ -19099,12 +19099,18 @@ mod tests {
     /// row is OUT of scope by construction — the needle's `"📂 `
     /// character sequence rejects both.
     ///
-    /// The positive count is pinned per-module at the pre-lift site
-    /// count (`web_service.rs` ×3, `developer_tools.rs` ×5). A fusion
-    /// that folded two consumer sites into one call or dropped one of
-    /// the labeled directory rows silently fails here — the negative
-    /// half above would still pass, but the positive count would fall
-    /// below the pre-lift census.
+    /// The positive count is pinned per-module at the current-census
+    /// site count (`web_service.rs` ×3, `developer_tools.rs` ×3 —
+    /// post the `read_service_env_and_chdir_to_workspace` preamble
+    /// primitive lift on `developer_tools.rs`, the two labeled-path
+    /// rows for `Service` / `Workspace` live at ONE body inside the
+    /// primitive rather than at each of `rust_regenerate` +
+    /// `rust_cargo_update`, so the pre-lift 5 collapses to 3:
+    /// primitive (×2) + `rust_dev` (×1)). A fusion that folded two
+    /// consumer sites into one call or dropped one of the labeled
+    /// directory rows silently fails here — the negative half above
+    /// would still pass, but the positive count would fall below the
+    /// current census.
     #[test]
     fn print_path_label_callers_delegate_through_primitive() {
         const CALLERS: &[(&str, &str, usize)] = &[
@@ -19116,7 +19122,7 @@ mod tests {
             (
                 include_str!("commands/developer_tools.rs"),
                 "commands/developer_tools.rs",
-                5,
+                3,
             ),
         ];
         for (source, module_path, expected_forwards) in CALLERS {
