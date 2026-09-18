@@ -328,7 +328,10 @@ pub async fn verify_health_endpoint(
                     )
                     .await;
                 } else {
-                    crate::ui::print_step_failure_with_error("Health check failed", &e);
+                    crate::post_deploy_endpoint_transport_failure::print_post_deploy_endpoint_transport_failure(
+                        crate::post_deploy_endpoint_status_failure::PostDeployEndpointCheck::Health,
+                        &e,
+                    );
                     return Ok((false, None));
                 }
             }
@@ -391,7 +394,10 @@ pub async fn verify_graphql_endpoint(
             }
         }
         Err(e) => {
-            crate::ui::print_step_failure_with_error("GraphQL check failed", &e);
+            crate::post_deploy_endpoint_transport_failure::print_post_deploy_endpoint_transport_failure(
+                crate::post_deploy_endpoint_status_failure::PostDeployEndpointCheck::Graphql,
+                &e,
+            );
             return Ok((false, None));
         }
     }

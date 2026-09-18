@@ -10199,10 +10199,24 @@ mod tests {
                 "commands/prerelease.rs",
                 3,
             ),
+            // `commands/post_deploy_verification.rs`'s pre-lift 3
+            // forwardings dropped to 1 when the two `"Health check
+            // failed"` / `"GraphQL check failed"` transport-error
+            // branch sites migrated onto
+            // `crate::post_deploy_endpoint_transport_failure::print_post_deploy_endpoint_transport_failure`.
+            // The migrated pair now routes through that primitive's
+            // own delegation to
+            // `crate::ui::print_step_failure_with_error`, so the
+            // operator-facing byte-shape is preserved at ONE place.
+            // The remaining forward is the smoke-query per-query
+            // error-branch at
+            // `verify_smoke_queries`'s outer `Err(e) => …` arm,
+            // which does not share the endpoint-verification-gate
+            // label grammar (it forwards `&smoke.name`).
             (
                 include_str!("commands/post_deploy_verification.rs"),
                 "commands/post_deploy_verification.rs",
-                3,
+                1,
             ),
             (
                 include_str!("commands/optional_prerelease_phase_gate.rs"),
