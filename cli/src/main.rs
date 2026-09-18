@@ -126,6 +126,7 @@ mod package_phase_announce;
 mod path_builder;
 mod pod_probe_pending_wait_line;
 mod poll_backoff_advance;
+mod post_deploy_endpoint_check_pass;
 mod post_deploy_endpoint_status_failure;
 mod post_deploy_gate_preamble;
 mod post_deploy_graphql_query;

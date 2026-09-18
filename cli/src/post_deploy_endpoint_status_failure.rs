@@ -90,6 +90,29 @@ impl PostDeployEndpointCheck {
             Self::Graphql => "GraphQL check failed",
         }
     }
+
+    /// The pre-lift `"<pass-label>"` label the two sibling `Ok`-branch
+    /// sites in `commands/post_deploy_verification.rs` handed to
+    /// `format!("<label> ({}ms)", latency_ms)` before returning
+    /// `Ok((true, Some(latency_ms)))`. Consumed by
+    /// [`crate::post_deploy_endpoint_check_pass::print_post_deploy_endpoint_check_pass`].
+    ///
+    /// The two labels are **not symmetric** with
+    /// [`Self::check_failed_label`] — the pre-lift wording differs
+    /// deliberately: the health probe reports `"Health check passed"`
+    /// (a verb-past-tense discharge of the health assertion) while the
+    /// GraphQL probe reports `"GraphQL responding"` (a present-tense
+    /// liveness ack matching the introspection probe's semantics). The
+    /// enum pins that asymmetry in one match-arm so a well-meaning
+    /// homogenisation to `"<Endpoint> check passed"` at either site
+    /// fails the label-pin test rather than silently changing the
+    /// operator-facing grammar.
+    pub const fn check_passed_label(self) -> &'static str {
+        match self {
+            Self::Health => "Health check passed",
+            Self::Graphql => "GraphQL responding",
+        }
+    }
 }
 
 /// Compose the pre-lift `format!("<Endpoint> check failed: Status {}",

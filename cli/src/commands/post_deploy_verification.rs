@@ -296,7 +296,10 @@ pub async fn verify_health_endpoint(
                 let latency_ms = start.elapsed().as_millis() as u64;
 
                 if response.status().is_success() {
-                    crate::ui::print_step_pass(&format!("Health check passed ({}ms)", latency_ms));
+                    crate::post_deploy_endpoint_check_pass::print_post_deploy_endpoint_check_pass(
+                        crate::post_deploy_endpoint_status_failure::PostDeployEndpointCheck::Health,
+                        latency_ms,
+                    );
                     return Ok((true, Some(latency_ms)));
                 } else {
                     let status = response.status();
@@ -358,10 +361,10 @@ pub async fn verify_graphql_endpoint(
                 match response.json::<serde_json::Value>().await {
                     Ok(json) => {
                         if json.get("data").is_some() {
-                            crate::ui::print_step_pass(&format!(
-                                "GraphQL responding ({}ms)",
-                                latency_ms
-                            ));
+                            crate::post_deploy_endpoint_check_pass::print_post_deploy_endpoint_check_pass(
+                                crate::post_deploy_endpoint_status_failure::PostDeployEndpointCheck::Graphql,
+                                latency_ms,
+                            );
                             return Ok((true, Some(latency_ms)));
                         } else if let Some(errors) = json.get("errors") {
                             crate::ui::print_step_failure(&format!(
