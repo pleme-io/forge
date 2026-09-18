@@ -387,21 +387,33 @@ mod tests {
         );
     }
 
-    /// Caller shield (positive half): the three pre-lift modules that
-    /// housed the five sites MUST each forward through
+    /// Caller shield (positive half): the modules that own the
+    /// pre-lift sites MUST each forward through
     /// [`kubectl_exec_pod_argv_prefix`] at least the number of times
-    /// matching their pre-lift site count, so a migration that dropped
-    /// a call site outright leaves the negative "no raw inline shape"
-    /// scan trivially satisfied by absence but the positive count still
+    /// matching their site count, so a migration that dropped a call
+    /// site outright leaves the negative "no raw inline shape" scan
+    /// trivially satisfied by absence but the positive count still
     /// fails. Mirrors the sibling
     /// `every_prelift_module_forwards_through_*` shields the crate
     /// carries against every other typed argv primitive.
+    ///
+    /// The two pre-lift `commands/sessions.rs` sites (count_sessions +
+    /// delete_sessions) now route through the fused primitive
+    /// `crate::kubectl_exec_pod_capture_sync::run_kubectl_exec_pod_capture_sync`,
+    /// whose body carries the single argv-prefix delegation on their
+    /// behalf — so the sessions.rs entry migrated onto the
+    /// `kubectl_exec_pod_capture_sync.rs` row of this table with a
+    /// count of 1 (one production-body call from the fused primitive,
+    /// plus argv-shape byte-oracle tests that harden the composition).
+    /// A future consumer that wants the fused resolve-then-exec-then-
+    /// capture shape reaches for that primitive first, not for the
+    /// argv-prefix helper alone.
     #[test]
     fn every_prelift_module_forwards_through_kubectl_exec_pod_argv_prefix() {
         use std::path::PathBuf;
         let crate_src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
         let expectations: &[(PathBuf, usize)] = &[
-            (crate_src.join("commands").join("sessions.rs"), 2),
+            (crate_src.join("kubectl_exec_pod_capture_sync.rs"), 1),
             (crate_src.join("commands").join("search_sync.rs"), 2),
             (
                 crate_src

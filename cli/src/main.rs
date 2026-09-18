@@ -106,6 +106,7 @@ mod kubectl_apply_argv;
 mod kubectl_delete_job_argv;
 mod kubectl_duration_arg;
 mod kubectl_exec_pod_argv;
+mod kubectl_exec_pod_capture_sync;
 mod kubectl_get_databasemigration_output_argv;
 mod kubectl_get_databasemigration_status_phase_argv;
 mod kubectl_get_job_condition_status_argv;
