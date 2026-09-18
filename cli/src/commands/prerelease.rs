@@ -904,9 +904,9 @@ async fn run_frontend_gates(config: &PreReleaseConfig) -> Result<GateSummary> {
 async fn run_integration_gate(config: &PreReleaseConfig) -> Result<bool> {
     let start = crate::ui::print_step_heading_start("G13: Integration tests");
 
-    // Ensure Docker is running (auto-start on macOS)
-    if let Err(e) = e2e::ensure_docker_running() {
-        crate::ui::print_step_failure_with_error("Docker not available", &e);
+    // Ensure Docker is running (auto-start on macOS); on failure emit the
+    // `Docker not available: <err>` step-failure line and skip the gate.
+    if !crate::docker_available_gate_preflight::ensure_docker_running_for_gate() {
         return Ok(false);
     }
 
@@ -1017,9 +1017,9 @@ fn print_e2e_diagnostics(backend_dir: &Path) {
 async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
     let start = crate::ui::print_step_heading_start("G14: E2E tests");
 
-    // Ensure Docker is running (may already be started by G13)
-    if let Err(e) = e2e::ensure_docker_running() {
-        crate::ui::print_step_failure_with_error("Docker not available", &e);
+    // Ensure Docker is running (may already be started by G13); on failure
+    // emit the `Docker not available: <err>` step-failure line and skip.
+    if !crate::docker_available_gate_preflight::ensure_docker_running_for_gate() {
         return Ok(false);
     }
 

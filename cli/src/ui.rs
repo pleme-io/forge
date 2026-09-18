@@ -10162,10 +10162,18 @@ mod tests {
     #[test]
     fn print_step_failure_with_error_callers_delegate_through_primitive() {
         const CALLERS: &[(&str, &str, usize)] = &[
+            // `commands/prerelease.rs`'s pre-lift 7 forwardings dropped to
+            // 5 when the two "Docker not available" gate-preflight sites
+            // migrated onto
+            // `crate::docker_available_gate_preflight::ensure_docker_running_for_gate`.
+            // The two migrated sites now route through that primitive's
+            // own writer sibling (which internally delegates to
+            // `crate::ui::write_step_failure_with_error`), so the
+            // operator-facing byte-shape is preserved at ONE place.
             (
                 include_str!("commands/prerelease.rs"),
                 "commands/prerelease.rs",
-                7,
+                5,
             ),
             (
                 include_str!("commands/post_deploy_verification.rs"),
