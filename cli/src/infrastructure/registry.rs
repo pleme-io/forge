@@ -359,7 +359,7 @@ impl RegistryClient {
         // `crate::oci_manifest::tests`.
         let full_ref = crate::oci_manifest::image_reference(registry, tag);
         let captured = Command::new(&doca)
-            .args(["inspect", "--ref", &full_ref, "--digest-only"])
+            .args(crate::doca_inspect_digest_argv::doca_inspect_digest_only_argv(&full_ref))
             .envs(doca_source_creds_env_pairs(
                 &self.credentials.organization,
                 &self.credentials.token,

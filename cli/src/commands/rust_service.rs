@@ -776,7 +776,7 @@ async fn verify_image_in_registry(registry: &str, full_tag_suffix: &str) -> Resu
     // `--digest-only` replaces `--format {{.Digest}}` — both emit the OCI
     // manifest digest (`sha256:…`) and nothing else, so parsing is unchanged.
     let output = Command::new(&doca)
-        .args(["inspect", "--ref", &full_tag, "--digest-only"])
+        .args(crate::doca_inspect_digest_argv::doca_inspect_digest_only_argv(&full_tag))
         .envs(doca_source_creds_env_pairs(organization, &github_token))
         .output()
         .await
