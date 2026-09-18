@@ -3,11 +3,10 @@
 //! Replaces product-sdlc.nix::test:ci.
 
 use anyhow::Result;
-use std::process::Command;
 use tracing::info;
 
 use crate::repo::{get_tool_path, require_existing_working_dir};
-use crate::retry::run_inherited_status_sync;
+use crate::retry::{run_bin_args_at_inherited_status_sync, run_bin_args_inherited_status_sync};
 
 /// Resolve the `cargo` binary via `CARGO`, falling back to PATH. Every
 /// `cargo` spawn in this module reads through this sigil so the resolve
@@ -35,34 +34,39 @@ pub fn execute(working_dir: &str, threads: u32) -> Result<()> {
 
     let cargo = cargo_bin();
 
+    let threads_str = threads.to_string();
     if which::which("cargo-nextest").is_ok() {
         info!("Running tests with cargo nextest (threads={})...", threads);
-        let mut cmd = Command::new(&cargo);
-        cmd.args([
-            "nextest",
-            "run",
-            "--profile",
-            "ci",
-            "--test-threads",
-            &threads.to_string(),
-        ])
-        .current_dir(dir);
-        run_inherited_status_sync(cmd, "cargo nextest run")?;
+        run_bin_args_at_inherited_status_sync(
+            &cargo,
+            &[
+                "nextest",
+                "run",
+                "--profile",
+                "ci",
+                "--test-threads",
+                &threads_str,
+            ],
+            dir,
+            "cargo nextest run",
+        )?;
     } else {
         info!(
             "cargo-nextest not found, falling back to cargo test (threads={})...",
             threads
         );
-        let mut cmd = Command::new(&cargo);
-        cmd.args([
-            "test",
-            "--no-fail-fast",
-            "--",
-            "--test-threads",
-            &threads.to_string(),
-        ])
-        .current_dir(dir);
-        run_inherited_status_sync(cmd, "cargo test")?;
+        run_bin_args_at_inherited_status_sync(
+            &cargo,
+            &[
+                "test",
+                "--no-fail-fast",
+                "--",
+                "--test-threads",
+                &threads_str,
+            ],
+            dir,
+            "cargo test",
+        )?;
     }
 
     info!("All tests passed");
@@ -77,7 +81,7 @@ pub fn coverage(working_dir: &str, format: &str) -> Result<()> {
 
     if which::which("cargo-tarpaulin").is_err() {
         info!("Installing cargo-tarpaulin...");
-        crate::retry::run_bin_args_inherited_status_sync(
+        run_bin_args_inherited_status_sync(
             &cargo,
             &["install", "cargo-tarpaulin"],
             "cargo install cargo-tarpaulin",
@@ -88,9 +92,12 @@ pub fn coverage(working_dir: &str, format: &str) -> Result<()> {
         "Running coverage with cargo tarpaulin (format={})...",
         format
     );
-    let mut cmd = Command::new(&cargo);
-    cmd.args(["tarpaulin", "--out", format]).current_dir(dir);
-    run_inherited_status_sync(cmd, "cargo tarpaulin")?;
+    run_bin_args_at_inherited_status_sync(
+        &cargo,
+        &["tarpaulin", "--out", format],
+        dir,
+        "cargo tarpaulin",
+    )?;
 
     info!("Coverage report generated ({})", format);
     Ok(())

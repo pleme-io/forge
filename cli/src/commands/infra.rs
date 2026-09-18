@@ -4,11 +4,10 @@
 
 use anyhow::{bail, Result};
 use std::path::Path;
-use std::process::Command;
 use tracing::info;
 
 use crate::git;
-use crate::retry::run_inherited_status_sync;
+use crate::retry::run_bin_args_at_inherited_status_sync;
 
 /// Resolve the `docker` binary path via `DOCKER_BIN`, falling back to
 /// `docker` on `PATH`. Wired through [`crate::repo::get_tool_path`] —
@@ -48,9 +47,7 @@ pub fn up(working_dir: &str, services: &[String]) -> Result<()> {
     }
     let argv = crate::docker_compose_argv::docker_compose_argv(&compose_path, &suffix);
 
-    let mut cmd = Command::new(docker_bin());
-    cmd.args(&argv).current_dir(&repo_root);
-    run_inherited_status_sync(cmd, "docker compose up")?;
+    run_bin_args_at_inherited_status_sync(&docker_bin(), &argv, &repo_root, "docker compose up")?;
 
     info!("Infrastructure services started");
     Ok(())
@@ -65,9 +62,7 @@ pub fn down(working_dir: &str) -> Result<()> {
 
     let compose_path = compose_file.to_string_lossy();
     let argv = crate::docker_compose_argv::docker_compose_argv(&compose_path, &["down"]);
-    let mut cmd = Command::new(docker_bin());
-    cmd.args(&argv).current_dir(&repo_root);
-    run_inherited_status_sync(cmd, "docker compose down")?;
+    run_bin_args_at_inherited_status_sync(&docker_bin(), &argv, &repo_root, "docker compose down")?;
 
     info!("Infrastructure services stopped");
     Ok(())
@@ -85,9 +80,12 @@ pub fn clean(working_dir: &str) -> Result<()> {
         &compose_path,
         &["down", "-v", "--remove-orphans"],
     );
-    let mut cmd = Command::new(docker_bin());
-    cmd.args(&argv).current_dir(&repo_root);
-    run_inherited_status_sync(cmd, "docker compose clean")?;
+    run_bin_args_at_inherited_status_sync(
+        &docker_bin(),
+        &argv,
+        &repo_root,
+        "docker compose clean",
+    )?;
 
     info!("Infrastructure cleaned");
     Ok(())

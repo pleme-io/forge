@@ -14669,6 +14669,57 @@ pub fn run_bin_args_inherited_status_sync(
     run_inherited_status_sync(cmd, op)
 }
 
+/// `(bin, args, cwd)`-front wrapper: `.current_dir(cwd)`-scoped extension
+/// of [`run_bin_args_inherited_status_sync`] for the hot shape at sync
+/// command-module callers that spawn a fixed argv scoped to a working
+/// directory:
+///
+/// ```text
+/// let bin = <tool>_bin();
+/// let mut cmd = std::process::Command::new(&bin);
+/// cmd.args(&[...]).current_dir(<cwd>);
+/// crate::retry::run_inherited_status_sync(cmd, "<op>")
+/// ```
+///
+/// Pre-lift this three-line stanza spelled at three sites in
+/// `commands/test_ci.rs::{execute (nextest branch, cargo-test fallback),
+/// coverage (tarpaulin run)}` and three sites in
+/// `commands/infra.rs::{up, down, clean}` — six copies past the
+/// three-times-is-a-law threshold (THEORY §VI.1, PRIME DIRECTIVE:
+/// duplication budget is zero). Post-lift a caller composes the
+/// `.args()` slice and the `.current_dir()` scope in ONE call, so a
+/// future refinement (structured cwd logging, an OTLP `spawn.cwd`
+/// span attribute, a `set_current_dir_labeled`-style `Result` wrapper
+/// naming the missing directory) lands at ONE body rather than at
+/// every consumer.
+///
+/// `cwd` takes `impl AsRef<Path>` to accept both `&Path` callers
+/// (`commands/test_ci.rs`, whose `dir` binding resolves via
+/// [`crate::repo::require_existing_working_dir`]) and `PathBuf` /
+/// `&PathBuf` callers (`commands/infra.rs`, whose `repo_root` resolves
+/// via `resolve_repo_root`) without forcing an inline `.as_ref()` at
+/// every site.
+///
+/// # When to reach for this vs [`run_bin_args_inherited_status_sync`]
+///
+/// Use this variant when the caller ALREADY spells
+/// `.current_dir(...)` on the pre-lift builder chain — the caller
+/// otherwise identical to a [`run_bin_args_inherited_status_sync`]
+/// caller. Callers that need `.env(...)`, a piped `.stdin(...)`, or
+/// a builder-driven argv should keep the direct
+/// [`run_inherited_status_sync`] surface — this helper only wraps the
+/// fixed-argv-plus-cwd shape.
+pub fn run_bin_args_at_inherited_status_sync(
+    bin: &str,
+    args: &[&str],
+    cwd: impl AsRef<std::path::Path>,
+    op: &str,
+) -> anyhow::Result<()> {
+    let mut cmd = std::process::Command::new(bin);
+    cmd.args(args).current_dir(cwd.as_ref());
+    run_inherited_status_sync(cmd, op)
+}
+
 /// Best-effort captured-stdout probe: spawn `bin` with `args` sync, and
 /// return the UTF-8-lossy stdout on Ok — regardless of `output.status`
 /// — or `None` on spawn `Err`. Deliberately swallows every failure
@@ -36407,6 +36458,132 @@ mod tests {
         assert!(
             result.is_ok(),
             "wrapper must forward caller-supplied args verbatim; got: {:?}",
+            result.err().map(|e| format!("{:#}", e))
+        );
+    }
+
+    /// Sync `(bin, args, cwd)`-front wrapper: `exit 0` from the resolved
+    /// binary surfaces as `Ok(())` verbatim, proving the wrapper composes
+    /// with [`run_inherited_status_sync`] on the happy path even when a
+    /// working directory is fixed on the built `Command`. Mirrors the
+    /// happy-path pin at the sibling `(bin, args)`-only wrapper.
+    #[test]
+    fn test_run_bin_args_at_inherited_status_sync_success_returns_ok() {
+        let (_dir, shim) = crate::test_support::make_executable_shim(
+            "sync-bin-args-at-cli",
+            "#!/bin/sh\nexit 0\n",
+        );
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let result =
+            run_bin_args_at_inherited_status_sync(&shim, &[], cwd.path(), "sync-bin-args-at-cli");
+        assert!(result.is_ok(), "exit 0 must surface as Ok(())");
+    }
+
+    /// Sync `(bin, args, cwd)`-front wrapper: a non-zero exit carries
+    /// BOTH the op label and the exit code through the shared
+    /// [`classify_inherited_status`] body — the `.current_dir(cwd)`
+    /// extension does not reshape the envelope. Symmetric with the
+    /// sibling `(bin, args)`-only sync wrapper's exit-code carry pin.
+    #[test]
+    fn test_run_bin_args_at_inherited_status_sync_nonzero_exit_carries_op_and_code() {
+        let (_dir, shim) = crate::test_support::make_executable_shim(
+            "sync-bin-args-at-cli",
+            "#!/bin/sh\nexit 13\n",
+        );
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let err =
+            run_bin_args_at_inherited_status_sync(&shim, &[], cwd.path(), "sync-bin-args-at-cli")
+                .expect_err("nonzero exit must fail");
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("sync-bin-args-at-cli"),
+            "op label must appear in failure message, got: {msg}"
+        );
+        assert!(
+            msg.contains("exit 13"),
+            "exit code must appear in failure message, got: {msg}"
+        );
+    }
+
+    /// Sync `(bin, args, cwd)`-front wrapper: a spawn failure (binary not
+    /// on PATH) carries the op label under the canonical
+    /// `"Failed to run {op}"` envelope, proving the wrapper routes spawn
+    /// errors through the same shared body as the sibling sync wrapper.
+    #[test]
+    fn test_run_bin_args_at_inherited_status_sync_spawn_failure_carries_op() {
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let err = run_bin_args_at_inherited_status_sync(
+            "/nonexistent/path/to/sync-bin-args-at-inherited-status-binary-that-does-not-exist",
+            &[],
+            cwd.path(),
+            "sync-bin-args-at-missing-tool",
+        )
+        .expect_err("missing binary must fail");
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("sync-bin-args-at-missing-tool"),
+            "op label must appear in spawn-failure message, got: {msg}"
+        );
+    }
+
+    /// Sync `(bin, args, cwd)`-front wrapper: caller-supplied `args`
+    /// reach the child in the exact positions the caller set — the
+    /// `.current_dir(cwd)` extension neither prepends, drops, nor
+    /// reorders argv. Uses the same content-addressable probe shape the
+    /// sibling `(bin, args)`-only sync wrapper's argv-forwarding pin
+    /// uses, so an argv-shape regression at this wrapper's surface fails
+    /// HERE distinctly from a regression at the sibling wrapper.
+    #[test]
+    fn test_run_bin_args_at_inherited_status_sync_forwards_args_to_child() {
+        let marker = "forge-sync-bin-args-at-probe-m4n5o6p7";
+        let value = "expected-sync-bin-args-at-marker-q8r9s0t1";
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let result = run_bin_args_at_inherited_status_sync(
+            "/bin/sh",
+            &[
+                "-c",
+                "test \"$1\" = \"forge-sync-bin-args-at-probe-m4n5o6p7\" && \
+                 test \"$2\" = \"expected-sync-bin-args-at-marker-q8r9s0t1\"",
+                "probe",
+                marker,
+                value,
+            ],
+            cwd.path(),
+            "sync-bin-args-at-forwarding-probe",
+        );
+        assert!(
+            result.is_ok(),
+            "wrapper must forward caller-supplied args verbatim; got: {:?}",
+            result.err().map(|e| format!("{:#}", e))
+        );
+    }
+
+    /// Sync `(bin, args, cwd)`-front wrapper: the `cwd` argument scopes
+    /// the spawned child's working directory verbatim — a probe file
+    /// written into `cwd` is visible as a relative path IFF the wrapper
+    /// honored `.current_dir(cwd)`. A regression that dropped the
+    /// `.current_dir(cwd.as_ref())` step (or one that resolved `cwd`
+    /// against the parent's cwd instead of forwarding it) fires HERE
+    /// with an exit-1 `test -f` failure, not silently at a
+    /// `commands/test_ci.rs::execute` invocation that would look at the
+    /// wrong working tree. This is the missing leg of the field-
+    /// survival contract at the new wrapper surface, symmetric with
+    /// `test_run_inherited_status_preserves_caller_supplied_current_dir`
+    /// at the direct primitive.
+    #[test]
+    fn test_run_bin_args_at_inherited_status_sync_scopes_cwd_on_child() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker_name = "forge_at_cwd_marker_p2q3r4s5t6u7";
+        std::fs::write(dir.path().join(marker_name), b"").expect("write marker");
+        let result = run_bin_args_at_inherited_status_sync(
+            "/bin/sh",
+            &["-c", &format!("test -f {}", marker_name)],
+            dir.path(),
+            "sync-bin-args-at-cwd-scope-probe",
+        );
+        assert!(
+            result.is_ok(),
+            "wrapper must scope caller-supplied cwd on the child; got: {:?}",
             result.err().map(|e| format!("{:#}", e))
         );
     }

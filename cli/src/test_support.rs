@@ -1969,23 +1969,27 @@ pub fn assert_source_routes_status_only_spawns_through_run_inherited_status_sync
         inline.is_empty(),
         "{module_path} must not spawn via an inline `.status()` \
          terminator — every status-only spawn must route through \
-         `crate::retry::run_inherited_status_sync` (direct primitive) \
-         or `crate::retry::run_bin_args_inherited_status_sync` (the \
-         `(bin, args)`-front wrapper), which carry the exit code into \
-         the failure envelope. Found: {inline:?}"
+         `crate::retry::run_inherited_status_sync` (direct primitive), \
+         `crate::retry::run_bin_args_inherited_status_sync` (the \
+         `(bin, args)`-front wrapper), or \
+         `crate::retry::run_bin_args_at_inherited_status_sync` (the \
+         `(bin, args, cwd)`-front sibling), which carry the exit code \
+         into the failure envelope. Found: {inline:?}"
     );
 
     let direct = code_line_hits(body, "run_inherited_status_sync(").len();
     let wrapped = code_line_hits(body, "run_bin_args_inherited_status_sync(").len();
-    let delegations = direct + wrapped;
+    let wrapped_at = code_line_hits(body, "run_bin_args_at_inherited_status_sync(").len();
+    let delegations = direct + wrapped + wrapped_at;
     assert!(
         delegations >= min_delegations,
         "{module_path} must route {spawns_description} through \
-         `run_inherited_status_sync` or \
-         `run_bin_args_inherited_status_sync` — found only \
+         `run_inherited_status_sync`, \
+         `run_bin_args_inherited_status_sync`, or \
+         `run_bin_args_at_inherited_status_sync` — found only \
          {delegations} delegation call(s) (direct: {direct}, wrapped: \
-         {wrapped}); a dropped call would leave the negative \
-         `.status()` scan satisfied by absence"
+         {wrapped}, wrapped_at: {wrapped_at}); a dropped call would \
+         leave the negative `.status()` scan satisfied by absence"
     );
 }
 
@@ -5448,6 +5452,40 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
             "fake/module.rs",
             2,
             "one direct + one wrapper delegation",
+        );
+    }
+
+    /// Wrapped-at-form pin: a call to the `(bin, args, cwd)`-front
+    /// sibling [`crate::retry::run_bin_args_at_inherited_status_sync`]
+    /// counts as a valid delegation, so a module that migrates every
+    /// pre-lift `Command::new(&bin).args(...).current_dir(cwd);
+    /// run_inherited_status_sync(cmd, op)` stanza to the new wrapper
+    /// still passes the shield without the caller lowering
+    /// `min_delegations`. Pre-widening the shield only counted the
+    /// direct primitive and the sibling `(bin, args)`-only wrapper; a
+    /// full-module lift to the `(bin, args, cwd)` sibling would have
+    /// driven the count to zero and fired the "delegation call(s)"
+    /// arm even though the sibling delegates to the same
+    /// [`crate::retry::classify_inherited_status`] body. The three
+    /// needles are pairwise disjoint as substrings — `run_bin_args_at_`
+    /// carries an `at_` infix that neither the direct nor the
+    /// wrapper's `run_bin_args_inherited_status_sync(` prefix admits
+    /// past position 13 — so summing `code_line_hits` counts across
+    /// the three patterns never double-counts a single call site.
+    #[test]
+    fn test_assert_source_routes_status_only_spawns_through_run_inherited_status_sync_counts_wrapped_at_form(
+    ) {
+        let source = "\
+            fn a() { crate::retry::run_bin_args_at_inherited_status_sync(\
+             &tool_bin(), &[\"probe\"], \"/tmp\", \"a\").unwrap(); }\n\
+            fn b() { crate::retry::run_bin_args_at_inherited_status_sync(\
+             &tool_bin(), &[\"probe\"], \"/tmp\", \"b\").unwrap(); }\n\
+            \n#[cfg(test)]\nmod tests { }\n";
+        assert_source_routes_status_only_spawns_through_run_inherited_status_sync(
+            source,
+            "fake/module.rs",
+            2,
+            "both cwd-scoped wrapper-form spawns",
         );
     }
 
