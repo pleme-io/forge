@@ -1210,22 +1210,8 @@ fn calculate_age(timestamp: &str) -> String {
     use chrono::{DateTime, Utc};
 
     if let Ok(created) = DateTime::parse_from_rfc3339(timestamp) {
-        let now = Utc::now();
-        let duration = now.signed_duration_since(created);
-
-        if duration.num_days() > 0 {
-            format!("{}d{}h", duration.num_days(), duration.num_hours() % 24)
-        } else if duration.num_hours() > 0 {
-            format!("{}h{}m", duration.num_hours(), duration.num_minutes() % 60)
-        } else if duration.num_minutes() > 0 {
-            format!(
-                "{}m{}s",
-                duration.num_minutes(),
-                duration.num_seconds() % 60
-            )
-        } else {
-            format!("{}s", duration.num_seconds())
-        }
+        let duration = Utc::now().signed_duration_since(created);
+        crate::short_human_duration::format_short_human_duration(duration)
     } else {
         "-".to_string()
     }
@@ -1238,15 +1224,9 @@ fn calculate_duration(start: &str, end: &str) -> Option<String> {
     let end_dt = DateTime::parse_from_rfc3339(end).ok()?;
     let duration = end_dt.signed_duration_since(start_dt);
 
-    Some(if duration.num_minutes() > 0 {
-        format!(
-            "{}m{}s",
-            duration.num_minutes(),
-            duration.num_seconds() % 60
-        )
-    } else {
-        format!("{}s", duration.num_seconds())
-    })
+    Some(crate::short_human_duration::format_short_human_duration(
+        duration,
+    ))
 }
 
 impl Default for RelatedServices {
@@ -2711,6 +2691,90 @@ mod tests {
              hit(s): {delegate_hits:#?}. A missing delegation would \
              leave the negative scan above trivially satisfied by \
              absence.",
+            delegate_hits.len()
+        );
+    }
+
+    /// Regression shield: `commands/status.rs`'s two compact-human-
+    /// duration surfaces (`calculate_age` and `calculate_duration`)
+    /// MUST route through
+    /// [`crate::short_human_duration::format_short_human_duration`]
+    /// rather than re-inline the four-way `<d>d<h>h` / `<h>h<m>m` /
+    /// `<m>m<s>s` / `<s>s` ladder. Pre-lift both bodies restated the
+    /// `format!("{}m{}s", …, … % 60)` minutes-branch and
+    /// `format!("{}s", …)` seconds-tail inline (two code-line hits
+    /// each), and `calculate_duration` truncated at the minutes
+    /// branch — so a 3h14m migration rendered as `"194m14s"` while
+    /// its sibling `calculate_age` already spoke `"3h14m"` for a
+    /// multi-hour-old Deployment. Post-lift the ONE
+    /// `crate::short_human_duration` oracle decides the grammar, so
+    /// a future consumer of a "compact human duration"
+    /// `chrono::Duration` lands on the same ladder rather than
+    /// re-deriving its own.
+    ///
+    /// The shield asserts:
+    ///
+    /// 1. NEITHER the `format!("{}m{}s"` minutes-branch NOR the
+    ///    `format!("{}s"` seconds-tail spelling of the pre-lift
+    ///    ladder appears anywhere in the module's non-test body —
+    ///    every "compact human duration" render routes through the
+    ///    typed primitive.
+    /// 2. The delegating call
+    ///    `crate::short_human_duration::format_short_human_duration(`
+    ///    appears at EXACTLY TWO code lines — the two consumer
+    ///    surfaces (`calculate_age` at the "resource age" column,
+    ///    `calculate_duration` at the migration "elapsed duration"
+    ///    column). A missing delegation would leave the negative
+    ///    scan trivially satisfied by absence.
+    ///
+    /// The scan is bounded to the module's non-test body via the
+    /// `#[cfg(test)]\nmod tests {` marker (same slice boundary the
+    /// sibling `replica_count_is_only_pointer_as_i64_unwrap_or_zero_at_the_replica_reader_surface`
+    /// shield uses), and routes through
+    /// [`crate::test_support::code_line_hits`] so `///`-prefixed
+    /// docstring mentions of the pre-lift needles do not self-match
+    /// as phantom hits — the same code-line-filter discipline the
+    /// crate's other pre-lift-needle shields established.
+    #[test]
+    fn compact_human_duration_renders_route_through_format_short_human_duration_primitive() {
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("status.rs"),
+            "commands/status.rs",
+        );
+
+        for pre_lift in [
+            "format!(\"{}m{}s\",",
+            "format!(\"{}s\", duration.num_seconds",
+        ] {
+            let hits = crate::test_support::code_line_hits(body, pre_lift);
+            assert!(
+                hits.is_empty(),
+                "commands/status.rs must NOT spell `{pre_lift}` inline \
+                 in the module body — every compact-human-duration \
+                 render routes through \
+                 `crate::short_human_duration::format_short_human_duration`, \
+                 the ONE ladder oracle that owns the four-way \
+                 `<d>d<h>h` / `<h>h<m>m` / `<m>m<s>s` / `<s>s` \
+                 grammar. Found {} code-line hit(s): {hits:#?}. A \
+                 hand-rolled inline copy re-opens the drift class the \
+                 primitive was landed to close.",
+                hits.len(),
+            );
+        }
+
+        let delegate_needle = "crate::short_human_duration::format_short_human_duration(";
+        let delegate_hits = crate::test_support::code_line_hits(body, delegate_needle);
+        assert_eq!(
+            delegate_hits.len(),
+            2,
+            "commands/status.rs must delegate compact-human-duration \
+             rendering to \
+             `crate::short_human_duration::format_short_human_duration()` \
+             at EXACTLY two code lines — the `calculate_age` \
+             resource-age body and the `calculate_duration` migration \
+             elapsed-duration body. Found {} code-line hit(s): \
+             {delegate_hits:#?}. A missing delegation would leave the \
+             negative scan above trivially satisfied by absence.",
             delegate_hits.len()
         );
     }
