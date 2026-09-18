@@ -1564,26 +1564,15 @@ pub async fn orchestrate_release(
     let git_sha = last_git_sha;
 
     // Step 4: Wait for deployment to be ready
-    let wait_for_rollout = deploy_config.resolved_deployment().wait_for_rollout;
-
-    if wait_for_rollout {
-        crate::ui::print_numbered_step_heading("4", "Waiting for deployment rollout...");
-        crate::commands::flux::wait_for_deployment(
-            service.clone(),
-            namespace.clone(),
-            deploy_config.global.deployment.deployment_wait_timeout_secs,
-            tag_suffix.clone(),
-            &deploy_config,
-        )
-        .await?;
-        println!();
-    } else {
-        println!(
-            "Step 4: {}",
-            "Skipping deployment rollout wait (wait_for_rollout: false)".dimmed()
-        );
-        println!();
-    }
+    crate::commands::deployment_rollout_wait_step::run_deployment_rollout_wait_step(
+        "4",
+        service.clone(),
+        namespace.clone(),
+        tag_suffix.clone(),
+        &deploy_config,
+    )
+    .await?;
+    println!();
 
     // Step 4.5 (conditional): Search service GitOps sync
     // Only runs for services with novasearch.enabled = true in deploy.yaml
@@ -2457,26 +2446,15 @@ pub async fn release_rust_service(
     // Service-level override wins over global — see
     // `DeployConfig::resolved_deployment` for the whole-struct override
     // discipline.
-    let wait_for_rollout = deploy_config.resolved_deployment().wait_for_rollout;
-
-    if wait_for_rollout {
-        println!();
-        crate::ui::print_numbered_step_heading("6/9", "Waiting for deployment rollout...");
-        crate::commands::flux::wait_for_deployment(
-            service.clone(),
-            namespace.clone(),
-            deploy_config.global.deployment.deployment_wait_timeout_secs,
-            tag_suffix.clone(),
-            &deploy_config,
-        )
-        .await?;
-    } else {
-        println!();
-        println!(
-            "Step 6/9: {}",
-            "Skipping deployment rollout wait (wait_for_rollout: false)".bold()
-        );
-    }
+    println!();
+    crate::commands::deployment_rollout_wait_step::run_deployment_rollout_wait_step(
+        "6/9",
+        service.clone(),
+        namespace.clone(),
+        tag_suffix.clone(),
+        &deploy_config,
+    )
+    .await?;
 
     // Step 6.5 (conditional): Search service GitOps sync
     // Only runs for services with novasearch.enabled = true in deploy.yaml
