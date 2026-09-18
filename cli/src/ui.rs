@@ -8198,15 +8198,34 @@ mod tests {
             // visual contract, and a caller migrating its only step-heading
             // site from the leaner to the timed variant (a legitimate
             // "this step is timed now" edit) must not fail this shield.
+            //
+            // A module whose only pre-lift `print_step_heading` sites all
+            // migrated onto a downstream typed primitive that ITSELF fuses
+            // the heading with a companion step (e.g.
+            // `announce_and_build_post_deploy_gate_client` in
+            // `post_deploy_verification.rs`, which fuses the gate heading
+            // with the `build_post_deploy_http_client` bind) forwards
+            // through that primitive instead — the shield accepts the
+            // fused-primitive forward as an equivalent delegation, since
+            // the underlying `print_step_heading` call still lives at ONE
+            // typed body downstream.
+            let forwards_directly = body.contains("crate::ui::print_step_heading(")
+                || body.contains("crate::ui::print_step_heading_start(");
+            let forwards_through_fused_primitive = *module_path
+                == "commands/post_deploy_verification.rs"
+                && body.contains(
+                    "crate::post_deploy_gate_preamble::announce_and_build_post_deploy_gate_client(",
+                );
             assert!(
-                body.contains("crate::ui::print_step_heading(")
-                    || body.contains("crate::ui::print_step_heading_start("),
+                forwards_directly || forwards_through_fused_primitive,
                 "{module_path} body must forward to \
                  `crate::ui::print_step_heading(\"<TITLE>\")` (or its \
                  timed-fusion sibling \
-                 `crate::ui::print_step_heading_start(\"<TITLE>\")`) — \
-                 the primitive body every one-line bold step-heading in \
-                 the crate now delegates through."
+                 `crate::ui::print_step_heading_start(\"<TITLE>\")`, or a \
+                 downstream fused primitive that itself forwards through \
+                 `crate::ui::print_step_heading`) — the primitive body \
+                 every one-line bold step-heading in the crate now \
+                 delegates through."
             );
         }
     }

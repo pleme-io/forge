@@ -127,6 +127,7 @@ mod path_builder;
 mod pod_probe_pending_wait_line;
 mod poll_backoff_advance;
 mod post_deploy_endpoint_status_failure;
+mod post_deploy_gate_preamble;
 mod post_deploy_graphql_query;
 mod post_deploy_http_client;
 mod probe_dump;

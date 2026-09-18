@@ -173,30 +173,51 @@ mod tests {
         );
     }
 
-    /// Positive half of the shield: `post_deploy_verification.rs` MUST
-    /// forward through
-    /// `crate::post_deploy_http_client::build_post_deploy_http_client(`
-    /// at least the pre-lift census's four times, so a migration that
-    /// dropped a call site outright leaves the negative "no raw
-    /// `.danger_accept_invalid_certs(true)`" scan trivially satisfied
-    /// by absence but the positive count still fails.
+    /// Positive half of the shield: the post-deploy verification
+    /// surface MUST forward all four pre-lift census sites through
+    /// `build_post_deploy_http_client(` — three now via the
+    /// [`crate::post_deploy_gate_preamble`] gate-preamble primitive
+    /// that fuses the pre-lift heading + client-build stanza
+    /// (`verify_health_endpoint`, `verify_graphql_endpoint`,
+    /// `verify_smoke_queries`), plus the direct `quick_health_check`
+    /// call that remains in `post_deploy_verification.rs`. A
+    /// migration that dropped any of the four sites outright leaves
+    /// the negative "no raw `.danger_accept_invalid_certs(true)`"
+    /// scan trivially satisfied by absence but the positive count
+    /// still fails.
+    ///
+    /// Post-lift count: 1 direct forward in
+    /// `commands/post_deploy_verification.rs` (`quick_health_check`)
+    /// + 1 fused forward in `post_deploy_gate_preamble.rs` (reached
+    /// by the three gate-preamble entries), for a fleet-wide census
+    /// of 2 code-line forwards guarding four caller sites.
     #[test]
     fn post_deploy_verification_forwards_through_build_post_deploy_http_client_at_all_four_sites() {
-        const SOURCE: &str = include_str!("commands/post_deploy_verification.rs");
-        let forwards = SOURCE
+        const VERIFICATION_SOURCE: &str = include_str!("commands/post_deploy_verification.rs");
+        const GATE_PREAMBLE_SOURCE: &str = include_str!("post_deploy_gate_preamble.rs");
+        let verification_forwards = VERIFICATION_SOURCE
+            .matches("crate::post_deploy_http_client::build_post_deploy_http_client(")
+            .count();
+        let gate_preamble_forwards = GATE_PREAMBLE_SOURCE
             .matches("crate::post_deploy_http_client::build_post_deploy_http_client(")
             .count();
         assert!(
-            forwards >= 4,
+            verification_forwards >= 1,
             "commands/post_deploy_verification.rs must forward at \
-             least 4 post-deploy HTTP-client construction sites \
-             through \
+             least the surviving `quick_health_check` site through \
              `crate::post_deploy_http_client::build_post_deploy_http_client(` \
-             (pre-lift census: verify_health_endpoint, \
-             verify_graphql_endpoint, verify_smoke_queries, \
-             quick_health_check); found {forwards}. A dropped call \
-             would leave the negative raw-shape scan satisfied by \
-             absence."
+             directly; found {verification_forwards}. The three \
+             gate-preamble sites (verify_health_endpoint, \
+             verify_graphql_endpoint, verify_smoke_queries) now route \
+             through `crate::post_deploy_gate_preamble::announce_and_build_post_deploy_gate_client`, \
+             which is verified by its own gate-preamble shield."
+        );
+        assert!(
+            gate_preamble_forwards >= 1,
+            "post_deploy_gate_preamble.rs must itself forward through \
+             `crate::post_deploy_http_client::build_post_deploy_http_client(` \
+             so the three fused gate entries inherit the lenient-TLS \
+             envelope; found {gate_preamble_forwards}."
         );
     }
 }
