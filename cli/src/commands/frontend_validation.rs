@@ -254,14 +254,10 @@ pub async fn run_lint_with_config(web_dir: &Path, linter: &str) -> Result<(bool,
             duration.as_secs_f64()
         ));
 
-        // Collect error/warning lines for summary details
-        let mut details = Vec::new();
-        for line in combined.lines().take(15) {
-            if line.contains("error") || line.contains("warning") || line.contains("✖") {
-                crate::ui::print_diagnostic_line(line);
-                details.push(line.to_string());
-            }
-        }
+        let details =
+            crate::frontend_lint_diagnostic_collect::print_and_collect_lint_diagnostic_lines(
+                &combined,
+            );
 
         Ok((false, details))
     }
@@ -342,14 +338,10 @@ async fn run_biome_lint(web_dir: &Path) -> Result<(bool, Vec<String>)> {
             duration.as_secs_f64()
         ));
 
-        // Collect error lines for summary details
-        let mut details = Vec::new();
-        for line in combined.lines().take(15) {
-            if line.contains("error") || line.contains("warning") || line.contains("✖") {
-                crate::ui::print_diagnostic_line(line);
-                details.push(line.to_string());
-            }
-        }
+        let details =
+            crate::frontend_lint_diagnostic_collect::print_and_collect_lint_diagnostic_lines(
+                &combined,
+            );
 
         Ok((false, details))
     }

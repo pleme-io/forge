@@ -18119,12 +18119,24 @@ mod tests {
     /// invocation with the exact three-space indent-template and the
     /// plain `line` argument on the same source line.
     ///
-    /// The positive count is pinned per-module at the pre-lift site
-    /// count (`prerelease.rs` ×6, `frontend_validation.rs` ×3). A
-    /// fusion that folded two consumer sites into one call or dropped
-    /// one of the plain rows silently fails here — the negative half
-    /// above would still pass, but the positive count would fall
-    /// below the pre-lift census.
+    /// The positive count is pinned per-module at the current post-
+    /// lift site count (`prerelease.rs` ×6, `frontend_validation.rs`
+    /// ×1). Pre-lift `frontend_validation.rs` carried 3 direct
+    /// `print_diagnostic_line` calls; a follow-up lift migrated 2 of
+    /// them onto the fused `walk-cap-filter-print-collect` primitive
+    /// at [`crate::frontend_lint_diagnostic_collect::
+    /// print_and_collect_lint_diagnostic_lines`] (which routes
+    /// through [`super::write_diagnostic_line`] under a shared writer
+    /// sink so the byte-oracle test pins the per-line render), so the
+    /// visible `crate::ui::print_diagnostic_line(` count at this
+    /// caller migrated 3 → 1 (the surviving one in
+    /// `run_biome_lint`'s auto-fix-failed branch, which has a
+    /// distinct 5-line cap + no filter + no collect shape and is
+    /// out-of-scope for the fused primitive). A fusion that folded
+    /// the surviving direct call into another lift or dropped one of
+    /// the plain rows silently fails here — the negative half above
+    /// would still pass, but the positive count would fall below the
+    /// current census.
     #[test]
     fn print_diagnostic_line_callers_delegate_through_primitive() {
         const CALLERS: &[(&str, &str, usize)] = &[
@@ -18136,7 +18148,7 @@ mod tests {
             (
                 include_str!("commands/frontend_validation.rs"),
                 "commands/frontend_validation.rs",
-                3,
+                1,
             ),
         ];
         for (source, module_path, expected_forwards) in CALLERS {
