@@ -594,7 +594,8 @@ spec:
         db_label,
         config.migration_timeout_secs()
     );
-    let timeout_str = format!("{}s", config.migration_timeout_secs());
+    let timeout_str =
+        crate::kubectl_duration_arg::kubectl_duration_seconds_arg(config.migration_timeout_secs());
     let job_ref = crate::workload_field::format_workload_argv_ref(
         crate::workload_field::KubernetesWorkloadKind::Job,
         &job_name,

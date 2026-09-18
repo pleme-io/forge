@@ -80,7 +80,7 @@ pub(crate) async fn run_health_check(
     );
 
     // Check rollout status
-    let timeout_str = format!("{}s", timeout_secs);
+    let timeout_str = crate::kubectl_duration_arg::kubectl_duration_seconds_arg(timeout_secs);
     let deployment_ref = crate::workload_field::format_workload_argv_ref(
         crate::workload_field::KubernetesWorkloadKind::Deployment,
         deployment,
