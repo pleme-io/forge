@@ -343,23 +343,14 @@ pub async fn verify_graphql_endpoint(
 
     let client = crate::post_deploy_http_client::build_post_deploy_http_client(timeout)?;
 
-    // Simple introspection query
-    let query = serde_json::json!({
-        "query": "{ __typename }"
-    });
-
-    let start = Instant::now();
-
-    match client
-        .post(graphql_url)
-        .header("Content-Type", "application/json")
-        .json(&query)
-        .send()
-        .await
+    match crate::post_deploy_graphql_query::send_graphql_query_timed(
+        &client,
+        graphql_url,
+        "{ __typename }",
+    )
+    .await
     {
-        Ok(response) => {
-            let latency_ms = start.elapsed().as_millis() as u64;
-
+        Ok((response, latency_ms)) => {
             if response.status().is_success() {
                 // Parse response to verify it's valid GraphQL
                 match response.json::<serde_json::Value>().await {
@@ -426,22 +417,14 @@ pub async fn verify_smoke_queries(
     let mut all_passed = true;
 
     for smoke in queries {
-        let start = Instant::now();
-
-        let query = serde_json::json!({
-            "query": smoke.query
-        });
-
-        match client
-            .post(graphql_url)
-            .header("Content-Type", "application/json")
-            .json(&query)
-            .send()
-            .await
+        match crate::post_deploy_graphql_query::send_graphql_query_timed(
+            &client,
+            graphql_url,
+            &smoke.query,
+        )
+        .await
         {
-            Ok(response) => {
-                let latency_ms = start.elapsed().as_millis() as u64;
-
+            Ok((response, latency_ms)) => {
                 if !response.status().is_success() {
                     let status = response.status();
                     crate::ui::print_step_failure(&format!(
