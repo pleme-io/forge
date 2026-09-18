@@ -150,6 +150,68 @@ pub fn parse_kubectl_list_items(json_text: &str) -> Option<Vec<serde_json::Value
     Some(std::mem::take(items))
 }
 
+/// Parse arbitrary text as a generic [`serde_json::Value`] tree, folding
+/// any [`serde_json::Error`] parse failure into [`None`].
+///
+/// Peer of [`parse_kubectl_list_items`] on the JSON parse frontier. The
+/// list-items primitive bundles `parse-then-extract-items-array` because
+/// every kubectl-list consumer takes the same second step; this primitive
+/// factors out ONLY the parse first step for consumers whose second step
+/// is per-module (a status-condition walk, a manifest-digest fingerprint,
+/// an architecture detection ladder, a pass-rate arithmetic, a store-path
+/// filter over two JSON shapes). Pre-lift, five sibling parsers each
+/// spelled the verbatim opener
+///
+/// ```text
+/// let Ok(value) = serde_json::from_str::<serde_json::Value>(<text>) else {
+///     return <sentinel>;
+/// };
+/// ```
+///
+/// where `<sentinel>` was the module's caller-specific
+/// no-usable-JSON-evidence collapse: a
+/// [`FluxSourceVerificationOutcome::ProbeAbsent`](crate::flux_source_verification::FluxSourceVerificationOutcome::ProbeAbsent),
+/// a [`CisK8sPassRateOutcome::ProbeAbsent`](crate::cis_k8s_pass_rate::CisK8sPassRateOutcome::ProbeAbsent),
+/// an [`OciArchitectureOutcome::Absent`](crate::oci_architecture::OciArchitectureOutcome::Absent),
+/// an empty [`String`], or an empty [`Vec`]. Post-lift, every consumer
+/// routes the parse step through this primitive and folds [`None`] into
+/// its per-module sentinel:
+///
+/// ```ignore
+/// let Some(value) = crate::probe_outcome::parse_json_value(text) else {
+///     return <sentinel>;
+/// };
+/// ```
+///
+/// Five sibling call sites past THEORY.md §VI.1's "two is a coincidence;
+/// three is a law" threshold
+/// ([`crate::flux_source_verification::parse_gitrepository_status`],
+/// [`crate::oci_manifest::canonical_manifest_fingerprint`],
+/// [`crate::oci_architecture::parse_manifest_architectures`],
+/// [`crate::cis_k8s_pass_rate::parse_cis_k8s_audit_json`],
+/// [`crate::store_path::parse_closure_paths`]). Naming the primitive with
+/// the invariant makes the "malformed JSON folds into
+/// no-usable-JSON-evidence, never propagates as an [`Err`]" discipline
+/// explicit at every consumer site — a future refactor that wanted to
+/// route parse errors through `anyhow::Context` at any of the five sites
+/// would have to break the primitive routing rather than silently escape
+/// the fold at one site.
+///
+/// # Why not `Result<serde_json::Value, T>`
+///
+/// A `Result<serde_json::Value, T>` shape that carried the sentinel
+/// through would force every consumer to match on `Ok`/`Err` and re-emit
+/// the sentinel in the error arm, which is one more line than the
+/// pre-lift `let Ok else` shape. The [`Option`] return keeps the caller
+/// site at the same one-line shape as pre-lift, and the sentinel choice
+/// stays at the caller — heterogeneous across the five consumers
+/// (three typed [`ProbeOutcome`] variants, [`String::new`], [`Vec::new`])
+/// without a generic parameter or a trait bound.
+#[allow(dead_code)]
+pub fn parse_json_value(text: &str) -> Option<serde_json::Value> {
+    serde_json::from_str(text).ok()
+}
+
 /// Common contract every typed probe outcome in forge's attestation
 /// pipeline implements. The single `is_probe_absent` method names the
 /// load-bearing structural discriminator the typed-primitive family
@@ -39910,6 +39972,143 @@ mod tests {
                  let Some(items) = value.get(\"items\").and_then(|i| \
                  i.as_array()) else {{ return *Outcome::ProbeAbsent; }};` \
                  stanza fails here rather than silently splitting the \
+                 discipline across the primitive and the re-fused site. \
+                 Found: {hits:?}"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // parse_json_value primitive tests
+    // ---------------------------------------------------------------
+
+    /// Malformed JSON collapses to `None`. Pre-lift the five sibling
+    /// parsers (`flux_source_verification::parse_gitrepository_status`,
+    /// `oci_manifest::canonical_manifest_fingerprint`,
+    /// `oci_architecture::parse_manifest_architectures`,
+    /// `cis_k8s_pass_rate::parse_cis_k8s_audit_json`,
+    /// `store_path::parse_closure_paths`) each spelled `let Ok(value) =
+    /// serde_json::from_str::<serde_json::Value>(<text>) else { return
+    /// <sentinel>; };` verbatim — this test pins the primitive
+    /// collapses the parse-failure world to the same `None` at ONE body.
+    /// A truncated / corrupt stdout (network glitch, RBAC-denied stderr
+    /// echoed onto stdout, mid-stream disconnect) is the load-bearing
+    /// "no evidence collected" world every pre-lift consumer folded to
+    /// its per-module sentinel.
+    #[test]
+    fn parse_json_value_returns_none_on_invalid_json() {
+        assert!(super::parse_json_value("not json at all").is_none());
+        assert!(super::parse_json_value(r#"{"unterminated": "#).is_none());
+        assert!(super::parse_json_value("").is_none());
+        assert!(super::parse_json_value("   \t\n  ").is_none());
+    }
+
+    /// Well-formed JSON returns `Some(Value)` preserving the parsed
+    /// tree. The four load-bearing JSON shapes across the five consumer
+    /// bodies — a top-level object (kensa audit reports,
+    /// GitRepository status), a top-level array (older `nix path-info
+    /// --recursive --json`), a scalar (defensive: malformed manifest
+    /// stripped down to a bare digest), and a nested object
+    /// (skopeo manifest) — all round-trip through the primitive
+    /// unchanged. A regression that inserted a "top-level must be
+    /// object" filter would silently reclassify the array-shape
+    /// closure listing at `store_path::parse_closure_paths` as
+    /// probe-absent.
+    #[test]
+    fn parse_json_value_returns_some_on_well_formed_input() {
+        let object = super::parse_json_value(r#"{"passed_controls":42,"total_controls":100}"#)
+            .expect("well-formed object must parse");
+        assert_eq!(
+            object.get("passed_controls").and_then(|v| v.as_u64()),
+            Some(42)
+        );
+
+        let array = super::parse_json_value(r#"[{"path":"/nix/store/x-foo"}]"#)
+            .expect("well-formed array must parse");
+        assert!(array.is_array());
+        assert_eq!(array.as_array().map(|a| a.len()), Some(1));
+
+        let scalar =
+            super::parse_json_value(r#""just-a-string""#).expect("well-formed scalar must parse");
+        assert_eq!(scalar.as_str(), Some("just-a-string"));
+
+        let nested = super::parse_json_value(
+            r#"{"status":{"conditions":[{"type":"SourceVerified","status":"True"}]}}"#,
+        )
+        .expect("well-formed nested object must parse");
+        assert_eq!(
+            nested
+                .get("status")
+                .and_then(|s| s.get("conditions"))
+                .and_then(|c| c.as_array())
+                .map(|a| a.len()),
+            Some(1)
+        );
+    }
+
+    /// Regression shield: `crate::probe_outcome::parse_json_value` is
+    /// the ONLY consumer of the pre-lift one-line `let Ok(value) =
+    /// serde_json::from_str::<serde_json::Value>(<text>) else { return
+    /// <sentinel>; };` opener across the five sibling parsers that
+    /// each fold malformed JSON into a caller-specific
+    /// no-usable-JSON-evidence sentinel. Pre-lift each of the five
+    /// sites (`flux_source_verification`, `oci_manifest`,
+    /// `oci_architecture`, `cis_k8s_pass_rate`, `store_path`) spelled
+    /// the verbatim `serde_json::from_str::<serde_json::Value>(...)`
+    /// opener with a per-module input identifier (`json_text`,
+    /// `manifest_json`, `closure_info`). A future regression that
+    /// re-fused the pre-lift opener at any of the five sites (or at a
+    /// new sixth consumer that grows into the same "parse JSON blob,
+    /// fold parse error into no-evidence" idiom) would silently split
+    /// the "malformed JSON → no-usable-JSON-evidence, never propagate
+    /// as `Err`" discipline across the primitive and the re-fused
+    /// site. The shield pins the discipline at ONE call site — the
+    /// primitive itself — by asserting the load-bearing turbofish
+    /// needle `serde_json::from_str::<serde_json::Value>(` appears
+    /// zero times in each consumer's non-test body. The primitive body
+    /// itself uses type-inferred `serde_json::from_str(text)` without
+    /// the explicit turbofish, so the primitive's own file (were it
+    /// added to the scan later) would not self-match on the needle.
+    ///
+    /// Routes through [`crate::test_support::code_line_hits`] so
+    /// `///`-prefixed doc-comment mentions in fn docs (should any
+    /// future doc reference the pre-lift shape as prose) do not
+    /// self-match as phantom hits, the same code-line-filter
+    /// discipline the sibling
+    /// [`parse_kubectl_list_items_is_only_json_items_parse_across_typed_probe_outcome_consumers`]
+    /// shield established. Slices each source at the
+    /// `\n#[cfg(test)]\nmod tests {` marker so doc-quotations that
+    /// appear inside a test module body stay out of scope, and the
+    /// primitive-family's own byte-oracle stanzas inside `#[cfg(test)]`
+    /// modules do not false-match.
+    #[test]
+    fn parse_json_value_is_only_generic_serde_json_value_parse_across_five_fold_to_sentinel_consumers(
+    ) {
+        let needle = "serde_json::from_str::<serde_json::Value>(";
+        let tests_marker = "\n#[cfg(test)]\nmod tests {";
+
+        for (path, source) in [
+            (
+                "flux_source_verification.rs",
+                include_str!("flux_source_verification.rs"),
+            ),
+            ("oci_manifest.rs", include_str!("oci_manifest.rs")),
+            ("oci_architecture.rs", include_str!("oci_architecture.rs")),
+            ("cis_k8s_pass_rate.rs", include_str!("cis_k8s_pass_rate.rs")),
+            ("store_path.rs", include_str!("store_path.rs")),
+        ] {
+            let body_end = source.find(tests_marker).unwrap_or(source.len());
+            let module_body = &source[..body_end];
+            let hits = crate::test_support::code_line_hits(module_body, needle);
+            assert!(
+                hits.is_empty(),
+                "{path} must route its parse-JSON-blob-or-fold-to-sentinel \
+                 opener through `crate::probe_outcome::parse_json_value(<text>)` \
+                 so a future regression that re-fuses the pre-lift \
+                 `let Ok(value) = serde_json::from_str::<serde_json::Value>\
+                 (<text>) else {{ return <sentinel>; }};` opener fails here \
+                 rather than silently splitting the \"malformed JSON folds \
+                 into no-usable-JSON-evidence, never propagates as `Err`\" \
                  discipline across the primitive and the re-fused site. \
                  Found: {hits:?}"
             );

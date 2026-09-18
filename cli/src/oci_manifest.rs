@@ -8949,7 +8949,7 @@ impl<'de> serde::Deserialize<'de> for ContentDigest {
 /// recognised role, fingerprints to the empty string; the call site
 /// disambiguates this from the probe-failed case via an explicit sentinel.
 pub fn canonical_manifest_fingerprint(manifest_json: &str) -> String {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(manifest_json) else {
+    let Some(value) = crate::probe_outcome::parse_json_value(manifest_json) else {
         return String::new();
     };
     let mut lines: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();

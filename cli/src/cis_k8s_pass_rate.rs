@@ -334,7 +334,7 @@ crate::impl_probe_outcome!(CisK8sPassRateOutcome, ProbeAbsent);
 /// ratio; downstream consumers pattern-match the typed two-arm enum.
 #[allow(dead_code)]
 pub fn parse_cis_k8s_audit_json(json_text: &str) -> CisK8sPassRateOutcome {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(json_text) else {
+    let Some(value) = crate::probe_outcome::parse_json_value(json_text) else {
         return CisK8sPassRateOutcome::ProbeAbsent;
     };
     let Some(passed) = value.get("passed_controls").and_then(|v| v.as_u64()) else {

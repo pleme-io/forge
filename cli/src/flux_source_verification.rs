@@ -307,7 +307,7 @@ crate::impl_verified_outcome!(FluxSourceVerificationOutcome);
 /// claim.
 #[allow(dead_code)]
 pub fn parse_gitrepository_status(json_text: &str) -> FluxSourceVerificationOutcome {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(json_text) else {
+    let Some(value) = crate::probe_outcome::parse_json_value(json_text) else {
         return FluxSourceVerificationOutcome::ProbeAbsent;
     };
     let Some(conditions) = value

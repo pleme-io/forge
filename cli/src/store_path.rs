@@ -6499,7 +6499,7 @@ impl From<&StorePath> for std::borrow::Cow<'static, [u8]> {
 /// is more honest than one taken over the malformed text. A document that
 /// is not valid JSON yields no paths.
 pub fn parse_closure_paths(closure_info: &str) -> Vec<StorePath> {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(closure_info) else {
+    let Some(value) = crate::probe_outcome::parse_json_value(closure_info) else {
         return Vec::new();
     };
     let candidates: Vec<&str> = match &value {

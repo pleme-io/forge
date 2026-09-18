@@ -161,7 +161,7 @@ crate::impl_probe_outcome!(OciArchitectureOutcome, Absent);
 /// mirroring the `pick_identity` whitespace-rejection discipline in
 /// [`crate::cosign`].
 pub fn parse_manifest_architectures(manifest_json: &str) -> OciArchitectureOutcome {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(manifest_json) else {
+    let Some(value) = crate::probe_outcome::parse_json_value(manifest_json) else {
         return OciArchitectureOutcome::Absent;
     };
     let Some(obj) = value.as_object() else {
