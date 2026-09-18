@@ -80,6 +80,7 @@ pub mod test_ci;
 pub mod test_suite_failure_banner;
 pub mod tool;
 pub mod typescript;
+pub mod verify_image_in_registry_step;
 pub mod web_build_verify;
 pub mod web_service;
 pub mod web_test_suite_skipped;

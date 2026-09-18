@@ -750,7 +750,17 @@ async fn push_arch_closure_to_attic(arch_label: &str, result_path: &str, cache_t
 
 /// Verify image exists in registry and return its digest
 /// This provides a cryptographic guarantee that we're deploying exactly what we pushed
-async fn verify_image_in_registry(registry: &str, full_tag_suffix: &str) -> Result<String> {
+///
+/// `pub(crate)` so the [`crate::commands::verify_image_in_registry_step`]
+/// typed primitive can wrap the pre-lift 3-line
+/// `heading + verify + captured-digest ack` ceremony that both
+/// [`execute`]'s Step 1.5 preamble and [`deploy_and_verify`]'s Step
+/// 2.5/9 preamble spelled verbatim. See that module's docs for the
+/// pre-lift census.
+pub(crate) async fn verify_image_in_registry(
+    registry: &str,
+    full_tag_suffix: &str,
+) -> Result<String> {
     // Compose `<repository>:<tag>` via
     // `crate::oci_manifest::image_reference` — the typed
     // compositional inverse of `image_repository_and_tag`.
@@ -1398,10 +1408,14 @@ pub async fn orchestrate_release(
 
         // Step 1.5: Verify image exists in registry and capture digest
         println!();
-        crate::ui::print_numbered_step_heading("1.5", "Verifying image in registry...");
         let verify_tag = deploy_tag.clone();
-        let pushed_digest = verify_image_in_registry(&registry, &verify_tag).await?;
-        println!("   📋 Captured digest: {}", pushed_digest);
+        let pushed_digest =
+            crate::commands::verify_image_in_registry_step::run_verify_image_in_registry_step(
+                "1.5",
+                &registry,
+                &verify_tag,
+            )
+            .await?;
         println!();
 
         // If push-only, we're done
@@ -2378,9 +2392,13 @@ pub async fn release_rust_service(
 
     // Step 2.5: Verify image exists in registry and capture digest
     println!();
-    crate::ui::print_numbered_step_heading("2.5/9", "Verifying image in registry...");
-    let pushed_digest = verify_image_in_registry(&registry, &deploy_tag).await?;
-    println!("   📋 Captured digest: {}", pushed_digest);
+    let pushed_digest =
+        crate::commands::verify_image_in_registry_step::run_verify_image_in_registry_step(
+            "2.5/9",
+            &registry,
+            &deploy_tag,
+        )
+        .await?;
 
     // Step 3: Run migrations BEFORE deploying (CRITICAL: database must be ready before new pods start)
     // Check and reset stuck Shinka migrations first
