@@ -47,6 +47,7 @@ pub mod migration_new;
 pub mod migration_validation;
 pub mod migrations;
 pub mod nix_builder;
+pub mod optional_prerelease_phase_gate;
 pub mod pangea;
 pub mod pangea_infra;
 pub mod post_deploy_verification;

@@ -449,66 +449,34 @@ pub async fn execute(
     // Requires Docker — testcontainers for Postgres, Redis, NATS
     // ========================================
     let skip_integration = crate::repo::truthy_flag_from_env("SKIP_INTEGRATION");
-
-    if skip_integration || !config.gates.integration.enabled {
-        let reason = if skip_integration {
-            "SKIP_INTEGRATION=true"
-        } else {
-            "disabled"
-        };
-        summary
-            .skipped
-            .push(format!("G13: Integration tests ({})", reason));
-    } else {
-        println!();
-        crate::ui::print_phase_heading("Phase 0b: Integration Tests (G13)");
-
-        match run_integration_gate(&config).await {
-            Ok(passed) => {
-                if passed {
-                    summary.passed.push("G13: Integration tests".to_string());
-                } else {
-                    summary.failed.push("G13: Integration tests".to_string());
-                }
-            }
-            Err(e) => {
-                crate::ui::print_step_failure_with_error("Integration tests error", &e);
-                summary.failed.push("G13: Integration tests".to_string());
-            }
-        }
-    }
+    super::optional_prerelease_phase_gate::run_optional_prerelease_phase_gate(
+        &mut summary,
+        "SKIP_INTEGRATION",
+        skip_integration,
+        config.gates.integration.enabled,
+        "G13: Integration tests",
+        "Phase 0b: Integration Tests (G13)",
+        "Integration tests error",
+        || run_integration_gate(&config),
+    )
+    .await;
 
     // ========================================
     // Phase 0c: E2E tests (G14)
     // Requires Docker + Nix images + Chrome (headless)
     // ========================================
     let skip_e2e = crate::repo::truthy_flag_from_env("SKIP_E2E");
-
-    if skip_e2e || !config.gates.e2e.enabled {
-        let reason = if skip_e2e {
-            "SKIP_E2E=true"
-        } else {
-            "disabled"
-        };
-        summary.skipped.push(format!("G14: E2E tests ({})", reason));
-    } else {
-        println!();
-        crate::ui::print_phase_heading("Phase 0c: E2E Tests (G14)");
-
-        match run_e2e_gate(&config).await {
-            Ok(passed) => {
-                if passed {
-                    summary.passed.push("G14: E2E tests".to_string());
-                } else {
-                    summary.failed.push("G14: E2E tests".to_string());
-                }
-            }
-            Err(e) => {
-                crate::ui::print_step_failure_with_error("E2E tests error", &e);
-                summary.failed.push("G14: E2E tests".to_string());
-            }
-        }
-    }
+    super::optional_prerelease_phase_gate::run_optional_prerelease_phase_gate(
+        &mut summary,
+        "SKIP_E2E",
+        skip_e2e,
+        config.gates.e2e.enabled,
+        "G14: E2E tests",
+        "Phase 0c: E2E Tests (G14)",
+        "E2E tests error",
+        || run_e2e_gate(&config),
+    )
+    .await;
 
     // Final summary
     summary.total_time_secs = start.elapsed().as_secs_f64();

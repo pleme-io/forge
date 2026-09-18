@@ -10165,20 +10165,30 @@ mod tests {
             // `commands/prerelease.rs`'s pre-lift 7 forwardings dropped to
             // 5 when the two "Docker not available" gate-preflight sites
             // migrated onto
-            // `crate::docker_available_gate_preflight::ensure_docker_running_for_gate`.
-            // The two migrated sites now route through that primitive's
-            // own writer sibling (which internally delegates to
-            // `crate::ui::write_step_failure_with_error`), so the
-            // operator-facing byte-shape is preserved at ONE place.
+            // `crate::docker_available_gate_preflight::ensure_docker_running_for_gate`,
+            // then dropped to 3 when the two `Integration tests error` /
+            // `E2E tests error` phase-gate error-branch sites migrated
+            // onto
+            // `crate::commands::optional_prerelease_phase_gate::classify_prerelease_phase_gate_outcome`.
+            // Both migrated pairs now route through their respective
+            // primitives' own delegations to
+            // `crate::ui::print_step_failure_with_error`, so the
+            // operator-facing byte-shape is preserved at ONE place per
+            // pair.
             (
                 include_str!("commands/prerelease.rs"),
                 "commands/prerelease.rs",
-                5,
+                3,
             ),
             (
                 include_str!("commands/post_deploy_verification.rs"),
                 "commands/post_deploy_verification.rs",
                 3,
+            ),
+            (
+                include_str!("commands/optional_prerelease_phase_gate.rs"),
+                "commands/optional_prerelease_phase_gate.rs",
+                1,
             ),
         ];
         for (source, module_path, expected_forwards) in CALLERS {
