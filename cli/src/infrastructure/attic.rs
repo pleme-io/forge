@@ -569,8 +569,12 @@ impl AtticClient {
             })?;
 
         let mut cmd = self.command();
-        cmd.args(["login", &self.cache_name, server_url, token])
-            .piped_child_stdio();
+        cmd.args(crate::attic_login_argv::attic_login_argv(
+            &self.cache_name,
+            server_url,
+            token,
+        ))
+        .piped_child_stdio();
 
         classify_capture(
             cmd.output().await,
@@ -696,8 +700,12 @@ impl AtticClient {
             let token_owned = token_owned.clone();
             async move {
                 let mut cmd = Command::new(&attic_bin);
-                cmd.args(["login", &cache, &server_url_owned, &token_owned])
-                    .piped_child_stdio();
+                cmd.args(crate::attic_login_argv::attic_login_argv(
+                    &cache,
+                    &server_url_owned,
+                    &token_owned,
+                ))
+                .piped_child_stdio();
                 cmd.output().await
             }
         })
