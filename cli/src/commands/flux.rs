@@ -532,12 +532,10 @@ pub async fn verify_deployment_image(
         .bold()
     );
 
-    let start = std::time::Instant::now();
-    let mut backoff_attempt: u32 = 0;
-    let mut last_diag_at = 0u64;
+    let mut poll_clock = crate::deployment_poll_clock::DeploymentPollClock::new();
 
     loop {
-        let elapsed = start.elapsed().as_secs();
+        let elapsed = poll_clock.elapsed_secs();
 
         match get_pod_status_full(namespace, deployment_name).await {
             Ok(pod) => {
@@ -584,12 +582,12 @@ pub async fn verify_deployment_image(
             namespace,
             deployment_name,
             elapsed,
-            &mut last_diag_at,
+            &mut poll_clock.last_diag_at,
         )
         .await;
 
         crate::poll_backoff_advance::advance_poll_backoff_tokio(
-            &mut backoff_attempt,
+            &mut poll_clock.backoff_attempt,
             flux_poll_delay,
         )
         .await;
@@ -627,12 +625,10 @@ pub async fn wait_for_deployment(
     let expected_sha = expected_tag_suffix;
     crate::ui::print_field("Expected git SHA in image tag", &expected_sha);
 
-    let start = std::time::Instant::now();
-    let mut backoff_attempt: u32 = 0;
-    let mut last_diag_at = 0u64;
+    let mut poll_clock = crate::deployment_poll_clock::DeploymentPollClock::new();
 
     loop {
-        let elapsed = start.elapsed().as_secs();
+        let elapsed = poll_clock.elapsed_secs();
 
         match get_pod_status_full(&namespace, &deployment_name).await {
             Ok(pod) => {
@@ -692,12 +688,12 @@ pub async fn wait_for_deployment(
             &namespace,
             &deployment_name,
             elapsed,
-            &mut last_diag_at,
+            &mut poll_clock.last_diag_at,
         )
         .await;
 
         crate::poll_backoff_advance::advance_poll_backoff_tokio(
-            &mut backoff_attempt,
+            &mut poll_clock.backoff_attempt,
             flux_poll_delay,
         )
         .await;
@@ -1499,6 +1495,90 @@ mod tests {
              `DEPLOYMENT_DIAG_BURST_INTERVAL_SECS` const's own \
              definition line. Found code-line hits: {:#?}",
             cadence_const_hits,
+        );
+    }
+
+    /// Whole-module lift shield for the two pre-lift sibling 3-line
+    /// preamble stanzas
+    ///
+    /// ```ignore
+    /// let start = std::time::Instant::now();
+    /// let mut backoff_attempt: u32 = 0;
+    /// let mut last_diag_at = 0u64;
+    /// ```
+    ///
+    /// that opened the two deployment-pod-polling loops in
+    /// [`super::verify_deployment_image`] and
+    /// [`super::wait_for_deployment`]. Post-lift both consumer sites
+    /// bind a single `let mut poll_clock =
+    /// crate::deployment_poll_clock::DeploymentPollClock::new();`
+    /// carrying the same three fields as pub fields for disjoint
+    /// mutable borrows through the existing
+    /// [`super::emit_periodic_deployment_diagnostics_burst`] and
+    /// [`crate::poll_backoff_advance::advance_poll_backoff_tokio`]
+    /// consumers.
+    ///
+    /// Two invariants pinned here:
+    ///
+    /// 1. **Negative:** The `let mut last_diag_at = 0u64;` line — a
+    ///    tell for the pre-lift 3-line preamble whose ident +
+    ///    literal-type pair (`0u64`, not the bare `0`) is unique to
+    ///    the two lifted sites in this crate — must not reappear in
+    ///    the module body. A regression that re-inlined either
+    ///    preamble fails here. (`let mut backoff_attempt: u32 = 0;`
+    ///    appears in eight other polling loops fleet-wide, so it
+    ///    would false-positive on cross-module drift; `last_diag_at`
+    ///    is exclusive to this module by grep, making it the reliable
+    ///    tell.)
+    /// 2. **Positive delegation floor ≥ 2:** `DeploymentPollClock::new(`
+    ///    appears at ≥ 2 code lines in the module body — both
+    ///    consumer loops. A future third deployment-pod-polling loop
+    ///    added to this module joins the same delegation chain, and
+    ///    the floor grows with it.
+    ///
+    /// Scan bounded strictly to the module's non-test body (file
+    /// start to the FIRST `\n#[cfg(test)]\nmod tests {` marker) so
+    /// this shield's own docstring mention of the pre-lift shape
+    /// stays out of scope. Sibling of the
+    /// `test_flux_polling_loops_route_periodic_diag_burst_through_typed_primitive`
+    /// whole-module boundary shield above — same "one const + one
+    /// delegation-helper + whole-module negative + positive-floor"
+    /// quadruple discipline every three-field poll-loop preamble
+    /// this module carries.
+    #[test]
+    fn test_flux_polling_loops_route_deployment_poll_clock_new() {
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("flux.rs"),
+            "commands/flux.rs",
+        );
+
+        // (1) Pre-lift preamble tell — `let mut last_diag_at = 0u64;`
+        // — must not reappear at any code line.
+        let pre_lift_hits = code_line_hits(module_body, "let mut last_diag_at = 0u64;");
+        assert!(
+            pre_lift_hits.is_empty(),
+            "commands/flux.rs must NOT re-inline the pre-lift 3-line \
+             `let start = std::time::Instant::now(); \
+             let mut backoff_attempt: u32 = 0; \
+             let mut last_diag_at = 0u64;` deployment-pod-polling \
+             preamble at either consumer loop — route through \
+             `crate::deployment_poll_clock::DeploymentPollClock::new()` \
+             instead. Found code-line hits: {:#?}",
+            pre_lift_hits,
+        );
+
+        // (2) Post-lift delegation must appear at ≥ 2 code lines
+        // (one per consumer loop).
+        let delegation_hits = code_line_hits(module_body, "DeploymentPollClock::new()");
+        assert!(
+            delegation_hits.len() >= 2,
+            "commands/flux.rs must consume \
+             `crate::deployment_poll_clock::DeploymentPollClock::new()` \
+             at both polling loops' preambles — post-lift the \
+             constructor is invoked at 2 call sites \
+             (`verify_deployment_image`, `wait_for_deployment`). \
+             Found:\n{}",
+            delegation_hits.join("\n"),
         );
     }
 

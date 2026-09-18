@@ -78,6 +78,7 @@ mod cloudflare_purge_success_ack;
 // of `generate_cargo_nix_step` for the direct-binary shape.
 mod crate2nix_regenerate_step;
 mod deploy_target_field;
+mod deployment_poll_clock;
 mod doca_inspect_digest_argv;
 mod docker_available_gate_preflight;
 mod docker_compose_argv;
