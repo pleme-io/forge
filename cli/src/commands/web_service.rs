@@ -168,16 +168,12 @@ pub async fn web_regenerate(product: String, service: String, repo_root: String)
     println!();
 
     // Step 2: Regenerate Hanabi Cargo.nix using crate2nix
-    crate::rust_toolchain_phase_announce::print_rust_toolchain_phase_announce(
-        "Regenerating Hanabi Cargo.nix",
-        "(crate2nix generate)",
-    );
-
-    crate::nix::run_crate2nix_in(&crate2nix, &hanabi_dir)
-        .await
-        .context("Failed to regenerate Hanabi Cargo.nix")?;
-    crate::ui::print_step_pass("Hanabi Cargo.nix regenerated");
-    println!();
+    crate::crate2nix_regenerate_step::announce_and_run_crate2nix_regenerate(
+        &crate2nix,
+        &hanabi_dir,
+        "Hanabi Cargo.nix",
+    )
+    .await?;
 
     // Success summary
     crate::cargo_nix_ceremony_banner::print_cargo_nix_ceremony_banner(
@@ -256,16 +252,12 @@ pub async fn web_cargo_update(product: String, service: String, repo_root: Strin
     println!();
 
     // Step 2: Regenerate Cargo.nix
-    crate::rust_toolchain_phase_announce::print_rust_toolchain_phase_announce(
-        "Regenerating Cargo.nix",
-        "(crate2nix generate)",
-    );
-
-    crate::nix::run_crate2nix_in(&crate2nix, &hanabi_dir)
-        .await
-        .context("Failed to regenerate Hanabi Cargo.nix")?;
-    crate::ui::print_step_pass("Cargo.nix regenerated");
-    println!();
+    crate::crate2nix_regenerate_step::announce_and_run_crate2nix_regenerate(
+        &crate2nix,
+        &hanabi_dir,
+        "Cargo.nix",
+    )
+    .await?;
 
     // Success summary
     crate::cargo_nix_ceremony_banner::print_cargo_nix_ceremony_banner(

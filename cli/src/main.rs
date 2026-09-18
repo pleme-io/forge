@@ -74,6 +74,9 @@ mod cargo_nix_ceremony_banner;
 mod cargo_test_argv;
 mod cloudflare;
 mod cloudflare_purge_success_ack;
+// Announce-run-ack fusion for `crate2nix generate` in <dir> — the sibling
+// of `generate_cargo_nix_step` for the direct-binary shape.
+mod crate2nix_regenerate_step;
 mod deploy_target_field;
 mod doca_inspect_digest_argv;
 mod docker_available_gate_preflight;

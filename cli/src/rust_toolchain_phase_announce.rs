@@ -254,23 +254,34 @@ mod tests {
         );
     }
 
-    // Positive half of the shield: `web_service.rs` MUST forward
-    // through
-    // `crate::rust_toolchain_phase_announce::print_rust_toolchain_phase_announce(`
-    // at least the migrated count, so a migration that dropped a
-    // call site outright leaves the negative "no raw inline shape"
-    // scan trivially satisfied by absence but the positive count
-    // still fails.
+    // Positive half of the shield: the primitive MUST have at least
+    // one downstream consumer routing through
+    // `print_rust_toolchain_phase_announce(`, so a migration that
+    // dropped a call site outright leaves the negative "no raw
+    // inline shape" scan trivially satisfied by absence but the
+    // positive count still fails.
+    //
+    // The two pre-lift `commands/web_service.rs` stanzas that once
+    // called this primitive directly now route through the fusion
+    // sibling
+    // [`crate::crate2nix_regenerate_step::announce_and_run_crate2nix_regenerate`],
+    // which itself delegates through this primitive at ONE landing.
+    // The invariant transitions from "2 direct calls in
+    // web_service.rs" to "1 call in the fusion module" — the
+    // positive count still fails on a migration that dropped the
+    // fusion primitive's body, and the sibling shield
+    // `every_prelift_module_forwards_through_announce_and_run_crate2nix_regenerate`
+    // (in `crate2nix_regenerate_step.rs`) pins the two-uses count
+    // at the caller site.
     #[test]
-    fn every_prelift_module_forwards_through_print_rust_toolchain_phase_announce() {
+    fn every_downstream_owner_forwards_through_print_rust_toolchain_phase_announce() {
         use std::path::PathBuf;
-        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src")
-            .join("commands");
-        let expectations: &[(&str, usize)] = &[("web_service.rs", 2)];
+        let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let expectations: &[(&str, usize)] = &[("crate2nix_regenerate_step.rs", 1)];
         for (basename, min_count) in expectations {
-            let path = commands_dir.join(basename);
-            let source = std::fs::read_to_string(&path).unwrap();
+            let path = src_dir.join(basename);
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|_| panic!("expected {} to exist", path.display()));
             let forwards = source
                 .matches(
                     "crate::rust_toolchain_phase_announce::print_rust_toolchain_phase_announce(",
