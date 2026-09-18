@@ -406,6 +406,61 @@ pub fn run_test_pyramid(
     Ok(())
 }
 
+/// Spawn `cmd` under `run_inherited_status_sync` while timing the
+/// elapsed wall-clock, then emit the canonical completion-ack line via
+/// [`crate::repo::msg_completed_in_secs_1`] to stdout — the primitive
+/// owns the rendered surface (label + elapsed grammar + precision). Returns the
+/// spawn's [`Result`] verbatim so the caller keeps `?`-propagation or
+/// direct-return control; the ack line fires unconditionally BEFORE
+/// the return, so a failing spawn still reports its elapsed on the
+/// same terminal surface a passing spawn does.
+///
+/// # Rationale
+///
+/// Pre-lift the three test-pyramid spawn sites in this module —
+/// [`run_backend_unit_tests`], [`run_frontend_unit_tests`]'s
+/// no-report branch, and [`run_backend_integration_tests`] — each
+/// spelled the same four-line stanza verbatim:
+///
+/// ```ignore
+/// let start = Instant::now();
+/// let outcome = run_inherited_status_sync(cmd, <op>);
+/// let elapsed = start.elapsed();
+/// ui::print_info(&crate::repo::msg_completed_in_secs_1(<label>, elapsed));
+/// ```
+///
+/// Lifting the stanza onto this primitive means a future refinement
+/// (a switch from [`ui::print_info`] to [`ui::print_step_pass`], an
+/// added `Started at ...` opener line, a swap of the
+/// [`crate::repo::msg_completed_in_secs_1`] dialect for a two-decimal
+/// render, or a promotion of the tail to a themed banner via
+/// [`crate::ui`]) reaches one call site rather than three diverging
+/// arms. THEORY §I.5 — duplication budget zero; every recurring
+/// shape becomes a helper before it becomes duplicated code.
+///
+/// The `op` label is threaded verbatim into
+/// [`run_inherited_status_sync`]'s error `Context`; the
+/// `completion_label` is threaded verbatim into the ack line. The
+/// two axes stay independent because the pre-lift sites already
+/// disagreed on them (`run_backend_integration_tests` announces the
+/// spawn as `"Backend integration tests"` and acknowledges its
+/// completion as `"Integration tests"`), and forcing them to a single
+/// value would silently rewrite one of the two rendered surfaces.
+fn run_inherited_status_sync_with_timed_completion_ack(
+    cmd: Command,
+    op: &str,
+    completion_label: &str,
+) -> Result<()> {
+    let start = Instant::now();
+    let outcome = run_inherited_status_sync(cmd, op);
+    let elapsed = start.elapsed();
+    ui::print_info(&crate::repo::msg_completed_in_secs_1(
+        completion_label,
+        elapsed,
+    ));
+    outcome
+}
+
 /// Run backend unit tests
 fn run_backend_unit_tests(backend_dir: &str, filter: Option<&str>) -> Result<()> {
     ui::print_info("Running cargo test --lib");
@@ -418,16 +473,11 @@ fn run_backend_unit_tests(backend_dir: &str, filter: Option<&str>) -> Result<()>
         cmd.arg(f);
     }
 
-    let start = Instant::now();
-    let outcome = run_inherited_status_sync(cmd, "Backend unit tests");
-    let elapsed = start.elapsed();
-
-    ui::print_info(&crate::repo::msg_completed_in_secs_1(
+    run_inherited_status_sync_with_timed_completion_ack(
+        cmd,
         "Backend unit tests",
-        elapsed,
-    ));
-
-    outcome
+        "Backend unit tests",
+    )
 }
 
 /// Run frontend unit tests
@@ -492,16 +542,11 @@ fn run_frontend_unit_tests(
             cmd.arg(f);
         }
 
-        let start = Instant::now();
-        let outcome = run_inherited_status_sync(cmd, "Frontend unit tests");
-        let elapsed = start.elapsed();
-
-        ui::print_info(&crate::repo::msg_completed_in_secs_1(
+        run_inherited_status_sync_with_timed_completion_ack(
+            cmd,
             "Frontend unit tests",
-            elapsed,
-        ));
-
-        outcome?;
+            "Frontend unit tests",
+        )?;
     }
 
     Ok(())
@@ -517,19 +562,14 @@ fn run_backend_integration_tests(backend_dir: &str, filter: Option<&str>) -> Res
 
     ui::print_info(&format!("Running cargo {}", args.join(" ")));
 
-    let start = Instant::now();
     let cargo = cargo_bin();
     let mut cmd = Command::new(&cargo);
     cmd.current_dir(backend_dir).args(&args);
-    let outcome = run_inherited_status_sync(cmd, "Backend integration tests");
-    let elapsed = start.elapsed();
-
-    ui::print_info(&crate::repo::msg_completed_in_secs_1(
+    run_inherited_status_sync_with_timed_completion_ack(
+        cmd,
+        "Backend integration tests",
         "Integration tests",
-        elapsed,
-    ));
-
-    outcome
+    )
 }
 
 /// Prepare E2E test images by building them via Nix and loading into Docker
@@ -2330,11 +2370,23 @@ mod e2e_status_spawn_routing_tests {
     /// (a3d51eb). Same three-primitive discipline: negative side
     /// forbids the inline `.status()` builder-terminator at any code
     /// line in the module body; positive side pins that
-    /// `run_inherited_status_sync(` appears at ≥7 code lines (one
-    /// per pre-lift spawn — the six original status-only sites plus
-    /// the `docker load` site whose stdin-piping-specific `.spawn()`
-    /// + `.wait()` shape now collapses onto the same primitive), so
-    /// a regression that dropped every delegation cannot leave the
+    /// `run_inherited_status_sync(` appears at ≥5 code lines in the
+    /// production body — the four surviving direct consumer sites
+    /// ([`super::run_frontend_unit_tests`]'s report branch,
+    /// [`super::run_e2e_tests`], and the two
+    /// [`super::build_and_load_image`] spawns for `nix build` and the
+    /// piped `docker load`) plus the ONE indirection through
+    /// [`super::run_inherited_status_sync_with_timed_completion_ack`]
+    /// that fuses the three test-pyramid-consumer sites
+    /// ([`super::run_backend_unit_tests`],
+    /// [`super::run_frontend_unit_tests`]'s no-report branch, and
+    /// [`super::run_backend_integration_tests`]) onto one delegation
+    /// call. The primitive-fused sites STILL route through
+    /// `run_inherited_status_sync` — just one hop deeper — so the
+    /// shield's semantic intent (every status-only spawn reaches
+    /// [`crate::retry::run_inherited_status_sync`]) is preserved by
+    /// the primitive's body carrying the fifth delegation. A
+    /// regression that dropped any delegation cannot leave the
     /// negative scan trivially satisfied by absence. Both hits
     /// route through [`crate::test_support::code_line_hits`] for
     /// anti-docstring-self-match discipline. Scan bounds from file
@@ -2348,12 +2400,16 @@ mod e2e_status_spawn_routing_tests {
         crate::test_support::assert_source_routes_status_only_spawns_through_run_inherited_status_sync(
             include_str!("e2e.rs"),
             "commands/e2e.rs",
-            7,
-            "all seven status-only spawns (`cargo test --lib`, `bun \
-             run test` reporter + console branches, `cargo test \
-             --test integration_tests`, `cargo test --test \
-             e2e_tests`, `nix build <flake-attr>`, and the piped \
-             `docker load` in `build_and_load_image`)",
+            5,
+            "all seven status-only spawns — three test-pyramid \
+             consumers (`cargo test --lib`, `bun run test` console \
+             branch, `cargo test --test integration_tests`) fused \
+             onto ONE `run_inherited_status_sync` delegation through \
+             `run_inherited_status_sync_with_timed_completion_ack`, \
+             plus four direct delegations (`bun run test` reporter \
+             branch, `cargo test --test e2e_tests`, `nix build \
+             <flake-attr>`, and the piped `docker load` in \
+             `build_and_load_image`)",
         );
     }
 }
@@ -2686,6 +2742,93 @@ mod discard_post_run_e2e_cleanup_body_tests {
              a caller-visible crash, defeating the whole discard-error \
              semantics the primitive delivers to `run_e2e_gate`'s match \
              arms. Offending body: {body:?}",
+        );
+    }
+}
+
+#[cfg(test)]
+mod timed_completion_ack_delegation_tests {
+    /// Whole-module positive-delegation shield: the three pre-lift
+    /// test-pyramid spawn sites in `commands/e2e.rs` —
+    /// [`super::run_backend_unit_tests`],
+    /// [`super::run_frontend_unit_tests`]'s no-report `else` branch,
+    /// and [`super::run_backend_integration_tests`] — MUST reach the
+    /// spawn-and-time-and-ack four-line stanza through the
+    /// [`super::run_inherited_status_sync_with_timed_completion_ack`]
+    /// primitive, not by respelling the pre-lift stanza
+    ///
+    /// ```ignore
+    /// let start = Instant::now();
+    /// let outcome = run_inherited_status_sync(cmd, <op>);
+    /// let elapsed = start.elapsed();
+    /// ui::print_info(&crate::repo::msg_completed_in_secs_1(<label>, elapsed));
+    /// ```
+    ///
+    /// verbatim. Pre-lift every consumer spelled that four-line
+    /// stanza in-line, so a future refinement (a swap of
+    /// [`crate::ui::print_info`] for [`crate::ui::print_step_pass`], an
+    /// added `Started at ...` opener, a switch of the
+    /// [`crate::repo::msg_completed_in_secs_1`] dialect to a two-decimal
+    /// precision, or a promotion of the tail to a themed banner via
+    /// [`crate::ui`]) would have to be applied to three lockstep call
+    /// arms — the exact class of drift the sibling
+    /// `crate::stage_completion_ack::print_stage_completion_ack` primitive
+    /// (7d2e5d3), `crate::pre_release_flux_health_check_step` (e56268c),
+    /// and `crate::post_release_flux_health_check_step` (97952ba) lifts
+    /// closed on their respective ceremony surfaces.
+    ///
+    /// The primitive-name identifier
+    /// `run_inherited_status_sync_with_timed_completion_ack(` must
+    /// appear at ≥ 4 code-line hits in the module — one at the
+    /// definition site plus one at each of the three consumer sites.
+    /// A fourth consumer landing anywhere in the module MUST route
+    /// through the same primitive, raising the count monotonically;
+    /// a regression to the pre-lift four-line stanza at any site
+    /// drops the count and flips this assertion. The scan runs
+    /// against the whole file (`include_str!("e2e.rs")`), so this
+    /// shield's own docstring mentions of the primitive name count
+    /// toward the total — but docstring hits ride a `///` prefix and
+    /// [`crate::test_support::code_line_hits`] filters those out, so
+    /// the code-line count reflects real call-sites only.
+    ///
+    /// The two remaining `run_inherited_status_sync(cmd, ...)` code
+    /// lines in this module ([`super::run_frontend_unit_tests`]'s
+    /// report branch — extra `println!()` + JSON-report line between
+    /// elapsed and ack — and [`super::run_e2e_tests`] — cleanup +
+    /// diagnostics between elapsed and ack) are NOT in the four-line
+    /// stanza shape this primitive owns. Their surrounding ceremony
+    /// diverges from the primitive's contract, so the shield
+    /// intentionally leaves them unscored: adding them under the same
+    /// primitive would require an ack-precede-with-blank-line +
+    /// post-cleanup-hook axis this primitive intentionally omits, at
+    /// the cost of collapsing two genuinely-different stanzas into
+    /// one flag-driven surface that reads worse than either half.
+    #[test]
+    fn test_pyramid_spawn_sites_delegate_through_timed_completion_ack_primitive() {
+        const SOURCE: &str = include_str!("e2e.rs");
+        let production_body =
+            crate::test_support::module_body_before_first_cfg_test(SOURCE, "commands/e2e.rs");
+        let primitive_hits = crate::test_support::code_line_hits(
+            production_body,
+            "run_inherited_status_sync_with_timed_completion_ack(",
+        );
+        assert_eq!(
+            primitive_hits.len(),
+            4,
+            "commands/e2e.rs's production body (before the first \
+             `#[cfg(test)]` marker) MUST spell \
+             `run_inherited_status_sync_with_timed_completion_ack(` at \
+             EXACTLY 4 code-line hits — the definition plus the three \
+             pre-lift consumer sites (`run_backend_unit_tests`, \
+             `run_frontend_unit_tests`'s no-report branch, \
+             `run_backend_integration_tests`). A regression to the \
+             pre-lift four-line stanza at any consumer drops this count \
+             to 3; a fifth consumer landing under the same stanza \
+             raises it to 5 and MUST route through the same primitive \
+             rather than in-line a fourth pre-lift respell. Found {} \
+             sites:\n{}",
+            primitive_hits.len(),
+            primitive_hits.join("\n"),
         );
     }
 }
