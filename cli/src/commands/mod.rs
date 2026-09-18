@@ -21,6 +21,7 @@ pub mod deployment_rollout_wait_step;
 pub mod developer_tool_phase_open;
 pub mod developer_tools;
 pub mod e2e;
+pub mod env_indexed_step_prefix;
 pub mod expected_tag_annotation_failure_warn;
 pub mod federation;
 pub mod federation_tests;

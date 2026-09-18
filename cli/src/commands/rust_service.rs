@@ -1459,12 +1459,12 @@ pub async fn orchestrate_release(
             let namespace = resolve_namespace_for_env(env, namespace_override.as_deref())?;
 
             println!();
-            println!(
-                "   [{}/{}] {} migrations → {}",
+            crate::commands::env_indexed_step_prefix::print_env_indexed_step_prefix(
                 i + 1,
                 environments.len(),
-                env.cyan().bold(),
-                namespace.dimmed()
+                env,
+                &namespace,
+                crate::commands::env_indexed_step_prefix::EnvIndexedStepPhase::Migrations,
             );
 
             // Check and reset stuck Shinka migrations first
@@ -1499,12 +1499,12 @@ pub async fn orchestrate_release(
         let namespace = resolve_namespace_for_env(env, namespace_override.as_deref())?;
 
         println!();
-        println!(
-            "   [{}/{}] {} → {}",
+        crate::commands::env_indexed_step_prefix::print_env_indexed_step_prefix(
             i + 1,
             environments.len(),
-            env.cyan().bold(),
-            namespace.dimmed()
+            env,
+            &namespace,
+            crate::commands::env_indexed_step_prefix::EnvIndexedStepPhase::Deploy,
         );
 
         // Deploy to this environment (updates manifest, commits)
