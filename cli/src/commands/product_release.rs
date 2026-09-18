@@ -356,13 +356,11 @@ pub async fn product_release(
         );
     };
 
-    println!(
-        "{} {} Product Release {}",
-        ">>".bold(),
-        product.cyan().bold(),
-        format!("(env: {}, sha: {})", target_env, git_sha).dimmed()
+    crate::product_workflow_intro_banner::print_product_workflow_intro_banner(
+        &product,
+        "Product Release",
+        &format!("(env: {}, sha: {})", target_env, git_sha),
     );
-    crate::ui::print_ascii_title_underline(60);
 
     // Show release plan
     crate::ui::print_step_heading("Release Plan:");

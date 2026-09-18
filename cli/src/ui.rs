@@ -14926,17 +14926,10 @@ mod tests {
     /// this shield's `commands/*.rs` scope).
     #[test]
     fn print_ascii_title_underline_callers_delegate_through_primitive() {
-        const CALLERS: &[(&str, &str)] = &[
-            (
-                include_str!("commands/developer_tools.rs"),
-                "commands/developer_tools.rs",
-            ),
-            (include_str!("commands/rollback.rs"), "commands/rollback.rs"),
-            (
-                include_str!("commands/product_release.rs"),
-                "commands/product_release.rs",
-            ),
-        ];
+        const CALLERS: &[(&str, &str)] = &[(
+            include_str!("commands/developer_tools.rs"),
+            "commands/developer_tools.rs",
+        )];
         // `commands/web_service.rs` is deliberately absent from
         // this positive-forwarding roster: its two pre-lift
         // consumers of `crate::ui::print_ascii_title_underline(50)`
@@ -14964,6 +14957,23 @@ mod tests {
         // through the fused primitive, exactly as
         // `commands/web_service.rs` does above. The negative
         // re-inline check still runs for this module below.
+        //
+        // `commands/rollback.rs` and `commands/product_release.rs`
+        // are likewise deliberately absent post-lift: their two
+        // pre-lift consumers of
+        // `crate::ui::print_ascii_title_underline(60)` — the
+        // `>> <product> Rollback <detail>` and `>> <product> Product
+        // Release <detail>` product-workflow intro banners —
+        // migrated onto the fused
+        // [`crate::product_workflow_intro_banner::print_product_workflow_intro_banner`]
+        // primitive, which delegates internally to
+        // [`super::write_ascii_title_underline`]. Post-lift both
+        // modules have NO direct call to
+        // `print_ascii_title_underline` on the migrated banner
+        // stanza — the underline reaches its rendered banner
+        // transitively through the fused primitive. The negative
+        // re-inline check still runs for both modules below as part
+        // of a whole-crate sweep.
         for (source, module_path) in CALLERS {
             let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
             for (i, line) in body.lines().enumerate() {
@@ -14988,13 +14998,25 @@ mod tests {
                  through."
             );
         }
-        // Negative re-inline sweep for `commands/web_service.rs`
-        // (no positive forwarding count — its two consumers now
-        // reach the underline transitively through
-        // [`super::print_command_intro_banner`]).
-        {
-            let source = include_str!("commands/web_service.rs");
-            let module_path = "commands/web_service.rs";
+        // Negative re-inline sweep for the modules whose
+        // positive-forwarding count moved to a fused primitive:
+        // `commands/web_service.rs` (through
+        // [`super::print_command_intro_banner`]),
+        // `commands/rollback.rs`, and `commands/product_release.rs`
+        // (both through
+        // [`crate::product_workflow_intro_banner::print_product_workflow_intro_banner`]).
+        const NEG_ONLY_MODULES: &[(&str, &str)] = &[
+            (
+                include_str!("commands/web_service.rs"),
+                "commands/web_service.rs",
+            ),
+            (include_str!("commands/rollback.rs"), "commands/rollback.rs"),
+            (
+                include_str!("commands/product_release.rs"),
+                "commands/product_release.rs",
+            ),
+        ];
+        for (source, module_path) in NEG_ONLY_MODULES {
             let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
             for (i, line) in body.lines().enumerate() {
                 assert!(
@@ -15003,12 +15025,11 @@ mod tests {
                      `println!(\"{{}}\", \"=\".repeat(<width>));` \
                      ASCII title-underline rule — that two-liner was \
                      lifted onto `crate::ui::print_ascii_title_underline` \
-                     (and, for the fused four-part title + underline \
-                     stanza this module carried pre-lift, onto \
-                     `crate::ui::print_command_intro_banner`). A \
-                     re-inline would silently reopen the duplication \
-                     class this shield exists to close. Offending \
-                     line: {line:?}",
+                     (and, for a fused title + underline stanza this \
+                     module carried pre-lift, onto its owning fused \
+                     primitive). A re-inline would silently reopen the \
+                     duplication class this shield exists to close. \
+                     Offending line: {line:?}",
                     lineno = i + 1
                 );
             }

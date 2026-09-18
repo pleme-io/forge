@@ -116,13 +116,11 @@ pub async fn execute(
     println!();
 
     // ─── Show rollback plan ─────────────────────────────────────────────────
-    println!(
-        "{} {} Rollback {}",
-        ">>".bold(),
-        product.cyan().bold(),
-        format!("(env: {})", target_env).dimmed()
+    crate::product_workflow_intro_banner::print_product_workflow_intro_banner(
+        &product,
+        "Rollback",
+        &format!("(env: {})", target_env),
     );
-    crate::ui::print_ascii_title_underline(60);
     crate::ui::print_step_heading("Rollback Plan:");
 
     for entry in &entries {

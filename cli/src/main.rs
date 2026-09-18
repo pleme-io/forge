@@ -129,6 +129,7 @@ mod post_deploy_http_client;
 mod probe_dump;
 mod probe_verifying;
 mod product_service_id;
+mod product_workflow_intro_banner;
 mod prompt_confirm;
 mod push_op_label;
 mod pushed_image_ref_list;
