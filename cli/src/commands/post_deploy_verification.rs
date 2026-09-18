@@ -307,10 +307,10 @@ pub async fn verify_health_endpoint(
                         )
                         .await;
                     } else {
-                        crate::ui::print_step_failure(&format!(
-                            "Health check failed: Status {}",
-                            status
-                        ));
+                        crate::post_deploy_endpoint_status_failure::print_post_deploy_endpoint_status_failure(
+                            crate::post_deploy_endpoint_status_failure::PostDeployEndpointCheck::Health,
+                            status,
+                        );
                         return Ok((false, Some(latency_ms)));
                     }
                 }
@@ -378,10 +378,10 @@ pub async fn verify_graphql_endpoint(
                     }
                 }
             } else {
-                crate::ui::print_step_failure(&format!(
-                    "GraphQL check failed: Status {}",
-                    response.status()
-                ));
+                crate::post_deploy_endpoint_status_failure::print_post_deploy_endpoint_status_failure(
+                    crate::post_deploy_endpoint_status_failure::PostDeployEndpointCheck::Graphql,
+                    response.status(),
+                );
                 return Ok((false, Some(latency_ms)));
             }
         }
