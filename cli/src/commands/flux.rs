@@ -405,28 +405,32 @@ async fn reconcile_source() -> Result<()> {
 ///
 /// This function reconciles each phase in order, skipping phases that don't exist.
 async fn reconcile_product_chain(namespace: &str) -> Result<()> {
-    // The phases in dependency order. The final phase uses the bare namespace name.
-    let phases = [
-        "init",
-        "secrets",
-        "databases",
-        "bootstrap",
-        "governance",
-        "migrations",
-        "", // final phase = bare kustomization name (e.g., "{product}-{environment}")
-    ];
+    // The 7-phase dependency-order chain
+    // (`init → secrets → databases → bootstrap → governance →
+    // migrations → app`) lives in
+    // `commands/flux_product_chain_phase::FluxProductChainPhase::ORDER`
+    // as a `[Self; 7]` slice. Pre-lift this site seeded the phases as
+    // a `[&'static str; 7]` inline literal whose final element was the
+    // empty string `""` sentinel, and the loop body then carried three
+    // sibling `if phase.is_empty() { <app arm> } else { <named arm> }`
+    // decisions (kustomization-name resolution, ready-branch label,
+    // reconcile-branch label). Post-lift the closed enum owns all
+    // three projections; adding a new phase means adding a variant +
+    // an `ORDER` entry + a match arm, and the exhaustiveness check
+    // forecloses the pre-lift "slice extended without updating the
+    // sibling label projection" drift.
+    use crate::commands::flux_product_chain_phase::{
+        print_phase_already_ready_ack, print_phase_reconcile_nonzero_warn,
+        print_phase_reconciled_ack, print_reconciling_phase_announce, FluxProductChainPhase,
+    };
 
     println!(
         "   🔄 Reconciling product chain for {}...",
         namespace.cyan()
     );
 
-    for phase in &phases {
-        let ks_name = if phase.is_empty() {
-            namespace.to_string()
-        } else {
-            format!("{}-{}", namespace, phase)
-        };
+    for phase in FluxProductChainPhase::ORDER {
+        let ks_name = phase.kustomization_name(namespace);
 
         // Route through the canonical `flux_get::get_kustomization_scoped`
         // primitive so this site honors `FLUX_BIN` (via
@@ -447,13 +451,11 @@ async fn reconcile_product_chain(namespace: &str) -> Result<()> {
         };
 
         if row.is_ready() {
-            let phase_label = if phase.is_empty() { "app" } else { phase };
-            println!("      ✓ {} (already ready)", phase_label.dimmed());
+            print_phase_already_ready_ack(phase);
             continue;
         }
 
-        let phase_label = if phase.is_empty() { "app" } else { phase };
-        println!("      ⏳ Reconciling {}...", phase_label);
+        print_reconciling_phase_announce(phase);
 
         // Route through the canonical `flux_reconcile` primitive so this
         // site honors `FLUX_BIN` (via `get_tool_path("flux")`) and yields
@@ -461,7 +463,7 @@ async fn reconcile_product_chain(namespace: &str) -> Result<()> {
         // stderr)` failure record on non-zero exit — best-effort warn
         // preserved by matching on the typed variant.
         match crate::flux_reconcile::reconcile_kustomization(&ks_name, "flux-system", false).await {
-            Ok(()) => println!("      ✓ {}", phase_label.green()),
+            Ok(()) => print_phase_reconciled_ack(phase),
             Err(e @ crate::flux_reconcile::FluxReconcileError::SpawnFailed { .. }) => {
                 return Err(anyhow::Error::new(e)
                     .context(format!("Failed to reconcile kustomization {}", ks_name)));
@@ -473,13 +475,7 @@ async fn reconcile_product_chain(namespace: &str) -> Result<()> {
                 // ready. The verify_deployment_image step will catch this
                 // downstream. Surface exit code + trimmed stderr so the operator
                 // has a real hint instead of a bare "returned non-zero".
-                println!(
-                    "      ⚠ {} (reconcile returned non-zero, may need dependency; \
-                     exit={:?}): {}",
-                    phase_label.yellow(),
-                    exit_code,
-                    stderr.trim()
-                );
+                print_phase_reconcile_nonzero_warn(phase, exit_code, &stderr);
             }
         }
     }
