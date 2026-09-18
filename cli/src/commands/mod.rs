@@ -65,6 +65,7 @@ pub mod release_commit;
 pub mod rollback;
 pub mod rollout;
 pub mod rust_service;
+pub mod rust_test_phase;
 pub mod schema_validation;
 pub mod search_sync;
 pub mod seed;

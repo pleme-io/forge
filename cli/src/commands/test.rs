@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use colored::Colorize;
 use serde::Deserialize;
 use tokio::process::Command;
@@ -239,36 +239,23 @@ async fn run_rust_tests(service: &str, service_dir: &str, test_type: TestType) -
     let cargo = crate::repo::get_tool_path("CARGO", "cargo");
 
     if run_unit {
-        println!(
-            "  {} Running Rust unit tests for {}...",
-            "🧪".bright_yellow(),
-            service.bright_cyan()
-        );
-
-        let mut cmd = Command::new(&cargo);
-        cmd.args(["test", "--lib", "--bins"])
-            .current_dir(service_dir);
-        crate::retry::run_inherited_status(cmd, "cargo test --lib --bins")
-            .await
-            .context("Failed to run cargo test")?;
-
-        crate::ui::print_summary_pass("Rust unit tests passed");
+        crate::commands::rust_test_phase::announce_and_run_rust_test_phase(
+            &cargo,
+            service,
+            service_dir,
+            crate::commands::rust_test_phase::RustTestPhase::Unit,
+        )
+        .await?;
     }
 
     if run_integration {
-        println!(
-            "  {} Running Rust integration tests for {}...",
-            "🔗".bright_yellow(),
-            service.bright_cyan()
-        );
-
-        let mut cmd = Command::new(&cargo);
-        cmd.args(["test", "--test", "*"]).current_dir(service_dir);
-        crate::retry::run_inherited_status(cmd, "cargo test --test *")
-            .await
-            .context("Failed to run cargo integration tests")?;
-
-        crate::ui::print_summary_pass("Rust integration tests passed");
+        crate::commands::rust_test_phase::announce_and_run_rust_test_phase(
+            &cargo,
+            service,
+            service_dir,
+            crate::commands::rust_test_phase::RustTestPhase::Integration,
+        )
+        .await?;
     }
 
     print_success_summary();
