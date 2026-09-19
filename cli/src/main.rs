@@ -67,6 +67,10 @@ mod attic_login_argv;
 mod attic_push_step;
 mod backend_frontend_dirs_preamble;
 mod bookmark_git_sha_field;
+// `<repo_root>/pkgs/platform/bootstrap` composition primitive — sibling of
+// `hanabi_dir` for the Bootstrap platform component. Consumers in
+// `commands/bootstrap.rs::{get_bootstrap_dir, regenerate}` forward through it.
+mod bootstrap_dir;
 mod building_progress_message;
 mod bun_argv;
 mod bun_install_frozen_lockfile_capture;

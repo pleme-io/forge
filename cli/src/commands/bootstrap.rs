@@ -181,7 +181,7 @@ fn get_bootstrap_dir() -> Result<std::path::PathBuf> {
 
     // Otherwise, find repo root and compute path
     let repo_root = find_repo_root()?;
-    Ok(repo_root.join("pkgs/platform/bootstrap"))
+    Ok(crate::bootstrap_dir::bootstrap_dir(&repo_root))
 }
 
 /// Build and push a single bootstrap binary
@@ -610,7 +610,7 @@ pub async fn regenerate() -> Result<()> {
 
     // Get bootstrap directory
     let bootstrap_dir = crate::repo::path_from_env_optional("SERVICE_DIR")
-        .unwrap_or_else(|| repo_root.join("pkgs/platform/bootstrap"));
+        .unwrap_or_else(|| crate::bootstrap_dir::bootstrap_dir(&repo_root));
 
     info!("📁 Bootstrap directory: {}", bootstrap_dir.display());
 

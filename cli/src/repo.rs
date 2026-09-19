@@ -1028,8 +1028,10 @@ pub fn path_from_env(env_var: &str, miss_context: &'static str) -> Result<PathBu
 ///   env-var-first shortcut before falling back to
 ///   `DeployConfig::find_repo_root(&current_dir)`.
 /// - `commands/bootstrap.rs::get_bootstrap_dir` (`SERVICE_DIR`) —
-///   env-var-first shortcut before falling back to `find_repo_root()
-///   .join("pkgs/platform/bootstrap")`.
+///   env-var-first shortcut before falling back to
+///   [`crate::bootstrap_dir::bootstrap_dir(&find_repo_root()?)`](crate::bootstrap_dir::bootstrap_dir),
+///   the typed sibling of [`crate::hanabi_dir::hanabi_dir`] that owns
+///   the `<repo_root>/pkgs/platform/bootstrap` composition.
 /// - `commands/pangea.rs::find_external_repo` (`<NAME>_DIR`, dynamic)
 ///   — env-var-first shortcut before searching standard `$HOME/code`
 ///   / `$HOME/.local/src` locations.
