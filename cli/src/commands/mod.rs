@@ -57,6 +57,7 @@ pub mod post_release_flux_health_check_step;
 pub mod pre_release_flux_health_check_step;
 pub mod prerelease;
 pub mod product_release;
+pub mod product_release_phase_skipped;
 pub mod push;
 pub mod rebac_check_heading_with_gap;
 pub mod rebac_check_skipped_missing_dir;

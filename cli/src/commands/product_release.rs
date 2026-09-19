@@ -652,8 +652,14 @@ pub async fn product_release(
         .await?;
         println!();
 
-        crate::ui::print_phase_skipped("Phase 4: Skipping dashboard sync (--build-only)");
-        crate::ui::print_phase_skipped("Phase 5: Skipping post-deploy verification (--build-only)");
+        crate::commands::product_release_phase_skipped::print_product_release_phase_skipped(
+            crate::commands::product_release_phase_skipped::ProductReleaseSkippablePhase::DashboardSync,
+            Some(crate::commands::product_release_phase_skipped::PRODUCT_RELEASE_SKIP_CAUSE_BUILD_ONLY),
+        );
+        crate::commands::product_release_phase_skipped::print_product_release_phase_skipped(
+            crate::commands::product_release_phase_skipped::ProductReleaseSkippablePhase::PostDeployVerification,
+            Some(crate::commands::product_release_phase_skipped::PRODUCT_RELEASE_SKIP_CAUSE_BUILD_ONLY),
+        );
 
         crate::ui::print_release_stage_banner(
             "BUILD COMPLETE",
@@ -777,7 +783,10 @@ pub async fn product_release(
         run_forge_subcommand_in_product_dir("dashboards", &repo_root, &product).await?;
         println!();
     } else {
-        crate::ui::print_phase_skipped("Phase 4: Skipping dashboard sync");
+        crate::commands::product_release_phase_skipped::print_product_release_phase_skipped(
+            crate::commands::product_release_phase_skipped::ProductReleaseSkippablePhase::DashboardSync,
+            None,
+        );
     }
 
     // ─── Phase 5: Post-deploy verification ──────────────────────────────────
@@ -800,7 +809,10 @@ pub async fn product_release(
         }
         println!();
     } else {
-        crate::ui::print_phase_skipped("Phase 5: Skipping post-deploy verification");
+        crate::commands::product_release_phase_skipped::print_product_release_phase_skipped(
+            crate::commands::product_release_phase_skipped::ProductReleaseSkippablePhase::PostDeployVerification,
+            None,
+        );
     }
 
     // ─── Done ───────────────────────────────────────────────────────────────
