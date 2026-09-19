@@ -251,6 +251,42 @@ impl GateSummary {
         self.failed.is_empty()
     }
 
+    /// Fold every `Vec` field of `other` into `self`, in field-declaration
+    /// order: `passed`, `failed`, `failed_details`, `skipped`. The scalar
+    /// `total_time_secs` is intentionally NOT touched — the caller owns
+    /// aggregate timing at the phase boundary, not per sub-summary.
+    ///
+    /// Lifts the pre-lift 3 sibling 6-line stanzas
+    ///
+    /// ```ignore
+    /// summary.passed.extend(<sub>.passed);
+    /// summary.failed.extend(<sub>.failed);
+    /// summary
+    ///     .failed_details
+    ///     .extend(<sub>.failed_details);
+    /// summary.skipped.extend(<sub>.skipped);
+    /// ```
+    ///
+    /// (Phase 0a `backend_results` / `migration_results` / `frontend_results`
+    /// tokio::join! demux) onto one call each. A future 4th parallel
+    /// sub-summary added to the join! tuple lands on the same primitive with
+    /// zero risk of dropping the `failed_details` half of the pair — the
+    /// pre-lift stanza's multi-line `summary\n    .failed_details\n    .extend`
+    /// break was the specific hand-copy trap a merge trait removes.
+    pub fn merge_from(&mut self, other: GateSummary) {
+        let GateSummary {
+            passed,
+            failed,
+            failed_details,
+            skipped,
+            total_time_secs: _,
+        } = other;
+        self.passed.extend(passed);
+        self.failed.extend(failed);
+        self.failed_details.extend(failed_details);
+        self.skipped.extend(skipped);
+    }
+
     pub fn print_summary(&self) {
         crate::ui::print_section_header("Gate Summary");
 
@@ -417,32 +453,13 @@ pub async fn execute(
         run_frontend_gates(&config),
     );
 
-    // Merge backend results
-    let backend_results = backend_results?;
-    summary.passed.extend(backend_results.passed);
-    summary.failed.extend(backend_results.failed);
-    summary
-        .failed_details
-        .extend(backend_results.failed_details);
-    summary.skipped.extend(backend_results.skipped);
-
-    // Merge migration results
-    let migration_results = migration_results?;
-    summary.passed.extend(migration_results.passed);
-    summary.failed.extend(migration_results.failed);
-    summary
-        .failed_details
-        .extend(migration_results.failed_details);
-    summary.skipped.extend(migration_results.skipped);
-
-    // Merge frontend results
-    let frontend_results = frontend_results?;
-    summary.passed.extend(frontend_results.passed);
-    summary.failed.extend(frontend_results.failed);
-    summary
-        .failed_details
-        .extend(frontend_results.failed_details);
-    summary.skipped.extend(frontend_results.skipped);
+    // Merge Phase 0a sub-summaries. Each `merge_from` call folds every
+    // Vec field (passed / failed / failed_details / skipped) at once —
+    // the pre-lift stanzas' `.failed_details.extend(...)` line, broken
+    // across three source lines, was the specific hand-copy trap.
+    summary.merge_from(backend_results?);
+    summary.merge_from(migration_results?);
+    summary.merge_from(frontend_results?);
 
     // ========================================
     // Phase 0b: Integration tests (G13)
@@ -1370,17 +1387,141 @@ mod tests {
 
         // Merge like the parallel gates do
         let mut merged = GateSummary::default();
-        merged.passed.extend(a.passed);
-        merged.failed.extend(a.failed);
-        merged.skipped.extend(a.skipped);
-        merged.passed.extend(b.passed);
-        merged.failed.extend(b.failed);
-        merged.skipped.extend(b.skipped);
+        merged.merge_from(a);
+        merged.merge_from(b);
 
         assert_eq!(merged.passed.len(), 2);
         assert_eq!(merged.failed.len(), 1);
         assert_eq!(merged.skipped.len(), 1);
         assert!(!merged.all_passed());
+    }
+
+    /// [`GateSummary::merge_from`] must fold `failed_details` too — the
+    /// half-stanza that lived on its own multi-line
+    /// `summary\n    .failed_details\n    .extend(...)` break in the
+    /// pre-lift Phase 0a demux, and that the previous
+    /// `test_gate_summary_merge` (pre-lift) did NOT exercise. A future
+    /// change that drops the field from `merge_from`'s body would still
+    /// pass the `passed/failed/skipped`-only assertions, so this shield
+    /// pins the fourth Vec explicitly.
+    #[test]
+    fn gate_summary_merge_from_folds_failed_details_field() {
+        let mut a = GateSummary::default();
+        a.failed.push("G3: fmt".to_string());
+        a.failed_details
+            .push(("G3".to_string(), vec!["file.rs unformatted".to_string()]));
+
+        let mut b = GateSummary::default();
+        b.failed.push("G4: test".to_string());
+        b.failed_details.push((
+            "G4".to_string(),
+            vec!["test_x FAILED".to_string(), "test_y panicked".to_string()],
+        ));
+
+        let mut merged = GateSummary::default();
+        merged.merge_from(a);
+        merged.merge_from(b);
+
+        assert_eq!(
+            merged.failed_details.len(),
+            2,
+            "merge_from must fold BOTH sub-summaries' failed_details \
+             entries — got {:?}",
+            merged.failed_details,
+        );
+        let total_detail_lines: usize = merged
+            .failed_details
+            .iter()
+            .map(|(_, lines)| lines.len())
+            .sum();
+        assert_eq!(
+            total_detail_lines, 3,
+            "merge_from must preserve every failed_details detail line \
+             from every sub-summary (1 from a + 2 from b = 3) — got \
+             {total_detail_lines}",
+        );
+    }
+
+    /// [`GateSummary::merge_from`] must NOT overwrite the receiver's
+    /// `total_time_secs` scalar — the pre-lift stanza did not touch it,
+    /// and phase-boundary timing is the caller's concern. This shield
+    /// pins that structural invariant against a future edit that "helpfully"
+    /// summed or replaced it inside the primitive's body.
+    #[test]
+    fn gate_summary_merge_from_leaves_total_time_secs_unchanged() {
+        let mut receiver = GateSummary {
+            total_time_secs: 12.5,
+            ..GateSummary::default()
+        };
+        let donor = GateSummary {
+            total_time_secs: 999.0,
+            ..GateSummary::default()
+        };
+        receiver.merge_from(donor);
+        assert_eq!(
+            receiver.total_time_secs, 12.5,
+            "merge_from must NOT touch total_time_secs — the caller owns \
+             aggregate timing at the phase boundary. Got {}",
+            receiver.total_time_secs,
+        );
+    }
+
+    /// Whole-module shield: `run_prerelease`'s Phase 0a demux must route
+    /// every parallel sub-summary through [`GateSummary::merge_from`].
+    /// The pre-lift shape spelled the four-line stanza
+    ///
+    /// ```ignore
+    /// summary.passed.extend(<x>.passed);
+    /// summary.failed.extend(<x>.failed);
+    /// summary.failed_details.extend(<x>.failed_details);
+    /// summary.skipped.extend(<x>.skipped);
+    /// ```
+    ///
+    /// three times, and its multi-line `summary\n    .failed_details\n
+    ///     .extend(...)` break was the specific hand-copy trap. A regression
+    /// that re-inlined even one sub-summary's four-line stanza would
+    /// silently divergence the trap surface again.
+    ///
+    /// Two-arm pin: negative side forbids `summary.failed_details.extend(`
+    /// and `summary.passed.extend(` from re-appearing in the module body;
+    /// positive side pins ≥3 `merge_from(` delegation calls so a dropped
+    /// call cannot leave the negative scan trivially satisfied by absence.
+    ///
+    /// Fail-before-pass-after: pre-lift the module body carried three
+    /// `summary.passed.extend(` and three `summary.failed_details.extend(`
+    /// hits (one per demuxed sub-summary), and zero `merge_from(` hits;
+    /// the shield's `== 0` and `>= 3` assertions each flip on the lift.
+    #[test]
+    fn phase_0a_demux_routes_every_sub_summary_through_merge_from() {
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("prerelease.rs"),
+            "commands/prerelease.rs",
+        );
+        for needle in [
+            "summary.passed.extend(",
+            "summary.failed.extend(",
+            "summary.failed_details.extend(",
+            "summary.skipped.extend(",
+            "summary\n        .failed_details\n        .extend(",
+        ] {
+            let hits = crate::test_support::code_line_hits(body, needle);
+            assert!(
+                hits.is_empty(),
+                "commands/prerelease.rs must NOT re-inline the pre-lift \
+                 Phase 0a merge stanza — every sub-summary routes through \
+                 `GateSummary::merge_from`, which folds all four Vec fields \
+                 at once. Offending hits for `{needle}`: {hits:?}",
+            );
+        }
+        let delegations = crate::test_support::code_line_hits(body, "summary.merge_from(").len();
+        assert!(
+            delegations >= 3,
+            "commands/prerelease.rs must route every Phase 0a parallel \
+             sub-summary (`backend_results`, `migration_results`, \
+             `frontend_results`) through `summary.merge_from(...)` — found \
+             only {delegations} delegation call(s); a dropped call would \
+             leave the negative-side scan trivially satisfied by absence.",
+        );
     }
 
     // ====================================================================
