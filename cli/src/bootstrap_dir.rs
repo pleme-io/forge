@@ -29,13 +29,14 @@
 //!
 //! This primitive is the Bootstrap-half of the same
 //! `<repo_root>/pkgs/platform/<component>` grammar the Hanabi half
-//! ([`crate::hanabi_dir::hanabi_dir`]) resolves. A future lift that
-//! grows a closed `PlatformComponent { Hanabi, Bootstrap }` enum plus
-//! one `platform_component_dir(repo_root, component)` accessor can
-//! land at ONE place and both this primitive and the Hanabi sibling
-//! forward through it; the two half-primitives exist so the census
-//! stays local and each consumer surface reaches for a name that
-//! matches its component rather than a generic slot.
+//! ([`crate::hanabi_dir::hanabi_dir`]) resolves. Post-lift both
+//! half-primitives forward through
+//! [`crate::platform_component::platform_component_dir`] — the closed-
+//! enum accessor that pins the shared `pkgs/platform` prefix at ONE
+//! construction surface. The two half-primitives remain as component-
+//! named forwarders so the caller-side census stays local and each
+//! consumer surface reaches for a name matching its component rather
+//! than the generic accessor.
 //!
 //! # THEORY grounding
 //!
@@ -73,7 +74,10 @@ use std::path::{Path, PathBuf};
 /// consumers, which both bind the result into a local `let` and hand
 /// `&bootstrap_dir` to downstream calls that must outlive the arg.
 pub fn bootstrap_dir(repo_root: &Path) -> PathBuf {
-    repo_root.join("pkgs/platform/bootstrap")
+    crate::platform_component::platform_component_dir(
+        repo_root,
+        crate::platform_component::PlatformComponent::Bootstrap,
+    )
 }
 
 #[cfg(test)]

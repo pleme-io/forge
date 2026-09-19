@@ -43,9 +43,11 @@
 //! `resolve_platform_component_dir(repo_root, name)` would either lose
 //! the two-argument-typing invariant (Hanabi callers never spell the
 //! component name inline) or force an open `&str` slot the two sibling
-//! components' consumer sites have no reason to accept. A future lift
-//! that grows a closed `PlatformComponent { Hanabi, Bootstrap }` enum
-//! can land at ONE place; this primitive is the Hanabi-only half.
+//! components' consumer sites have no reason to accept. Post-lift the
+//! shared prefix lives at the closed-enum accessor
+//! [`crate::platform_component::platform_component_dir`] — this
+//! primitive stays as the Hanabi-only forwarder so the caller-side
+//! census stays local.
 //!
 //! # Distinct from the sibling product-directory composition
 //!
@@ -97,7 +99,10 @@ use std::path::{Path, PathBuf};
 /// immediately after the call. Matches the pre-lift chained-`.join`
 /// behavior at both consumers.
 pub fn hanabi_dir(repo_root: &Path) -> PathBuf {
-    repo_root.join("pkgs/platform/hanabi")
+    crate::platform_component::platform_component_dir(
+        repo_root,
+        crate::platform_component::PlatformComponent::Hanabi,
+    )
 }
 
 #[cfg(test)]

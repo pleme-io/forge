@@ -70,6 +70,9 @@ mod bookmark_git_sha_field;
 // `<repo_root>/pkgs/platform/bootstrap` composition primitive — sibling of
 // `hanabi_dir` for the Bootstrap platform component. Consumers in
 // `commands/bootstrap.rs::{get_bootstrap_dir, regenerate}` forward through it.
+// Post-lift both half-primitives (`bootstrap_dir`, `hanabi_dir`) delegate
+// through `platform_component::platform_component_dir` — the closed-enum
+// accessor that pins the `pkgs/platform` prefix at one construction surface.
 mod bootstrap_dir;
 mod building_progress_message;
 mod bun_argv;
@@ -79,6 +82,7 @@ mod cargo_nix_ceremony_banner;
 mod cargo_test_argv;
 mod cloudflare;
 mod cloudflare_purge_success_ack;
+mod platform_component;
 // Announce-run-ack fusion for `crate2nix generate` in <dir> — the sibling
 // of `generate_cargo_nix_step` for the direct-binary shape.
 mod crate2nix_regenerate_step;
