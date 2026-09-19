@@ -252,13 +252,7 @@ pub async fn push_single(
 
     // Build or use provided image path
     let image_path = if skip_build {
-        image_path.ok_or_else(|| {
-            anyhow::anyhow!(
-                "--image-path is required when using --skip-build\n\n  \
-                 Either remove --skip-build to build the image, or provide\n  \
-                 the path to an existing image with --image-path"
-            )
-        })?
+        crate::skip_build_image_path::resolve_skip_build_image_path(image_path)?
     } else {
         let bootstrap_dir = get_bootstrap_dir()?;
         verify_directory(&bootstrap_dir, &["flake.nix"])?;

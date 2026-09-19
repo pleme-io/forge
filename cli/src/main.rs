@@ -165,6 +165,11 @@ mod screenshot_diag;
 mod shinka_migration_reset_ack;
 mod short_human_duration;
 mod short_sha_tagging_preamble;
+// Typed primitive: resolve the `--image-path` argument when `--skip-build`
+// is used, or bail with the canonical operator-facing error message. Both
+// `commands/bootstrap.rs::push_single` and `commands/pangea.rs::push_single`
+// delegate through it so the wording of the error message lives at ONE line.
+mod skip_build_image_path;
 mod skipping_step;
 mod smoke_query_failure_record;
 mod stage_completion_ack;
