@@ -363,9 +363,24 @@ mod tests {
         use std::path::PathBuf;
         let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
         // (module basename, minimum forward count).
+        // Post-lift: 5 of the 6 pre-lift `comprehensive_release.rs`
+        // fused-stanza sites migrated onto
+        // `commands/comprehensive_release_step_header_timed_start::
+        // announce_step_header_and_start_timer`, which itself forwards
+        // through `announce_step_header_with_trailing_blank` at ONE
+        // primitive body — so the caller-side floor shifts from
+        // ≥6-at-`comprehensive_release.rs` to ≥1-at-
+        // `comprehensive_release.rs` (the only remaining direct call
+        // is the Step 3/5 `else`-branch that fires when
+        // `compose_file` is `None` and never composes a timed
+        // completion) plus ≥1 inside the timed-start fusion module.
         let expectations: &[(&str, usize)] = &[
             ("commands/deploy.rs", 2),
-            ("commands/comprehensive_release.rs", 6),
+            ("commands/comprehensive_release.rs", 1),
+            (
+                "commands/comprehensive_release_step_header_timed_start.rs",
+                1,
+            ),
             ("commands/github_runner_ci.rs", 3),
             ("commands/nix_builder.rs", 1),
         ];

@@ -292,12 +292,8 @@ pub async fn execute(
     // STEP 1: PRE-BUILD VALIDATION (Unit Tests)
     // ========================================================================
     if !skip_unit_tests {
-        let step_start = Instant::now();
-        crate::step_header_with_trailing_blank::announce_step_header_with_trailing_blank(
-            1,
-            5,
-            "Pre-Build Validation",
-        );
+        let step_start = crate::commands::comprehensive_release_step_header_timed_start
+            ::announce_step_header_and_start_timer(1, 5, "Pre-Build Validation");
 
         info!("🧪 Running unit tests...");
         println!();
@@ -370,12 +366,8 @@ pub async fn execute(
     let build_output = "result";
 
     if !skip_build {
-        let step_start = Instant::now();
-        crate::step_header_with_trailing_blank::announce_step_header_with_trailing_blank(
-            2,
-            5,
-            "Build Docker Image",
-        );
+        let step_start = crate::commands::comprehensive_release_step_header_timed_start
+            ::announce_step_header_and_start_timer(2, 5, "Build Docker Image");
 
         commands::build::execute(
             flake_attr.clone(),
@@ -402,12 +394,8 @@ pub async fn execute(
     // ========================================================================
     if !skip_integration_tests {
         if let Some(compose_path) = &compose_file {
-            let step_start = Instant::now();
-            crate::step_header_with_trailing_blank::announce_step_header_with_trailing_blank(
-                3,
-                5,
-                "Integration Testing",
-            );
+            let step_start = crate::commands::comprehensive_release_step_header_timed_start
+                ::announce_step_header_and_start_timer(3, 5, "Integration Testing");
 
             // Check if compose file exists
             let compose_file_path = std::path::Path::new(&working_dir).join(compose_path);
@@ -747,12 +735,8 @@ pub async fn execute(
     // STEP 4: PUSH TO REGISTRY
     // ========================================================================
     if !skip_push {
-        let step_start = Instant::now();
-        crate::step_header_with_trailing_blank::announce_step_header_with_trailing_blank(
-            4,
-            5,
-            "Push to Registry",
-        );
+        let step_start = crate::commands::comprehensive_release_step_header_timed_start
+            ::announce_step_header_and_start_timer(4, 5, "Push to Registry");
 
         commands::push::execute(
             build_output.to_string(),
@@ -782,12 +766,8 @@ pub async fn execute(
     // STEP 5: DEPLOY TO KUBERNETES
     // ========================================================================
     if !skip_deploy {
-        let step_start = Instant::now();
-        crate::step_header_with_trailing_blank::announce_step_header_with_trailing_blank(
-            5,
-            5,
-            "Deploy to Kubernetes",
-        );
+        let step_start = crate::commands::comprehensive_release_step_header_timed_start
+            ::announce_step_header_and_start_timer(5, 5, "Deploy to Kubernetes");
 
         // Create result symlink at repo root for deploy command
         let result_link = std::path::Path::new(&repo_root_str).join("result");

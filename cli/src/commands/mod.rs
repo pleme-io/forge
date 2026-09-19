@@ -12,6 +12,7 @@ pub mod codegen;
 pub mod codegen_validation;
 pub mod composition_check_print;
 pub mod comprehensive_release;
+pub mod comprehensive_release_step_header_timed_start;
 pub mod comprehensive_release_step_pass_timed;
 pub mod crossplane;
 pub mod crossplane_xpkg_push;
