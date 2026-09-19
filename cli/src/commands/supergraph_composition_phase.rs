@@ -72,6 +72,33 @@ const RUNNING_ANNOUNCEMENT_SUFFIX: &str = "-composition validation...";
 /// one edit.
 const PASS_MESSAGE_SUFFIX: &str = "-composition validation passed";
 
+/// The invariant suffix each pre-lift `bail!` composition-validation-
+/// failure literal spelled after the `Pre|Post` adjective slot and
+/// BEFORE the phase-specific consequence sentence —
+/// `"-composition validation failed."` (period included). Sibling of
+/// [`PASS_MESSAGE_SUFFIX`] under the correlated pairing: a re-phrasing
+/// of the pass suffix and the failure suffix (both name the same
+/// `-composition validation` narrative) flows to both from adjacent
+/// const edits rather than through drift-prone inline literals across
+/// `commands/federation.rs`.
+const FAILURE_MESSAGE_SUFFIX: &str = "-composition validation failed.";
+
+/// The pre-lift `bail!` consequence sentence spliced after
+/// [`FAILURE_MESSAGE_SUFFIX`] on the [`SupergraphCompositionPhase::Pre`]
+/// arm — `" Cannot proceed with composition."` (leading ASCII space
+/// preserved so the concatenation with the shared suffix reads as one
+/// English sentence pair). Byte-identical to the pre-lift inline
+/// literal at `commands/federation.rs::update_federation` :161.
+const PRE_FAILURE_CONSEQUENCE_TAIL: &str = " Cannot proceed with composition.";
+
+/// The pre-lift `bail!` consequence sentence spliced after
+/// [`FAILURE_MESSAGE_SUFFIX`] on the [`SupergraphCompositionPhase::Post`]
+/// arm — `" Supergraph may be invalid."` (leading ASCII space
+/// preserved for the same reason as
+/// [`PRE_FAILURE_CONSEQUENCE_TAIL`]). Byte-identical to the pre-lift
+/// inline literal at `commands/federation.rs::update_federation` :262.
+const POST_FAILURE_CONSEQUENCE_TAIL: &str = " Supergraph may be invalid.";
+
 /// The two typed variants of the announce-and-close supergraph-
 /// composition-validation-phase stanza the fusion primitive
 /// supports.
@@ -158,6 +185,39 @@ impl SupergraphCompositionPhase {
     pub fn pass_message(self) -> String {
         format!("{}{}", self.capitalized_adjective(), PASS_MESSAGE_SUFFIX)
     }
+
+    /// The phase-specific consequence tail spliced into the pre-lift
+    /// `bail!` composition-validation-failure literal AFTER the shared
+    /// `"<Pre|Post>-composition validation failed."` prefix. Inverse
+    /// of the phase-detection axis: `Pre` →
+    /// [`PRE_FAILURE_CONSEQUENCE_TAIL`], `Post` →
+    /// [`POST_FAILURE_CONSEQUENCE_TAIL`]. Byte-identical to the tail
+    /// each pre-lift call site spelled inline.
+    #[inline]
+    #[must_use]
+    pub const fn failure_consequence_tail(self) -> &'static str {
+        match self {
+            SupergraphCompositionPhase::Pre => PRE_FAILURE_CONSEQUENCE_TAIL,
+            SupergraphCompositionPhase::Post => POST_FAILURE_CONSEQUENCE_TAIL,
+        }
+    }
+
+    /// The full `bail!` message for a failed composition-validation
+    /// phase — the
+    /// `"<Pre|Post>-composition validation failed.<consequence tail>"`
+    /// composition of [`Self::capitalized_adjective`],
+    /// [`FAILURE_MESSAGE_SUFFIX`], and
+    /// [`Self::failure_consequence_tail`]. Byte-identical to the
+    /// string each pre-lift call site passed to `anyhow::bail!`.
+    #[must_use]
+    pub fn failure_message(self) -> String {
+        format!(
+            "{}{}{}",
+            self.capitalized_adjective(),
+            FAILURE_MESSAGE_SUFFIX,
+            self.failure_consequence_tail(),
+        )
+    }
 }
 
 /// Emit the canonical `🔍 Running <phase>-composition validation...`
@@ -214,6 +274,52 @@ pub fn write_composition_phase_start<W: io::Write>(
     phase: SupergraphCompositionPhase,
 ) -> io::Result<()> {
     writeln!(w, "{}", phase.announcement())
+}
+
+/// Print every per-check result row through the fleet-standard
+/// [`crate::commands::composition_check_print::print_composition_check_result`]
+/// primitive, then bail with the phase-specific failure message
+/// composed by [`SupergraphCompositionPhase::failure_message`] when
+/// the aggregate `passed` flag is `false`.
+///
+/// Encoding the correlated `for check in checks { print(check); }
+/// + if !passed { bail!(<phase-specific-msg>); }` sibling stanza as
+/// a phase-parameterised primitive closes THREE drift risks at ONE
+/// typed boundary. First, a caller cannot silently pass the
+/// pre-shape aggregate `passed` flag but stamp the post-shape
+/// failure message (or vice versa), because the phase-enum owns
+/// both the aggregate probe (via its receiver arg) and the
+/// consequence tail. Second, a future re-tuning of the shared
+/// `-composition validation failed.` suffix flows to both phases
+/// from one const edit. Third, a future re-tuning of the per-check
+/// print grammar flows through
+/// `crate::commands::composition_check_print` from one edit rather
+/// than through two duplicated for-loops.
+///
+/// # Scope boundary
+///
+/// The primitive owns the report + bail grammar around ONE
+/// validation invocation. The intervening state — the actual
+/// `run_pre_composition_checks` / `run_post_composition_checks`
+/// call receiver, the `pre_check` / `post_check` binding, and any
+/// per-phase auxiliary side-effect (size probe, service-count
+/// probe, per-check counter) — stays at the call site because its
+/// shape varies between the two phases. Sibling of the
+/// [`announce_composition_phase_start`] +
+/// [`announce_composition_phase_pass`] pair that owns the visual
+/// grammar around this same body.
+pub fn report_and_bail_on_failed_composition_checks(
+    phase: SupergraphCompositionPhase,
+    checks: &[crate::commands::supergraph_verification::CheckResult],
+    passed: bool,
+) -> anyhow::Result<()> {
+    for check in checks {
+        crate::commands::composition_check_print::print_composition_check_result(check);
+    }
+    if !passed {
+        anyhow::bail!("{}", phase.failure_message());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -318,7 +424,7 @@ mod tests {
         );
     }
 
-    /// Const-anchor pin: the three canonical strings the primitive
+    /// Const-anchor pin: the five canonical strings the primitive
     /// owns each carry their exact pre-lift byte sequence. A future
     /// edit that touched one const without updating the mirrored
     /// inline literal in the caller-shield below cannot silently
@@ -328,6 +434,111 @@ mod tests {
         assert_eq!(RUNNING_ANNOUNCEMENT_PREFIX, "\u{1f50d} Running ");
         assert_eq!(RUNNING_ANNOUNCEMENT_SUFFIX, "-composition validation...");
         assert_eq!(PASS_MESSAGE_SUFFIX, "-composition validation passed");
+        assert_eq!(FAILURE_MESSAGE_SUFFIX, "-composition validation failed.");
+        assert_eq!(
+            PRE_FAILURE_CONSEQUENCE_TAIL,
+            " Cannot proceed with composition.",
+        );
+        assert_eq!(POST_FAILURE_CONSEQUENCE_TAIL, " Supergraph may be invalid.");
+    }
+
+    /// Pin the phase-specific consequence-tail axis: `Pre` →
+    /// `" Cannot proceed with composition."`, `Post` →
+    /// `" Supergraph may be invalid."` — the two verbatim tails the
+    /// pre-lift `bail!` sites each spelled inline. A silent drift
+    /// that shipped the pre-shape prefix but the post-shape
+    /// consequence (or vice versa) regresses this assertion.
+    #[test]
+    fn failure_consequence_tail_maps_to_pre_lift_wording() {
+        assert_eq!(
+            SupergraphCompositionPhase::Pre.failure_consequence_tail(),
+            " Cannot proceed with composition.",
+        );
+        assert_eq!(
+            SupergraphCompositionPhase::Post.failure_consequence_tail(),
+            " Supergraph may be invalid.",
+        );
+    }
+
+    /// Pin the full failure-message composition for both phases:
+    /// `Pre` →
+    /// `"Pre-composition validation failed. Cannot proceed with composition."`,
+    /// `Post` →
+    /// `"Post-composition validation failed. Supergraph may be invalid."`
+    /// — byte-identical to the string the pre-lift call site passed
+    /// to `anyhow::bail!`. A drift in the shared prefix
+    /// (`"-composition validation failed."`) OR either
+    /// phase-specific consequence tail fails this at one site.
+    #[test]
+    fn failure_message_matches_pre_lift_bail_literals() {
+        assert_eq!(
+            SupergraphCompositionPhase::Pre.failure_message(),
+            "Pre-composition validation failed. Cannot proceed with composition.",
+        );
+        assert_eq!(
+            SupergraphCompositionPhase::Post.failure_message(),
+            "Post-composition validation failed. Supergraph may be invalid.",
+        );
+    }
+
+    /// Structural pin: [`report_and_bail_on_failed_composition_checks`]
+    /// bails with the phase-specific
+    /// [`SupergraphCompositionPhase::failure_message`] when `passed
+    /// = false`, regardless of the check list content. The lifted
+    /// stanza was `if !<x>_check.passed { bail!(...) }`, so a
+    /// refactor that flipped the polarity of the guard or drifted
+    /// the bail wording regresses here.
+    #[test]
+    fn report_and_bail_raises_pre_lift_wording_on_pre_arm() {
+        let err = report_and_bail_on_failed_composition_checks(
+            SupergraphCompositionPhase::Pre,
+            &[],
+            false,
+        )
+        .expect_err("passed = false must bail");
+        assert_eq!(
+            err.to_string(),
+            "Pre-composition validation failed. Cannot proceed with composition.",
+        );
+    }
+
+    /// Sibling to [`report_and_bail_raises_pre_lift_wording_on_pre_arm`]
+    /// for the `Post` arm — same guard-polarity pin, same
+    /// wording-drift regression shield.
+    #[test]
+    fn report_and_bail_raises_pre_lift_wording_on_post_arm() {
+        let err = report_and_bail_on_failed_composition_checks(
+            SupergraphCompositionPhase::Post,
+            &[],
+            false,
+        )
+        .expect_err("passed = false must bail");
+        assert_eq!(
+            err.to_string(),
+            "Post-composition validation failed. Supergraph may be invalid.",
+        );
+    }
+
+    /// Complementary pin: [`report_and_bail_on_failed_composition_checks`]
+    /// returns `Ok(())` when the aggregate `passed = true`, whatever
+    /// the phase — the guard is a strict `if !passed { bail }` and
+    /// never fires on the pass path. A future refactor that
+    /// accidentally added a per-check post-condition or flipped the
+    /// guard polarity would regress this assertion.
+    #[test]
+    fn report_and_bail_returns_ok_on_passed_true_both_phases() {
+        assert!(report_and_bail_on_failed_composition_checks(
+            SupergraphCompositionPhase::Pre,
+            &[],
+            true,
+        )
+        .is_ok());
+        assert!(report_and_bail_on_failed_composition_checks(
+            SupergraphCompositionPhase::Post,
+            &[],
+            true,
+        )
+        .is_ok());
     }
 
     /// Caller shield: no source line under `cli/src/commands/` may
@@ -442,23 +653,25 @@ mod tests {
 
     /// Positive-half delegation shield: the sole consumer module
     /// `commands/federation.rs` MUST carry exactly one call to
-    /// [`announce_composition_phase_start`] and exactly one call to
-    /// [`announce_composition_phase_pass`] for each of the two
-    /// phases — that is, at least two calls to each helper, one per
-    /// phase. Guards against a silent removal of the announcement
-    /// or the pass acknowledgement from the composition flow
-    /// (a refactor that accidentally dropped the fusion call while
-    /// migrating a step, a merge that lost the call in a conflict
-    /// resolution). The announce+pass pair is load-bearing for the
-    /// operator-facing narrative around composition, so its
-    /// presence at exactly two sites per helper is a structural
-    /// invariant.
+    /// [`announce_composition_phase_start`], exactly one call to
+    /// [`announce_composition_phase_pass`], and exactly one call
+    /// to [`report_and_bail_on_failed_composition_checks`] for each
+    /// of the two phases — that is, exactly two calls to each
+    /// helper, one per phase. Guards against a silent removal of
+    /// the announcement, the pass acknowledgement, or the report-
+    /// and-bail closure from the composition flow (a refactor that
+    /// accidentally dropped the fusion call while migrating a step,
+    /// a merge that lost the call in a conflict resolution). Each
+    /// primitive is load-bearing for the operator-facing narrative
+    /// around composition, so its presence at exactly two sites per
+    /// helper is a structural invariant.
     #[test]
     fn every_composition_phase_consumer_delegates_through_fusion() {
         let source = include_str!("federation.rs");
         for needle in [
             "announce_composition_phase_start(",
             "announce_composition_phase_pass(",
+            "report_and_bail_on_failed_composition_checks(",
         ] {
             let count = source.matches(needle).count();
             assert_eq!(
@@ -469,6 +682,64 @@ mod tests {
                  {count}. A flow that runs to completion without \
                  emitting both announcements breaks the operator-\
                  facing composition narrative.",
+            );
+        }
+    }
+
+    /// Caller shield: no source line under `cli/src/commands/` may
+    /// spell the pre-lift `bail!` composition-validation-failure
+    /// literal
+    /// `bail!("<Pre|Post>-composition validation failed.<tail>")`
+    /// inline any more. Every composition-validation report-and-
+    /// bail narrative must resolve through
+    /// [`report_and_bail_on_failed_composition_checks`] so a future
+    /// re-phrasing of the shared `-composition validation failed.`
+    /// suffix or either phase-specific consequence tail flows to
+    /// both phases from one edit.
+    ///
+    /// The forbidden shape is reconstructed at test time via
+    /// [`format!`] from the bare fragments so this shield's own
+    /// source text does not false-match itself.
+    #[test]
+    fn no_command_module_still_spells_raw_composition_phase_failure_bail() {
+        use std::path::PathBuf;
+        for (phase_word, tail) in [
+            ("Pre", " Cannot proceed with composition."),
+            ("Post", " Supergraph may be invalid."),
+        ] {
+            let forbidden = format!(
+                "bail!(\"{}{}{}\")",
+                phase_word, "-composition validation failed.", tail,
+            );
+            let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("src")
+                .join("commands");
+            let mut offenders: Vec<(PathBuf, Vec<String>)> = Vec::new();
+            for entry in std::fs::read_dir(&commands_dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                if path.file_name().and_then(|n| n.to_str())
+                    == Some("supergraph_composition_phase.rs")
+                {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).unwrap();
+                let hits = crate::test_support::code_line_hits(&source, &forbidden);
+                if !hits.is_empty() {
+                    offenders.push((path, hits));
+                }
+            }
+            assert!(
+                offenders.is_empty(),
+                "pre-lift `{}` failure-bail stanza(s) survive under \
+                 `commands/` — route each through \
+                 `crate::commands::supergraph_composition_phase::\
+                 report_and_bail_on_failed_composition_checks(<phase>, \
+                 <checks>, <passed>)` instead:\n{:#?}",
+                forbidden,
+                offenders,
             );
         }
     }

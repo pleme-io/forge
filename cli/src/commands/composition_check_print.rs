@@ -421,34 +421,42 @@ mod tests {
         );
     }
 
-    /// Positive-delegation shield: `commands/federation.rs` — the
-    /// one pre-lift consumer — must resolve at least two
-    /// composition-check row emissions through
-    /// [`print_composition_check_result`]. Pairs with the negative
-    /// caller shield above: the negative shield forbids the raw
-    /// `check.message.<color>()` literal from surviving, and this
-    /// shield forbids a "just delete the print loop, the bail
-    /// message suffices" cleanup that quietly drops the operator's
-    /// visible per-check trail without regressing the negative-
-    /// shield assertion. The floor is two — one call for the pre-
-    /// composition loop, one call for the post-composition loop —
-    /// matching the two pre-lift for-check-in-checks bodies.
+    /// Positive-delegation shield: the fusion primitive
+    /// `commands/supergraph_composition_phase.rs::
+    /// report_and_bail_on_failed_composition_checks` — the sole
+    /// remaining post-lift consumer of the per-check row printer —
+    /// must resolve at least one composition-check row emission
+    /// through [`print_composition_check_result`]. Pairs with the
+    /// negative caller shield above: the negative shield forbids
+    /// the raw `check.message.<color>()` literal from surviving,
+    /// and this shield forbids a "just delete the print loop, the
+    /// bail message suffices" cleanup that quietly drops the
+    /// operator's visible per-check trail without regressing the
+    /// negative-shield assertion. Before the report-and-bail
+    /// fusion, the pre-lift `commands/federation.rs` carried two
+    /// direct call sites — one per phase; the fusion migrated both
+    /// behind a single generic call inside the primitive body, so
+    /// the floor here is one, and the caller-side pairing is
+    /// enforced separately by
+    /// `commands/supergraph_composition_phase.rs::
+    /// every_composition_phase_consumer_delegates_through_fusion`.
     #[test]
-    fn federation_module_delegates_through_primitive_at_least_twice() {
+    fn composition_phase_fusion_delegates_through_primitive_at_least_once() {
         use std::path::PathBuf;
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("src")
             .join("commands")
-            .join("federation.rs");
+            .join("supergraph_composition_phase.rs");
         let source = std::fs::read_to_string(&path).unwrap();
         let call_count = source.matches("print_composition_check_result(").count();
         assert!(
-            call_count >= 2,
-            "`commands/federation.rs` must resolve at least two composition-check row \
-             emissions through `print_composition_check_result` (one per pre/post \
-             composition loop); found {} call(s). A cleanup that dropped either \
-             delegation regresses the operator's visible per-check trail without \
-             tripping the negative caller shield.",
+            call_count >= 1,
+            "`commands/supergraph_composition_phase.rs::\
+             report_and_bail_on_failed_composition_checks` must resolve at least one \
+             composition-check row emission through `print_composition_check_result`; \
+             found {} call(s). A cleanup that dropped the delegation regresses the \
+             operator's visible per-check trail without tripping the negative caller \
+             shield.",
             call_count,
         );
     }

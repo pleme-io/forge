@@ -140,7 +140,7 @@ pub async fn update_federation(
 
     use crate::commands::supergraph_composition_phase::{
         announce_composition_phase_pass, announce_composition_phase_start,
-        SupergraphCompositionPhase,
+        report_and_bail_on_failed_composition_checks, SupergraphCompositionPhase,
     };
 
     announce_composition_phase_start(SupergraphCompositionPhase::Pre);
@@ -148,14 +148,11 @@ pub async fn update_federation(
 
     let pre_check = run_pre_composition_checks(&subgraphs_dir).await?;
 
-    // Print all check results
-    for check in &pre_check.checks {
-        crate::commands::composition_check_print::print_composition_check_result(check);
-    }
-
-    if !pre_check.passed {
-        bail!("Pre-composition validation failed. Cannot proceed with composition.");
-    }
+    report_and_bail_on_failed_composition_checks(
+        SupergraphCompositionPhase::Pre,
+        &pre_check.checks,
+        pre_check.passed,
+    )?;
 
     announce_composition_phase_pass(SupergraphCompositionPhase::Pre);
     println!();
@@ -252,14 +249,11 @@ pub async fn update_federation(
 
     let post_check = run_post_composition_checks(&supergraph_path, &subgraphs_dir).await?;
 
-    // Print all check results
-    for check in &post_check.checks {
-        crate::commands::composition_check_print::print_composition_check_result(check);
-    }
-
-    if !post_check.passed {
-        bail!("Post-composition validation failed. Supergraph may be invalid.");
-    }
+    report_and_bail_on_failed_composition_checks(
+        SupergraphCompositionPhase::Post,
+        &post_check.checks,
+        post_check.passed,
+    )?;
 
     announce_composition_phase_pass(SupergraphCompositionPhase::Post);
     println!(
