@@ -3420,9 +3420,9 @@ pub fn msg_took_secs_1<M: std::fmt::Display>(msg: M, d: std::time::Duration) -> 
 ///   count / two-noun grammar is a distinct dialect from this single-
 ///   count / single-noun surface, and would fit awkwardly on a
 ///   generalized `(counts: &[(usize, &str)], d)` signature that no
-///   pre-lift site spells. A future `msg_with_two_counts_and_secs_1`
-///   sibling is the natural next lift when that dialect crosses the
-///   three-is-a-law threshold; today only one site exists.
+///   pre-lift site spells. The [`msg_with_two_counts_and_secs_1`]
+///   sibling below owns the two-count dialect at ONE body; a future
+///   three-count dialect earns its own sibling on the same carve-out.
 /// - **Verb-first shapes** such as
 ///   `format!("{} passed ({:.1}s)", linter_name, ...)` where the
 ///   interleaved arg is a semantic label (not a count) — the
@@ -3437,6 +3437,87 @@ pub fn msg_with_count_noun_secs_1<M: std::fmt::Display, C: std::fmt::Display>(
     d: std::time::Duration,
 ) -> String {
     format!("{} ({} {}, {:.1}s)", msg, count, noun, d.as_secs_f64())
+}
+
+/// Two-count peer of [`msg_with_count_noun_secs_1`] on the DISTINCT
+/// `<msg> ({count1} {noun1}, {count2} {noun2}, {:.1}s)` grammar —
+/// two count/noun tuples plus the fleet-standard `{:.1}s` seconds tag
+/// inside ONE parenthesized suffix, comma-space separated, one
+/// decimal-place precision, no trailing content — and return the
+/// composed owned [`String`].
+///
+/// # What this closes
+///
+/// [`msg_with_count_noun_secs_1`]'s "Non-goals" section explicitly
+/// deferred the two-count / two-noun dialect until it crossed
+/// THEORY §VI.1's three-times-is-a-law threshold. Two sibling sites
+/// past the two-is-a-coincidence line now share the dialect
+/// byte-for-byte modulo the label and the count/noun binding:
+///
+/// - `commands/frontend_validation.rs::run_lint_with_config`
+///   (ESLint arm failure branch) —
+///   `"{} failed ({} errors, {} warnings, {:.1}s)"` with the
+///   two-argument `error_count` / `warning_count` bindings.
+/// - `commands/frontend_validation.rs::run_biome_lint`
+///   (check-arm failure branch) —
+///   `"Biome check failed ({} errors, {} warnings, {:.1}s)"` with the
+///   two-argument `errors` / `warnings` bindings.
+///
+/// Both sites feed the composed line to
+/// [`crate::ui::print_step_failure`]. Post-lift each site collapses
+/// to `crate::ui::print_step_failure(&crate::repo::msg_with_two_counts_and_secs_1(
+/// <label>, <errors>, "errors", <warnings>, "warnings", duration))`
+/// and the four-invariant grammar (precision, paren shape, tuple
+/// ordering, seconds unit) lives at ONE body.
+///
+/// # The four grammar invariants this primitive pins at one place
+///
+/// The three [`msg_with_count_noun_secs_1`] carries (precision, paren
+/// grammar, seconds unit) plus a fourth that this two-count shape
+/// adds — the ORDER of the two count/noun pairs. `run_biome_lint`
+/// counts `errors.count().max(...)` first then warnings; the ESLint
+/// arm counts `error_count` then `warning_count`. Both consumers
+/// spell errors-before-warnings. A drift to
+/// `<msg> ({count2} {noun2}, {count1} {noun1}, {:.1}s)` at ONE
+/// consumer would silently flip the two counts in the operator
+/// readout.
+///
+/// # Non-goals
+///
+/// - **Three-count and beyond.** A `(<c1> <n1>, <c2> <n2>, <c3> <n3>,
+///   {:.1}s)` dialect has no consumer today. When it arrives it
+///   belongs on a `msg_with_three_counts_and_secs_1` sibling for the
+///   same reason [`msg_with_count_noun_secs_1`] carves the one-count
+///   shape from this one: a generalized `(counts: &[(usize, &str)],
+///   d)` signature would erase the compile-time argument-count check
+///   the fixed-arity shape carries and hand the caller a `Vec`
+///   allocation every consumer would then boilerplate away.
+/// - **Verb-first or noun-less shapes.** Same carve-out
+///   [`msg_with_count_noun_secs_1`] documents: consuming a
+///   `<verb> <label> (<secs>s)` render through this primitive would
+///   ask the caller to pass `""` as a noun and burn the tuple
+///   grammar on a render that reads `"linter (0 , 0 , 1.2s)"`.
+pub fn msg_with_two_counts_and_secs_1<
+    M: std::fmt::Display,
+    C1: std::fmt::Display,
+    C2: std::fmt::Display,
+>(
+    msg: M,
+    count1: C1,
+    noun1: &str,
+    count2: C2,
+    noun2: &str,
+    d: std::time::Duration,
+) -> String {
+    format!(
+        "{} ({} {}, {} {}, {:.1}s)",
+        msg,
+        count1,
+        noun1,
+        count2,
+        noun2,
+        d.as_secs_f64()
+    )
 }
 
 /// Push each `line` of `lines` into `buf` prefixed with four ASCII spaces
@@ -11036,6 +11117,234 @@ mod tests {
              Duration::as_secs_f64 with the `s` unit suffix — a \
              1500ms input must render `1.5s`, NOT `1500ms`, NOT `1.5ms`. \
              Got: {rendered:?}"
+        );
+    }
+
+    /// [`msg_with_two_counts_and_secs_1`] renders the full
+    /// `<msg> (<c1> <n1>, <c2> <n2>, {:.1}s)` grammar the two sibling
+    /// `commands/frontend_validation.rs::{run_lint_with_config
+    /// (ESLint arm), run_biome_lint (check arm)}` failure branches
+    /// spelled inline pre-lift. Pin the byte-exact envelope at both
+    /// pre-lift labels: `"ESLint failed"` (dynamic-linter-name arm)
+    /// and `"Biome check failed"` (hardcoded arm).
+    #[test]
+    fn msg_with_two_counts_and_secs_1_renders_full_envelope_at_both_prelift_labels() {
+        // ESLint-arm fixture (linter_name = "ESLint" only reachable arm)
+        assert_eq!(
+            msg_with_two_counts_and_secs_1(
+                "ESLint failed",
+                7_usize,
+                "errors",
+                3_usize,
+                "warnings",
+                std::time::Duration::from_millis(1500),
+            ),
+            "ESLint failed (7 errors, 3 warnings, 1.5s)",
+        );
+        // Biome-arm fixture (hardcoded `"Biome check failed"` msg)
+        assert_eq!(
+            msg_with_two_counts_and_secs_1(
+                "Biome check failed",
+                12_usize,
+                "errors",
+                4_usize,
+                "warnings",
+                std::time::Duration::from_millis(3400),
+            ),
+            "Biome check failed (12 errors, 4 warnings, 3.4s)",
+        );
+    }
+
+    /// [`msg_with_two_counts_and_secs_1`] pins the fleet-standard
+    /// one-decimal-place precision on the seconds slot — same
+    /// `{:.1}` invariant [`msg_with_count_noun_secs_1`] carries. A
+    /// hand-swap to `{:.0}` would quantize a sub-second failure to
+    /// `0s` and silence signal-carrying transients; a swap to
+    /// `{:.2}` would drift the dialect into the
+    /// `commands/integration_tests.rs` `(took {:.2}s)` convention.
+    #[test]
+    fn msg_with_two_counts_and_secs_1_pins_one_decimal_place_precision() {
+        let rendered = msg_with_two_counts_and_secs_1(
+            "Biome check failed",
+            2_usize,
+            "errors",
+            1_usize,
+            "warnings",
+            std::time::Duration::from_millis(1234),
+        );
+        assert_eq!(
+            rendered, "Biome check failed (2 errors, 1 warnings, 1.2s)",
+            "msg_with_two_counts_and_secs_1() must render a 1.234s \
+             duration with ONE decimal digit — `{{:.1}}`, not \
+             `{{:.0}}` (would quantize to `1s`) and not `{{:.2}}` \
+             (would drift into the {{:.2}}s dialect). Got: {rendered:?}"
+        );
+    }
+
+    /// [`msg_with_two_counts_and_secs_1`] pins the tuple-delimiter
+    /// grammar ` (<c1> <n1>, <c2> <n2>, {:.1}s)` — one leading space,
+    /// opening paren, single space between each count and noun, one
+    /// comma-space between each pair, closing paren, no trailing
+    /// content. A drift to ` [<c1> <n1>; <c2> <n2>; {:.1}s]`,
+    /// ` — <c1> <n1> and <c2> <n2> in {:.1}s`, or a comma-less
+    /// ` (<c1> <n1> <c2> <n2> {:.1}s)` would break both consumers'
+    /// shared shape and any scraper matching the pre-lift paren-plus-
+    /// two-commas envelope.
+    #[test]
+    fn msg_with_two_counts_and_secs_1_pins_paren_two_comma_grammar() {
+        let rendered = msg_with_two_counts_and_secs_1(
+            "ESLint failed",
+            5_usize,
+            "errors",
+            2_usize,
+            "warnings",
+            std::time::Duration::from_secs(1),
+        );
+        assert!(
+            rendered.starts_with("ESLint failed (5 errors, 2 warnings, "),
+            "msg_with_two_counts_and_secs_1() must render the suffix \
+             as ` (<c1> <n1>, <c2> <n2>, <secs>s)` — one leading space, \
+             opening paren, one space between each count and noun, one \
+             comma-space between each pair. Got: {rendered:?}"
+        );
+        assert!(
+            rendered.ends_with("1.0s)"),
+            "msg_with_two_counts_and_secs_1() must close the suffix \
+             with `<secs>s)` — closing paren after the seconds tag, no \
+             trailing content. Got: {rendered:?}"
+        );
+        // Exactly two commas: one between each count/noun pair and one
+        // before the seconds tag.
+        assert_eq!(
+            rendered.matches(',').count(),
+            2,
+            "msg_with_two_counts_and_secs_1() must carry exactly TWO \
+             comma-space separators — one between the two count/noun \
+             pairs, one between the second pair and the seconds tag. \
+             Got: {rendered:?}"
+        );
+    }
+
+    /// [`msg_with_two_counts_and_secs_1`] renders count BEFORE noun in
+    /// each pair, and pair 1 BEFORE pair 2 in the tuple. Pre-lift both
+    /// consumer sites spelled errors-before-warnings; a drift that
+    /// swapped either the intra-pair order (`"errors 5"` → `"5-errors"`)
+    /// or the inter-pair order (`(warnings, errors)` instead of
+    /// `(errors, warnings)`) would silently reorder the operator
+    /// readout at both gates.
+    #[test]
+    fn msg_with_two_counts_and_secs_1_pins_intra_and_inter_pair_ordering() {
+        let rendered = msg_with_two_counts_and_secs_1(
+            "Biome check failed",
+            9_usize,
+            "errors",
+            4_usize,
+            "warnings",
+            std::time::Duration::from_millis(500),
+        );
+        // Intra-pair: count-then-noun, single space
+        assert!(
+            rendered.contains("(9 errors, 4 warnings,"),
+            "msg_with_two_counts_and_secs_1() must render count BEFORE \
+             noun in each pair with a single space — a drift to \
+             `(errors 9,` or `(9-errors,` would silently alter the \
+             prose. Got: {rendered:?}"
+        );
+        // Inter-pair: pair 1 (errors) BEFORE pair 2 (warnings)
+        let errors_idx = rendered.find("errors").expect("errors tag must be present");
+        let warnings_idx = rendered
+            .find("warnings")
+            .expect("warnings tag must be present");
+        assert!(
+            errors_idx < warnings_idx,
+            "msg_with_two_counts_and_secs_1() must render the first \
+             count/noun pair BEFORE the second — pre-lift both consumer \
+             sites spelled errors-before-warnings. A swap would flip \
+             the two counts in the operator readout. Got: {rendered:?}"
+        );
+    }
+
+    /// [`msg_with_two_counts_and_secs_1`] accepts distinct
+    /// [`Display`]-bound count types on each slot (`usize` from the
+    /// biome arm's `.count().max(...)`, `usize` from the ESLint arm's
+    /// `.matches().count()`) and remains generic against future
+    /// callers that mix `u32` / `u64` / `usize`.
+    #[test]
+    fn msg_with_two_counts_and_secs_1_accepts_distinct_display_count_types() {
+        assert_eq!(
+            msg_with_two_counts_and_secs_1(
+                "ESLint failed",
+                0_usize,
+                "errors",
+                0_u32,
+                "warnings",
+                std::time::Duration::from_millis(0),
+            ),
+            "ESLint failed (0 errors, 0 warnings, 0.0s)"
+        );
+        assert_eq!(
+            msg_with_two_counts_and_secs_1(
+                "Biome check failed",
+                42_u64,
+                "errors",
+                7_i32,
+                "warnings",
+                std::time::Duration::from_millis(0),
+            ),
+            "Biome check failed (42 errors, 7 warnings, 0.0s)"
+        );
+    }
+
+    /// [`msg_with_two_counts_and_secs_1`]'s trailing unit character is
+    /// `s` and the projection ([`Duration::as_secs_f64`]) agrees.
+    /// Mirrors the one-count sibling's unit-oracle discipline.
+    #[test]
+    fn msg_with_two_counts_and_secs_1_seconds_unit_agrees_with_projection() {
+        let rendered = msg_with_two_counts_and_secs_1(
+            "Biome check failed",
+            1_usize,
+            "errors",
+            2_usize,
+            "warnings",
+            std::time::Duration::from_millis(2500),
+        );
+        assert!(
+            rendered.ends_with("2.5s)"),
+            "msg_with_two_counts_and_secs_1() must render seconds via \
+             Duration::as_secs_f64 with the `s` unit suffix — a \
+             2500ms input must render `2.5s`, NOT `2500ms`. Got: {rendered:?}"
+        );
+    }
+
+    /// Caller shield: the two `commands/frontend_validation.rs`
+    /// failure branches must forward through
+    /// [`msg_with_two_counts_and_secs_1`]. A count of `0` means the
+    /// two pre-lift sites were re-inlined or the primitive was
+    /// renamed without updating the callers; a count below `2` means
+    /// only one of the two sibling sites migrated.
+    #[test]
+    fn frontend_validation_forwards_through_msg_with_two_counts_and_secs_1() {
+        use std::path::PathBuf as StdPathBuf;
+        let path = StdPathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands")
+            .join("frontend_validation.rs");
+        let source = std::fs::read_to_string(&path).unwrap();
+        let needle = "msg_with_two_counts_and_secs_1(";
+        let forwards = source
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim_start();
+                !trimmed.starts_with("//") && !trimmed.starts_with("///")
+            })
+            .filter(|line| line.contains(needle))
+            .count();
+        assert!(
+            forwards >= 2,
+            "commands/frontend_validation.rs must forward at least 2 \
+             two-count failure lines through `{needle}`; found {forwards}. \
+             A dropped call would leave the two-count grammar duplicated \
+             at that site."
         );
     }
 

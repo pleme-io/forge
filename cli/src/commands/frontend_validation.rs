@@ -246,12 +246,13 @@ pub async fn run_lint_with_config(web_dir: &Path, linter: &str) -> Result<(bool,
         let error_count = combined.matches(" error").count();
         let warning_count = combined.matches(" warning").count();
 
-        crate::ui::print_step_failure(&format!(
-            "{} failed ({} errors, {} warnings, {:.1}s)",
-            linter_name,
+        crate::ui::print_step_failure(&crate::repo::msg_with_two_counts_and_secs_1(
+            format!("{} failed", linter_name),
             error_count,
+            "errors",
             warning_count,
-            duration.as_secs_f64()
+            "warnings",
+            duration,
         ));
 
         let details =
@@ -331,11 +332,13 @@ async fn run_biome_lint(web_dir: &Path) -> Result<(bool, Vec<String>)> {
             .filter(|l| l.contains("warning") || l.contains("⚠"))
             .count();
 
-        crate::ui::print_step_failure(&format!(
-            "Biome check failed ({} errors, {} warnings, {:.1}s)",
+        crate::ui::print_step_failure(&crate::repo::msg_with_two_counts_and_secs_1(
+            "Biome check failed",
             errors,
+            "errors",
             warnings,
-            duration.as_secs_f64()
+            "warnings",
+            duration,
         ));
 
         let details =
