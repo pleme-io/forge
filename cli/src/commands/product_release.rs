@@ -37,6 +37,53 @@ pub(crate) async fn run_forge_subcommand(args: &[&str]) -> Result<()> {
     crate::retry::run_inherited_status(cmd, &format!("forge {}", args.join(" "))).await
 }
 
+/// Argv the [`run_forge_subcommand_in_product_dir`] primitive hands
+/// to [`run_forge_subcommand`] — a fixed
+/// `[<subcommand>, "--working-dir", <product_dir_str>]` triple.
+///
+/// Extracted as its own function so the byte-oracle sibling tests can
+/// pin the flag spelling and slot ordering against an in-memory
+/// `[&str; 3]` without spawning the child forge process.
+fn product_working_dir_forge_argv<'a>(
+    subcommand: &'a str,
+    product_dir_str: &'a str,
+) -> [&'a str; 3] {
+    [subcommand, "--working-dir", product_dir_str]
+}
+
+/// Re-invoke a forge subcommand scoped to a product's working
+/// directory via the canonical
+/// `[<subcommand>, "--working-dir", <product_dir>]` argv triple both
+/// pre-lift Phase-0 (`prerelease`) and Phase-4 (`dashboards`) sites
+/// in [`execute`] spelled inline.
+///
+/// Pre-lift each site resolved [`crate::config::resolve_product_dir`],
+/// bound the UTF-8 string via [`crate::repo::path_to_string_lossy`],
+/// and handed the fixed three-slot argv to [`run_forge_subcommand`]
+/// as three verbatim source lines. Post-lift the resolve → string →
+/// argv → spawn composition lives at one body; a future adjustment
+/// (an extra shared `--` sentinel, a swap of `--working-dir` for a
+/// `--product-dir` alias, a canonicalize hook on the resolved path,
+/// a telemetry sigil on the re-invoke) lands here and reaches every
+/// consumer by construction (THEORY.md §V.1 knowable-platform
+/// construction guarantee; THEORY.md §VI.1 recurring-shape-to-helper
+/// past the three-times threshold — redeemed at two callers here, with
+/// every future `forge <subcmd> --working-dir <product_dir>`
+/// self-re-invoke inheriting the same shape).
+async fn run_forge_subcommand_in_product_dir(
+    subcommand: &str,
+    repo_root: &str,
+    product: &str,
+) -> Result<()> {
+    let product_dir = crate::config::resolve_product_dir(std::path::Path::new(repo_root), product);
+    let product_dir_str = crate::repo::path_to_string_lossy(&product_dir);
+    run_forge_subcommand(&product_working_dir_forge_argv(
+        subcommand,
+        &product_dir_str,
+    ))
+    .await
+}
+
 /// Run a nix release app.
 ///
 /// - Standalone repos (product = repo root): `nix run .#release:{service} -- {extra_args}`
@@ -386,12 +433,7 @@ pub async fn product_release(
 
     if !effective_skip_gates && product_config.prerelease {
         crate::ui::print_step_heading("Phase 0: Pre-release gates");
-        let product_dir =
-            crate::config::resolve_product_dir(std::path::Path::new(&repo_root), &product);
-        let product_dir_str = crate::repo::path_to_string_lossy(&product_dir);
-
-        run_forge_subcommand(&["prerelease", "--working-dir", &product_dir_str]).await?;
-
+        run_forge_subcommand_in_product_dir("prerelease", &repo_root, &product).await?;
         println!();
     } else if skip_gates {
         crate::ui::print_phase_skipped("Phase 0: Skipping pre-release gates (--skip-gates)");
@@ -732,10 +774,7 @@ pub async fn product_release(
     // ─── Phase 4: Dashboard sync ────────────────────────────────────────────
     if !skip_dashboards && product_config.dashboards {
         crate::ui::print_step_heading("Phase 4: Dashboard sync");
-        let product_dir =
-            crate::config::resolve_product_dir(std::path::Path::new(&repo_root), &product);
-        let product_dir_str = crate::repo::path_to_string_lossy(&product_dir);
-        run_forge_subcommand(&["dashboards", "--working-dir", &product_dir_str]).await?;
+        run_forge_subcommand_in_product_dir("dashboards", &repo_root, &product).await?;
         println!();
     } else {
         crate::ui::print_phase_skipped("Phase 4: Skipping dashboard sync");
@@ -1299,6 +1338,207 @@ mod release_git_sha_routing_tests {
              leave the negative scan above trivially satisfied by \
              absence.",
             delegate_hits.len()
+        );
+    }
+}
+
+#[cfg(test)]
+mod product_dir_working_dir_forge_argv_delegation_tests {
+    //! Byte-oracle + delegation shields for the
+    //! `run_forge_subcommand_in_product_dir` primitive lift.
+    //!
+    //! Pre-lift the two `commands/product_release.rs` sites — Phase 0
+    //! (`prerelease`) at :388 and Phase 4 (`dashboards`) at :733 —
+    //! each spelled the same three-line preamble verbatim: resolve
+    //! `product_dir` via [`crate::config::resolve_product_dir`], bind
+    //! `product_dir_str` via [`crate::repo::path_to_string_lossy`],
+    //! and hand the fixed `[<subcmd>, "--working-dir", <dir>]` argv
+    //! triple to [`super::run_forge_subcommand`]. The two lines that
+    //! carried the `let product_dir_str = crate::repo::path_to_string_lossy(&product_dir);`
+    //! binding and the `run_forge_subcommand(&["<subcmd>", "--working-dir", &product_dir_str])`
+    //! call had to move in lockstep with any future flag / delimiter /
+    //! resolve-hook change — a drift at either site would put the
+    //! Phase-0 gates and the Phase-4 dashboards subcommand on a
+    //! different working-dir contract than the other.
+    //!
+    //! Post-lift the composition lives at one body
+    //! (`run_forge_subcommand_in_product_dir`), which reaches
+    //! [`super::run_forge_subcommand`] via the pure
+    //! `product_working_dir_forge_argv` argv-builder. The byte-oracle
+    //! tests below pin the argv slot ordering and the fixed
+    //! `--working-dir` flag against an in-memory `[&str; 3]` — no
+    //! child forge process, no filesystem, no environment. The
+    //! source-scan shields (positive delegation + negative caller
+    //! `let product_dir_str = crate::repo::path_to_string_lossy(&product_dir);`)
+    //! together ensure a regression that re-inlines the preamble at
+    //! either caller — or that swaps the flag out from under the
+    //! primitive — fails at test time rather than silently in
+    //! production.
+    //!
+    //! Sibling of `hanabi_dir.rs`, `bootstrap_dir.rs`,
+    //! `platform_component.rs` — same THEORY.md §VI.1
+    //! recurring-shape-to-helper discipline redeemed at two callers
+    //! sharing an argv composition instead of a path composition.
+    use super::product_working_dir_forge_argv;
+
+    /// The pure argv builder must return the canonical
+    /// `[<subcommand>, "--working-dir", <product_dir_str>]` triple.
+    /// Pins the fixed middle-slot flag spelling AND the outer slot
+    /// order (subcommand first, product-dir last) both pre-lift
+    /// sites relied on when handing the slice to
+    /// [`super::run_forge_subcommand`]. A future re-ordering (a
+    /// swap of the working-dir flag to the head, or a rename of
+    /// `--working-dir` to `--product-dir`) fails here first rather
+    /// than silently reaching one caller's Phase before the other's.
+    #[test]
+    fn test_product_working_dir_forge_argv_prerelease_shape() {
+        let argv = product_working_dir_forge_argv("prerelease", "/repo/products/foo");
+        assert_eq!(argv, ["prerelease", "--working-dir", "/repo/products/foo"]);
+    }
+
+    /// Sibling of the `prerelease` shape test above — pins the
+    /// Phase-4 `dashboards` call site's argv triple against the
+    /// same fixed `--working-dir` middle slot. Guards against a
+    /// regression that special-cases one subcommand's argv (a
+    /// covert `dashboards`-only flag alias) and leaves the other's
+    /// unchanged.
+    #[test]
+    fn test_product_working_dir_forge_argv_dashboards_shape() {
+        let argv = product_working_dir_forge_argv("dashboards", "/tmp/product-dir");
+        assert_eq!(argv, ["dashboards", "--working-dir", "/tmp/product-dir"]);
+    }
+
+    /// The subcommand and product-dir slots MUST forward the caller's
+    /// bytes verbatim — no trimming, no canonicalization, no path
+    /// normalization. Pins the transparent-forwarding contract both
+    /// pre-lift callers relied on: the value they handed to
+    /// [`crate::repo::path_to_string_lossy`] is the value the child
+    /// forge process sees under `--working-dir`.
+    #[test]
+    fn test_product_working_dir_forge_argv_forwards_bytes_verbatim() {
+        let argv = product_working_dir_forge_argv("sync", "  /leading/space  ");
+        assert_eq!(argv[0], "sync");
+        assert_eq!(argv[1], "--working-dir");
+        assert_eq!(argv[2], "  /leading/space  ");
+    }
+
+    /// Positive delegation shield: the module body (bounded by the
+    /// first `#[cfg(test)]` marker via
+    /// [`crate::test_support::module_body_before_first_cfg_test`])
+    /// MUST reference `run_forge_subcommand_in_product_dir(` at
+    /// EXACTLY three code lines — the two Phase-0 and Phase-4
+    /// callers plus the primitive's own `async fn` signature. Pins
+    /// the two-caller reuse the primitive was landed to consolidate;
+    /// a regression that re-inlined one caller and deleted the
+    /// other's delegation would leave the negative shield below
+    /// trivially satisfied by absence.
+    ///
+    /// Bounding to the pre-tests module body via
+    /// [`crate::test_support::module_body_before_first_cfg_test`]
+    /// keeps this shield's own `#[cfg(test)]`-scoped docstring
+    /// mentions of the primitive name (they live below the boundary)
+    /// out of the count entirely, on top of the `///`-prefix filter
+    /// that [`crate::test_support::code_line_hits`] applies.
+    #[test]
+    fn test_run_forge_subcommand_in_product_dir_delegated_at_two_callers() {
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            include_str!("product_release.rs"),
+            "commands/product_release.rs",
+        );
+        let hits =
+            crate::test_support::code_line_hits(body, "run_forge_subcommand_in_product_dir(");
+        assert_eq!(
+            hits.len(),
+            3,
+            "commands/product_release.rs must reference \
+             `run_forge_subcommand_in_product_dir(` at EXACTLY 3 \
+             code lines in the pre-tests module body (2 callers + \
+             1 `async fn` signature). Found {} code-line hit(s): \
+             {hits:#?}. A missing delegation would leave the \
+             negative caller shield below trivially satisfied by \
+             absence; an extra hit means a new caller landed \
+             without a corresponding update here.",
+            hits.len()
+        );
+    }
+
+    /// Negative caller shield: the pre-lift binding
+    /// `let product_dir_str = crate::repo::path_to_string_lossy(&product_dir);`
+    /// — the middle line of the three-line preamble both Phase 0 and
+    /// Phase 4 sites spelled — MUST appear at exactly one code line
+    /// post-lift (the primitive body). A regression that re-inlined
+    /// the preamble at either caller would bump the count to ≥2 and
+    /// fail here rather than silently reintroducing the drift class
+    /// the lift was landed to close.
+    ///
+    /// The scan looks for the full binding shape (with the
+    /// `&product_dir` argument) rather than the bare
+    /// `path_to_string_lossy` call so the sibling
+    /// `let service_dir = crate::repo::path_to_string_lossy(&product_dir.join(...));`
+    /// bindings in `execute` and the rollback deploy loop —
+    /// legitimately different consumers of `path_to_string_lossy` —
+    /// stay out of scope. Scoping to the pre-tests module body via
+    /// [`crate::test_support::module_body_before_first_cfg_test`]
+    /// keeps this shield's own docstring mention of the binding out
+    /// of the count.
+    #[test]
+    fn test_product_dir_str_binding_lives_at_one_code_line_post_lift() {
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            include_str!("product_release.rs"),
+            "commands/product_release.rs",
+        );
+        let needle = "let product_dir_str = crate::repo::path_to_string_lossy(&product_dir);";
+        let hits = crate::test_support::code_line_hits(body, needle);
+        assert_eq!(
+            hits.len(),
+            1,
+            "commands/product_release.rs must spell \
+             `{needle}` at EXACTLY one code line in the pre-tests \
+             module body (the `run_forge_subcommand_in_product_dir` \
+             primitive body). Found {} code-line hit(s): \
+             {hits:#?}. A second hit means the three-line preamble \
+             re-inlined at one of the pre-lift Phase-0 \
+             (`prerelease`) or Phase-4 (`dashboards`) sites — the \
+             exact drift class the lift was landed to close.",
+            hits.len()
+        );
+    }
+
+    /// Negative caller shield: the pre-lift argv literal
+    /// `run_forge_subcommand(&["<subcmd>", "--working-dir", &product_dir_str])`
+    /// spelled the fixed `--working-dir` flag at both Phase-0 and
+    /// Phase-4 sites. Post-lift the flag lives at exactly one code
+    /// line in the pre-tests module body — the pure
+    /// `product_working_dir_forge_argv` argv builder — so a
+    /// regression that re-inlined the argv triple at either caller
+    /// would bump the count to ≥2 and fail here.
+    ///
+    /// Scoping via
+    /// [`crate::test_support::module_body_before_first_cfg_test`]
+    /// keeps both this shield's own byte-oracle asserts (which name
+    /// `"--working-dir"` verbatim as expected argv slots) AND the
+    /// scattered doc-comment mentions across other command modules
+    /// out of scope by construction.
+    #[test]
+    fn test_working_dir_flag_lives_at_one_code_line_post_lift() {
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            include_str!("product_release.rs"),
+            "commands/product_release.rs",
+        );
+        let needle = "\"--working-dir\"";
+        let hits = crate::test_support::code_line_hits(body, needle);
+        assert_eq!(
+            hits.len(),
+            1,
+            "commands/product_release.rs must spell the \
+             `\"--working-dir\"` argv literal at EXACTLY one code \
+             line in the pre-tests module body (the \
+             `product_working_dir_forge_argv` argv builder). Found \
+             {} code-line hit(s): {hits:#?}. A second hit means \
+             the argv triple re-inlined at one of the pre-lift \
+             `run_forge_subcommand(&[...])` sites — the exact \
+             flag-drift class the lift was landed to close.",
+            hits.len()
         );
     }
 }
