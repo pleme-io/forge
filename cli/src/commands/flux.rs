@@ -562,19 +562,7 @@ pub async fn verify_deployment_image(
             }
         }
 
-        emit_periodic_deployment_diagnostics_burst(
-            namespace,
-            deployment_name,
-            elapsed,
-            &mut poll_clock.last_diag_at,
-        )
-        .await;
-
-        crate::poll_backoff_advance::advance_poll_backoff_tokio(
-            &mut poll_clock.backoff_attempt,
-            flux_poll_delay,
-        )
-        .await;
+        deployment_poll_iteration_tail(namespace, deployment_name, elapsed, &mut poll_clock).await;
     }
 }
 
@@ -656,19 +644,8 @@ pub async fn wait_for_deployment(
             }
         }
 
-        emit_periodic_deployment_diagnostics_burst(
-            &namespace,
-            &deployment_name,
-            elapsed,
-            &mut poll_clock.last_diag_at,
-        )
-        .await;
-
-        crate::poll_backoff_advance::advance_poll_backoff_tokio(
-            &mut poll_clock.backoff_attempt,
-            flux_poll_delay,
-        )
-        .await;
+        deployment_poll_iteration_tail(&namespace, &deployment_name, elapsed, &mut poll_clock)
+            .await;
     }
 }
 
@@ -726,6 +703,56 @@ async fn emit_periodic_deployment_diagnostics_burst(
         let diag = gather_deployment_diagnostics(namespace, deployment_name).await;
         println!("{}", diag);
     }
+}
+
+/// Fused end-of-iteration tail both deployment-pod-polling loops in this
+/// module ([`verify_deployment_image`] and [`wait_for_deployment`])
+/// pre-lift spelled verbatim: first the every-120s periodic diagnostic
+/// burst (via [`emit_periodic_deployment_diagnostics_burst`]), then the
+/// exponential-backoff sleep-and-advance sleep (via
+/// [`crate::poll_backoff_advance::advance_poll_backoff_tokio`] driven
+/// by [`flux_poll_delay`]). Both consumer sites carry the SAME
+/// [`crate::deployment_poll_clock::DeploymentPollClock`], so both
+/// `&mut poll_clock.last_diag_at` and `&mut poll_clock.backoff_attempt`
+/// disjoint borrows land at ONE call.
+///
+/// # Load-bearing ordering
+///
+/// The diagnostic burst fires BEFORE the sleep — an operator watching
+/// a stuck deployment gets the 120s cadence trigger and then the loop
+/// naps. Reversing the order would delay every operator-visible burst
+/// by one `flux_poll_delay(attempt)` step (2s → 4s → 8s → 16s → 30s
+/// cap), which for the third and beyond bursts drifts by 30 seconds
+/// off the declared 120s cadence.
+///
+/// # Compounding
+///
+/// A third deployment-pod-polling loop the module adds (a chart-release
+/// rollout probe, a supergraph propagation wait) forwards through this
+/// helper at ONE call rather than restating the 6-line pair. The type
+/// signature makes the "single clock threads BOTH cursors" invariant
+/// visible: a caller that accidentally passed two separate clocks
+/// (one for the burst cursor, one for the backoff cursor) would fail
+/// to compile because the disjoint-field borrows require ONE receiver.
+async fn deployment_poll_iteration_tail(
+    namespace: &str,
+    deployment_name: &str,
+    elapsed: u64,
+    poll_clock: &mut crate::deployment_poll_clock::DeploymentPollClock,
+) {
+    emit_periodic_deployment_diagnostics_burst(
+        namespace,
+        deployment_name,
+        elapsed,
+        &mut poll_clock.last_diag_at,
+    )
+    .await;
+
+    crate::poll_backoff_advance::advance_poll_backoff_tokio(
+        &mut poll_clock.backoff_attempt,
+        flux_poll_delay,
+    )
+    .await;
 }
 
 /// Terminal container failure reasons that won't resolve on their own.
@@ -1288,13 +1315,15 @@ mod tests {
         );
         let delegation_hits = code_line_hits(module_body, "flux_poll_delay");
         assert!(
-            delegation_hits.len() >= 3,
-            "flux.rs must consume the typed poll-delay helper at both \
-             polling loops' sleep sites — post-lift the `flux_poll_delay` \
-             function pointer is passed to \
-             `crate::poll_backoff_advance::advance_poll_backoff_tokio` \
-             at 2 call sites, plus the fn-definition line contributes \
-             one hit, so the floor is `>= 3` code-line hits. Found:\n{}",
+            delegation_hits.len() >= 2,
+            "flux.rs must consume the typed poll-delay helper at the \
+             fused `deployment_poll_iteration_tail` helper's sleep site — \
+             post-lift the `flux_poll_delay` function pointer is passed \
+             to `crate::poll_backoff_advance::advance_poll_backoff_tokio` \
+             at 1 call site (the fused `deployment_poll_iteration_tail` \
+             helper both polling loops route through), plus the \
+             fn-definition line contributes one hit, so the floor is \
+             `>= 2` code-line hits. Found:\n{}",
             delegation_hits.join("\n"),
         );
     }
@@ -1492,19 +1521,21 @@ mod tests {
             pre_lift_hits,
         );
 
-        // (2) Post-lift delegation must appear at ≥3 code lines
-        // (two callers + the primitive's own `fn` definition line).
+        // (2) Post-lift delegation must appear at ≥2 code lines
+        // (one caller — the fused `deployment_poll_iteration_tail`
+        // helper both polling loops route through — plus the
+        // primitive's own `fn` definition line).
         let delegation_hits =
             code_line_hits(module_body, "emit_periodic_deployment_diagnostics_burst(");
         assert!(
-            delegation_hits.len() >= 3,
+            delegation_hits.len() >= 2,
             "commands/flux.rs must consume the typed \
              `emit_periodic_deployment_diagnostics_burst` primitive at \
-             both polling loops — post-lift the primitive is invoked \
-             at 2 call sites (`verify_deployment_image`, \
-             `wait_for_deployment`) plus the `fn`-definition line \
-             contributes one hit, so the floor is `>= 3` code-line \
-             hits. Found:\n{}",
+             the fused `deployment_poll_iteration_tail` helper — post-lift \
+             the primitive is invoked at 1 call site (the helper both \
+             `verify_deployment_image` and `wait_for_deployment` route \
+             through) plus the `fn`-definition line contributes one hit, \
+             so the floor is `>= 2` code-line hits. Found:\n{}",
             delegation_hits.join("\n"),
         );
 
@@ -1608,6 +1639,107 @@ mod tests {
              constructor is invoked at 2 call sites \
              (`verify_deployment_image`, `wait_for_deployment`). \
              Found:\n{}",
+            delegation_hits.join("\n"),
+        );
+    }
+
+    /// Whole-module lift shield for the two pre-lift sibling 6-line
+    /// end-of-iteration tail stanzas
+    ///
+    /// ```ignore
+    /// emit_periodic_deployment_diagnostics_burst(
+    ///     <ns>,
+    ///     <deploy>,
+    ///     elapsed,
+    ///     &mut poll_clock.last_diag_at,
+    /// )
+    /// .await;
+    ///
+    /// crate::poll_backoff_advance::advance_poll_backoff_tokio(
+    ///     &mut poll_clock.backoff_attempt,
+    ///     flux_poll_delay,
+    /// )
+    /// .await;
+    /// ```
+    ///
+    /// that closed each deployment-pod-polling loop iteration in
+    /// [`super::verify_deployment_image`] and [`super::wait_for_deployment`].
+    /// Post-lift both consumer sites delegate through the fused
+    /// [`super::deployment_poll_iteration_tail`] helper, which threads a
+    /// single `&mut DeploymentPollClock` receiver into BOTH the
+    /// diagnostic-burst cursor and the backoff-advance cursor via
+    /// disjoint field borrows.
+    ///
+    /// Two invariants pinned here:
+    ///
+    /// 1. **Negative:** The `.poll_backoff_advance::advance_poll_backoff_tokio(`
+    ///    fully-qualified call — a tell for the pre-lift 6-line tail
+    ///    whose module-path prefix is unique to the two lifted sites —
+    ///    must not reappear in the module body. A regression that
+    ///    re-inlined either tail fails here. (The bare
+    ///    `advance_poll_backoff_tokio(` alone would false-positive on
+    ///    the new helper's body, which is the ONE legitimate call
+    ///    site; the fully-qualified path is exclusive to a caller that
+    ///    bypassed the helper.)
+    /// 2. **Positive delegation floor ≥ 3:** `deployment_poll_iteration_tail(`
+    ///    appears at ≥ 3 code lines (2 caller sites + the fn-definition
+    ///    line). A future third deployment-pod-polling loop added to
+    ///    this module joins the same delegation chain and the floor
+    ///    grows with it.
+    ///
+    /// Scan bounded strictly to the module's non-test body (file start
+    /// to the FIRST `\n#[cfg(test)]\nmod tests {` marker) so this
+    /// shield's own docstring mention of the pre-lift shape stays out
+    /// of scope. Sibling of the two whole-module boundary shields
+    /// [`test_flux_polling_loops_route_periodic_diag_burst_through_typed_primitive`]
+    /// and [`test_flux_polling_loops_route_deployment_poll_clock_new`]
+    /// — same "one delegation-helper + whole-module negative +
+    /// positive-floor" triple discipline every three-field poll-loop
+    /// stanza this module carries.
+    #[test]
+    fn test_flux_polling_loops_route_deployment_poll_iteration_tail() {
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("flux.rs"),
+            "commands/flux.rs",
+        );
+
+        // (1) Pre-lift tail tell — the fully-qualified
+        // `crate::poll_backoff_advance::advance_poll_backoff_tokio(`
+        // path — must not reappear at any code line. The helper itself
+        // calls `crate::poll_backoff_advance::advance_poll_backoff_tokio(`,
+        // so this shield fires only if a caller re-inlines the pair
+        // outside the helper.
+        let pre_lift_hits = code_line_hits(
+            module_body,
+            "crate::poll_backoff_advance::advance_poll_backoff_tokio(",
+        );
+        assert!(
+            pre_lift_hits.len() <= 1,
+            "commands/flux.rs must NOT re-inline the pre-lift 6-line \
+             end-of-iteration tail (`emit_periodic_deployment_diagnostics_burst(...)\
+             .await;` + `crate::poll_backoff_advance::advance_poll_backoff_tokio(...)\
+             .await;`) at either consumer loop — route through \
+             `deployment_poll_iteration_tail(namespace, deployment_name, \
+             elapsed, &mut poll_clock).await` instead. The fused helper \
+             carries the ONE legitimate call to \
+             `crate::poll_backoff_advance::advance_poll_backoff_tokio(`; \
+             any additional hit means a caller bypassed the helper. \
+             Found code-line hits: {:#?}",
+            pre_lift_hits,
+        );
+
+        // (2) Post-lift delegation must appear at ≥ 3 code lines
+        // (two consumer call sites + the fn-definition line).
+        let delegation_hits = code_line_hits(module_body, "deployment_poll_iteration_tail(");
+        assert!(
+            delegation_hits.len() >= 3,
+            "commands/flux.rs must consume the fused \
+             `deployment_poll_iteration_tail` helper at both polling \
+             loops' end-of-iteration tails — post-lift the helper is \
+             invoked at 2 call sites (`verify_deployment_image`, \
+             `wait_for_deployment`) plus the `fn`-definition line \
+             contributes one hit, so the floor is `>= 3` code-line \
+             hits. Found:\n{}",
             delegation_hits.join("\n"),
         );
     }
