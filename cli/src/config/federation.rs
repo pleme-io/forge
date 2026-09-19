@@ -290,7 +290,12 @@ impl ServiceFederationTestsConfig {
     pub fn namespace(&self, product: &str, environment: &str) -> String {
         self.namespace_pattern
             .clone()
-            .unwrap_or_else(|| format!("{}-{}", product, environment))
+            .unwrap_or_else(|| {
+                crate::product_environment_namespace::product_environment_namespace(
+                    product,
+                    environment,
+                )
+            })
             .replace("{product}", product)
             .replace("{environment}", environment)
     }

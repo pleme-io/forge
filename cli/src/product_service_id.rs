@@ -65,12 +65,12 @@
 //!   OCI-architecture prefix. Different domain (image tag, not resource
 //!   name); different axes (arch × sha, not product × service); different
 //!   consumers (registry-side tag matching, not K8s label matching).
-//! - **`{product}-{environment}` K8s namespace** — `commands/rollback.rs:274`,
-//!   `commands/sessions.rs:149`, `commands/attestation.rs:{1571, 1572}`,
-//!   `config/federation.rs:293`, `domain/service.rs:155`,
-//!   `config/product.rs:233`. The convention already owned by
-//!   [`crate::config::product::ProductConfig::namespace_for_env`]; a
-//!   distinct domain (env axis, not service axis) with its own primitive.
+//! - **`{product}-{environment}` K8s namespace** — the sibling convention,
+//!   owned by [`crate::product_environment_namespace::product_environment_namespace`];
+//!   `commands/rollback.rs`, `commands/sessions.rs`, `commands/attestation.rs`,
+//!   `config/federation.rs`, `domain/service.rs`, and
+//!   `config/product.rs::ProductConfig::namespace_for_env` all delegate to
+//!   it. A distinct domain (env axis, not service axis) with its own primitive.
 //! - **`{name}-{target}` binary name** — `commands/tool.rs:233`. A
 //!   `<crate>-<triple>` cross-compilation product name; different axes.
 //! - **`{resource_base}-{suffix}` k8s child-resource name** —

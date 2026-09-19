@@ -144,6 +144,7 @@ mod post_deploy_graphql_query;
 mod post_deploy_http_client;
 mod probe_dump;
 mod probe_verifying;
+mod product_environment_namespace;
 mod product_service_id;
 mod product_workflow_intro_banner;
 mod prompt_confirm;

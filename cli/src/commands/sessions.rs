@@ -146,7 +146,8 @@ fn delete_sessions(namespace: &str, pod: &str, password: &str) -> Result<usize> 
 /// Flush all sessions for a product
 pub async fn flush(product: String, environment: String, force: bool, dry_run: bool) -> Result<()> {
     let config = ProductConfig::for_product(&product)?;
-    let namespace = format!("{}-{}", product, environment);
+    let namespace =
+        crate::product_environment_namespace::product_environment_namespace(&product, &environment);
 
     println!("🔄 Session Flush for {} ({})", product, environment);
     crate::ui::print_field("Namespace", &namespace);

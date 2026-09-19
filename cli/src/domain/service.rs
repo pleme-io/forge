@@ -152,7 +152,10 @@ impl ServiceDefinition {
 
     /// Get the Kubernetes namespace for this service
     pub fn namespace(&self, environment: &str) -> String {
-        format!("{}-{}", self.product, environment)
+        crate::product_environment_namespace::product_environment_namespace(
+            &self.product,
+            environment,
+        )
     }
 
     /// Get the Kubernetes deployment name

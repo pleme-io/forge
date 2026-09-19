@@ -1581,8 +1581,14 @@ pub fn compose_product_certification(
     );
 
     let deployment = DeploymentAttestation {
-        namespace: format!("{}-{}", product, environment),
-        kustomization: format!("{}-{}", product, environment),
+        namespace: crate::product_environment_namespace::product_environment_namespace(
+            product,
+            environment,
+        ),
+        kustomization: crate::product_environment_namespace::product_environment_namespace(
+            product,
+            environment,
+        ),
         source_commit: source.commit.clone(),
         source_verified: source_verification_outcome.is_verified(),
         manifest_hash: deployment_manifest_outcome.manifest_hash(),

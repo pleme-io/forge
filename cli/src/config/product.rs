@@ -230,7 +230,7 @@ impl ProductConfig {
             s if s.starts_with("production") => "production",
             other => other,
         };
-        format!("{}-{}", self.name, simplified)
+        crate::product_environment_namespace::product_environment_namespace(&self.name, simplified)
     }
 
     // =========================================================================

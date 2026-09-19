@@ -264,7 +264,10 @@ pub async fn execute(
                 {
                     if let Some(hc) = &svc_config.health_check {
                         if i < entries.len() - 1 {
-                            let namespace = format!("{}-{}", product, env_name);
+                            let namespace =
+                                crate::product_environment_namespace::product_environment_namespace(
+                                    &product, env_name,
+                                );
                             run_health_check(&hc.deployment, &namespace, hc.timeout_secs).await?;
                         }
                     }
