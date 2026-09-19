@@ -61,8 +61,11 @@ pub async fn execute(
     .await?;
 
     // Step 3: GitOps Deploy
-    crate::step_header::announce_step_header(3, 3, "GitOps Deploy");
-    println!();
+    crate::step_header_with_trailing_blank::announce_step_header_with_trailing_blank(
+        3,
+        3,
+        "GitOps Deploy",
+    );
 
     // The manifest parameter should point to kustomization.yaml
     let kustomization_path = Path::new(&manifest);
@@ -141,8 +144,11 @@ pub async fn execute(
     // This is optional - if config can't be loaded, we skip purging
     if let Ok(config) = DeployConfig::load_for_service(&name) {
         if config.global.cloudflare.enabled {
-            crate::step_header::announce_step_header(4, 4, "Purge Cloudflare Cache");
-            println!();
+            crate::step_header_with_trailing_blank::announce_step_header_with_trailing_blank(
+                4,
+                4,
+                "Purge Cloudflare Cache",
+            );
 
             if let (Some(zone_id), Some(api_token), Some(base_url)) = (
                 config.global.cloudflare.zone_id.as_ref(),

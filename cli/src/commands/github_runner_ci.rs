@@ -165,8 +165,9 @@ pub async fn execute(
 
     // Step 1: Build with Nix (unless skipped)
     if !skip_build {
-        crate::step_header::announce_step_header(1, 3, "Build");
-        println!();
+        crate::step_header_with_trailing_blank::announce_step_header_with_trailing_blank(
+            1, 3, "Build",
+        );
 
         // Get ATTIC_TOKEN from environment or kubernetes secret
         // Fallback namespace can be configured via ATTIC_FALLBACK_NAMESPACE env var
@@ -422,8 +423,11 @@ pub async fn execute(
 
     // Step 2: Push to GHCR (unless skipped)
     if !skip_push {
-        crate::step_header::announce_step_header(2, 3, "Push to GHCR");
-        println!();
+        crate::step_header_with_trailing_blank::announce_step_header_with_trailing_blank(
+            2,
+            3,
+            "Push to GHCR",
+        );
 
         // Get GHCR token via canonical discovery chain
         let ghcr_token = crate::infrastructure::registry::RegistryCredentials::discover_token(None)
@@ -459,8 +463,11 @@ pub async fn execute(
     }
 
     // Step 3: Update manifest and commit
-    crate::step_header::announce_step_header(3, 3, "GitOps Deployment");
-    println!();
+    crate::step_header_with_trailing_blank::announce_step_header_with_trailing_blank(
+        3,
+        3,
+        "GitOps Deployment",
+    );
 
     let manifest_path = std::path::Path::new(&repo_root_str).join(&manifest);
 

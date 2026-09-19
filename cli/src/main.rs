@@ -174,6 +174,7 @@ mod skipping_step;
 mod smoke_query_failure_record;
 mod stage_completion_ack;
 mod step_header;
+mod step_header_with_trailing_blank;
 mod success_step;
 mod supergraph_content_hash;
 mod tags_field;

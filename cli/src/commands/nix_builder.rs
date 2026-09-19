@@ -282,12 +282,11 @@ pub async fn release(
         modified_files.push(primary_kust.clone());
         println!();
     } else {
-        crate::step_header::announce_step_header(
+        crate::step_header_with_trailing_blank::announce_step_header_with_trailing_blank(
             2,
             7,
             "Skip primary cluster nix-builder kustomization (not provided)",
         );
-        println!();
     }
 
     // Step 4: Update primary cluster kenshi kustomization.yaml BUILDER_IMAGE

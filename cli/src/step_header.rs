@@ -401,6 +401,26 @@ mod tests {
     // `commands/cluster_overlay_release_push_step.rs`
     // (`every_prelift_module_forwards_through_announce_and_push_release_image_step`)
     // which pins that fusion-call count at ≥1 per consumer.
+    //
+    // Twelve `announce_step_header(...); println!();` fused
+    // two-line stanzas (deploy.rs×2, comprehensive_release.rs×6,
+    // github_runner_ci.rs×3, nix_builder.rs×1) subsequently lifted
+    // onto `crate::step_header_with_trailing_blank::\
+    // announce_step_header_with_trailing_blank`; that fusion
+    // primitive transitively calls
+    // `crate::step_header::announce_step_header` from
+    // `step_header_with_trailing_blank.rs` (not under `commands/`),
+    // so the direct-count under `commands/` dropped accordingly:
+    // deploy.rs 4 → 2 (Step 1 "Build" and Step 2 "Push" retain their
+    // unframed announce calls, no trailing blank), comprehensive_release.rs
+    // 6 → 0 (all six framed stanzas lifted), github_runner_ci.rs
+    // 3 → 0 (all three framed stanzas lifted), nix_builder.rs
+    // 6 → 5 (the `else`-branch Skip-primary stanza lifted). See
+    // the positive-half sibling shield in
+    // `step_header_with_trailing_blank.rs`
+    // (`every_prelift_module_forwards_through_\
+    // announce_step_header_with_trailing_blank`) which pins that
+    // fusion-call count at pre-lift totals per consumer.
     #[test]
     fn every_prelift_module_forwards_through_announce_step_header() {
         use std::path::PathBuf;
@@ -409,12 +429,10 @@ mod tests {
             .join("commands");
         // (module basename, minimum direct forward count)
         let expectations: &[(&str, usize)] = &[
-            ("comprehensive_release.rs", 6),
-            ("deploy.rs", 4),
-            ("github_runner_ci.rs", 3),
+            ("deploy.rs", 2),
             ("kenshi.rs", 2),
             ("kenshi_agent.rs", 4),
-            ("nix_builder.rs", 6),
+            ("nix_builder.rs", 5),
         ];
         for (basename, min_count) in expectations {
             let path = commands_dir.join(basename);

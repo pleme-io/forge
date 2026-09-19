@@ -293,8 +293,11 @@ pub async fn execute(
     // ========================================================================
     if !skip_unit_tests {
         let step_start = Instant::now();
-        crate::step_header::announce_step_header(1, 5, "Pre-Build Validation");
-        println!();
+        crate::step_header_with_trailing_blank::announce_step_header_with_trailing_blank(
+            1,
+            5,
+            "Pre-Build Validation",
+        );
 
         info!("🧪 Running unit tests...");
         println!();
@@ -368,8 +371,11 @@ pub async fn execute(
 
     if !skip_build {
         let step_start = Instant::now();
-        crate::step_header::announce_step_header(2, 5, "Build Docker Image");
-        println!();
+        crate::step_header_with_trailing_blank::announce_step_header_with_trailing_blank(
+            2,
+            5,
+            "Build Docker Image",
+        );
 
         commands::build::execute(
             flake_attr.clone(),
@@ -397,8 +403,11 @@ pub async fn execute(
     if !skip_integration_tests {
         if let Some(compose_path) = &compose_file {
             let step_start = Instant::now();
-            crate::step_header::announce_step_header(3, 5, "Integration Testing");
-            println!();
+            crate::step_header_with_trailing_blank::announce_step_header_with_trailing_blank(
+                3,
+                5,
+                "Integration Testing",
+            );
 
             // Check if compose file exists
             let compose_file_path = std::path::Path::new(&working_dir).join(compose_path);
@@ -722,8 +731,11 @@ pub async fn execute(
                 );
             }
         } else {
-            crate::step_header::announce_step_header(3, 5, "Integration Testing");
-            println!();
+            crate::step_header_with_trailing_blank::announce_step_header_with_trailing_blank(
+                3,
+                5,
+                "Integration Testing",
+            );
             crate::warn_advisory!("No compose file provided, skipping integration tests");
             println!();
         }
@@ -736,8 +748,11 @@ pub async fn execute(
     // ========================================================================
     if !skip_push {
         let step_start = Instant::now();
-        crate::step_header::announce_step_header(4, 5, "Push to Registry");
-        println!();
+        crate::step_header_with_trailing_blank::announce_step_header_with_trailing_blank(
+            4,
+            5,
+            "Push to Registry",
+        );
 
         commands::push::execute(
             build_output.to_string(),
@@ -768,8 +783,11 @@ pub async fn execute(
     // ========================================================================
     if !skip_deploy {
         let step_start = Instant::now();
-        crate::step_header::announce_step_header(5, 5, "Deploy to Kubernetes");
-        println!();
+        crate::step_header_with_trailing_blank::announce_step_header_with_trailing_blank(
+            5,
+            5,
+            "Deploy to Kubernetes",
+        );
 
         // Create result symlink at repo root for deploy command
         let result_link = std::path::Path::new(&repo_root_str).join("result");
