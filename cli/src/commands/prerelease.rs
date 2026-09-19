@@ -870,13 +870,19 @@ async fn run_frontend_gates(config: &PreReleaseConfig) -> Result<GateSummary> {
 
 /// G13: Run integration tests (testcontainers: Postgres + Redis + NATS)
 async fn run_integration_gate(config: &PreReleaseConfig) -> Result<bool> {
-    let start = crate::ui::print_step_heading_start("G13: Integration tests");
-
-    // Ensure Docker is running (auto-start on macOS); on failure emit the
-    // `Docker not available: <err>` step-failure line and skip the gate.
-    if !crate::docker_available_gate_preflight::ensure_docker_running_for_gate() {
+    // Announce the G13 step heading and enforce the docker
+    // daemon-availability preflight in one fused call. On preflight
+    // failure the primitive has already emitted the
+    // `❌ Docker not available: <err>` line and returns `None`; the
+    // caller short-circuits with `return Ok(false)` so the sibling
+    // gates continue running.
+    let Some(start) =
+        crate::docker_available_gate_preflight::announce_docker_gate_step_heading_or_skip(
+            "G13: Integration tests",
+        )
+    else {
         return Ok(false);
-    }
+    };
 
     let timeout_secs = config.gates.integration.timeout_secs;
     let cargo = cargo_bin();
@@ -983,13 +989,19 @@ fn print_e2e_diagnostics(backend_dir: &Path) {
 
 /// G14: Run E2E tests (chromiumoxide + testcontainers full stack)
 async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
-    let start = crate::ui::print_step_heading_start("G14: E2E tests");
-
-    // Ensure Docker is running (may already be started by G13); on failure
-    // emit the `Docker not available: <err>` step-failure line and skip.
-    if !crate::docker_available_gate_preflight::ensure_docker_running_for_gate() {
+    // Announce the G14 step heading and enforce the docker
+    // daemon-availability preflight in one fused call. Docker may
+    // already be started by G13; the preflight is idempotent. On
+    // preflight failure the primitive has already emitted the
+    // `❌ Docker not available: <err>` line and returns `None`; the
+    // caller short-circuits with `return Ok(false)`.
+    let Some(start) =
+        crate::docker_available_gate_preflight::announce_docker_gate_step_heading_or_skip(
+            "G14: E2E tests",
+        )
+    else {
         return Ok(false);
-    }
+    };
 
     // Resolve repo root for image preparation
     let repo_root = config.working_dir.to_str().map(|s| s.to_string());
