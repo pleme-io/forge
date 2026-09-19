@@ -78,6 +78,7 @@ mod building_progress_message;
 mod bun_argv;
 mod bun_install_frozen_lockfile_capture;
 mod bun_x_graphql_codegen_capture;
+mod cargo_lock_and_cargo_nix_bullets;
 mod cargo_nix_ceremony_banner;
 mod cargo_test_argv;
 mod cloudflare;

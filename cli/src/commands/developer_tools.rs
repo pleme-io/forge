@@ -380,9 +380,9 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
     crate::cargo_nix_ceremony_banner::print_cargo_nix_ceremony_banner(
         crate::cargo_nix_ceremony_banner::CargoNixCeremony::Regeneration,
     );
-    crate::ui::print_bullet_path(&cargo_lock);
-    crate::ui::print_bullet_path(&workspace_root.join("Cargo.nix"));
-    println!();
+    crate::cargo_lock_and_cargo_nix_bullets::print_cargo_lock_and_cargo_nix_bullets_with_blank(
+        &workspace_root,
+    );
     crate::ui::print_next_steps_heading();
     crate::ui::print_next_step(1, "Review the changes: git diff");
     crate::ui::print_next_step(
@@ -426,9 +426,9 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
     crate::cargo_nix_ceremony_banner::print_cargo_nix_ceremony_banner(
         crate::cargo_nix_ceremony_banner::CargoNixCeremony::Update,
     );
-    crate::ui::print_bullet_path(&workspace_root.join("Cargo.lock"));
-    crate::ui::print_bullet_path(&workspace_root.join("Cargo.nix"));
-    println!();
+    crate::cargo_lock_and_cargo_nix_bullets::print_cargo_lock_and_cargo_nix_bullets_with_blank(
+        &workspace_root,
+    );
     crate::ui::print_next_steps_heading();
     crate::ui::print_next_step(1, "Review the changes: git diff");
     crate::ui::print_next_step(2, "Test the build: cargo build");

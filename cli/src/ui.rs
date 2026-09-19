@@ -12562,11 +12562,17 @@ mod tests {
         // `ui.rs`, never in the target modules the `include_str!`
         // above pulls in.
         const CALLERS: &[(&str, &str, bool, usize)] = &[
+            // developer_tools.rs was 11 pre-lift; the (Cargo.lock,
+            // Cargo.nix, blank) closer at three sites folded two
+            // pairs of direct `print_bullet_path(` calls onto
+            // `crate::cargo_lock_and_cargo_nix_bullets::\
+            //   print_cargo_lock_and_cargo_nix_bullets_with_blank(`,
+            // dropping 4 forward hits down to 7.
             (
                 include_str!("commands/developer_tools.rs"),
                 "commands/developer_tools.rs",
                 true,
-                11,
+                7,
             ),
             (
                 include_str!("commands/comprehensive_release.rs"),
@@ -12580,11 +12586,18 @@ mod tests {
                 false,
                 4,
             ),
+            // web_service.rs was 4 pre-lift; the closer at
+            // `web_cargo_update` folded one pair of direct
+            // `print_bullet_path(` calls onto the shared primitive,
+            // dropping 2 forward hits down to 2. The remaining pair
+            // lives at `web_regenerate` (a `deps.nix` +
+            // `Cargo.nix` catalog whose first bullet differs from the
+            // `Cargo.lock` primitive shape).
             (
                 include_str!("commands/web_service.rs"),
                 "commands/web_service.rs",
                 true,
-                4,
+                2,
             ),
         ];
         for (source, module_path, has_cfg_test, expected_forwards) in CALLERS {
@@ -12765,8 +12778,21 @@ mod tests {
         let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("src")
             .join("commands");
-        // (module basename, minimum direct forward count)
-        let expectations: &[(&str, usize)] = &[("developer_tools.rs", 4), ("web_service.rs", 4)];
+        // (module basename, minimum direct forward count). The
+        // `commands/developer_tools.rs` pre-lift count of 4 dropped
+        // to 0 when the (Cargo.lock, Cargo.nix, blank) closer at both
+        // consumer sites lifted onto
+        // `crate::cargo_lock_and_cargo_nix_bullets::\
+        //   print_cargo_lock_and_cargo_nix_bullets_with_blank(`; that
+        // module's forward count is now pinned by the sibling
+        // `every_prelift_module_forwards_through_cargo_lock_and_cargo_nix_bullets`
+        // shield in `crate::cargo_lock_and_cargo_nix_bullets`. The
+        // `commands/web_service.rs` pre-lift count of 4 dropped to 2
+        // when only the `web_cargo_update` closer lifted; the
+        // `web_regenerate` site remains a direct `print_bullet_path`
+        // consumer because its first bullet is a `deps.nix` path, not
+        // the shared `Cargo.lock` path this primitive owns.
+        let expectations: &[(&str, usize)] = &[("web_service.rs", 2)];
         for (basename, min_count) in expectations {
             let path = commands_dir.join(basename);
             let source = std::fs::read_to_string(&path).unwrap();
