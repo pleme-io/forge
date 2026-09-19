@@ -21293,16 +21293,33 @@ mod tests {
                     lineno = i + 1
                 );
             }
-            let forward_hits = body.matches("crate::ui::print_deployed_image_ref(").count();
+            // Accept EITHER the direct `crate::ui::print_deployed_image_ref(`
+            // call (the peer-primitive path) OR delegation through the
+            // downstream fused primitive
+            // `crate::workflow_complete_banner::print_workflow_complete_banner(`,
+            // which itself terminates in `write_deployed_image_ref` — a
+            // caller migrating from the direct call onto the fused
+            // banner+image-ref primitive (both pre-lift consumers did
+            // exactly this) preserves the pre-lift byte grammar, so the
+            // forward-count discipline stays "exactly one per consumer"
+            // measured across BOTH delegation strings.
+            let direct_hits = body.matches("crate::ui::print_deployed_image_ref(").count();
+            let fused_hits = body
+                .matches("crate::workflow_complete_banner::print_workflow_complete_banner(")
+                .count();
+            let forward_hits = direct_hits + fused_hits;
             assert_eq!(
                 forward_hits, 1,
-                "{module_path} body must forward to \
-                 `crate::ui::print_deployed_image_ref(...)` at exactly \
-                 one site — one per pre-lift consumer in this module. \
-                 A fusion that folded the two consumer sites into one \
-                 call or dropped one of the deployed image-ref rows \
-                 silently fails here. Found {forward_hits} forwarding \
-                 hits."
+                "{module_path} body must forward to EITHER \
+                 `crate::ui::print_deployed_image_ref(...)` OR the \
+                 downstream fused primitive \
+                 `crate::workflow_complete_banner::print_workflow_complete_banner(...)` \
+                 at exactly one site — one per pre-lift consumer in \
+                 this module. A fusion that folded the two consumer \
+                 sites into one call or dropped one of the deployed \
+                 image-ref rows silently fails here. Found \
+                 {forward_hits} forwarding hits ({direct_hits} direct \
+                 + {fused_hits} fused)."
             );
         }
     }

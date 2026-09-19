@@ -781,11 +781,11 @@ pub async fn execute(
         info!("⏭️  Skipping rollout watch (use --watch to enable)");
     }
 
-    crate::ui::print_boxed_banner(
-        crate::ui::BoxedBannerStyle::GreenBold,
-        "✅ GitHub Runner CI Complete!",
+    crate::workflow_complete_banner::print_workflow_complete_banner(
+        crate::workflow_complete_banner::WorkflowCompleteBanner::GitHubRunnerCi,
+        registry,
+        &git_sha,
     );
-    crate::ui::print_deployed_image_ref(registry, &git_sha);
     println!("🎯 Namespace: {}", namespace);
     println!("🚀 StatefulSet: {}", name);
     println!();

@@ -203,11 +203,11 @@ pub async fn execute(
         }
     }
 
-    crate::ui::print_boxed_banner(
-        crate::ui::BoxedBannerStyle::GreenBold,
-        "✅ Deployment Complete!",
+    crate::workflow_complete_banner::print_workflow_complete_banner(
+        crate::workflow_complete_banner::WorkflowCompleteBanner::Deployment,
+        registry,
+        tag,
     );
-    crate::ui::print_deployed_image_ref(registry, tag);
     println!("🎯 Strategy: FluxCD GitOps");
     println!();
     println!("Monitor deployment:");

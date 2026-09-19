@@ -178,6 +178,7 @@ mod tools;
 mod updated_field;
 mod using_pod_field;
 mod using_tool_field;
+mod workflow_complete_banner;
 mod workload_field;
 mod zone_id_field;
 
