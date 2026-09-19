@@ -9265,6 +9265,67 @@ impl RetryPolicy {
         }
     }
 
+    /// The `max_attempts` field of [`Self::network_or_immediate`] as a bare
+    /// `u32` — i.e. [`Self::network`]'s `5` when `safe_mode` is `true`,
+    /// [`Self::immediate`]'s `1` when `safe_mode` is `false`.
+    ///
+    /// Lifts the verbatim one-line stanza
+    /// ```text
+    /// let <name>_retries = if safe_mode { 5 } else { 1 };
+    /// ```
+    /// that the two Attic-facing sites in
+    /// `commands/github_runner_ci.rs::execute` — `login_with_retries`
+    /// (`let attic_login_retries = …` at ~L278) and `push_with_retries`
+    /// (`let attic_push_retries = …` at ~L407) — previously carried by
+    /// hand as the `retries: u32` argument to the two
+    /// [`crate::infrastructure::attic::AtticClient`] retry-driven methods.
+    /// Two identically-shaped bodies past the ≥2 duplication threshold
+    /// forge's CLAUDE.md PRIME DIRECTIVE and THEORY.md §VI.1's
+    /// three-times rule enforce for command-module recurrences of a
+    /// retry-schedule literal.
+    ///
+    /// # Why the boolean-conditional literal must not be hand-spelled
+    ///
+    /// The two literals `5` and `1` are not free-standing constants —
+    /// they are the `max_attempts` fields of the two canonical factory
+    /// constructors [`Self::network`] and [`Self::immediate`], the two
+    /// arms of [`Self::network_or_immediate`]. A hand-spelled
+    /// `if safe_mode { 5 } else { 1 }` at a call site pins the two
+    /// literals at that site alone, so a future re-tune of
+    /// [`Self::network`]'s canonical `max_attempts: 5` (e.g., raised to
+    /// `6` to widen the transient-failure budget for the Bazel / Buck2
+    /// / SLSA reference schedule the docstring names) would silently
+    /// leave the two Attic sites at `5` while the rest of the tree
+    /// updated. The `max_attempts` field of the factory constructor is
+    /// the single source of truth for the canonical budget; routing
+    /// the two sites through this primitive pins that.
+    ///
+    /// # Const-fn discipline
+    ///
+    /// Marked `const fn` for the same reason
+    /// [`Self::network_or_immediate`] is: the value is a pure function
+    /// of the boolean argument (it composes two const constructors and
+    /// reads a `u32` field), and a const returner admits the same
+    /// `const`-context call shapes the sibling factory constructors
+    /// admit (e.g., a `const SAFE_MODE_DEFAULT: bool = true; const N:
+    /// u32 = RetryPolicy::max_attempts_for_safe_mode(SAFE_MODE_DEFAULT);`
+    /// table at a future call site).
+    ///
+    /// # Composition
+    ///
+    /// `RetryPolicy::max_attempts_for_safe_mode(b)` and
+    /// `RetryPolicy::network_or_immediate(b).max_attempts` return the
+    /// same `u32` by construction (the former is defined as the latter);
+    /// the tests
+    /// `test_max_attempts_for_safe_mode_true_equals_network_max_attempts`
+    /// and
+    /// `test_max_attempts_for_safe_mode_false_equals_immediate_max_attempts`
+    /// pin the equality against a regression that fused either arm onto
+    /// a hand-spelled literal.
+    pub const fn max_attempts_for_safe_mode(safe_mode: bool) -> u32 {
+        Self::network_or_immediate(safe_mode).max_attempts
+    }
+
     /// Custom policy. `max_attempts` is clamped to `>= 1` so a degenerate
     /// `0` cannot silently turn the loop into a no-op.
     pub fn new(
@@ -17099,6 +17160,130 @@ mod tests {
         assert_eq!(false_arm.initial_backoff, imm.initial_backoff);
         assert_eq!(false_arm.max_backoff, imm.max_backoff);
         assert_eq!(false_arm.compute_delay(2), Duration::ZERO);
+    }
+
+    /// `max_attempts_for_safe_mode(true)` returns [`RetryPolicy::network`]'s
+    /// canonical `max_attempts` verbatim. The load-bearing pin: a
+    /// regression that fused the `true` arm onto a hand-spelled literal
+    /// (e.g., `5` frozen at the primitive boundary) would silently
+    /// desynchronize the two Attic-facing retry-budget consumers in
+    /// `commands/github_runner_ci.rs::execute` from a future re-tune of
+    /// [`RetryPolicy::network`]'s canonical budget — exactly the
+    /// property drift the primitive exists to close. Reading
+    /// `RetryPolicy::network().max_attempts` on the RHS of the
+    /// assertion (rather than the literal `5`) pins the equality
+    /// against the canonical factory field, not against today's value.
+    #[test]
+    fn test_max_attempts_for_safe_mode_true_equals_network_max_attempts() {
+        assert_eq!(
+            RetryPolicy::max_attempts_for_safe_mode(true),
+            RetryPolicy::network().max_attempts,
+            "true arm must inherit network()'s max_attempts, whatever it is"
+        );
+    }
+
+    /// `max_attempts_for_safe_mode(false)` returns
+    /// [`RetryPolicy::immediate`]'s `max_attempts` verbatim — the
+    /// no-retry `1`. The load-bearing pin: a regression that fused the
+    /// `false` arm onto `network()`'s budget (e.g., by mis-inverting
+    /// the boolean) would silently promote every non-safe-mode CI
+    /// surface consuming this primitive to a five-attempt retry loop
+    /// against the registry/cache, exactly the failure mode the
+    /// safe-mode partition exists to suppress. Reading
+    /// `RetryPolicy::immediate().max_attempts` on the RHS pins the
+    /// equality against the canonical factory field, not against
+    /// today's value.
+    #[test]
+    fn test_max_attempts_for_safe_mode_false_equals_immediate_max_attempts() {
+        assert_eq!(
+            RetryPolicy::max_attempts_for_safe_mode(false),
+            RetryPolicy::immediate().max_attempts,
+            "false arm must inherit immediate()'s max_attempts, whatever it is"
+        );
+    }
+
+    /// `max_attempts_for_safe_mode` is defined as the `max_attempts`
+    /// projection of [`RetryPolicy::network_or_immediate`] — the two
+    /// call shapes return the same `u32` for both boolean arms. Pins
+    /// the composition against a regression that re-implemented the
+    /// primitive with a hand-spelled `if` branch that could drift
+    /// from `network_or_immediate`'s partition.
+    #[test]
+    fn test_max_attempts_for_safe_mode_equals_network_or_immediate_projection() {
+        for b in [true, false] {
+            assert_eq!(
+                RetryPolicy::max_attempts_for_safe_mode(b),
+                RetryPolicy::network_or_immediate(b).max_attempts,
+                "max_attempts_for_safe_mode({b}) must equal \
+                 network_or_immediate({b}).max_attempts"
+            );
+        }
+    }
+
+    /// The two arms partition the canonical factory constructors'
+    /// `max_attempts` fields exactly: `true` arm equals
+    /// `network().max_attempts`, `false` arm equals
+    /// `immediate().max_attempts`, and the two are structurally
+    /// distinct (`network()` retries; `immediate()` does not). Pins a
+    /// regression that fused both arms onto one constant.
+    #[test]
+    fn test_max_attempts_for_safe_mode_is_non_degenerate_partition() {
+        assert_ne!(
+            RetryPolicy::max_attempts_for_safe_mode(true),
+            RetryPolicy::max_attempts_for_safe_mode(false),
+            "the partition must be non-degenerate: true and false must differ"
+        );
+    }
+
+    /// `max_attempts_for_safe_mode` is callable in a `const` context —
+    /// the same const-fn discipline [`RetryPolicy::network`],
+    /// [`RetryPolicy::immediate`], and [`RetryPolicy::network_or_immediate`]
+    /// carry. Pins that a future regression that dropped the `const`
+    /// qualifier would surface here as a compile-error rather than as
+    /// a silent loss of a `const N: u32 = ...` table at a future call
+    /// site.
+    #[test]
+    fn test_max_attempts_for_safe_mode_is_const_fn() {
+        const TRUE_ARM: u32 = RetryPolicy::max_attempts_for_safe_mode(true);
+        const FALSE_ARM: u32 = RetryPolicy::max_attempts_for_safe_mode(false);
+        assert_eq!(TRUE_ARM, RetryPolicy::network().max_attempts);
+        assert_eq!(FALSE_ARM, RetryPolicy::immediate().max_attempts);
+    }
+
+    /// Regression-shield: the two Attic-facing retry-budget sites in
+    /// `commands/github_runner_ci.rs::execute` (`attic_login_retries`
+    /// at ~L278 and `attic_push_retries` at ~L407) MUST route through
+    /// [`RetryPolicy::max_attempts_for_safe_mode`] and MUST NOT carry
+    /// the pre-lift hand-spelled `if safe_mode { 5 } else { 1 }`
+    /// stanza. A future edit that re-fused the boolean-conditional
+    /// literal at either call site would freeze the two literals at
+    /// that site alone, silently desynchronizing it from a future
+    /// re-tune of [`RetryPolicy::network`]'s canonical budget. This
+    /// shield fires against that regression by grepping the module's
+    /// source for the pre-lift pattern.
+    #[test]
+    fn test_attic_retry_budget_sites_route_through_max_attempts_for_safe_mode() {
+        let src = include_str!("commands/github_runner_ci.rs");
+        // Post-lift: at least two call sites of the primitive.
+        let post_lift_calls = src
+            .matches("RetryPolicy::max_attempts_for_safe_mode(safe_mode)")
+            .count();
+        assert!(
+            post_lift_calls >= 2,
+            "commands/github_runner_ci.rs must route both Attic retry-budget \
+             sites through `RetryPolicy::max_attempts_for_safe_mode(safe_mode)`; \
+             found {post_lift_calls} call(s)"
+        );
+        // Pre-lift: zero occurrences of the hand-spelled stanza. `matches`
+        // over the exact-byte needle is enough — the pre-lift shape was
+        // spelled verbatim across whitespace at both sites.
+        let pre_lift_stanzas = src.matches("if safe_mode { 5 } else { 1 }").count();
+        assert_eq!(
+            pre_lift_stanzas, 0,
+            "commands/github_runner_ci.rs must not carry the pre-lift \
+             `if safe_mode {{ 5 }} else {{ 1 }}` stanza at any call site; \
+             route through `RetryPolicy::max_attempts_for_safe_mode` instead"
+        );
     }
 
     /// `network_with_max_attempts(n)` inherits every schedule field of

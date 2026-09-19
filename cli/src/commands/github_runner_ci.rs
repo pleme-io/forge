@@ -272,10 +272,17 @@ pub async fn execute(
         // on the migrated `push_with_retries` sibling); safe_mode=false
         // → 1 attempt (no retry). `login_with_retries` clamps
         // `retries=0` to 1 at `RetryPolicy::new`, so the partition
-        // cannot silently collapse into a no-op. The regression-shield
+        // cannot silently collapse into a no-op. Routes through
+        // [`crate::retry::RetryPolicy::max_attempts_for_safe_mode`] so
+        // the two literals `5` and `1` are read from
+        // [`crate::retry::RetryPolicy::network`] /
+        // [`crate::retry::RetryPolicy::immediate`]'s canonical fields
+        // rather than hand-spelled here (the sibling call at ~L407 for
+        // the `push_with_retries` retry budget composes through the
+        // same primitive). The regression-shield
         // `tests::test_execute_routes_attic_login_through_attic_client_not_helper`
         // pins the delegation structurally against a future re-fusion.
-        let attic_login_retries = if safe_mode { 5 } else { 1 };
+        let attic_login_retries = crate::retry::RetryPolicy::max_attempts_for_safe_mode(safe_mode);
         crate::infrastructure::attic::AtticClient::new(attic_server.clone())
             .with_token(attic_token.clone())
             .login_with_retries(&cache_url, attic_login_retries)
@@ -396,7 +403,15 @@ pub async fn execute(
         // migrated `build.rs` / `push.rs` sibling surfaces);
         // safe_mode=false → 1 attempt (no retry). `push_with_retries`
         // clamps `retries=0` to 1 at `RetryPolicy::new`, so the
-        // partition cannot silently collapse into a no-op.
+        // partition cannot silently collapse into a no-op. Routes
+        // through
+        // [`crate::retry::RetryPolicy::max_attempts_for_safe_mode`] so
+        // the two literals `5` and `1` are read from
+        // [`crate::retry::RetryPolicy::network`] /
+        // [`crate::retry::RetryPolicy::immediate`]'s canonical fields
+        // rather than hand-spelled here (the sibling call at ~L278 for
+        // the `login_with_retries` retry budget composes through the
+        // same primitive).
         //
         // No `.with_token(...)` on the client: the token was seeded
         // into attic's on-disk config by the earlier `login` step, and
@@ -404,7 +419,7 @@ pub async fn execute(
         // `ATTIC_TOKEN` into the spawned process's env either.
         // Preserving the absent-env property means a ps-visible
         // observation surface on shared CI hosts is unchanged.
-        let attic_push_retries = if safe_mode { 5 } else { 1 };
+        let attic_push_retries = crate::retry::RetryPolicy::max_attempts_for_safe_mode(safe_mode);
         let push_result = crate::infrastructure::attic::AtticClient::new(cache_name.clone())
             .push_with_retries(&build_output, attic_push_retries)
             .await;
