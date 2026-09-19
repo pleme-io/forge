@@ -16818,17 +16818,29 @@ mod tests {
     /// below the pre-lift census.
     #[test]
     fn print_next_steps_heading_callers_delegate_through_primitive() {
+        // web_service.rs and developer_tools.rs each pre-lift housed 2
+        // direct `crate::ui::print_next_steps_heading()` forwards; both
+        // have since migrated fully onto
+        // `crate::next_steps_review_the_changes_opener::\
+        // print_next_steps_heading_then_review_the_changes()` (which
+        // routes through `crate::ui::write_next_steps_heading` inside
+        // its byte-oracle sibling but does NOT re-emit the direct
+        // `crate::ui::print_next_steps_heading(` needle this shield
+        // scans for). The entries are kept at 0 so the negative
+        // `println!("Next steps:"` re-inline check still fires against
+        // both modules; a re-inline via the direct primitive would flip
+        // the positive count from 0.
         const CALLERS: &[(&str, &str, usize)] = &[
             (
                 include_str!("commands/web_service.rs"),
                 "commands/web_service.rs",
-                2,
+                0,
             ),
             (include_str!("commands/sync.rs"), "commands/sync.rs", 1),
             (
                 include_str!("commands/developer_tools.rs"),
                 "commands/developer_tools.rs",
-                2,
+                0,
             ),
         ];
         for (source, module_path, expected_forwards) in CALLERS {
@@ -17027,17 +17039,27 @@ mod tests {
     /// pre-lift census.
     #[test]
     fn print_next_step_callers_delegate_through_primitive() {
+        // web_service.rs and developer_tools.rs each pre-lift housed 5
+        // direct `crate::ui::print_next_step(` forwards; the four
+        // shared step-1 `"Review the changes: git diff"` rows across
+        // web_regenerate + web_cargo_update + rust_regenerate +
+        // rust_cargo_update lifted onto
+        // `crate::next_steps_review_the_changes_opener::\
+        // print_next_steps_heading_then_review_the_changes()`, so each
+        // module drops from 5 to 3 direct forwards (the remaining
+        // step-2 / step-3 rows continue to route through
+        // `crate::ui::print_next_step` directly).
         const CALLERS: &[(&str, &str, usize)] = &[
             (
                 include_str!("commands/web_service.rs"),
                 "commands/web_service.rs",
-                5,
+                3,
             ),
             (include_str!("commands/sync.rs"), "commands/sync.rs", 3),
             (
                 include_str!("commands/developer_tools.rs"),
                 "commands/developer_tools.rs",
-                5,
+                3,
             ),
         ];
         const NEEDLES: &[&str] = &["\"  1. ", "\"  2. ", "\"  3. "];

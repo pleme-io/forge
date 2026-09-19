@@ -383,8 +383,7 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
     crate::cargo_lock_and_cargo_nix_bullets::print_cargo_lock_and_cargo_nix_bullets_with_blank(
         &workspace_root,
     );
-    crate::ui::print_next_steps_heading();
-    crate::ui::print_next_step(1, "Review the changes: git diff");
+    crate::next_steps_review_the_changes_opener::print_next_steps_heading_then_review_the_changes();
     crate::ui::print_next_step(
         2,
         "Commit both files: git add Cargo.lock Cargo.nix && git commit",
@@ -429,8 +428,7 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
     crate::cargo_lock_and_cargo_nix_bullets::print_cargo_lock_and_cargo_nix_bullets_with_blank(
         &workspace_root,
     );
-    crate::ui::print_next_steps_heading();
-    crate::ui::print_next_step(1, "Review the changes: git diff");
+    crate::next_steps_review_the_changes_opener::print_next_steps_heading_then_review_the_changes();
     crate::ui::print_next_step(2, "Test the build: cargo build");
     crate::ui::print_next_step(
         3,

@@ -124,6 +124,7 @@ mod kubectl_get_pods_by_selector_argv;
 mod kubectl_logs_argv;
 mod list_resource_names_by_selector_argv;
 mod namespace_field;
+mod next_steps_review_the_changes_opener;
 mod nix;
 mod nix_build_spinner;
 mod nix_built_store_path;
