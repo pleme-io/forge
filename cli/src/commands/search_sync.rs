@@ -129,19 +129,7 @@ async fn run_sync_direct(config_path: &Path, config: &NovaSearchConfig) -> Resul
     )
     .await;
 
-    match result {
-        Ok(Ok(())) => {
-            crate::ui::print_report_item("Search sync completed successfully");
-            Ok(())
-        }
-        Ok(Err(e)) => Err(e),
-        Err(_) => {
-            bail!(
-                "Search sync timed out after {} seconds",
-                config.timeout_secs
-            );
-        }
-    }
+    finalize_search_sync_await_result(result, config.timeout_secs)
 }
 
 /// Run sync via kubectl exec (fallback when novasearchctl not available locally)
@@ -239,17 +227,60 @@ async fn run_sync_via_kubectl(
     cleanup_args.extend(["rm", "-rf", remote_config_path]);
     let _ = kubectl_command_async().args(&cleanup_args).status().await;
 
+    finalize_search_sync_await_result(result, config.timeout_secs)
+}
+
+/// Success message emitted on the `Ok(Ok(()))` arm of the primitive.
+///
+/// Held out as a `const` so the printed-line invariant is a single string
+/// literal that the byte-oracle test below pins verbatim — a drift on
+/// either the success ack or the error envelope would fail the test
+/// before it could ship.
+const SEARCH_SYNC_SUCCESS_ACK: &str = "Search sync completed successfully";
+
+/// Timeout-envelope template. The `{}` placeholder is populated with the
+/// caller's `timeout_secs`, matching the pre-lift `format!` shape at both
+/// sites verbatim. Held out (with `#[allow(dead_code)]` because it exists
+/// for the byte-oracle test to pin the canonical shape, not for the
+/// primitive's own render path) so a drift on the template alone would
+/// fail the byte-oracle test before it could ship.
+#[allow(dead_code)]
+const SEARCH_SYNC_TIMEOUT_ENVELOPE_TEMPLATE: &str = "Search sync timed out after {} seconds";
+
+/// Format the timeout envelope. Held out for byte-oracle parity with the
+/// pre-lift `format!` at either call site.
+fn format_search_sync_timeout_message(timeout_secs: u64) -> String {
+    format!("Search sync timed out after {} seconds", timeout_secs)
+}
+
+/// Fused terminator for the two `timeout(<duration>, <sync-op>).await`
+/// stanzas in this module.
+///
+/// Pre-lift `run_sync_direct` (direct novasearchctl invocation) and
+/// `run_sync_via_kubectl` (pod-side kubectl-exec fallback) each spelled
+/// the same 12-line `match result { Ok(Ok(())) => ok / Ok(Err(e)) =>
+/// forward / Err(_) => bail-with-timeout }` body verbatim. A drift on
+/// either the success ack or the timeout envelope on ONE arm was silently
+/// permissible — nothing pinned the two arms to spell the same operator
+/// contract.
+///
+/// Post-lift the ONE body carries both the success ack literal
+/// ([`SEARCH_SYNC_SUCCESS_ACK`]) and the timeout envelope template
+/// ([`SEARCH_SYNC_TIMEOUT_ENVELOPE_TEMPLATE`], rendered via
+/// [`format_search_sync_timeout_message`]), so a future call-site adder
+/// gets the same shape by construction.
+fn finalize_search_sync_await_result(
+    result: std::result::Result<Result<()>, tokio::time::error::Elapsed>,
+    timeout_secs: u64,
+) -> Result<()> {
     match result {
         Ok(Ok(())) => {
-            crate::ui::print_report_item("Search sync completed successfully");
+            crate::ui::print_report_item(SEARCH_SYNC_SUCCESS_ACK);
             Ok(())
         }
         Ok(Err(e)) => Err(e),
         Err(_) => {
-            bail!(
-                "Search sync timed out after {} seconds",
-                config.timeout_secs
-            );
+            bail!(format_search_sync_timeout_message(timeout_secs));
         }
     }
 }
@@ -498,6 +529,167 @@ mod tests {
              spawn through `crate::retry::run_inherited_status` — \
              the delegation string was not found in \
              run_sync_via_kubectl."
+        );
+    }
+
+    /// The success arm of the primitive returns `Ok(())` verbatim and
+    /// does not touch the `Err` path. The `print_report_item` ack is
+    /// pinned separately in the byte-oracle below; here we only
+    /// certify the control-flow shape.
+    #[tokio::test]
+    async fn test_finalize_search_sync_await_result_success_arm_returns_ok() {
+        let result: std::result::Result<anyhow::Result<()>, tokio::time::error::Elapsed> =
+            Ok(Ok(()));
+
+        let out = super::finalize_search_sync_await_result(result, 30);
+
+        assert!(
+            out.is_ok(),
+            "Ok(Ok(())) arm must return Ok(()) — got Err instead"
+        );
+    }
+
+    /// The forward-error arm carries the inner `anyhow::Error` through
+    /// unchanged. A future refactor that re-wraps the inner error
+    /// would silently rot every operator's failure-message contract
+    /// on this path; this shield fails first.
+    #[tokio::test]
+    async fn test_finalize_search_sync_await_result_forward_error_arm_preserves_inner_message() {
+        let inner_msg = "novasearchctl child exited with code 7";
+        let result: std::result::Result<anyhow::Result<()>, tokio::time::error::Elapsed> =
+            Ok(Err(anyhow::anyhow!(inner_msg)));
+
+        let out = super::finalize_search_sync_await_result(result, 30);
+
+        let err = out.expect_err("Ok(Err(_)) arm must forward the inner error");
+        assert_eq!(
+            format!("{}", err),
+            inner_msg,
+            "Ok(Err(e)) arm must forward the inner error unchanged — \
+             a wrapper on the message would rot the operator's \
+             failure-envelope contract."
+        );
+    }
+
+    /// The timeout arm bails with the canonical
+    /// [`super::SEARCH_SYNC_TIMEOUT_ENVELOPE_TEMPLATE`] shape, rendering
+    /// the caller's `timeout_secs` into the `{}` slot. A drift on the
+    /// envelope wording is a semver-visible change to operator logs.
+    #[tokio::test]
+    async fn test_finalize_search_sync_await_result_timeout_arm_bails_with_canonical_envelope() {
+        let elapsed = tokio::time::timeout(
+            std::time::Duration::from_nanos(1),
+            std::future::pending::<()>(),
+        )
+        .await
+        .expect_err("pending future must trip the 1ns timeout");
+
+        let result: std::result::Result<anyhow::Result<()>, tokio::time::error::Elapsed> =
+            Err(elapsed);
+
+        let out = super::finalize_search_sync_await_result(result, 42);
+        let err = out.expect_err("Err(Elapsed) arm must bail");
+
+        assert_eq!(
+            format!("{}", err),
+            "Search sync timed out after 42 seconds",
+            "Err(Elapsed) arm must render the canonical envelope with \
+             the caller's timeout_secs — a drift is a semver-visible \
+             change to operator logs."
+        );
+    }
+
+    /// Byte-oracle: the success-ack literal spelled by the primitive's
+    /// `Ok(Ok(()))` arm and the `SEARCH_SYNC_SUCCESS_ACK` const must
+    /// stay in lockstep. A drift on either side would let one arm
+    /// spell a stale message while the const still reads the canonical
+    /// one — the exact class of measured-claim rot theory calls out
+    /// in `THEORY.md § V` (measured claims rot downward; a copy carries
+    /// the number without the method).
+    #[test]
+    fn test_search_sync_success_ack_const_matches_pre_lift_literal() {
+        assert_eq!(
+            super::SEARCH_SYNC_SUCCESS_ACK,
+            "Search sync completed successfully",
+            "SEARCH_SYNC_SUCCESS_ACK must spell the pre-lift ack \
+             verbatim — a drift here rots both call-site logs."
+        );
+    }
+
+    /// Byte-oracle: the timeout-envelope template and its renderer
+    /// stay in lockstep. Written as a `format!` composition so a
+    /// drift on either the template or the renderer's `format!` call
+    /// would fail the equality assertion before the message could
+    /// ship.
+    #[test]
+    fn test_format_search_sync_timeout_message_renders_canonical_envelope() {
+        assert_eq!(
+            super::SEARCH_SYNC_TIMEOUT_ENVELOPE_TEMPLATE,
+            "Search sync timed out after {} seconds",
+        );
+        assert_eq!(
+            super::format_search_sync_timeout_message(300),
+            "Search sync timed out after 300 seconds",
+        );
+        assert_eq!(
+            super::format_search_sync_timeout_message(0),
+            "Search sync timed out after 0 seconds",
+        );
+    }
+
+    /// Positive-delegation shield: both `run_sync_direct` and
+    /// `run_sync_via_kubectl` must call
+    /// `finalize_search_sync_await_result(` on the tail of their
+    /// `timeout(...).await` stanza. A re-inline of the 12-line
+    /// `match result { Ok(Ok(())) => … / Ok(Err(e)) => … / Err(_) =>
+    /// bail!(…) }` body at either site would silently permit a drift
+    /// on either the success ack or the timeout envelope — the very
+    /// duplication this lift was written to close.
+    ///
+    /// The forbidden pre-lift `match result { Ok(Ok(())) =>` opener
+    /// is reconstructed via [`format!`] so this shield's own source
+    /// text does not false-match itself; the whole-module scan
+    /// therefore covers both fn bodies AND every sibling
+    /// `#[cfg(test)]` block. The positive side pins that
+    /// `finalize_search_sync_await_result(` appears at ≥2 code-line
+    /// hits (both call sites), so a regression that dropped ONE
+    /// delegation cannot leave the negative scan trivially satisfied
+    /// by absence at the other.
+    #[test]
+    fn test_search_sync_timeout_terminators_delegate_through_finalize_primitive() {
+        const SOURCE: &str = include_str!("search_sync.rs");
+
+        let pre_lift_opener = format!("match result {{{}", "\n        Ok(Ok(())) =>");
+        let pre_lift_hits = SOURCE.matches(&pre_lift_opener).count();
+        assert_eq!(
+            pre_lift_hits, 1,
+            "commands/search_sync.rs must spell the pre-lift \
+             `match result {{ Ok(Ok(())) => … / Ok(Err(e)) => … / \
+             Err(_) => bail!(…) }}` body at EXACTLY ONE site — the \
+             `finalize_search_sync_await_result` primitive body. \
+             A second hit is a re-inlined call-site stanza; every \
+             `timeout(<duration>, <sync-op>).await` stanza must \
+             instead route its result through \
+             `finalize_search_sync_await_result` so the success ack \
+             and the timeout envelope stay pinned to ONE body. \
+             Saw {} hits.",
+            pre_lift_hits
+        );
+
+        let call_line_hits = SOURCE
+            .lines()
+            .filter(|line| line.contains("finalize_search_sync_await_result("))
+            .count();
+
+        assert!(
+            call_line_hits >= 3,
+            "commands/search_sync.rs must reference \
+             `finalize_search_sync_await_result(` at ≥3 code lines \
+             (both call sites and the fn definition) — a regression \
+             that dropped a delegation would leave the negative \
+             pre-lift-opener scan trivially satisfied by absence. \
+             Saw {} code-line hits.",
+            call_line_hits
         );
     }
 }
