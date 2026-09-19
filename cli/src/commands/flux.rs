@@ -545,19 +545,7 @@ pub async fn verify_deployment_image(
                 }
 
                 // Check for terminal failures on the NEW pod
-                if let Some(ref reason) = pod.waiting_reason {
-                    if is_terminal_failure(reason) {
-                        let diagnostics =
-                            gather_deployment_diagnostics(namespace, deployment_name).await;
-                        bail!(
-                            "Deployment {} failed: {} ({})\n{}",
-                            deployment_name,
-                            reason,
-                            pod.waiting_message.as_deref().unwrap_or(""),
-                            diagnostics,
-                        );
-                    }
-                }
+                bail_on_terminal_pod_failure(&pod, namespace, deployment_name).await?;
 
                 let tag = crate::oci_manifest::image_tag_display(&pod.image);
                 println!(
@@ -644,19 +632,7 @@ pub async fn wait_for_deployment(
                 }
 
                 // Check for terminal failures
-                if let Some(ref reason) = pod.waiting_reason {
-                    if is_terminal_failure(reason) {
-                        let diagnostics =
-                            gather_deployment_diagnostics(&namespace, &deployment_name).await;
-                        bail!(
-                            "Deployment {} failed: {} ({})\n{}",
-                            deployment_name,
-                            reason,
-                            pod.waiting_message.as_deref().unwrap_or(""),
-                            diagnostics,
-                        );
-                    }
-                }
+                bail_on_terminal_pod_failure(&pod, &namespace, &deployment_name).await?;
 
                 let current_tag = crate::oci_manifest::image_tag_display(&pod.image);
                 if has_correct_image {
@@ -772,6 +748,63 @@ struct PodStatus {
     ready: bool,
     waiting_reason: Option<String>,
     waiting_message: Option<String>,
+}
+
+/// Bail with the canonical `"Deployment {name} failed: {reason}
+/// ({message})\n{diagnostics}"` envelope when `pod.waiting_reason`
+/// carries a value that [`is_terminal_failure`] classifies as
+/// unrecoverable; otherwise return `Ok(())` and let the poll loop keep
+/// walking.
+///
+/// Both deployment-pod-polling loops
+/// ([`verify_deployment_image`] and [`wait_for_deployment`]) pre-lift
+/// spelled the 10-line stanza
+///
+/// ```ignore
+/// if let Some(ref reason) = pod.waiting_reason {
+///     if is_terminal_failure(reason) {
+///         let diagnostics =
+///             gather_deployment_diagnostics(<ns>, <deploy>).await;
+///         bail!(
+///             "Deployment {} failed: {} ({})\n{}",
+///             deployment_name,
+///             reason,
+///             pod.waiting_message.as_deref().unwrap_or(""),
+///             diagnostics,
+///         );
+///     }
+/// }
+/// ```
+///
+/// verbatim, differing only in whether `namespace` / `deployment_name`
+/// were already `&str` refs or `String` bindings taken by `&`. Post-lift
+/// the terminal-failure discriminator, the diagnostics-gather
+/// call-order (probe first, then bail so the operator log line carries
+/// the failing pod's live kubectl state), the `bail!` envelope shape,
+/// and the `waiting_message.as_deref().unwrap_or("")` fallback all live
+/// at ONE code point. A future re-tuning of the failure envelope —
+/// wrapping the diagnostics in a fenced block, promoting `reason` to a
+/// typed enum, or carrying the pod name alongside the deployment name —
+/// lands at one edit rather than silently drifting across the two
+/// callers on the same deployment-verification surface.
+async fn bail_on_terminal_pod_failure(
+    pod: &PodStatus,
+    namespace: &str,
+    deployment_name: &str,
+) -> Result<()> {
+    if let Some(ref reason) = pod.waiting_reason {
+        if is_terminal_failure(reason) {
+            let diagnostics = gather_deployment_diagnostics(namespace, deployment_name).await;
+            bail!(
+                "Deployment {} failed: {} ({})\n{}",
+                deployment_name,
+                reason,
+                pod.waiting_message.as_deref().unwrap_or(""),
+                diagnostics,
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Get comprehensive pod status for a deployment (image, phase, readiness, waiting reasons).
@@ -1072,7 +1105,8 @@ pub async fn gather_deployment_diagnostics(namespace: &str, deployment_name: &st
 #[cfg(test)]
 mod tests {
     use super::{
-        flux_poll_delay, write_flux_health_check_running_announce_line,
+        bail_on_terminal_pod_failure, flux_poll_delay,
+        write_flux_health_check_running_announce_line, PodStatus,
         FLUX_HEALTH_CHECK_RUNNING_ANNOUNCE_GLYPH, FLUX_POLL_BACKOFF,
     };
     use crate::test_support::code_line_hits;
@@ -1812,6 +1846,158 @@ mod tests {
              and `health_check_with_retry`). Found {} call-site hits: {:#?}",
             call_site_hits.len(),
             call_site_hits,
+        );
+    }
+
+    // ====================================================================
+    // bail_on_terminal_pod_failure — terminal-container-failure discriminator
+    // ====================================================================
+    //
+    // Pre-lift both deployment-pod-polling loops
+    // (`verify_deployment_image` at ~line 548, `wait_for_deployment` at
+    // ~line 635) each carried the same 10-line stanza:
+    //
+    //     if let Some(ref reason) = pod.waiting_reason {
+    //         if is_terminal_failure(reason) {
+    //             let diagnostics =
+    //                 gather_deployment_diagnostics(<ns>, <deploy>).await;
+    //             bail!(
+    //                 "Deployment {} failed: {} ({})\n{}",
+    //                 deployment_name,
+    //                 reason,
+    //                 pod.waiting_message.as_deref().unwrap_or(""),
+    //                 diagnostics,
+    //             );
+    //         }
+    //     }
+    //
+    // differing only in whether `namespace` / `deployment_name` were
+    // `&str` refs (`verify_deployment_image`) or `String` bindings
+    // taken by `&` (`wait_for_deployment`). Post-lift both consumers
+    // delegate through `bail_on_terminal_pod_failure(&pod, ns,
+    // deploy).await?` and the terminal-failure discriminator, the
+    // diagnostics-gather call, and the `bail!` envelope all live at
+    // ONE code point. Sibling of the periodic-diagnostic-burst lift
+    // shield above — same "whole-module negative + positive-floor +
+    // typed unit test" triple discipline.
+
+    /// Non-terminal path — `pod.waiting_reason = None` (the fresh
+    /// pod's steady state before a container starts) must fold to
+    /// `Ok(())` so the poll loop's next iteration walks. This exercise
+    /// only touches the primitive's early-return path and never hits
+    /// `gather_deployment_diagnostics`, so no kubectl process is
+    /// spawned and the test runs hermetically.
+    #[tokio::test]
+    async fn bail_on_terminal_pod_failure_returns_ok_when_waiting_reason_absent() {
+        let pod = PodStatus {
+            image: "ghcr.io/x/svc:sha".to_string(),
+            phase: "Running".to_string(),
+            ready: true,
+            waiting_reason: None,
+            waiting_message: None,
+        };
+        let outcome = bail_on_terminal_pod_failure(&pod, "ns", "svc").await;
+        assert!(
+            outcome.is_ok(),
+            "bail_on_terminal_pod_failure must fold `waiting_reason = \
+             None` (the fresh-pod steady state) to `Ok(())` so the \
+             deployment-pod-polling loop's next iteration walks. Got: \
+             {:?}",
+            outcome,
+        );
+    }
+
+    /// Non-terminal path — a non-fatal `waiting_reason`
+    /// (e.g. `"ContainerCreating"`) must also fold to `Ok(())`. The
+    /// canonical `is_terminal_failure` closed set is
+    /// `{ImagePullBackOff, ErrImagePull, InvalidImageName,
+    /// ErrImageNeverPull, CreateContainerConfigError,
+    /// CrashLoopBackOff}` — anything outside that set is a transient
+    /// state the poll loop must keep walking through, never bail on.
+    #[tokio::test]
+    async fn bail_on_terminal_pod_failure_returns_ok_when_waiting_reason_non_terminal() {
+        let pod = PodStatus {
+            image: "ghcr.io/x/svc:sha".to_string(),
+            phase: "Pending".to_string(),
+            ready: false,
+            waiting_reason: Some("ContainerCreating".to_string()),
+            waiting_message: Some("pulling image".to_string()),
+        };
+        let outcome = bail_on_terminal_pod_failure(&pod, "ns", "svc").await;
+        assert!(
+            outcome.is_ok(),
+            "bail_on_terminal_pod_failure must fold a non-terminal \
+             `waiting_reason` (e.g. `ContainerCreating`) to `Ok(())` \
+             so the poll loop keeps walking. Got: {:?}",
+            outcome,
+        );
+    }
+
+    /// Whole-module lift shield for the two pre-lift sibling 10-line
+    /// terminal-pod-failure bail stanzas. Post-lift the discriminator
+    /// lives at ONE code point on `bail_on_terminal_pod_failure` and
+    /// both consumer sites delegate through it.
+    ///
+    /// Two invariants pinned here:
+    ///
+    /// 1. **Negative:** The pre-lift envelope literal
+    ///    `"Deployment {} failed: {} ({})\n{}"` must appear at exactly
+    ///    ONE code line — the primitive's own `bail!(…)` body. Pre-
+    ///    lift the same literal appeared at two consumer sites; a
+    ///    regression that re-fused either 10-line stanza fails here
+    ///    rather than silently drifting the two operator-visible
+    ///    deployment-failure envelopes apart.
+    /// 2. **Positive delegation floor ≥ 2:**
+    ///    `bail_on_terminal_pod_failure(` appears at ≥ 2 code lines in
+    ///    the module body (both consumer loops; the `async fn`
+    ///    definition line contributes a third hit and the assertion
+    ///    tolerates it). A future third deployment-pod-polling loop
+    ///    added to this module joins the same delegation chain, and
+    ///    the floor grows with it.
+    ///
+    /// Scan bounded strictly to the module's non-test body (file start
+    /// to the FIRST `\n#[cfg(test)]\nmod tests {` marker) so this
+    /// shield's own docstring mention of the pre-lift envelope stays
+    /// out of scope. Sibling of the
+    /// `test_flux_polling_loops_route_periodic_diag_burst_through_typed_primitive`
+    /// whole-module boundary shield above — same "one primitive +
+    /// whole-module negative + positive floor" triple discipline both
+    /// polling loops share.
+    #[test]
+    fn test_flux_polling_loops_route_terminal_pod_failure_through_typed_primitive() {
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("flux.rs"),
+            "commands/flux.rs",
+        );
+
+        // (1) Pre-lift envelope must live at exactly ONE code line
+        // (the primitive's own `bail!(…)` body).
+        let envelope_hits = code_line_hits(module_body, "\"Deployment {} failed: {} ({})\\n{}\",");
+        assert_eq!(
+            envelope_hits.len(),
+            1,
+            "commands/flux.rs must pin the canonical \
+             `\"Deployment {{}} failed: {{}} ({{}})\\n{{}}\"` bail \
+             envelope at exactly ONE code point — the \
+             `bail_on_terminal_pod_failure` primitive's own `bail!(…)` \
+             body. A hit count other than 1 means either a consumer \
+             loop re-inlined the pre-lift 10-line stanza or the \
+             primitive body drifted. Found code-line hits: {:#?}",
+            envelope_hits,
+        );
+
+        // (2) Post-lift delegation must appear at ≥ 2 code lines
+        // (one per consumer loop).
+        let delegation_hits = code_line_hits(module_body, "bail_on_terminal_pod_failure(");
+        assert!(
+            delegation_hits.len() >= 2,
+            "commands/flux.rs must consume the typed \
+             `bail_on_terminal_pod_failure` primitive at both polling \
+             loops — post-lift the primitive is invoked at ≥ 2 call \
+             sites (`verify_deployment_image`, `wait_for_deployment`; \
+             the `async fn` definition line contributes a further \
+             hit). Found:\n{}",
+            delegation_hits.join("\n"),
         );
     }
 }
