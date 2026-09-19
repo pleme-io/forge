@@ -443,13 +443,13 @@ pub async fn verify_smoke_queries(
                         "{}: HTTP {} ({}ms)",
                         smoke.name, status, latency_ms
                     ));
-                    results.push(SmokeQueryResult {
-                        name: smoke.name.clone(),
-                        passed: false,
-                        latency_ms: Some(latency_ms),
-                        error: Some(format!("HTTP {}", status)),
-                    });
-                    all_passed = false;
+                    crate::smoke_query_failure_record::record_smoke_query_failure(
+                        &mut results,
+                        &mut all_passed,
+                        &smoke.name,
+                        Some(latency_ms),
+                        format!("HTTP {}", status),
+                    );
                     continue;
                 }
 
@@ -485,13 +485,13 @@ pub async fn verify_smoke_queries(
                                 "{}: {} ({}ms)",
                                 smoke.name, error_msg, latency_ms
                             ));
-                            results.push(SmokeQueryResult {
-                                name: smoke.name.clone(),
-                                passed: false,
-                                latency_ms: Some(latency_ms),
-                                error: Some(error_msg),
-                            });
-                            all_passed = false;
+                            crate::smoke_query_failure_record::record_smoke_query_failure(
+                                &mut results,
+                                &mut all_passed,
+                                &smoke.name,
+                                Some(latency_ms),
+                                error_msg,
+                            );
                         }
                     }
                     Err(e) => {
@@ -499,25 +499,25 @@ pub async fn verify_smoke_queries(
                             "{}: Failed to parse response: {} ({}ms)",
                             smoke.name, e, latency_ms
                         ));
-                        results.push(SmokeQueryResult {
-                            name: smoke.name.clone(),
-                            passed: false,
-                            latency_ms: Some(latency_ms),
-                            error: Some(format!("Parse error: {}", e)),
-                        });
-                        all_passed = false;
+                        crate::smoke_query_failure_record::record_smoke_query_failure(
+                            &mut results,
+                            &mut all_passed,
+                            &smoke.name,
+                            Some(latency_ms),
+                            format!("Parse error: {}", e),
+                        );
                     }
                 }
             }
             Err(e) => {
                 crate::ui::print_step_failure_with_error(&smoke.name, &e);
-                results.push(SmokeQueryResult {
-                    name: smoke.name.clone(),
-                    passed: false,
-                    latency_ms: None,
-                    error: Some(e.to_string()),
-                });
-                all_passed = false;
+                crate::smoke_query_failure_record::record_smoke_query_failure(
+                    &mut results,
+                    &mut all_passed,
+                    &smoke.name,
+                    None,
+                    e.to_string(),
+                );
             }
         }
     }

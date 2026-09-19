@@ -155,6 +155,7 @@ mod shinka_migration_reset_ack;
 mod short_human_duration;
 mod short_sha_tagging_preamble;
 mod skipping_step;
+mod smoke_query_failure_record;
 mod stage_completion_ack;
 mod step_header;
 mod success_step;
