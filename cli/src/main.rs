@@ -120,6 +120,12 @@ mod docker_compose_argv;
 mod docker_daemon_running_preflight;
 mod docker_info_probe;
 mod docker_installed_preflight;
+// Fused `print_diag_section_header` + `probe_and_dump_docker_ps_<mode>`
+// primitive. Callers: `commands/e2e.rs::print_failure_diagnostics`
+// (stderr sink) and `commands/prerelease.rs::print_e2e_diagnostics`
+// (stdout sink) — two docker-ps modes (Running / RecentlyExited) × two
+// callers = 4 pre-lift sibling stanzas.
+mod docker_ps_diag_section;
 mod docker_tag_argv;
 // `docker images` stdout → `"backend" | "web"` substring-filter →
 // sink-dispatched line-print primitive. Callers:

@@ -520,10 +520,20 @@ mod tests {
         // (module basename, minimum forward count from the pre-lift
         // census — 2 stanzas per file).
         let expectations: &[(&str, usize)] = &[("e2e.rs", 2), ("prerelease.rs", 2)];
+        // The fused `crate::docker_ps_diag_section::print_docker_ps_diag_section`
+        // primitive counts as a delegation shape here: internally it
+        // calls one of the two specialized docker-ps wrappers (Running
+        // ↔ `probe_and_dump_docker_ps_running`, RecentlyExited ↔
+        // `probe_and_dump_docker_ps_exited_since_15m`), each of which
+        // routes through `probe_and_dump_or_none_sync` at the byte
+        // level. A caller that spells the fused primitive still reaches
+        // the shared `(none)`-or-dump ternary, so this positive floor
+        // accepts it as a valid delegation shape.
         let needles: &[&str] = &[
             "crate::probe_dump::probe_and_dump_or_none_sync(",
             "crate::probe_dump::probe_and_dump_docker_ps_running(",
             "crate::probe_dump::probe_and_dump_docker_ps_exited_since_15m(",
+            "crate::docker_ps_diag_section::print_docker_ps_diag_section(",
         ];
         for (basename, min_count) in expectations {
             let path = commands_dir.join(basename);
@@ -1048,14 +1058,23 @@ mod tests {
     }
 
     /// Positive delegation shield: the two pre-lift files MUST forward
-    /// through [`print_diag_section_header`] at least as many times as
-    /// the pre-lift census demanded (`e2e.rs` × 3 sites,
+    /// through the [`print_diag_section_header`] family at least as many
+    /// times as the pre-lift census demanded (`e2e.rs` × 3 sites,
     /// `prerelease.rs` × 3 sites). A migration that dropped a call
     /// site outright — leaving the negative "no raw header literal"
     /// scan trivially satisfied by absence — regresses this floor.
     /// Mirrors the sibling
     /// `every_prelift_module_forwards_through_probe_and_dump_primitive`
     /// positive-half discipline.
+    ///
+    /// The fused
+    /// [`crate::docker_ps_diag_section::print_docker_ps_diag_section`]
+    /// primitive counts as a delegation shape: internally it calls
+    /// [`print_diag_section_header`] with the header its
+    /// `DockerPsDiagSection` variant projects onto, so a caller that
+    /// spells the fused primitive still emits the section header at the
+    /// byte level. Both direct and fused shapes reach the shared header
+    /// writer, and the count floor accepts either.
     #[test]
     fn every_prelift_module_forwards_through_print_diag_section_header() {
         use std::path::PathBuf;
@@ -1063,18 +1082,22 @@ mod tests {
             .join("src")
             .join("commands");
         let expectations: &[(&str, usize)] = &[("e2e.rs", 3), ("prerelease.rs", 3)];
-        let needle = "crate::probe_dump::print_diag_section_header(";
+        let needles: &[&str] = &[
+            "crate::probe_dump::print_diag_section_header(",
+            "crate::docker_ps_diag_section::print_docker_ps_diag_section(",
+        ];
         for (basename, min_count) in expectations {
             let path = commands_dir.join(basename);
             let source = std::fs::read_to_string(&path).unwrap();
-            let forwards = source.matches(needle).count();
+            let forwards: usize = needles.iter().map(|n| source.matches(n).count()).sum();
             assert!(
                 forwards >= *min_count,
                 "{basename} must forward at least {min_count} diagnostic-\
                  section-header site(s) through \
-                 `crate::probe_dump::print_diag_section_header(...)`; \
-                 found {forwards}. A dropped call would leave the negative \
-                 raw-header-literal scan satisfied by absence.",
+                 `crate::probe_dump::print_diag_section_header(...)` or the \
+                 fused `crate::docker_ps_diag_section::print_docker_ps_diag_section(...)` \
+                 primitive; found {forwards}. A dropped call would leave the \
+                 negative raw-header-literal scan satisfied by absence.",
             );
         }
     }

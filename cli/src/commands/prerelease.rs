@@ -994,27 +994,21 @@ fn print_e2e_diagnostics(backend_dir: &Path) {
     println!("{}", "── E2E Failure Diagnostics ──".bold().red());
 
     // Docker containers still running
-    crate::probe_dump::print_diag_section_header(
-        crate::probe_dump::DiagSink::Stdout,
-        "   ",
-        crate::probe_dump::DiagSectionHeader::DockerContainersRunning,
-    );
-    crate::probe_dump::probe_and_dump_docker_ps_running(
+    crate::docker_ps_diag_section::print_docker_ps_diag_section(
         &docker_bin(),
         crate::probe_dump::DiagSink::Stdout,
+        "   ",
         "     ",
+        crate::docker_ps_diag_section::DockerPsDiagSection::Running,
     );
 
     // Recently exited containers
-    crate::probe_dump::print_diag_section_header(
-        crate::probe_dump::DiagSink::Stdout,
-        "   ",
-        crate::probe_dump::DiagSectionHeader::DockerContainersRecentlyExited,
-    );
-    crate::probe_dump::probe_and_dump_docker_ps_exited_since_15m(
+    crate::docker_ps_diag_section::print_docker_ps_diag_section(
         &docker_bin(),
         crate::probe_dump::DiagSink::Stdout,
+        "   ",
         "     ",
+        crate::docker_ps_diag_section::DockerPsDiagSection::RecentlyExited,
     );
 
     // E2E images
@@ -1960,9 +1954,10 @@ mod tests {
         // `crate::retry::probe_stdout_capture_sync` primitive: two
         // (docker ps / docker ps -a --since=15m --filter status=exited)
         // reach it INDIRECTLY through the
-        // `crate::probe_dump::probe_and_dump_docker_ps_running` and
-        // `crate::probe_dump::probe_and_dump_docker_ps_exited_since_15m`
-        // specialized fusion wrappers (which delegate to
+        // `crate::docker_ps_diag_section::print_docker_ps_diag_section`
+        // fused header+probe primitive (which delegates to the two
+        // specialized `crate::probe_dump::probe_and_dump_docker_ps_<mode>`
+        // wrappers, which in turn delegate to
         // `probe_and_dump_or_none_sync` at the byte level, owning the
         // `--format` template as well as the `(none)`-or-dump ternary),
         // and one (docker images inside
@@ -1976,6 +1971,7 @@ mod tests {
         let fusion_needle = format!("probe_and_dump_or_none_{}(", "sync");
         let docker_ps_running_needle = format!("probe_and_dump_docker_ps_{}(", "running");
         let docker_ps_exited_needle = format!("probe_and_dump_docker_ps_exited_since_{}(", "15m");
+        let docker_ps_diag_section_needle = format!("print_docker_ps_diag_{}(", "section");
         let mut hits = crate::test_support::code_line_hits(body, &direct_needle);
         hits.extend(crate::test_support::code_line_hits(body, &fusion_needle));
         hits.extend(crate::test_support::code_line_hits(
@@ -1985,6 +1981,10 @@ mod tests {
         hits.extend(crate::test_support::code_line_hits(
             body,
             &docker_ps_exited_needle,
+        ));
+        hits.extend(crate::test_support::code_line_hits(
+            body,
+            &docker_ps_diag_section_needle,
         ));
         assert!(
             hits.len() >= 3,
