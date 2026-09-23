@@ -328,9 +328,7 @@ pub async fn check_idempotency(migrations_dir: &Path) -> Result<Vec<MigrationIss
     let migration_files = find_sql_files(migrations_dir).await?;
 
     for file_path in migration_files {
-        let content = fs::read_to_string(&file_path)
-            .await
-            .with_context(|| format!("Failed to read migration file: {}", file_path.display()))?;
+        let content = crate::migration_file_read::read_migration_file(&file_path).await?;
 
         let file_issues = check_file_idempotency(&file_path, &content);
         issues.extend(file_issues);
@@ -467,9 +465,7 @@ pub async fn check_soft_delete_compliance(migrations_dir: &Path) -> Result<Vec<M
     let migration_files = find_sql_files(migrations_dir).await?;
 
     for file_path in migration_files {
-        let content = fs::read_to_string(&file_path)
-            .await
-            .with_context(|| format!("Failed to read migration file: {}", file_path.display()))?;
+        let content = crate::migration_file_read::read_migration_file(&file_path).await?;
 
         let file_issues = check_file_soft_delete(&file_path, &content);
         issues.extend(file_issues);

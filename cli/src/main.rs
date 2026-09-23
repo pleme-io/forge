@@ -189,6 +189,7 @@ mod kubectl_get_job_status_succeeded_argv;
 mod kubectl_get_pods_by_selector_argv;
 mod kubectl_logs_argv;
 mod list_resource_names_by_selector_argv;
+mod migration_file_read;
 mod namespace_field;
 mod next_steps_review_the_changes_opener;
 mod nix;

@@ -9991,9 +9991,7 @@ mod tests {
             // Either shape preserves the underlying invariant: the
             // `❌.red()` glyph shape lives at ONE construction surface.
             let forwards = body.contains("crate::ui::print_step_failure(")
-                || body.contains(
-                    "crate::step_failure_count_noun::print_step_failure_count_noun(",
-                );
+                || body.contains("crate::step_failure_count_noun::print_step_failure_count_noun(");
             assert!(
                 forwards,
                 "{module_path} body must forward to \
