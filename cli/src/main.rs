@@ -186,6 +186,10 @@ mod updated_field;
 mod using_pod_field;
 mod using_tool_field;
 mod workflow_complete_banner;
+// Symmetric peer to `workflow_complete_banner` — the CyanBold intro
+// sibling to its GreenBold `✅ <NAME> Complete!` close. Callers:
+// `commands/{deploy, github_runner_ci}.rs::execute` open bodies.
+mod workflow_intro_banner;
 mod workload_field;
 mod zone_id_field;
 

@@ -16,9 +16,8 @@ pub async fn execute(
     cache_url: String,
     cache_name: String,
 ) -> Result<()> {
-    crate::ui::print_boxed_banner(
-        crate::ui::BoxedBannerStyle::CyanBold,
-        "Nexus Deploy - GitOps Workflow",
+    crate::workflow_intro_banner::print_workflow_intro_banner(
+        crate::workflow_intro_banner::WorkflowIntroBanner::NexusDeploy,
     );
 
     crate::info_deploy_target_field!(registry, tag);

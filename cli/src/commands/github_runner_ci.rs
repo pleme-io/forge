@@ -128,9 +128,8 @@ pub async fn execute(
     skip_push: bool,
     watch: bool,
 ) -> Result<()> {
-    crate::ui::print_boxed_banner(
-        crate::ui::BoxedBannerStyle::CyanBold,
-        "GitHub Runner CI Workflow",
+    crate::workflow_intro_banner::print_workflow_intro_banner(
+        crate::workflow_intro_banner::WorkflowIntroBanner::GitHubRunnerCi,
     );
 
     // Resolve short SHA + emit the `📦 Git SHA:` announcement through
