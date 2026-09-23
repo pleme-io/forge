@@ -11318,22 +11318,35 @@ mod tests {
         );
     }
 
-    /// Caller shield: the two `commands/frontend_validation.rs`
-    /// failure branches must forward through
-    /// [`msg_with_two_counts_and_secs_1`]. A count of `0` means the
-    /// two pre-lift sites were re-inlined or the primitive was
-    /// renamed without updating the callers; a count below `2` means
-    /// only one of the two sibling sites migrated.
+    /// Caller shield: the fused frontend-lint failure-report primitive
+    /// at `cli/src/frontend_lint_failure_report.rs` must forward
+    /// through [`msg_with_two_counts_and_secs_1`] exactly once — the
+    /// two pre-lift `commands/frontend_validation.rs` sibling sites
+    /// migrated onto that primitive, so the two-count grammar now
+    /// lands at ONE call site inside the failure-report primitive
+    /// (its `report_frontend_lint_failure` body), not at the two
+    /// consumer sites in `commands/frontend_validation.rs`.
+    ///
+    /// A count of `0` at the new target means the primitive's body
+    /// dropped its forward through the two-count grammar (a re-inline
+    /// or a rename without updating the composition); a count above
+    /// `1` at that target means the primitive's body spawned a
+    /// duplicate call the fusion was supposed to eliminate.
+    ///
+    /// A stray forward-through in `commands/frontend_validation.rs`
+    /// itself means a caller re-adopted the fused header inline and
+    /// bypassed the failure-report primitive — the negative half of
+    /// this shield.
     #[test]
-    fn frontend_validation_forwards_through_msg_with_two_counts_and_secs_1() {
+    fn frontend_lint_failure_report_forwards_through_msg_with_two_counts_and_secs_1() {
         use std::path::PathBuf as StdPathBuf;
-        let path = StdPathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src")
-            .join("commands")
-            .join("frontend_validation.rs");
-        let source = std::fs::read_to_string(&path).unwrap();
         let needle = "msg_with_two_counts_and_secs_1(";
-        let forwards = source
+        // Positive: the primitive's body carries exactly one forward.
+        let primitive_path = StdPathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("frontend_lint_failure_report.rs");
+        let primitive_source = std::fs::read_to_string(&primitive_path).unwrap();
+        let primitive_forwards = primitive_source
             .lines()
             .filter(|line| {
                 let trimmed = line.trim_start();
@@ -11341,12 +11354,39 @@ mod tests {
             })
             .filter(|line| line.contains(needle))
             .count();
-        assert!(
-            forwards >= 2,
-            "commands/frontend_validation.rs must forward at least 2 \
-             two-count failure lines through `{needle}`; found {forwards}. \
-             A dropped call would leave the two-count grammar duplicated \
-             at that site."
+        assert_eq!(
+            primitive_forwards, 1,
+            "cli/src/frontend_lint_failure_report.rs must forward the \
+             two-count failure header through `{needle}` exactly once \
+             (in `report_frontend_lint_failure`); found {primitive_forwards}. \
+             A count of 0 means the primitive dropped its forward-through; \
+             a count above 1 means the primitive's body spawned a duplicate \
+             call the fusion was supposed to eliminate."
+        );
+        // Negative: the pre-lift consumer file must no longer respell
+        // the two-count grammar inline — every consumer now reaches
+        // the primitive.
+        let consumer_path = StdPathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands")
+            .join("frontend_validation.rs");
+        let consumer_source = std::fs::read_to_string(&consumer_path).unwrap();
+        let consumer_forwards = consumer_source
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim_start();
+                !trimmed.starts_with("//") && !trimmed.starts_with("///")
+            })
+            .filter(|line| line.contains(needle))
+            .count();
+        assert_eq!(
+            consumer_forwards, 0,
+            "commands/frontend_validation.rs must NOT respell the \
+             two-count failure header inline any more — the two \
+             pre-lift sites migrated onto \
+             `crate::frontend_lint_failure_report::report_frontend_lint_failure(` \
+             which now owns the sole `{needle}` forward. \
+             Found {consumer_forwards} respell(s)."
         );
     }
 

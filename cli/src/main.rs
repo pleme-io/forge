@@ -122,6 +122,11 @@ mod first_pod_field_argv;
 mod flake_attr_ref;
 mod flux_gitops_monitor_hint;
 mod frontend_lint_diagnostic_collect;
+// Fused two-count `print_step_failure` header + `print_and_collect_lint_
+// diagnostic_lines` collection primitive. Callers:
+// `commands/frontend_validation.rs::{run_lint_with_config (ESLint arm),
+// run_biome_lint (check arm)}`.
+mod frontend_lint_failure_report;
 mod generate_cargo_nix_step;
 mod git;
 mod git_sha_field;
