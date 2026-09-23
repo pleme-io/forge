@@ -17046,20 +17046,28 @@ mod tests {
         // rust_cargo_update lifted onto
         // `crate::next_steps_review_the_changes_opener::\
         // print_next_steps_heading_then_review_the_changes()`, so each
-        // module drops from 5 to 3 direct forwards (the remaining
-        // step-2 / step-3 rows continue to route through
-        // `crate::ui::print_next_step` directly).
+        // module drops from 5 to 3 direct forwards. Post the
+        // `crate::cargo_ceremony_next_step_texts` migration the shared
+        // `"Test the build: cargo build"` step-2 tail (×2) and the
+        // shared `"Commit both files: git add Cargo.lock Cargo.nix &&
+        // git commit"` step-2 / step-3 tails (×2) route through the
+        // paired print helpers instead: `web_service.rs` sheds one
+        // forward (3 → 2), and `developer_tools.rs` sheds all three
+        // (3 → 0). The remaining `web_service.rs` forwards are the
+        // two `chore: <verb> Hanabi deps` commit instruction rows
+        // whose byte form is Hanabi-specific and not shared with
+        // `developer_tools.rs`.
         const CALLERS: &[(&str, &str, usize)] = &[
             (
                 include_str!("commands/web_service.rs"),
                 "commands/web_service.rs",
-                3,
+                2,
             ),
             (include_str!("commands/sync.rs"), "commands/sync.rs", 3),
             (
                 include_str!("commands/developer_tools.rs"),
                 "commands/developer_tools.rs",
-                3,
+                0,
             ),
         ];
         const NEEDLES: &[&str] = &["\"  1. ", "\"  2. ", "\"  3. "];

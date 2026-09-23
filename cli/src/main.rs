@@ -79,6 +79,16 @@ mod building_progress_message;
 mod bun_argv;
 mod bun_install_frozen_lockfile_capture;
 mod bun_x_graphql_codegen_capture;
+// Canonical instruction texts for the `cargo`-ceremony `Next steps:`
+// rows that trail the shared step-1 `"Review the changes: git diff"`
+// opener. Owns the byte-form of the `"Test the build: cargo build"`
+// step-2 tail (consumers: `commands/web_service.rs::web_cargo_update`,
+// `commands/developer_tools.rs::rust_cargo_update`) and the
+// `"Commit both files: git add Cargo.lock Cargo.nix && git commit"`
+// step-2 / step-3 tail (consumers: `commands/developer_tools.rs::{
+// rust_regenerate, rust_cargo_update}`) as `pub const`s so a future
+// rename or shell-composition change lands in one place.
+mod cargo_ceremony_next_step_texts;
 mod cargo_lock_and_cargo_nix_bullets;
 mod cargo_nix_ceremony_banner;
 mod cargo_nix_ceremony_summary_opener;

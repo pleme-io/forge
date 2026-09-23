@@ -251,7 +251,7 @@ pub async fn web_cargo_update(product: String, service: String, repo_root: Strin
         crate::cargo_nix_ceremony_banner::CargoNixCeremony::Update,
         &hanabi_dir,
     );
-    crate::ui::print_next_step(2, "Test the build: cargo build");
+    crate::cargo_ceremony_next_step_texts::print_test_the_build_next_step(2);
     crate::ui::print_next_step(
         3,
         "Commit: git add -A && git commit -m 'chore: update Hanabi deps'",

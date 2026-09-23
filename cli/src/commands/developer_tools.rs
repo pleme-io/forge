@@ -363,10 +363,7 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
         crate::cargo_nix_ceremony_banner::CargoNixCeremony::Regeneration,
         &workspace_root,
     );
-    crate::ui::print_next_step(
-        2,
-        "Commit both files: git add Cargo.lock Cargo.nix && git commit",
-    );
+    crate::cargo_ceremony_next_step_texts::print_commit_cargo_lock_and_nix_next_step(2);
     println!();
 
     Ok(())
@@ -404,11 +401,8 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
         crate::cargo_nix_ceremony_banner::CargoNixCeremony::Update,
         &workspace_root,
     );
-    crate::ui::print_next_step(2, "Test the build: cargo build");
-    crate::ui::print_next_step(
-        3,
-        "Commit both files: git add Cargo.lock Cargo.nix && git commit",
-    );
+    crate::cargo_ceremony_next_step_texts::print_test_the_build_next_step(2);
+    crate::cargo_ceremony_next_step_texts::print_commit_cargo_lock_and_nix_next_step(3);
     println!();
 
     Ok(())
