@@ -172,58 +172,40 @@ fn read_service_env_and_chdir_to_workspace() -> Result<PathBuf> {
 
 /// Run Rust unit tests
 pub async fn rust_test(service: String) -> Result<()> {
-    crate::commands::developer_tool_phase_open::print_developer_tool_phase_open(
-        crate::commands::developer_tool_phase_open::DeveloperToolPhase::UnitTest,
+    crate::commands::developer_tool_cargo_phase::announce_and_run_developer_tool_cargo_phase(
+        crate::commands::developer_tool_cargo_phase::DeveloperToolCargoPhase::UnitTest,
         &service,
-    );
-    crate::retry::run_bin_args_inherited_status(
         &cargo_bin(),
-        &["test", "--lib", "--bins"],
-        "cargo test",
     )
     .await
 }
 
 /// Run Rust clippy linter
 pub async fn rust_lint(service: String) -> Result<()> {
-    crate::commands::developer_tool_phase_open::print_developer_tool_phase_open(
-        crate::commands::developer_tool_phase_open::DeveloperToolPhase::Clippy,
+    crate::commands::developer_tool_cargo_phase::announce_and_run_developer_tool_cargo_phase(
+        crate::commands::developer_tool_cargo_phase::DeveloperToolCargoPhase::Clippy,
         &service,
-    );
-    crate::retry::run_bin_args_inherited_status(
         &cargo_bin(),
-        &[
-            "clippy",
-            "--all-targets",
-            "--all-features",
-            "--",
-            "-D",
-            "warnings",
-        ],
-        "cargo clippy",
     )
     .await
 }
 
 /// Format Rust code with rustfmt
 pub async fn rust_fmt(service: String) -> Result<()> {
-    crate::commands::developer_tool_phase_open::print_developer_tool_phase_open(
-        crate::commands::developer_tool_phase_open::DeveloperToolPhase::Format,
+    crate::commands::developer_tool_cargo_phase::announce_and_run_developer_tool_cargo_phase(
+        crate::commands::developer_tool_cargo_phase::DeveloperToolCargoPhase::Format,
         &service,
-    );
-    crate::retry::run_bin_args_inherited_status(&cargo_bin(), &["fmt", "--all"], "cargo fmt").await
+        &cargo_bin(),
+    )
+    .await
 }
 
 /// Check Rust code formatting
 pub async fn rust_fmt_check(service: String) -> Result<()> {
-    crate::commands::developer_tool_phase_open::print_developer_tool_phase_open(
-        crate::commands::developer_tool_phase_open::DeveloperToolPhase::FormatCheck,
+    crate::commands::developer_tool_cargo_phase::announce_and_run_developer_tool_cargo_phase(
+        crate::commands::developer_tool_cargo_phase::DeveloperToolCargoPhase::FormatCheck,
         &service,
-    );
-    crate::retry::run_bin_args_inherited_status(
         &cargo_bin(),
-        &["fmt", "--all", "--", "--check"],
-        "cargo fmt --check",
     )
     .await
 }

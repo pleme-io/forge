@@ -365,10 +365,19 @@ mod tests {
     }
 
     /// Positive-delegation shield: `commands/developer_tools.rs` MUST
-    /// forward through [`print_developer_tool_phase_open`] at least
-    /// six times — one per pre-lift `rust_*` command body the census
-    /// identified. Pins that a dropped call site cannot leave the
-    /// negative caller shield trivially satisfied by absence.
+    /// forward the six pre-lift `rust_*` command bodies to the
+    /// phase-open banner primitive at least six times, counting BOTH
+    /// direct [`print_developer_tool_phase_open`] calls AND indirect
+    /// forwards through
+    /// [`super::developer_tool_cargo_phase::announce_and_run_developer_tool_cargo_phase`]
+    /// (which itself calls the direct primitive in its body). Post-lift
+    /// four of the six pre-lift sites (`rust_test`, `rust_lint`,
+    /// `rust_fmt`, `rust_fmt_check`) route through the fused
+    /// cargo-phase primitive, and two (`rust_extract_schema`,
+    /// `rust_update_cargo_nix`) remain direct — so the direct count
+    /// alone is 2 and the fused count is 4, totaling six. Pins that a
+    /// dropped call site cannot leave the negative caller shield
+    /// trivially satisfied by absence.
     #[test]
     fn developer_tools_module_forwards_through_phase_open_primitive_at_least_six_times() {
         use std::path::PathBuf;
@@ -377,14 +386,20 @@ mod tests {
             .join("commands")
             .join("developer_tools.rs");
         let source = std::fs::read_to_string(&path).unwrap();
-        let forwards = source.matches("print_developer_tool_phase_open(").count();
+        let direct = source.matches("print_developer_tool_phase_open(").count();
+        let via_fused = source
+            .matches("announce_and_run_developer_tool_cargo_phase(")
+            .count();
+        let forwards = direct + via_fused;
         assert!(
             forwards >= 6,
-            "developer_tools.rs must forward at least six pre-lift phase-open \
-             banner site(s) through \
-             `crate::commands::developer_tool_phase_open::print_developer_tool_phase_open(`; \
-             found {forwards}. A dropped call would leave the negative \
-             raw-`println!` scan satisfied by absence.",
+            "developer_tools.rs must forward the six pre-lift phase-open \
+             banner sites either directly through \
+             `crate::commands::developer_tool_phase_open::print_developer_tool_phase_open(` \
+             (found {direct}) or indirectly through \
+             `crate::commands::developer_tool_cargo_phase::announce_and_run_developer_tool_cargo_phase(` \
+             (found {via_fused}); total forwards {forwards}. A dropped call \
+             would leave the negative raw-`println!` scan satisfied by absence.",
         );
     }
 }

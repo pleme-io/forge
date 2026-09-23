@@ -19,6 +19,7 @@ pub mod crossplane_xpkg_push;
 pub mod dashboards;
 pub mod deploy;
 pub mod deployment_rollout_wait_step;
+pub mod developer_tool_cargo_phase;
 pub mod developer_tool_phase_open;
 pub mod developer_tools;
 pub mod e2e;
