@@ -1129,14 +1129,10 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
                     .into_iter()
                     .rev()
                 {
-                    if line.contains("FAILED")
-                        || line.contains("panicked")
-                        || line.contains("error")
-                    {
-                        crate::ui::print_diagnostic_error_line(line);
-                    } else {
-                        crate::ui::print_diagnostic_line(line);
-                    }
+                    crate::classified_diagnostic_line::print_classified_diagnostic_line(
+                        line,
+                        &["FAILED", "panicked", "error"],
+                    );
                 }
                 crate::ui::print_light_rule(
                     crate::ui::LightRuleStyle::PrereleaseE2eFailureStderrCloseDimmed23,
@@ -1352,11 +1348,10 @@ async fn run_cargo_test(backend_dir: &Path) -> Result<bool> {
         if !stdout.trim().is_empty() {
             crate::ui::print_dimmed_dashed_marker("cargo test output");
             for line in stdout.lines() {
-                if line.contains("FAILED") || line.contains("panicked") || line.contains("error[") {
-                    crate::ui::print_diagnostic_error_line(line);
-                } else {
-                    crate::ui::print_diagnostic_line(line);
-                }
+                crate::classified_diagnostic_line::print_classified_diagnostic_line(
+                    line,
+                    &["FAILED", "panicked", "error["],
+                );
             }
         }
         // Show last 40 lines of stderr for compile errors / panic details
@@ -1365,11 +1360,10 @@ async fn run_cargo_test(backend_dir: &Path) -> Result<bool> {
             crate::ui::print_dimmed_dashed_marker("stderr (last 40 lines)");
             let start = stderr_lines.len().saturating_sub(40);
             for &line in &stderr_lines[start..] {
-                if line.contains("error") || line.contains("FAILED") || line.contains("panicked") {
-                    crate::ui::print_diagnostic_error_line(line);
-                } else {
-                    crate::ui::print_diagnostic_line(line);
-                }
+                crate::classified_diagnostic_line::print_classified_diagnostic_line(
+                    line,
+                    &["error", "FAILED", "panicked"],
+                );
             }
         }
         crate::ui::print_light_rule(crate::ui::LightRuleStyle::PrereleaseDiagnosticCloseDimmed28);

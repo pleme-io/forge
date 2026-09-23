@@ -18076,11 +18076,18 @@ mod tests {
     /// count would fall below the pre-lift census.
     #[test]
     fn print_diagnostic_error_line_callers_delegate_through_primitive() {
+        // `prerelease.rs` migrated 5 → 2 when the 3 sibling
+        // classify-and-print if/else bodies at the E2E stderr walk
+        // and the two `run_cargo_test` failed-report walks lifted
+        // onto `crate::classified_diagnostic_line::
+        // print_classified_diagnostic_line`. The two surviving
+        // direct calls live at the G1 `run_cargo_check` and G2
+        // `run_cargo_clippy` in-body diagnostic walks.
         const CALLERS: &[(&str, &str, usize)] = &[
             (
                 include_str!("commands/prerelease.rs"),
                 "commands/prerelease.rs",
-                5,
+                2,
             ),
             (
                 include_str!("commands/frontend_validation.rs"),
@@ -18259,10 +18266,19 @@ mod tests {
     /// fall below the current census.
     #[test]
     fn print_diagnostic_line_callers_delegate_through_primitive() {
+        // `prerelease.rs` migrated 5 → 2 when the 3 sibling
+        // classify-and-print if/else bodies at the E2E stderr walk
+        // and the two `run_cargo_test` failed-report walks lifted
+        // onto `crate::classified_diagnostic_line::
+        // print_classified_diagnostic_line` (which routes the
+        // no-marker branch through `write_diagnostic_line`, keeping
+        // the byte-shape invariant intact). The two surviving
+        // direct calls live at the E2E stdout unclassified walk
+        // and the G2 `run_cargo_clippy` in-body diagnostic walk.
         const CALLERS: &[(&str, &str, usize)] = &[(
             include_str!("commands/prerelease.rs"),
             "commands/prerelease.rs",
-            5,
+            2,
         )];
         for (source, module_path, expected_forwards) in CALLERS {
             let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);

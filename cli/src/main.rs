@@ -99,6 +99,13 @@ mod cargo_test_argv;
 // `commands/web_service.rs::web_cargo_update` and
 // `commands/developer_tools.rs::rust_cargo_update`.
 mod cargo_update_dependencies_phase;
+// Two-branch classified diagnostic-line dispatch primitive: routes
+// through `crate::ui::print_diagnostic_error_line` when the line
+// carries any caller-supplied error-marker substring, otherwise
+// through `crate::ui::print_diagnostic_line`. Callers:
+// `commands/prerelease.rs::{run_e2e_gate, run_cargo_test (stdout walk),
+// run_cargo_test (stderr last-40 walk)}`.
+mod classified_diagnostic_line;
 mod cloudflare;
 mod cloudflare_purge_success_ack;
 mod platform_component;
