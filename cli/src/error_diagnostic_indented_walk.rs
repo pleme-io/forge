@@ -93,8 +93,8 @@ use std::io;
 /// diagnostic-item type carrying structured fields all flow through the
 /// same writer without a per-caller `.to_string()` intermediate.
 #[allow(dead_code)] // See doc comment: the writer is a test/byte-oracle
-// peer of the tracing-routed
-// `error_diagnostic_indented_walk` function.
+                    // peer of the tracing-routed
+                    // `error_diagnostic_indented_walk` function.
 pub fn write_error_diagnostic_indented_walk<W, I, S>(
     w: &mut W,
     header: &str,

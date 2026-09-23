@@ -206,6 +206,7 @@ mod tools;
 mod updated_field;
 mod using_pod_field;
 mod using_tool_field;
+mod web_service_commit_next_step;
 mod workflow_complete_banner;
 // Symmetric peer to `workflow_complete_banner` — the CyanBold intro
 // sibling to its GreenBold `✅ <NAME> Complete!` close. Callers:

@@ -17053,15 +17053,18 @@ mod tests {
         // git commit"` step-2 / step-3 tails (×2) route through the
         // paired print helpers instead: `web_service.rs` sheds one
         // forward (3 → 2), and `developer_tools.rs` sheds all three
-        // (3 → 0). The remaining `web_service.rs` forwards are the
-        // two `chore: <verb> Hanabi deps` commit instruction rows
-        // whose byte form is Hanabi-specific and not shared with
-        // `developer_tools.rs`.
+        // (3 → 0). Post the
+        // `crate::web_service_commit_next_step` migration the two
+        // remaining `web_service.rs` forwards — the Hanabi-specific
+        // `"Commit: git add -A && git commit -m 'chore: <verb>'"`
+        // step-2 / step-3 tails — route through the closed-enum print
+        // helper, so `web_service.rs` sheds its last two direct
+        // forwards (2 → 0).
         const CALLERS: &[(&str, &str, usize)] = &[
             (
                 include_str!("commands/web_service.rs"),
                 "commands/web_service.rs",
-                2,
+                0,
             ),
             (include_str!("commands/sync.rs"), "commands/sync.rs", 3),
             (

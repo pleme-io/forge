@@ -180,9 +180,9 @@ pub async fn web_regenerate(product: String, service: String, repo_root: String)
     crate::ui::print_bullet_path(&hanabi_dir.join("Cargo.nix"));
     println!();
     crate::next_steps_review_the_changes_opener::print_next_steps_heading_then_review_the_changes();
-    crate::ui::print_next_step(
+    crate::web_service_commit_next_step::print_web_service_commit_next_step(
         2,
-        "Commit: git add -A && git commit -m 'chore: regenerate deps'",
+        crate::web_service_commit_next_step::WebServiceCommitChoreVerb::RegenerateDeps,
     );
     println!();
 
@@ -252,9 +252,9 @@ pub async fn web_cargo_update(product: String, service: String, repo_root: Strin
         &hanabi_dir,
     );
     crate::cargo_ceremony_next_step_texts::print_test_the_build_next_step(2);
-    crate::ui::print_next_step(
+    crate::web_service_commit_next_step::print_web_service_commit_next_step(
         3,
-        "Commit: git add -A && git commit -m 'chore: update Hanabi deps'",
+        crate::web_service_commit_next_step::WebServiceCommitChoreVerb::UpdateHanabiDeps,
     );
     println!();
 
