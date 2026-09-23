@@ -61,6 +61,8 @@
 
 use std::path::{Path, PathBuf};
 
+use anyhow::Result;
+
 /// Closed enumeration of the shared platform components forge composes
 /// `<repo_root>/pkgs/platform/<component>` directories for.
 ///
@@ -93,6 +95,104 @@ impl PlatformComponent {
             Self::Bootstrap => "bootstrap",
         }
     }
+
+    /// The Title-Case operator-facing display name every
+    /// [`require_platform_component_dir_exists`] miss-arm bail message
+    /// interpolates as `"{display_name} directory not found: {path}"`.
+    ///
+    /// Distinct from [`Self::segment`] because the disk segment is
+    /// lower-cased (`"hanabi"`, `"bootstrap"`) but the operator-facing
+    /// wording carries the component's Title-Case marketing name
+    /// (`"Hanabi"`, `"Bootstrap"`). A single-axis projection would fuse
+    /// the two and either force `.to_lowercase()` on the segment lookup
+    /// or `.to_uppercase_first_letter()` on the wording; splitting the
+    /// two projections keeps each arm literal.
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Hanabi => "Hanabi",
+            Self::Bootstrap => "Bootstrap",
+        }
+    }
+}
+
+/// Assert a caller-owned platform-component directory exists on disk,
+/// bailing with the canonical two-line envelope
+///
+/// ```text
+/// {component.display_name()} directory not found: {dir.display()}
+///   Expected at: pkgs/platform/{component.segment()}/
+/// ```
+///
+/// on the miss arm. The line-2 hint pins the expected in-repo location
+/// under the shared `pkgs/platform/` prefix so an operator whose command
+/// bailed can `cd <repo>/pkgs/platform/<component>/` without decoding
+/// the display-projected absolute path on line 1.
+///
+/// # Pre-lift census — two sibling stanzas on the Hanabi variant
+///
+/// Two pre-lift `commands/web_service.rs` sites each spelled the 5-line
+///
+/// ```text
+/// if !hanabi_dir.exists() {
+///     bail!(
+///         "Hanabi directory not found: {}\n  \
+///          Expected at: pkgs/platform/hanabi/",
+///         hanabi_dir.display()
+///     );
+/// }
+/// ```
+///
+/// stanza verbatim, differing only in the surrounding caller function:
+///
+/// 1. `commands/web_service.rs::web_regenerate` (~L134) — Hanabi
+///    Cargo.nix regeneration path, `hanabi_dir` pre-bound from
+///    [`crate::hanabi_dir::hanabi_dir`].
+/// 2. `commands/web_service.rs::web_cargo_update` (~L225) — Hanabi
+///    cargo-update path, same `hanabi_dir` binding via the same
+///    half-primitive.
+///
+/// Post-lift both stanzas route through this body; a future refinement
+/// (a swap to `.exists()` on a canonical form, an added ENOENT probe
+/// that surfaces `permission denied` distinctly, a re-wording of the
+/// hint line, a variant-conditional segment resolution) lands at ONE
+/// typed body and reaches both consumers by construction. Growing a
+/// third caller — say, a future [`PlatformComponent::Bootstrap`]-side
+/// existence assertion — reaches for the same body on first grep,
+/// spelled `require_platform_component_dir_exists(&bootstrap_dir,
+/// PlatformComponent::Bootstrap)?`.
+///
+/// # Errors
+///
+/// Returns `Err` with the exact wording above if `dir` does not exist
+/// on disk. On the hit arm returns `Ok(())` without touching `dir`
+/// further — the primitive does NOT probe the directory's contents,
+/// permissions, or Nix hash, only its presence. A caller that also
+/// wants the presence of `Cargo.nix` or `flake.nix` under `dir` gates
+/// that separately.
+///
+/// # Byte shape
+///
+/// The bail message is composed via a single `anyhow::bail!` with an
+/// interpolated `{}\n  Expected at: pkgs/platform/{}/` format string —
+/// the pre-lift two-line envelope verbatim, byte-for-byte. The
+/// [`tests::test_require_platform_component_dir_exists_hanabi_bail_shape`]
+/// byte-oracle pins the exact miss-arm wording so a future edit that
+/// dropped the two-space indent, respelled `"Expected at:"` to
+/// `"expected:"`, or dropped the trailing `/` would flip the assertion.
+pub fn require_platform_component_dir_exists(
+    dir: &Path,
+    component: PlatformComponent,
+) -> Result<()> {
+    if !dir.exists() {
+        anyhow::bail!(
+            "{} directory not found: {}\n  \
+             Expected at: pkgs/platform/{}/",
+            component.display_name(),
+            dir.display(),
+            component.segment(),
+        );
+    }
+    Ok(())
 }
 
 /// Compose the platform-component directory path under a caller-
@@ -262,6 +362,183 @@ mod tests {
     fn test_platform_component_segment_arms() {
         assert_eq!(PlatformComponent::Hanabi.segment(), "hanabi");
         assert_eq!(PlatformComponent::Bootstrap.segment(), "bootstrap");
+    }
+
+    /// Display-name pin: [`PlatformComponent::display_name`] returns the
+    /// Title-Case operator-facing name every
+    /// [`require_platform_component_dir_exists`] miss-arm bail message
+    /// interpolates as `"{display_name} directory not found: {path}"`.
+    ///
+    /// The two axes ([`PlatformComponent::segment`] and
+    /// [`PlatformComponent::display_name`]) are DISTINCT projections of
+    /// the same enum — a regression that fused them (say, by projecting
+    /// `.display_name()` through `.to_lowercase()` and dropping the
+    /// segment arm) would silently swap the operator-facing wording to
+    /// `"hanabi directory not found: ..."` (lower-case) or the disk
+    /// segment to `"Hanabi/"` (Title-Case). This pin flips first.
+    #[test]
+    fn test_platform_component_display_name_arms() {
+        assert_eq!(PlatformComponent::Hanabi.display_name(), "Hanabi");
+        assert_eq!(PlatformComponent::Bootstrap.display_name(), "Bootstrap");
+        assert_ne!(
+            PlatformComponent::Hanabi.display_name(),
+            PlatformComponent::Hanabi.segment(),
+            "display_name and segment must project distinct byte-strings — \
+             a regression that fused them would silently lower-case the \
+             operator-facing bail message or Title-Case the disk segment",
+        );
+    }
+
+    /// Byte-oracle (Hanabi miss arm): the pre-lift
+    /// `commands/web_service.rs` bail wording — the exact two-line
+    /// envelope with the `Hanabi directory not found: <path>` prefix,
+    /// the `\n  Expected at: pkgs/platform/hanabi/` hint (two-space
+    /// indent, trailing `/`), and no `context`-added suffix — MUST
+    /// survive the migration to [`require_platform_component_dir_exists`]
+    /// byte-for-byte. A future refactor that (a) dropped the two-space
+    /// indent, (b) respelled `"Expected at:"` to `"expected:"` /
+    /// `"try:"`, (c) dropped the trailing `/` on the hint path, or
+    /// (d) swapped the display projection from `<path>.display()` to
+    /// `<path>.to_string_lossy()` would flip this assertion before it
+    /// silently rewrote the operator-facing error surface.
+    #[test]
+    fn test_require_platform_component_dir_exists_hanabi_bail_shape() {
+        let missing = Path::new("/nonexistent/pkgs/platform/hanabi");
+        let err = require_platform_component_dir_exists(missing, PlatformComponent::Hanabi)
+            .expect_err("missing directory must produce Err");
+        let msg = format!("{err}");
+        assert_eq!(
+            msg,
+            "Hanabi directory not found: /nonexistent/pkgs/platform/hanabi\n  \
+             Expected at: pkgs/platform/hanabi/",
+            "require_platform_component_dir_exists must bail with the \
+             EXACT pre-lift two-line envelope for the Hanabi variant — \
+             any drift silently rewrites the operator-facing surface \
+             (got: {msg:?})",
+        );
+    }
+
+    /// Byte-oracle (Bootstrap miss arm): the same two-line envelope
+    /// shape MUST project correctly for the sibling
+    /// [`PlatformComponent::Bootstrap`] variant, using its own
+    /// [`Self::display_name`] and [`Self::segment`] arms. Prevents a
+    /// silent variant-crossed drift where a hypothetical future
+    /// Bootstrap consumer would surface a `"Hanabi directory not
+    /// found: <bootstrap-path>"` mixed-variant wording.
+    #[test]
+    fn test_require_platform_component_dir_exists_bootstrap_bail_shape() {
+        let missing = Path::new("/nonexistent/pkgs/platform/bootstrap");
+        let err = require_platform_component_dir_exists(missing, PlatformComponent::Bootstrap)
+            .expect_err("missing directory must produce Err");
+        let msg = format!("{err}");
+        assert_eq!(
+            msg,
+            "Bootstrap directory not found: /nonexistent/pkgs/platform/bootstrap\n  \
+             Expected at: pkgs/platform/bootstrap/",
+            "require_platform_component_dir_exists must project the \
+             Bootstrap variant's display_name and segment into the same \
+             two-line envelope shape — got: {msg:?}",
+        );
+    }
+
+    /// Hit-arm pin: an existing directory returns `Ok(())` without
+    /// touching the directory's contents. Uses [`env!`] `CARGO_MANIFEST_DIR`
+    /// (the `cli/` crate root) as a directory guaranteed to exist under
+    /// the test-run's working tree.
+    #[test]
+    fn test_require_platform_component_dir_exists_ok_when_dir_exists() {
+        let existing = Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(
+            require_platform_component_dir_exists(existing, PlatformComponent::Hanabi).is_ok(),
+            "an existing directory must return Ok(()) — the primitive \
+             gates only on `.exists()`, never on segment/name match",
+        );
+    }
+
+    /// Positive-delegation shield: `commands/web_service.rs` MUST
+    /// forward through [`require_platform_component_dir_exists`] at
+    /// least twice — the two pre-lift `if !hanabi_dir.exists() {
+    /// bail!(...); }` stanzas migrated. A dropped call would leave the
+    /// negative-shield scan below trivially satisfied by absence.
+    #[test]
+    fn every_prelift_module_forwards_through_require_platform_component_dir_exists() {
+        use std::path::PathBuf as StdPathBuf;
+        let commands_dir = StdPathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands");
+        let expectations: &[(&str, usize)] = &[("web_service.rs", 2)];
+        let needle = "require_platform_component_dir_exists(";
+        for (basename, min_count) in expectations {
+            let path = commands_dir.join(basename);
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|_| panic!("expected {} to exist", path.display()));
+            let forwards = source
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .filter(|line| line.contains(needle))
+                .count();
+            assert!(
+                forwards >= *min_count,
+                "{basename} must forward at least {min_count} \
+                 `if !<dir>.exists() {{ bail!(...); }}` site(s) through \
+                 `{needle}`; found {forwards}. A reverted call would \
+                 restore the two-body drift the primitive closed.",
+            );
+        }
+    }
+
+    /// Negative caller shield: no source line under `cli/src/commands/`
+    /// may spell the pre-lift raw `<Component> directory not found`
+    /// bail wording inline any more. Both pre-lift Hanabi sites in
+    /// `commands/web_service.rs` migrated; the two-line envelope belongs
+    /// at ONE code point (this module's [`require_platform_component_dir_exists`]).
+    /// A future consumer that wants the same wording reaches for the
+    /// primitive on first grep, not by copy-pasting the raw
+    /// `bail!("Hanabi directory not found: {}\n  Expected at: ...")`
+    /// literal.
+    #[test]
+    fn no_command_module_still_spells_raw_platform_component_not_found_bail() {
+        use std::path::PathBuf as StdPathBuf;
+        let commands_dir = StdPathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands");
+        let mut offenders: Vec<(StdPathBuf, usize, String)> = Vec::new();
+        for entry in std::fs::read_dir(&commands_dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            let mut in_block_comment = false;
+            for (idx, line) in source.lines().enumerate() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") {
+                    continue;
+                }
+                if trimmed.starts_with("/*") {
+                    in_block_comment = true;
+                }
+                if in_block_comment {
+                    if trimmed.contains("*/") {
+                        in_block_comment = false;
+                    }
+                    continue;
+                }
+                if line.contains("\"Hanabi directory not found:")
+                    || line.contains("\"Bootstrap directory not found:")
+                {
+                    offenders.push((path.clone(), idx + 1, line.to_string()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "raw `<Component> directory not found:` bail wording \
+             survives under `commands/` — route each through \
+             `crate::platform_component::require_platform_component_dir_exists\
+             (&<dir>, PlatformComponent::<Variant>)?`:\n{:#?}",
+            offenders,
+        );
     }
 
     /// Positive-delegation shield: BOTH component-named half-primitives

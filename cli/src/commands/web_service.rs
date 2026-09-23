@@ -131,13 +131,10 @@ pub async fn web_regenerate(product: String, service: String, repo_root: String)
         );
     }
 
-    if !hanabi_dir.exists() {
-        bail!(
-            "Hanabi directory not found: {}\n  \
-             Expected at: pkgs/platform/hanabi/",
-            hanabi_dir.display()
-        );
-    }
+    crate::platform_component::require_platform_component_dir_exists(
+        &hanabi_dir,
+        crate::platform_component::PlatformComponent::Hanabi,
+    )?;
 
     let pleme_linker = get_tool_path("PLEME_LINKER_BIN", "pleme-linker");
     let crate2nix = crate2nix_bin();
@@ -222,13 +219,10 @@ pub async fn web_cargo_update(product: String, service: String, repo_root: Strin
     let hanabi_dir = crate::hanabi_dir::hanabi_dir(repo_root_path);
 
     // Verify path exists
-    if !hanabi_dir.exists() {
-        bail!(
-            "Hanabi directory not found: {}\n  \
-             Expected at: pkgs/platform/hanabi/",
-            hanabi_dir.display()
-        );
-    }
+    crate::platform_component::require_platform_component_dir_exists(
+        &hanabi_dir,
+        crate::platform_component::PlatformComponent::Hanabi,
+    )?;
 
     let cargo = cargo_bin();
     let crate2nix = crate2nix_bin();
