@@ -231,18 +231,12 @@ pub async fn web_cargo_update(product: String, service: String, repo_root: Strin
     println!();
 
     // Step 1: Run cargo update
-    crate::package_phase_announce::print_package_phase_announce(
-        "Updating dependencies",
-        "(cargo update)",
-    );
-
-    let mut cmd = Command::new(&cargo);
-    cmd.arg("update").current_dir(&hanabi_dir);
-    crate::retry::run_inherited_status(cmd, "cargo update")
-        .await
-        .context("Failed to update Hanabi dependencies")?;
-    crate::ui::print_step_pass("Dependencies updated");
-    println!();
+    crate::cargo_update_dependencies_phase::announce_and_run_cargo_update_in(
+        &cargo,
+        &hanabi_dir,
+        Some("Failed to update Hanabi dependencies"),
+    )
+    .await?;
 
     // Step 2: Regenerate Cargo.nix
     crate::crate2nix_regenerate_step::announce_and_run_crate2nix_regenerate(

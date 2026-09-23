@@ -389,13 +389,12 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
     let workspace_root = read_service_env_and_chdir_to_workspace()?;
 
     // Step 1: Update dependencies
-    crate::package_phase_announce::print_package_phase_announce(
-        "Updating dependencies",
-        "(cargo update)",
-    );
-    crate::nix::run_cargo_update(&cargo_bin()).await?;
-    crate::ui::print_step_pass("Dependencies updated");
-    println!();
+    crate::cargo_update_dependencies_phase::announce_and_run_cargo_update_in(
+        &cargo_bin(),
+        &workspace_root,
+        None,
+    )
+    .await?;
 
     // Step 2: Generate Cargo.nix
     crate::generate_cargo_nix_step::announce_and_generate_cargo_nix(&nix_bin()).await?;
@@ -982,21 +981,69 @@ mod tests {
             inline_hits.len()
         );
         // Positive-side sibling: at least one consumer in this module
-        // routes through the primitive. A regression that dropped every
-        // `nix::run_cargo_update` call from this module would leave the
-        // forbidden scan trivially satisfied by absence, so pin the
-        // positive presence too — the two pre-lift sites
-        // (`rust_update_cargo_nix` and `rust_cargo_update`) each land
-        // one `crate::nix::run_cargo_update(&cargo_bin())` hit.
+        // routes through the canonical primitive. A regression that
+        // dropped every `nix::run_cargo_update` call from this module
+        // would leave the forbidden scan trivially satisfied by
+        // absence, so pin the positive presence too — the pre-lift
+        // count was two (`rust_update_cargo_nix` and `rust_cargo_update`
+        // each landed one `crate::nix::run_cargo_update(&cargo_bin())`
+        // hit); post-lift `rust_cargo_update` migrated onto the
+        // higher-level
+        // `crate::cargo_update_dependencies_phase::\
+        // announce_and_run_cargo_update_in` announce+run+ack fusion
+        // (which internally routes through the `_in`-scoped sibling
+        // `nix::run_cargo_update_in`, keeping the substrate-declared
+        // `CARGO` sigil and canonical `(op, exit_code)` record shape at
+        // one body), so the direct-`run_cargo_update` hit count drops
+        // to one — the surviving `rust_update_cargo_nix` consumer that
+        // pairs `run_cargo_update` with `run_nix_wrapped_crate2nix` on
+        // a raw-`println!`-framed ceremony distinct from the
+        // announce+run+ack fusion. The companion positive shield
+        // `test_developer_tools_cargo_update_routes_through_announce_and_run_cargo_update_in_primitive`
+        // below pins the migrated site's forward through the fusion.
         let canonical = "crate::nix::run_cargo_update(&cargo_bin())";
         let canonical_hits = crate::test_support::code_line_hits(body, canonical);
         assert!(
-            canonical_hits.len() >= 2,
-            "commands/developer_tools.rs must delegate `cargo update` \
-             spawns through `{canonical}` at at least two code lines \
-             (one per pre-lift consumer: `rust_update_cargo_nix`, \
-             `rust_cargo_update`). Found {} code-line hit(s): \
+            !canonical_hits.is_empty(),
+            "commands/developer_tools.rs must delegate the surviving \
+             raw-`println!`-framed `cargo update` spawn (in \
+             `rust_update_cargo_nix`) through `{canonical}` at at \
+             least one code line. Found {} code-line hit(s): \
              {canonical_hits:#?}.",
+            canonical_hits.len()
+        );
+    }
+
+    /// Companion positive shield to
+    /// [`test_developer_tools_cargo_update_routes_through_nix_run_cargo_update`]:
+    /// the `rust_cargo_update` consumer migrated onto the
+    /// [`crate::cargo_update_dependencies_phase::announce_and_run_cargo_update_in`]
+    /// announce+run+ack fusion, so pin the forward through the
+    /// primitive here. A regression that dropped the forward would
+    /// silently leave both `run_cargo_update` positive shields
+    /// (this one and the `_nix_run_cargo_update` sibling above)
+    /// satisfied by absence of the raw inline shape, but this shield
+    /// would fail.
+    #[test]
+    fn test_developer_tools_cargo_update_routes_through_announce_and_run_cargo_update_in_primitive()
+    {
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("developer_tools.rs"),
+            "commands/developer_tools.rs",
+        );
+        let canonical = "crate::cargo_update_dependencies_phase::\
+                         announce_and_run_cargo_update_in(";
+        let canonical_hits = crate::test_support::code_line_hits(body, canonical);
+        assert!(
+            !canonical_hits.is_empty(),
+            "commands/developer_tools.rs::rust_cargo_update must \
+             forward the Step-1 announce+run+ack cargo-update frame \
+             through `{canonical}` — the pre-lift stanza \
+             (`print_package_phase_announce(\"Updating dependencies\", \
+             \"(cargo update)\")` + `nix::run_cargo_update` + \
+             `print_step_pass(\"Dependencies updated\")` + \
+             `println!()`) migrated onto this primitive. Found {} \
+             code-line hit(s): {canonical_hits:#?}.",
             canonical_hits.len()
         );
     }

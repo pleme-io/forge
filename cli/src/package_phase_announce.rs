@@ -280,13 +280,29 @@ mod tests {
     // call site outright leaves the negative "no raw inline shape"
     // scan trivially satisfied by absence but the positive count
     // still fails.
+    //
+    // The counts here are DIRECT forwards from each module's own
+    // source. Pre-lift each of the two modules landed 2 direct
+    // forwards (the `Regenerating <target>` Step-1 announce and the
+    // `Updating dependencies` Step-1 cargo-update announce); post-lift
+    // the cargo-update Step-1 announce migrated onto
+    // `crate::cargo_update_dependencies_phase::\
+    // announce_and_run_cargo_update_in`, which itself forwards through
+    // `print_package_phase_announce` at one body — so the direct
+    // forward count in each pre-lift module drops from 2 to 1, but the
+    // shared grammar still reaches both consumer sites by construction
+    // (via the new primitive's one indirection). The companion
+    // sibling shield below pins the primitive's forward and its
+    // consumer-count so a regression that dropped the primitive call
+    // outright (from either consumer OR the primitive body) still
+    // fails at the visible spot.
     #[test]
     fn every_prelift_module_forwards_through_print_package_phase_announce() {
         use std::path::PathBuf;
         let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("src")
             .join("commands");
-        let expectations: &[(&str, usize)] = &[("web_service.rs", 2), ("developer_tools.rs", 2)];
+        let expectations: &[(&str, usize)] = &[("web_service.rs", 1), ("developer_tools.rs", 1)];
         for (basename, min_count) in expectations {
             let path = commands_dir.join(basename);
             let source = std::fs::read_to_string(&path).unwrap();
@@ -300,6 +316,61 @@ mod tests {
                  `crate::package_phase_announce::print_package_phase_announce(`; \
                  found {forwards}. A dropped call would leave the \
                  negative raw-shape scan satisfied by absence.",
+            );
+        }
+    }
+
+    // Companion positive shield to
+    // [`every_prelift_module_forwards_through_print_package_phase_announce`]:
+    // the migrated cargo-update Step-1 announce now flows through the
+    // `crate::cargo_update_dependencies_phase::\
+    // announce_and_run_cargo_update_in` fusion primitive, which itself
+    // must forward through
+    // `crate::package_phase_announce::print_package_phase_announce(`
+    // at exactly one body — and both pre-lift command modules must
+    // still call the primitive at least once. A regression that
+    // dropped the primitive's own forward through
+    // `print_package_phase_announce` would break the shared grammar
+    // for both consumer sites at once, and a regression that dropped
+    // the primitive call from either consumer would drop the migrated
+    // Step-1 announce entirely.
+    #[test]
+    fn cargo_update_dependencies_phase_carries_migrated_package_phase_announce() {
+        use std::path::PathBuf;
+        let cli_src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+
+        let primitive_body =
+            std::fs::read_to_string(cli_src.join("cargo_update_dependencies_phase.rs")).unwrap();
+        let primitive_forward_hits = primitive_body
+            .matches("crate::package_phase_announce::print_package_phase_announce(")
+            .count();
+        assert!(
+            primitive_forward_hits >= 1,
+            "cargo_update_dependencies_phase.rs must forward through \
+             `crate::package_phase_announce::print_package_phase_announce(` \
+             at least once so the migrated Step-1 cargo-update \
+             announce reaches the shared grammar. Found \
+             {primitive_forward_hits} hit(s).",
+        );
+
+        let consumer_canonical = "crate::cargo_update_dependencies_phase::\
+                                  announce_and_run_cargo_update_in(";
+        for basename in &["web_service.rs", "developer_tools.rs"] {
+            let source = std::fs::read_to_string(cli_src.join("commands").join(basename)).unwrap();
+            let consumer_hits = source
+                .lines()
+                .filter(|line| {
+                    let trimmed = line.trim_start();
+                    !trimmed.starts_with("//")
+                        && !trimmed.starts_with("///")
+                        && line.contains(consumer_canonical)
+                })
+                .count();
+            assert!(
+                consumer_hits >= 1,
+                "{basename} must forward the migrated Step-1 \
+                 cargo-update stanza through `{consumer_canonical}` \
+                 at least once. Found {consumer_hits} hit(s).",
             );
         }
     }

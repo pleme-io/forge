@@ -544,6 +544,55 @@ pub async fn run_cargo_update(cargo_path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Run `cargo update` scoped to a caller-provided working directory —
+/// the `_in` sibling of [`run_cargo_update`], mirrors the
+/// [`run_crate2nix_in`] / [`run_crate2nix`] pairing on the sibling
+/// crate2nix frontier.
+///
+/// # Arguments
+///
+/// * `cargo_path` - Resolved `CARGO` sigil (or `"cargo"` on PATH)
+/// * `dir` - Working directory to scope the spawn to; the primitive
+///   sets `.current_dir(dir)` on the spawned `tokio::process::Command`.
+///
+/// # Errors
+///
+/// Same canonical `{op} failed (exit {code})` record shape as
+/// [`run_cargo_update`], routed through the shared
+/// [`crate::retry::run_inherited_status`] envelope, with the canonical
+/// outer `"Failed to update Cargo.lock"` narrative attached by
+/// construction.
+///
+/// # Duplication lift
+///
+/// Pre-lift the `commands/web_service.rs::web_cargo_update` site
+/// spelled the four-line
+///
+/// ```text
+/// let mut cmd = Command::new(&cargo);
+/// cmd.arg("update").current_dir(&hanabi_dir);
+/// crate::retry::run_inherited_status(cmd, "cargo update")
+///     .await
+///     .context("Failed to update Hanabi dependencies")?;
+/// ```
+///
+/// stanza inline, and `commands/developer_tools.rs::rust_cargo_update`
+/// relied on `run_cargo_update`'s implicit process-cwd inheritance
+/// (post-preamble chdir). Post-lift both sites route through the
+/// higher-level
+/// [`crate::cargo_update_dependencies_phase::announce_and_run_cargo_update_in`]
+/// fusion, which threads their workspace directory through this
+/// `_in`-scoped runner.
+pub async fn run_cargo_update_in(cargo_path: &str, dir: impl AsRef<Path>) -> Result<()> {
+    info!("📦 Updating Cargo.lock...");
+    let mut cmd = Command::new(cargo_path);
+    cmd.args(["update"]).current_dir(dir.as_ref());
+    crate::retry::run_inherited_status(cmd, "cargo update")
+        .await
+        .context("Failed to update Cargo.lock")?;
+    Ok(())
+}
+
 /// Recursive-closure enumeration for a built Nix output link — the
 /// canonical typed primitive that pairs with
 /// [`crate::infrastructure::attic::AtticClient::push_closure_via_stdin`]

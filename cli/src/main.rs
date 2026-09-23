@@ -83,6 +83,12 @@ mod cargo_lock_and_cargo_nix_bullets;
 mod cargo_nix_ceremony_banner;
 mod cargo_nix_ceremony_summary_opener;
 mod cargo_test_argv;
+// Announce-run-ack fusion for the `cargo update` Step-1 dependency-refresh
+// phase — the closer sibling of `crate2nix_regenerate_step` (which owns the
+// analogous Step-2 `crate2nix generate` fusion). Consumers:
+// `commands/web_service.rs::web_cargo_update` and
+// `commands/developer_tools.rs::rust_cargo_update`.
+mod cargo_update_dependencies_phase;
 mod cloudflare;
 mod cloudflare_purge_success_ack;
 mod platform_component;
