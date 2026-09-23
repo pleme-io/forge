@@ -1338,12 +1338,11 @@ async fn run_cargo_test(backend_dir: &Path) -> Result<bool> {
         });
 
     if output.status.success() {
-        crate::ui::print_step_pass(&crate::repo::msg_with_count_noun_secs_1(
+        crate::test_count_pass_step::print_test_count_pass_step(
             "Tests passed",
-            test_count.unwrap_or(0),
-            "tests",
+            test_count,
             duration,
-        ));
+        );
         Ok(true)
     } else {
         let stderr = crate::repo::utf8_lossy_borrow(&output.stderr);

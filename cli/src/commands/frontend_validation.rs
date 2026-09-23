@@ -356,12 +356,11 @@ pub async fn run_unit_tests(web_dir: &Path) -> Result<(bool, Option<usize>, Vec<
     let test_count = parse_test_count(&combined);
 
     if output.status.success() {
-        crate::ui::print_step_pass(&crate::repo::msg_with_count_noun_secs_1(
+        crate::test_count_pass_step::print_test_count_pass_step(
             "Unit tests passed",
-            test_count.unwrap_or(0),
-            "tests",
+            test_count,
             duration,
-        ));
+        );
         Ok((true, test_count, Vec::new()))
     } else {
         // Check if tests actually failed or if there are no tests

@@ -205,6 +205,7 @@ mod step_header_with_trailing_blank;
 mod success_step;
 mod supergraph_content_hash;
 mod tags_field;
+mod test_count_pass_step;
 mod tokio_command_inherit_stdio;
 mod tokio_command_piped_stdio;
 mod tools;
