@@ -383,16 +383,20 @@ mod tests {
 
     /// Positive half of the shield: each pre-lift command module
     /// MUST forward through
-    /// [`print_cargo_nix_ceremony_banner`] at least the migrated
-    /// count, so a migration that dropped a call site outright
-    /// leaves the negative "no raw inline shape" scan trivially
-    /// satisfied by absence but the positive count still fails.
+    /// [`print_cargo_nix_ceremony_banner`] — either DIRECTLY or
+    /// INDIRECTLY via
+    /// [`crate::cargo_nix_ceremony_summary_opener::print_cargo_nix_ceremony_summary_opener`],
+    /// which delegates through this primitive — at least the
+    /// pre-lift migrated count, so a migration that dropped a call
+    /// site outright leaves the negative "no raw inline shape" scan
+    /// trivially satisfied by absence but the positive count still
+    /// fails.
     ///
-    /// Web-service.rs (×2: `regenerate_hanabi` regeneration closer
-    /// at :186-188, `web_cargo_update` update closer at :275-277).
-    /// Developer-tools.rs (×2: `rust_regenerate_cargo_nix`
-    /// regeneration closer at :348-350, `rust_cargo_update` update
-    /// closer at :407-409).
+    /// Web-service.rs (×2 pre-lift): one direct `regenerate_hanabi`
+    /// regeneration closer + one indirect `web_cargo_update` update
+    /// closer via the summary-opener. Developer-tools.rs (×2
+    /// pre-lift): two indirect `rust_regenerate` /
+    /// `rust_cargo_update` closers via the summary-opener.
     #[test]
     fn every_prelift_module_forwards_through_print_cargo_nix_ceremony_banner() {
         use std::path::PathBuf;
@@ -400,20 +404,27 @@ mod tests {
             .join("src")
             .join("commands");
         let expectations: &[(&str, usize)] = &[("web_service.rs", 2), ("developer_tools.rs", 2)];
-        // Reconstruct the call-site needle via `format!` so this
+        // Reconstruct the call-site needles via `format!` so this
         // shield's own source text does not false-match itself.
-        let needle = format!("{}(", "print_cargo_nix_ceremony_banner");
+        let direct_needle = format!("{}(", "print_cargo_nix_ceremony_banner");
+        let indirect_needle = format!("{}(", "print_cargo_nix_ceremony_summary_opener");
         for (basename, min_count) in expectations {
             let path = commands_dir.join(basename);
             let source = std::fs::read_to_string(&path).unwrap();
-            let forwards = source.matches(needle.as_str()).count();
+            let direct = source.matches(direct_needle.as_str()).count();
+            let indirect = source.matches(indirect_needle.as_str()).count();
+            let forwards = direct + indirect;
             assert!(
                 forwards >= *min_count,
                 "{basename} must forward at least {min_count} \
                  cargo-nix-ceremony banner stanza(s) through \
-                 `crate::cargo_nix_ceremony_banner::print_cargo_nix_ceremony_banner(`; \
-                 found {forwards}. A dropped call would leave the \
-                 negative raw-shape scan satisfied by absence.",
+                 `crate::cargo_nix_ceremony_banner::print_cargo_nix_ceremony_banner(` \
+                 (direct) or \
+                 `crate::cargo_nix_ceremony_summary_opener::print_cargo_nix_ceremony_summary_opener(` \
+                 (indirect via the summary opener); found \
+                 {direct} direct + {indirect} indirect = {forwards}. \
+                 A dropped call would leave the negative raw-shape \
+                 scan satisfied by absence.",
             );
         }
     }

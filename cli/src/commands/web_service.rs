@@ -259,13 +259,10 @@ pub async fn web_cargo_update(product: String, service: String, repo_root: Strin
     .await?;
 
     // Success summary
-    crate::cargo_nix_ceremony_banner::print_cargo_nix_ceremony_banner(
+    crate::cargo_nix_ceremony_summary_opener::print_cargo_nix_ceremony_summary_opener(
         crate::cargo_nix_ceremony_banner::CargoNixCeremony::Update,
-    );
-    crate::cargo_lock_and_cargo_nix_bullets::print_cargo_lock_and_cargo_nix_bullets_with_blank(
         &hanabi_dir,
     );
-    crate::next_steps_review_the_changes_opener::print_next_steps_heading_then_review_the_changes();
     crate::ui::print_next_step(2, "Test the build: cargo build");
     crate::ui::print_next_step(
         3,

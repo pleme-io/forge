@@ -359,13 +359,10 @@ pub async fn rust_regenerate(service: String) -> Result<()> {
     crate::generate_cargo_nix_step::announce_and_generate_cargo_nix(&nix_bin()).await?;
 
     // Success summary
-    crate::cargo_nix_ceremony_banner::print_cargo_nix_ceremony_banner(
+    crate::cargo_nix_ceremony_summary_opener::print_cargo_nix_ceremony_summary_opener(
         crate::cargo_nix_ceremony_banner::CargoNixCeremony::Regeneration,
-    );
-    crate::cargo_lock_and_cargo_nix_bullets::print_cargo_lock_and_cargo_nix_bullets_with_blank(
         &workspace_root,
     );
-    crate::next_steps_review_the_changes_opener::print_next_steps_heading_then_review_the_changes();
     crate::ui::print_next_step(
         2,
         "Commit both files: git add Cargo.lock Cargo.nix && git commit",
@@ -404,13 +401,10 @@ pub async fn rust_cargo_update(service: String) -> Result<()> {
     crate::generate_cargo_nix_step::announce_and_generate_cargo_nix(&nix_bin()).await?;
 
     // Success summary
-    crate::cargo_nix_ceremony_banner::print_cargo_nix_ceremony_banner(
+    crate::cargo_nix_ceremony_summary_opener::print_cargo_nix_ceremony_summary_opener(
         crate::cargo_nix_ceremony_banner::CargoNixCeremony::Update,
-    );
-    crate::cargo_lock_and_cargo_nix_bullets::print_cargo_lock_and_cargo_nix_bullets_with_blank(
         &workspace_root,
     );
-    crate::next_steps_review_the_changes_opener::print_next_steps_heading_then_review_the_changes();
     crate::ui::print_next_step(2, "Test the build: cargo build");
     crate::ui::print_next_step(
         3,

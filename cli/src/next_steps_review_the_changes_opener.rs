@@ -318,11 +318,14 @@ mod tests {
 
     /// Caller shield (positive half): the pre-lift modules that
     /// housed the four sites MUST forward through
-    /// [`print_next_steps_heading_then_review_the_changes`] at least
-    /// the pre-lift count of times, so a migration that dropped a
-    /// call site outright leaves the negative "no raw inline shape"
-    /// scan trivially satisfied by absence but the positive count
-    /// still fails. Mirrors the sibling
+    /// [`print_next_steps_heading_then_review_the_changes`] — either
+    /// DIRECTLY or INDIRECTLY via
+    /// [`crate::cargo_nix_ceremony_summary_opener::print_cargo_nix_ceremony_summary_opener`],
+    /// which delegates through this primitive — at least the pre-lift
+    /// count of times, so a migration that dropped a call site
+    /// outright leaves the negative "no raw inline shape" scan
+    /// trivially satisfied by absence but the positive count still
+    /// fails. Mirrors the sibling
     /// `every_prelift_module_forwards_through_cargo_lock_and_cargo_nix_bullets`
     /// shield in [`crate::cargo_lock_and_cargo_nix_bullets`].
     #[test]
@@ -332,19 +335,27 @@ mod tests {
             .join("src")
             .join("commands");
         let expectations: &[(&str, usize)] = &[("web_service.rs", 2), ("developer_tools.rs", 2)];
-        let needle = "print_next_steps_heading_then_review_the_changes(";
+        let direct_needle = "print_next_steps_heading_then_review_the_changes(";
+        // Reconstruct the indirect needle via `format!` so this
+        // shield's own source text does not false-match itself.
+        let indirect_needle = format!("{}(", "print_cargo_nix_ceremony_summary_opener");
         for (basename, min_count) in expectations {
             let path = commands_dir.join(basename);
             let source = std::fs::read_to_string(&path)
                 .unwrap_or_else(|_| panic!("expected {} to exist", path.display()));
-            let forwards = source.matches(needle).count();
+            let direct = source.matches(direct_needle).count();
+            let indirect = source.matches(indirect_needle.as_str()).count();
+            let forwards = direct + indirect;
             assert!(
                 forwards >= *min_count,
                 "{basename} must forward at least {min_count} \
                  (Next steps: heading + Review-the-changes step-1) \
-                 opener stanza(s) through `{needle}`; found \
-                 {forwards}. A dropped call would leave the negative \
-                 raw-shape scan satisfied by absence.",
+                 opener stanza(s) through `{direct_needle}` (direct) or \
+                 `crate::cargo_nix_ceremony_summary_opener::print_cargo_nix_ceremony_summary_opener(` \
+                 (indirect via the summary opener); found \
+                 {direct} direct + {indirect} indirect = {forwards}. \
+                 A dropped call would leave the negative raw-shape scan \
+                 satisfied by absence.",
             );
         }
     }
