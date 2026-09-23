@@ -186,6 +186,50 @@ async fn cargo_output_at(args: &[&str], cwd: &Path, op: &str) -> Result<std::pro
     )
 }
 
+/// Announce the gate step-heading, run `cargo <args>` at `cwd` through the
+/// [`cargo_output_at`] fusion primitive, and return the captured output paired
+/// with the elapsed wall-clock duration — the announce + spawn + elapse
+/// preamble every one-shot fast-gate wraps around its per-gate verdict
+/// heuristic.
+///
+/// # Fusion of three occurrences
+///
+/// Pre-lift each of `run_cargo_check` (G1), `run_cargo_clippy` (G2) and
+/// `run_cargo_test` (G4) opened with the same three-line stanza verbatim
+/// modulo argv, title and op label:
+///
+/// ```text
+/// let start = crate::ui::print_step_heading_start("G<N>: <title>");
+/// let output = cargo_output_at(&[..], backend_dir, "cargo <op>").await?;
+/// let duration = start.elapsed();
+/// ```
+///
+/// The stanza is a preamble atop the [`cargo_output_at`] fusion primitive:
+/// it announces the gate's numbered step heading, snapshots the wall-clock
+/// start via [`crate::ui::print_step_heading_start`], drives the captured-
+/// output spawn through the sibling fusion, and takes the elapsed duration
+/// off the same start clock. Post-lift each site collapses to a
+/// `announce_gate_and_run_cargo_output_at(<title>, &[..], backend_dir,
+/// <op>).await?` delegation and both the announce-then-elapse pairing
+/// (a caller that forgot to snapshot `start` before the spawn would lose
+/// the timing) and the shared `cargo_output_at` envelope are inherited
+/// by construction. `run_cargo_fmt_check` (G3) intentionally does NOT
+/// ride this primitive because it drives TWO cargo spawns (the auto-fix
+/// `cargo fmt` followed by the `cargo fmt -- --check` verify) off ONE
+/// start clock; a single-spawn primitive would collapse the two-arm shape
+/// or duplicate the elapsed sample.
+async fn announce_gate_and_run_cargo_output_at(
+    title: &str,
+    args: &[&str],
+    cwd: &Path,
+    op: &str,
+) -> Result<(std::process::Output, std::time::Duration)> {
+    let start = crate::ui::print_step_heading_start(title);
+    let output = cargo_output_at(args, cwd, op).await?;
+    let duration = start.elapsed();
+    Ok((output, duration))
+}
+
 /// Configuration for the pre-release validation
 #[derive(Debug, Clone)]
 pub struct PreReleaseConfig {
@@ -1159,13 +1203,15 @@ fn verify_directories(config: &PreReleaseConfig) -> Result<()> {
 
 /// G1: Run cargo check
 async fn run_cargo_check(backend_dir: &Path) -> Result<bool> {
-    let start = crate::ui::print_step_heading_start("G1: cargo check");
-
     // Check lib and bins only (not tests) - consistent with clippy
     // Test targets require test-helpers feature and are validated separately
-    let output = cargo_output_at(&["check", "--lib", "--bins"], backend_dir, "cargo check").await?;
-
-    let duration = start.elapsed();
+    let (output, duration) = announce_gate_and_run_cargo_output_at(
+        "G1: cargo check",
+        &["check", "--lib", "--bins"],
+        backend_dir,
+        "cargo check",
+    )
+    .await?;
 
     if output.status.success() {
         crate::ui::print_step_pass_timed("Compilation check passed", duration);
@@ -1185,18 +1231,15 @@ async fn run_cargo_check(backend_dir: &Path) -> Result<bool> {
 
 /// G2: Run cargo clippy with deny warnings
 async fn run_cargo_clippy(backend_dir: &Path) -> Result<bool> {
-    let start = crate::ui::print_step_heading_start("G2: cargo clippy");
-
     // Check lib and bins only (not tests) - test dead code warnings are expected
     // since GraphQL types aren't constructed directly in test code
-    let output = cargo_output_at(
+    let (output, duration) = announce_gate_and_run_cargo_output_at(
+        "G2: cargo clippy",
         &["clippy", "--lib", "--bins", "--", "-D", "warnings"],
         backend_dir,
         "cargo clippy",
     )
     .await?;
-
-    let duration = start.elapsed();
 
     if output.status.success() {
         crate::ui::print_step_pass(&crate::repo::msg_with_count_noun_secs_1(
@@ -1274,11 +1317,13 @@ async fn run_cargo_fmt_check(backend_dir: &Path) -> Result<bool> {
 
 /// G4: Run cargo test
 async fn run_cargo_test(backend_dir: &Path) -> Result<bool> {
-    let start = crate::ui::print_step_heading_start("G4: cargo test");
-
-    let output = cargo_output_at(&["test", "--lib", "--bins"], backend_dir, "cargo test").await?;
-
-    let duration = start.elapsed();
+    let (output, duration) = announce_gate_and_run_cargo_output_at(
+        "G4: cargo test",
+        &["test", "--lib", "--bins"],
+        backend_dir,
+        "cargo test",
+    )
+    .await?;
     let stdout = crate::repo::utf8_lossy_borrow(&output.stdout);
 
     // Parse test count from output
@@ -2105,6 +2150,91 @@ mod tests {
              absence. The five load-bearing sites are G1 `run_cargo_check`, \
              G2 `run_cargo_clippy`, G3 `run_cargo_fmt_check` (fix + check \
              arms), and G4 `run_cargo_test`.",
+        );
+    }
+
+    /// Whole-module shield: every one-shot fast-gate opener (G1, G2, G4)
+    /// in this module MUST route its announce + captured-spawn + elapse
+    /// three-line preamble through the
+    /// [`announce_gate_and_run_cargo_output_at`] fusion primitive — the
+    /// sibling of [`cargo_output_at`] one layer up the composition stack,
+    /// adding the announce-and-elapse pairing atop the bare captured-spawn
+    /// primitive. Pre-lift the three sites spelled the same three-line
+    /// stanza verbatim modulo argv, title and op label:
+    ///
+    /// ```text
+    /// let start = crate::ui::print_step_heading_start("G<N>: <title>");
+    /// let output = cargo_output_at(&[..], backend_dir, "cargo <op>").await?;
+    /// let duration = start.elapsed();
+    /// ```
+    ///
+    /// G3 `run_cargo_fmt_check` intentionally does NOT ride this primitive
+    /// because it drives TWO cargo spawns (auto-fix `cargo fmt` +
+    /// `cargo fmt -- --check` verify) off ONE start clock; a single-spawn
+    /// primitive would either collapse the two-arm shape or double-sample
+    /// the elapsed clock.
+    ///
+    /// # Two-arm pin
+    ///
+    /// Negative side pins that the per-site
+    /// `crate::ui::print_step_heading_start("G<N>:` numbered opener for
+    /// each of G1/G2/G4 never re-appears in the module body — a
+    /// reconstruction of the announce alone would take it and the paired
+    /// `let duration = start.elapsed()` off separate paths (the announce
+    /// inline, the elapse still through the primitive) and drift the
+    /// pairing one axis at a time. Positive side pins ≥3
+    /// `announce_gate_and_run_cargo_output_at(` delegation call sites —
+    /// one per migrated gate; a deletion drops the count and cannot leave
+    /// the negative-side scan trivially satisfied by absence.
+    ///
+    /// # Fail-before-pass-after
+    ///
+    /// Pre-lift the three G1/G2/G4 sites each spelled the numbered
+    /// `print_step_heading_start("G<N>:` opener verbatim — this shield's
+    /// count-eq-0 assertion on each of the three numbered openers
+    /// fails-before at 1 (per site) and passes-after at 0. The needles
+    /// are literals in the assertion vec so this shield's own docstring
+    /// mentions of the openers (living in `///`-prefixed comment lines)
+    /// never self-match via [`crate::test_support::code_line_hits`]'s
+    /// doc-comment filter.
+    #[test]
+    fn cargo_fast_gate_announce_preamble_routes_through_announce_gate_and_run_cargo_output_at() {
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("prerelease.rs"),
+            "commands/prerelease.rs",
+        );
+        for needle in [
+            "print_step_heading_start(\"G1:",
+            "print_step_heading_start(\"G2:",
+            "print_step_heading_start(\"G4:",
+        ] {
+            let hits = crate::test_support::code_line_hits(body, needle);
+            assert!(
+                hits.is_empty(),
+                "commands/prerelease.rs must NOT spell the per-site \
+                 `crate::ui::print_step_heading_start(\"G<N>: ...\")` \
+                 announce half of the pre-lift three-line preamble for \
+                 the G1/G2/G4 one-shot cargo gates — the announce + \
+                 captured-spawn + elapse preamble routes through \
+                 `announce_gate_and_run_cargo_output_at`. Re-inlining the \
+                 announce alone would take it and the paired \
+                 `let duration = start.elapsed()` off separate paths. \
+                 Offending needle `{needle}`, hits: {hits:?}",
+            );
+        }
+        let delegations =
+            crate::test_support::code_line_hits(body, "announce_gate_and_run_cargo_output_at(")
+                .len();
+        assert!(
+            delegations >= 3,
+            "commands/prerelease.rs must route the announce + \
+             captured-spawn + elapse three-line preamble on the G1/G2/G4 \
+             one-shot cargo gates through the \
+             `announce_gate_and_run_cargo_output_at` fusion — found only \
+             {delegations} delegation call(s); a dropped call would leave \
+             the negative-side scan trivially satisfied by absence. The \
+             three load-bearing sites are G1 `run_cargo_check`, G2 \
+             `run_cargo_clippy`, and G4 `run_cargo_test`.",
         );
     }
 
