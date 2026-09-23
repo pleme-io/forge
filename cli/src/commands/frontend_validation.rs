@@ -187,15 +187,18 @@ pub async fn run_type_check(web_dir: &Path) -> Result<(bool, Vec<String>)> {
             duration,
         ));
 
-        // Collect error lines for summary details
+        // Collect error lines for summary details — routed through the
+        // fused walk-cap-filter-print-collect primitive shared with the
+        // sibling `run_unit_tests` failure branch below (both cap at
+        // FRONTEND_ERROR_DIAGNOSTIC_LINE_CAP = 20 and print through the
+        // RED [`crate::ui::print_diagnostic_error_line`] adapter, only
+        // the keyword slice differs per tool).
         let combined = format!("{}\n{}", stderr, stdout);
-        let mut details = Vec::new();
-        for line in combined.lines().take(20) {
-            if line.contains("error") || line.contains("Error") {
-                crate::ui::print_diagnostic_error_line(line);
-                details.push(line.to_string());
-            }
-        }
+        let mut details =
+            crate::frontend_error_diagnostic_collect::print_and_collect_error_diagnostic_lines(
+                &combined,
+                &["error", "Error"],
+            );
 
         if error_count > 20 {
             println!("   ... and {} more errors", error_count - 20);
@@ -381,15 +384,18 @@ pub async fn run_unit_tests(web_dir: &Path) -> Result<(bool, Option<usize>, Vec<
         } else if has_failures {
             crate::ui::print_step_failure_timed("Unit tests failed", duration);
 
-            // Collect failure lines for summary details
-            let mut details = Vec::new();
-            let lines: Vec<&str> = combined.lines().collect();
-            for &line in lines.iter().take(20) {
-                if line.contains("FAIL") || line.contains("Error") || line.contains("✕") {
-                    crate::ui::print_diagnostic_error_line(line);
-                    details.push(line.to_string());
-                }
-            }
+            // Collect failure lines for summary details — routed through
+            // the fused walk-cap-filter-print-collect primitive shared
+            // with the sibling `run_type_check` failure branch above
+            // (both cap at FRONTEND_ERROR_DIAGNOSTIC_LINE_CAP = 20 and
+            // print through the RED
+            // [`crate::ui::print_diagnostic_error_line`] adapter, only
+            // the keyword slice differs per tool).
+            let details =
+                crate::frontend_error_diagnostic_collect::print_and_collect_error_diagnostic_lines(
+                    &combined,
+                    &["FAIL", "Error", "✕"],
+                );
 
             Ok((false, test_count, details))
         } else {

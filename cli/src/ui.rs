@@ -18068,12 +18068,11 @@ mod tests {
     /// sites route through `eprintln!` (stderr), not `println!`
     /// (stdout), and the shield's needle anchors on `println!`.
     ///
-    /// The positive count is pinned per-module at the pre-lift site
-    /// count (`prerelease.rs` ×5, `frontend_validation.rs` ×2). A
-    /// fusion that folded two consumer sites into one call or
-    /// dropped one of the highlighted lines silently fails here —
-    /// the negative half above would still pass, but the positive
-    /// count would fall below the pre-lift census.
+    /// The positive count is pinned per-module. A fusion that folded
+    /// two consumer sites into one call or dropped one of the
+    /// highlighted lines silently fails here — the negative half above
+    /// would still pass, but the positive count would fall below (or
+    /// exceed) the migrated census.
     #[test]
     fn print_diagnostic_error_line_callers_delegate_through_primitive() {
         // `prerelease.rs` migrated 5 → 2 when the 3 sibling
@@ -18083,6 +18082,21 @@ mod tests {
         // print_classified_diagnostic_line`. The two surviving
         // direct calls live at the G1 `run_cargo_check` and G2
         // `run_cargo_clippy` in-body diagnostic walks.
+        //
+        // `frontend_validation.rs` migrated 2 → 0 when both sibling
+        // walk-cap-filter-print-collect stanzas at
+        // `run_type_check` (`["error", "Error"]` keyword slice) and
+        // `run_unit_tests` (`["FAIL", "Error", "✕"]` keyword slice)
+        // lifted onto `crate::frontend_error_diagnostic_collect::
+        // print_and_collect_error_diagnostic_lines`, which internally
+        // reaches the writer sibling
+        // `crate::ui::write_diagnostic_error_line` (not this direct
+        // `print_diagnostic_error_line` entry point). The primitive's
+        // own body is out of scope for this shield (it lives at
+        // `cli/src/frontend_error_diagnostic_collect.rs`, not
+        // `cli/src/commands/`) — its call is enrolled below in the
+        // sibling `print_and_collect_error_diagnostic_lines` forward-
+        // count shield instead.
         const CALLERS: &[(&str, &str, usize)] = &[
             (
                 include_str!("commands/prerelease.rs"),
@@ -18092,7 +18106,7 @@ mod tests {
             (
                 include_str!("commands/frontend_validation.rs"),
                 "commands/frontend_validation.rs",
-                2,
+                0,
             ),
         ];
         for (source, module_path, expected_forwards) in CALLERS {

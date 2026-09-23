@@ -139,6 +139,15 @@ mod error_diagnostic_indented_walk;
 mod first_pod_field_argv;
 mod flake_attr_ref;
 mod flux_gitops_monitor_hint;
+// Frontend error-diagnostic head-take + collect + red-highlight primitive.
+// Callers: `commands/frontend_validation.rs::{run_type_check, run_unit_tests}`
+// — two sibling `for line in <combined>.lines().take(20) { if
+// line.contains(<kw>) { crate::ui::print_diagnostic_error_line(line);
+// details.push(line.to_string()); } }` stanzas that fold onto ONE typed
+// walk-cap-filter-print-collect body sharing the cap constant + the
+// `write_diagnostic_error_line` red per-line adapter, keyword slice
+// parameterized per caller.
+mod frontend_error_diagnostic_collect;
 mod frontend_lint_diagnostic_collect;
 // Fused two-count `print_step_failure` header + `print_and_collect_lint_
 // diagnostic_lines` collection primitive. Callers:
