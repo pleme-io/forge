@@ -121,11 +121,14 @@ pub async fn validate_codegen_with_autocommit(
 
     crate::ui::print_step_check(&format!("Schema exported ({} bytes)", schema_bytes.len()));
 
-    // Write schema to web directory
+    // Write schema to web directory — routed through the canonical
+    // `crate::graphql_schema_write::write_graphql_schema_bytes` primitive
+    // so the shared `"Failed to write schema to <path>"` envelope + the
+    // `tokio::fs::write` async body land at one construction surface
+    // (THEORY §V.1, §VI.1). Fanned in with the sibling stanzas at
+    // `commands/codegen.rs::{execute, export_schema_only}`.
     let schema_path = web_dir.join("schema.graphql");
-    tokio::fs::write(&schema_path, &schema_bytes)
-        .await
-        .with_context(|| format!("Failed to write schema to {}", schema_path.display()))?;
+    crate::graphql_schema_write::write_graphql_schema_bytes(&schema_bytes, &schema_path).await?;
 
     // Step 2: Run codegen
     println!("   Running GraphQL codegen...");

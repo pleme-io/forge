@@ -33,6 +33,13 @@ mod flux_source_verification;
 #[cfg(feature = "attestation")]
 mod git_signature;
 mod graphql_schema;
+// Async `tokio::fs::write(<dest>, <schema_bytes>)` + canonical
+// `.with_context(|| format!("Failed to write schema to {}",
+// <dest>.display()))` envelope primitive. Callers:
+// `commands/codegen.rs::{execute, export_schema_only}` and
+// `commands/codegen_validation.rs::execute` — three sibling stanzas that
+// share one write body and one operator-facing context envelope.
+mod graphql_schema_write;
 mod hanabi_dir;
 #[cfg(feature = "attestation")]
 mod helm_lint;

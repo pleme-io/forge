@@ -8,7 +8,6 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 use std::time::Instant;
-use tokio::fs;
 
 use crate::repo::get_tool_path;
 
@@ -93,11 +92,16 @@ pub async fn execute(backend_dir: &Path, web_dir: &Path) -> Result<CodegenResult
         schema_start.elapsed(),
     ));
 
-    // Step 2: Write schema to web directory
+    // Step 2: Write schema to web directory — routed through the
+    // canonical `crate::graphql_schema_write::write_graphql_schema_bytes`
+    // primitive so the `"Failed to write schema to <path>"` envelope,
+    // the async `tokio::fs::write` body, and any future atomic-write /
+    // OTLP-span refinement land at one construction surface (THEORY
+    // §V.1, §VI.1). Fanned in with the sibling stanzas at
+    // `commands/codegen.rs::export_schema_only` and
+    // `commands/codegen_validation.rs::execute`.
     let schema_path = web_dir.join("schema.graphql");
-    fs::write(&schema_path, &schema_bytes)
-        .await
-        .with_context(|| format!("Failed to write schema to {}", schema_path.display()))?;
+    crate::graphql_schema_write::write_graphql_schema_bytes(&schema_bytes, &schema_path).await?;
 
     crate::ui::print_step_check(&format!("Schema written to {}", schema_path.display()));
     println!();
@@ -182,9 +186,7 @@ pub async fn export_schema_only(backend_dir: &Path, output_path: &Path) -> Resul
     let schema_bytes = crate::graphql_schema::extract_graphql_schema(backend_dir).await?;
     let schema_size = schema_bytes.len();
 
-    fs::write(output_path, &schema_bytes)
-        .await
-        .with_context(|| format!("Failed to write schema to {}", output_path.display()))?;
+    crate::graphql_schema_write::write_graphql_schema_bytes(&schema_bytes, output_path).await?;
 
     crate::ui::print_step_pass(&format!(
         "Schema exported to {} ({} bytes)",
