@@ -1073,11 +1073,10 @@ fn print_image_info() -> Result<()> {
         .context("Failed to list Docker images")?;
 
     let stdout = crate::repo::utf8_lossy_borrow(&output.stdout);
-    for line in stdout.lines() {
-        if line.contains("backend") || line.contains("web") {
-            println!("{}", line);
-        }
-    }
+    crate::e2e_docker_images_backend_or_web_line_filter::print_e2e_docker_images_backend_or_web_lines(
+        &stdout,
+        crate::probe_dump::DiagSink::Stdout,
+    );
 
     Ok(())
 }
@@ -1123,11 +1122,10 @@ fn print_failure_diagnostics() {
     if let Some(stdout) =
         crate::retry::probe_stdout_capture_sync(&docker_bin(), &["images", "--format", &template])
     {
-        for line in stdout.lines() {
-            if line.contains("backend") || line.contains("web") {
-                eprintln!("{}", line);
-            }
-        }
+        crate::e2e_docker_images_backend_or_web_line_filter::print_e2e_docker_images_backend_or_web_lines(
+            &stdout,
+            crate::probe_dump::DiagSink::Stderr,
+        );
     }
 
     // Check for screenshots

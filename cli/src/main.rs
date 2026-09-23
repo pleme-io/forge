@@ -121,6 +121,11 @@ mod docker_daemon_running_preflight;
 mod docker_info_probe;
 mod docker_installed_preflight;
 mod docker_tag_argv;
+// `docker images` stdout → `"backend" | "web"` substring-filter →
+// sink-dispatched line-print primitive. Callers:
+// `commands/e2e.rs::{print_image_info (stdout sink),
+// print_failure_diagnostics (stderr sink)}`.
+mod e2e_docker_images_backend_or_web_line_filter;
 // Two-space-indented `tracing::error!`-routed diagnostic header + walk
 // primitive. Callers: `commands/rollout.rs::execute` SAFE-mode
 // `problems_detected` Recent Events / Recent Logs sub-sections.
