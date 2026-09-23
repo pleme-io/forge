@@ -229,23 +229,16 @@ pub async fn execute(
                 crate::config::resolve_product_dir(std::path::Path::new(&repo_root), &product);
             let service_dir = crate::repo::path_to_string_lossy(&product_dir.join(&entry.path));
 
-            run_forge_subcommand(&[
-                "orchestrate-release",
-                "--service",
-                &entry.name,
-                "--service-dir",
-                &service_dir,
-                "--repo-root",
-                &repo_root,
-                "--registry",
-                &entry.registry_url,
-                "--deploy-only",
-                "--image-tag",
-                &entry.previous_tag,
-                "--single-environment",
-                "--environment",
-                env_name,
-            ])
+            run_forge_subcommand(
+                &crate::commands::orchestrate_release_deploy_only_argv::orchestrate_release_deploy_only_single_env_argv(
+                    &entry.name,
+                    &service_dir,
+                    &repo_root,
+                    &entry.registry_url,
+                    &entry.previous_tag,
+                    env_name,
+                ),
+            )
             .await?;
 
             crate::ui::print_step_ok(&format!(

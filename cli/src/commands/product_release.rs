@@ -724,23 +724,16 @@ pub async fn product_release(
             // Always call orchestrate-release directly (not via nix run) to avoid
             // re-evaluating the nix derivation which would rebuild the docker image.
             // Phase 1 already built and pushed the image; Phase 2 only needs to deploy.
-            run_forge_subcommand(&[
-                "orchestrate-release",
-                "--service",
-                &svc.name,
-                "--service-dir",
-                &service_dir,
-                "--repo-root",
-                &repo_root,
-                "--registry",
-                &registry_url,
-                "--deploy-only",
-                "--image-tag",
-                &image_tag,
-                "--single-environment",
-                "--environment",
-                env_name,
-            ])
+            run_forge_subcommand(
+                &crate::commands::orchestrate_release_deploy_only_argv::orchestrate_release_deploy_only_single_env_argv(
+                    &svc.name,
+                    &service_dir,
+                    &repo_root,
+                    &registry_url,
+                    &image_tag,
+                    env_name,
+                ),
+            )
             .await?;
 
             crate::ui::print_step_ok(&format!(
