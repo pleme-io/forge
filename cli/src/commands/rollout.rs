@@ -307,12 +307,10 @@ pub async fn execute(
                 // Get events
                 match k8s::get_pod_events(&client, &namespace, &pod.name).await {
                     Ok(events) => {
-                        if !events.is_empty() {
-                            error!("Recent Events:");
-                            for event in events.iter().rev().take(10) {
-                                error!("  {}", event);
-                            }
-                        }
+                        crate::error_diagnostic_indented_walk::error_diagnostic_indented_walk(
+                            "Recent Events:",
+                            events.iter().rev().take(10),
+                        );
                     }
                     Err(e) => {
                         warn!("Failed to get events: {}", e);
@@ -322,12 +320,10 @@ pub async fn execute(
                 // Get logs
                 match k8s::get_pod_logs(&client, &namespace, &pod.name, 30).await {
                     Ok(logs) => {
-                        if !logs.is_empty() {
-                            error!("Recent Logs (last 30 lines):");
-                            for line in logs.lines().take(30) {
-                                error!("  {}", line);
-                            }
-                        }
+                        crate::error_diagnostic_indented_walk::error_diagnostic_indented_walk(
+                            "Recent Logs (last 30 lines):",
+                            logs.lines().take(30),
+                        );
                     }
                     Err(e) => {
                         warn!("Failed to get logs: {}", e);

@@ -104,6 +104,10 @@ mod docker_daemon_running_preflight;
 mod docker_info_probe;
 mod docker_installed_preflight;
 mod docker_tag_argv;
+// Two-space-indented `tracing::error!`-routed diagnostic header + walk
+// primitive. Callers: `commands/rollout.rs::execute` SAFE-mode
+// `problems_detected` Recent Events / Recent Logs sub-sections.
+mod error_diagnostic_indented_walk;
 mod first_pod_field_argv;
 mod flake_attr_ref;
 mod flux_gitops_monitor_hint;
