@@ -21706,7 +21706,13 @@ mod tests {
             (
                 include_str!("commands/prerelease.rs"),
                 "commands/prerelease.rs",
-                4,
+                // Was 4 pre-migration; 3 sites (Integration, E2E,
+                // Compilation check) now route through
+                // `crate::prerelease_gate_pass_fail_step::
+                // print_prerelease_gate_pass_step_timed`. Only the
+                // `Code formatting applied and verified` site still
+                // spells `crate::ui::print_step_pass_timed(` inline.
+                1,
             ),
             (
                 include_str!("commands/frontend_validation.rs"),
@@ -21860,7 +21866,14 @@ mod tests {
             (
                 include_str!("commands/prerelease.rs"),
                 "commands/prerelease.rs",
-                5,
+                // Was 5 pre-migration; 3 sites (Integration, E2E,
+                // Compilation check) now route through
+                // `crate::prerelease_gate_pass_fail_step::
+                // print_prerelease_gate_failure_step_timed`. The
+                // `cargo fmt failed` and generic `Tests failed`
+                // sites still spell `crate::ui::print_step_failure_timed(`
+                // inline.
+                2,
             ),
             (
                 include_str!("commands/frontend_validation.rs"),

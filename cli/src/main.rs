@@ -187,6 +187,12 @@ mod post_deploy_endpoint_transport_failure;
 mod post_deploy_gate_preamble;
 mod post_deploy_graphql_query;
 mod post_deploy_http_client;
+// Typed primitive: the `<base> passed` / `<base> failed` step-timed
+// label-pair for the three closed prerelease-gate dialects
+// (Integration, E2E, Compilation check). Callers:
+// `commands/prerelease.rs::{run_integration_gate, run_e2e_gate,
+// run_cargo_check}`.
+mod prerelease_gate_pass_fail_step;
 mod probe_dump;
 mod probe_verifying;
 mod product_environment_namespace;

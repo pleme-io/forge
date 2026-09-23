@@ -961,11 +961,17 @@ async fn run_integration_gate(config: &PreReleaseConfig) -> Result<bool> {
     match output {
         Ok(Ok(output)) => {
             if output.status.success() {
-                crate::ui::print_step_pass_timed("Integration tests passed", duration);
+                crate::prerelease_gate_pass_fail_step::print_prerelease_gate_pass_step_timed(
+                    crate::prerelease_gate_pass_fail_step::PrereleaseGatePassFailBaseLabel::IntegrationTests,
+                    duration,
+                );
                 Ok(true)
             } else {
                 let (stdout, stderr) = crate::repo::utf8_lossy_streams(&output);
-                crate::ui::print_step_failure_timed("Integration tests failed", duration);
+                crate::prerelease_gate_pass_fail_step::print_prerelease_gate_failure_step_timed(
+                    crate::prerelease_gate_pass_fail_step::PrereleaseGatePassFailBaseLabel::IntegrationTests,
+                    duration,
+                );
                 for line in stderr.lines().chain(stdout.lines()).take(15) {
                     if line.contains("FAILED") || line.contains("panicked") {
                         crate::ui::print_diagnostic_error_line(line);
@@ -1102,11 +1108,17 @@ async fn run_e2e_gate(config: &PreReleaseConfig) -> Result<bool> {
             e2e::discard_post_run_e2e_cleanup();
 
             if output.status.success() {
-                crate::ui::print_step_pass_timed("E2E tests passed", duration);
+                crate::prerelease_gate_pass_fail_step::print_prerelease_gate_pass_step_timed(
+                    crate::prerelease_gate_pass_fail_step::PrereleaseGatePassFailBaseLabel::E2eTests,
+                    duration,
+                );
                 Ok(true)
             } else {
                 let (stdout, stderr) = crate::repo::utf8_lossy_streams(&output);
-                crate::ui::print_step_failure_timed("E2E tests failed", duration);
+                crate::prerelease_gate_pass_fail_step::print_prerelease_gate_failure_step_timed(
+                    crate::prerelease_gate_pass_fail_step::PrereleaseGatePassFailBaseLabel::E2eTests,
+                    duration,
+                );
 
                 // Show all test output for debugging
                 println!();
@@ -1204,11 +1216,17 @@ async fn run_cargo_check(backend_dir: &Path) -> Result<bool> {
     .await?;
 
     if output.status.success() {
-        crate::ui::print_step_pass_timed("Compilation check passed", duration);
+        crate::prerelease_gate_pass_fail_step::print_prerelease_gate_pass_step_timed(
+            crate::prerelease_gate_pass_fail_step::PrereleaseGatePassFailBaseLabel::CompilationCheck,
+            duration,
+        );
         Ok(true)
     } else {
         let stderr = crate::repo::utf8_lossy_borrow(&output.stderr);
-        crate::ui::print_step_failure_timed("Compilation check failed", duration);
+        crate::prerelease_gate_pass_fail_step::print_prerelease_gate_failure_step_timed(
+            crate::prerelease_gate_pass_fail_step::PrereleaseGatePassFailBaseLabel::CompilationCheck,
+            duration,
+        );
         // Show first few errors
         for line in stderr.lines().take(10) {
             if line.contains("error") {
