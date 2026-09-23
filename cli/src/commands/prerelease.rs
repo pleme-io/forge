@@ -1261,12 +1261,12 @@ async fn run_cargo_clippy(backend_dir: &Path) -> Result<bool> {
         let stderr = crate::repo::utf8_lossy_borrow(&output.stderr);
         let warning_count = stderr.matches("warning:").count();
 
-        crate::ui::print_step_failure(&crate::repo::msg_with_count_noun_secs_1(
+        crate::step_failure_count_noun::print_step_failure_count_noun(
             "Clippy failed",
             warning_count,
             "warnings",
             duration,
-        ));
+        );
         // Show first few warnings
         for line in stderr.lines().take(10) {
             if line.contains("warning:") || line.contains("error:") {
@@ -1310,12 +1310,12 @@ async fn run_cargo_fmt_check(backend_dir: &Path) -> Result<bool> {
             .filter(|l| l.starts_with("Diff in"))
             .collect();
 
-        crate::ui::print_step_failure(&crate::repo::msg_with_count_noun_secs_1(
+        crate::step_failure_count_noun::print_step_failure_count_noun(
             "Code formatting check failed after auto-fix",
             unformatted_files.len(),
             "files",
             duration,
-        ));
+        );
         for file in unformatted_files.iter().take(5) {
             println!("   {}", file);
         }

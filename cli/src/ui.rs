@@ -9980,10 +9980,28 @@ mod tests {
                     lineno = i + 1
                 );
             }
+            // The module must forward through the primitive body of
+            // `crate::ui::print_step_failure(` — either directly, or
+            // through the `crate::step_failure_count_noun` sibling
+            // primitive (whose own body forwards through
+            // `crate::ui::print_step_failure(` at exactly one site,
+            // pinned by
+            // `step_failure_count_noun::tests::
+            //   print_helper_delegates_through_ui_print_step_failure_once`).
+            // Either shape preserves the underlying invariant: the
+            // `❌.red()` glyph shape lives at ONE construction surface.
+            let forwards = body.contains("crate::ui::print_step_failure(")
+                || body.contains(
+                    "crate::step_failure_count_noun::print_step_failure_count_noun(",
+                );
             assert!(
-                body.contains("crate::ui::print_step_failure("),
+                forwards,
                 "{module_path} body must forward to \
-                 `crate::ui::print_step_failure(\"<MSG>\")` — the \
+                 `crate::ui::print_step_failure(\"<MSG>\")` (directly, \
+                 or through the \
+                 `crate::step_failure_count_noun::\
+                 print_step_failure_count_noun` sibling primitive that \
+                 itself forwards through the same sink) — the \
                  primitive body every three-space-indented `❌.red()` \
                  in-body step-failure in the crate now delegates \
                  through."

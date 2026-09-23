@@ -180,12 +180,12 @@ pub async fn run_type_check(web_dir: &Path) -> Result<(bool, Vec<String>)> {
         // Count errors
         let error_count = stdout.matches("error TS").count() + stderr.matches("error TS").count();
 
-        crate::ui::print_step_failure(&crate::repo::msg_with_count_noun_secs_1(
+        crate::step_failure_count_noun::print_step_failure_count_noun(
             "Type check failed",
             error_count,
             "errors",
             duration,
-        ));
+        );
 
         // Collect error lines for summary details — routed through the
         // fused walk-cap-filter-print-collect primitive shared with the

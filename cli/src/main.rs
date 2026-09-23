@@ -245,6 +245,13 @@ mod skip_build_image_path;
 mod skipping_step;
 mod smoke_query_failure_record;
 mod stage_completion_ack;
+// Canonical `print_step_failure(&msg_with_count_noun_secs_1(<label>,
+// <count>, <noun>, duration))` step-failure fusion. Consumers:
+// `commands/frontend_validation.rs::run_type_check` (errors),
+// `commands/prerelease.rs::run_cargo_clippy` (warnings), and
+// `commands/prerelease.rs::run_cargo_fmt_check` (files) — three
+// sibling failure arms past the three-times threshold.
+mod step_failure_count_noun;
 mod step_header;
 mod step_header_with_trailing_blank;
 mod success_step;
