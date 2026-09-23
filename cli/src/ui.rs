@@ -18222,37 +18222,37 @@ mod tests {
     /// plain `line` argument on the same source line.
     ///
     /// The positive count is pinned per-module at the current post-
-    /// lift site count (`prerelease.rs` ×6, `frontend_validation.rs`
-    /// ×1). Pre-lift `frontend_validation.rs` carried 3 direct
-    /// `print_diagnostic_line` calls; a follow-up lift migrated 2 of
-    /// them onto the fused `walk-cap-filter-print-collect` primitive
-    /// at [`crate::frontend_lint_diagnostic_collect::
+    /// lift site count (`prerelease.rs` ×5). Pre-lift
+    /// `frontend_validation.rs` carried 3 direct
+    /// `print_diagnostic_line` calls; a first follow-up lift migrated
+    /// 2 of them onto the fused `walk-cap-filter-print-collect`
+    /// primitive at [`crate::frontend_lint_diagnostic_collect::
     /// print_and_collect_lint_diagnostic_lines`] (which routes
     /// through [`super::write_diagnostic_line`] under a shared writer
-    /// sink so the byte-oracle test pins the per-line render), so the
-    /// visible `crate::ui::print_diagnostic_line(` count at this
-    /// caller migrated 3 → 1 (the surviving one in
-    /// `run_biome_lint`'s auto-fix-failed branch, which has a
-    /// distinct 5-line cap + no filter + no collect shape and is
-    /// out-of-scope for the fused primitive). A fusion that folded
-    /// the surviving direct call into another lift or dropped one of
-    /// the plain rows silently fails here — the negative half above
-    /// would still pass, but the positive count would fall below the
-    /// current census.
+    /// sink so the byte-oracle test pins the per-line render), so
+    /// the visible `crate::ui::print_diagnostic_line(` count at
+    /// `frontend_validation.rs` migrated 3 → 1. A second follow-up
+    /// lift then migrated the surviving `run_biome_lint` auto-fix-
+    /// failed branch call, together with `commands/prerelease.rs::
+    /// run_cargo_fmt_check`'s G3 auto-fix branch call, onto the
+    /// sibling fused `walk-cap-print-collect` primitive at
+    /// [`crate::auto_fix_stderr_head_diagnostic::
+    /// print_and_collect_auto_fix_stderr_head_diagnostic_lines`] —
+    /// same 5-line cap, no filter, print AND (optionally) collect —
+    /// so the visible `crate::ui::print_diagnostic_line(` count
+    /// migrated `frontend_validation.rs` 1 → 0 (dropped from this
+    /// census) and `prerelease.rs` 6 → 5. A fusion that folded one
+    /// of the surviving direct calls into another lift or dropped
+    /// one of the plain rows silently fails here — the negative
+    /// half above would still pass, but the positive count would
+    /// fall below the current census.
     #[test]
     fn print_diagnostic_line_callers_delegate_through_primitive() {
-        const CALLERS: &[(&str, &str, usize)] = &[
-            (
-                include_str!("commands/prerelease.rs"),
-                "commands/prerelease.rs",
-                6,
-            ),
-            (
-                include_str!("commands/frontend_validation.rs"),
-                "commands/frontend_validation.rs",
-                1,
-            ),
-        ];
+        const CALLERS: &[(&str, &str, usize)] = &[(
+            include_str!("commands/prerelease.rs"),
+            "commands/prerelease.rs",
+            5,
+        )];
         for (source, module_path, expected_forwards) in CALLERS {
             let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
             for (i, line) in body.lines().enumerate() {

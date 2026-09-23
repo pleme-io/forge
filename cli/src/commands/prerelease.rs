@@ -1279,9 +1279,9 @@ async fn run_cargo_fmt_check(backend_dir: &Path) -> Result<bool> {
     if !fix_output.status.success() {
         let stderr = crate::repo::utf8_lossy_borrow(&fix_output.stderr);
         crate::ui::print_step_failure_timed("cargo fmt failed", start.elapsed());
-        for line in stderr.lines().take(5) {
-            crate::ui::print_diagnostic_line(line);
-        }
+        let _ = crate::auto_fix_stderr_head_diagnostic::print_and_collect_auto_fix_stderr_head_diagnostic_lines(
+            &stderr,
+        );
         return Ok(false);
     }
 

@@ -65,6 +65,7 @@ mod attic_cache_alias;
 mod attic_configure_step;
 mod attic_login_argv;
 mod attic_push_step;
+mod auto_fix_stderr_head_diagnostic;
 mod backend_frontend_dirs_preamble;
 mod bookmark_git_sha_field;
 // `<repo_root>/pkgs/platform/bootstrap` composition primitive — sibling of

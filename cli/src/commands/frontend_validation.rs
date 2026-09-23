@@ -291,13 +291,11 @@ async fn run_biome_lint(web_dir: &Path) -> Result<(bool, Vec<String>)> {
                 "Biome auto-fix failed - biome may not be installed",
                 start.elapsed(),
             );
-            for line in stderr.lines().take(5) {
-                crate::ui::print_diagnostic_line(line);
-            }
-            return Ok((
-                false,
-                stderr.lines().take(5).map(|l| l.to_string()).collect(),
-            ));
+            let details =
+                crate::auto_fix_stderr_head_diagnostic::print_and_collect_auto_fix_stderr_head_diagnostic_lines(
+                    &stderr,
+                );
+            return Ok((false, details));
         }
         // Otherwise, continue to check step - unfixable issues will be caught there
     }
