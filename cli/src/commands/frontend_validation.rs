@@ -170,8 +170,10 @@ pub async fn run_type_check(web_dir: &Path) -> Result<(bool, Vec<String>)> {
     let duration = start.elapsed();
 
     if output.status.success() {
-        crate::ui::print_step_pass_timed("Type check passed", duration);
-        Ok((true, Vec::new()))
+        crate::frontend_validation_clean_pass_step::emit_frontend_validation_clean_pass_step(
+            crate::frontend_validation_clean_pass_step::FrontendValidationCleanPassStep::TypeCheck,
+            duration,
+        )
     } else {
         let (stdout, stderr) = crate::repo::utf8_lossy_streams(&output);
 
@@ -307,8 +309,10 @@ async fn run_biome_lint(web_dir: &Path) -> Result<(bool, Vec<String>)> {
     let duration = start.elapsed();
 
     if check_output.status.success() {
-        crate::ui::print_step_pass_timed("Biome lint applied and verified", duration);
-        Ok((true, Vec::new()))
+        crate::frontend_validation_clean_pass_step::emit_frontend_validation_clean_pass_step(
+            crate::frontend_validation_clean_pass_step::FrontendValidationCleanPassStep::BiomeLint,
+            duration,
+        )
     } else {
         let combined = crate::repo::utf8_lossy_streams_joined(&check_output);
 

@@ -21717,7 +21717,15 @@ mod tests {
             (
                 include_str!("commands/frontend_validation.rs"),
                 "commands/frontend_validation.rs",
-                2,
+                // Was 2 pre-migration; both `run_type_check` (Type
+                // check passed) and `run_biome_lint` (Biome lint
+                // applied and verified) clean-success arms now route
+                // through
+                // `crate::frontend_validation_clean_pass_step::
+                // emit_frontend_validation_clean_pass_step`, so no
+                // site in this module still spells
+                // `crate::ui::print_step_pass_timed(` inline.
+                0,
             ),
         ];
         // Pre-lift needle: a `print_step_pass(&…)` call whose argument

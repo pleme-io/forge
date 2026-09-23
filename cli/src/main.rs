@@ -145,6 +145,11 @@ mod frontend_lint_diagnostic_collect;
 // `commands/frontend_validation.rs::{run_lint_with_config (ESLint arm),
 // run_biome_lint (check arm)}`.
 mod frontend_lint_failure_report;
+// Typed primitive: the `print_step_pass_timed(<label>, duration); Ok((true,
+// Vec::new()))` clean-success arm for the two closed frontend-validation
+// step dialects (TypeCheck, BiomeLint). Callers:
+// `commands/frontend_validation.rs::{run_type_check, run_biome_lint}`.
+mod frontend_validation_clean_pass_step;
 mod generate_cargo_nix_step;
 mod git;
 mod git_sha_field;
