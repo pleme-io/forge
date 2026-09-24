@@ -716,9 +716,9 @@ pub async fn validate_migrations_with_config(
 
     if config.idempotency_check {
         for file_path in &sql_files {
-            let content = fs::read_to_string(file_path)
-                .await
-                .with_context(|| format!("Failed to read: {}", file_path.display()))?;
+            let content =
+                crate::migration_file_read::read_migration_file_in_orchestrator_body(file_path)
+                    .await?;
             let issues = check_file_idempotency(file_path, &content);
             all_issues.extend(issues);
         }
@@ -726,9 +726,9 @@ pub async fn validate_migrations_with_config(
 
     if config.soft_delete_check {
         for file_path in &sql_files {
-            let content = fs::read_to_string(file_path)
-                .await
-                .with_context(|| format!("Failed to read: {}", file_path.display()))?;
+            let content =
+                crate::migration_file_read::read_migration_file_in_orchestrator_body(file_path)
+                    .await?;
             let issues = check_file_soft_delete(file_path, &content);
             all_issues.extend(issues);
         }
@@ -1087,9 +1087,8 @@ pub async fn validate_seaorm_migrations(
     let mut all_issues = Vec::new();
 
     for file_path in &rs_files {
-        let content = fs::read_to_string(file_path)
-            .await
-            .with_context(|| format!("Failed to read: {}", file_path.display()))?;
+        let content =
+            crate::migration_file_read::read_migration_file_in_orchestrator_body(file_path).await?;
         let issues = check_seaorm_file_safety(file_path, &content);
         all_issues.extend(issues);
     }
