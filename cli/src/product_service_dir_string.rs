@@ -198,15 +198,20 @@ mod tests {
         }
     }
 
-    // Caller shield (negative half): no source line in the two pre-lift
-    // consumer files may spell the pre-lift raw
-    // `path_to_string_lossy(&product_dir.join(` fusion inline any more.
-    // The two pre-lift sites migrated onto [`product_service_dir_string`];
-    // any future consumer that wants the same fused composition reaches
-    // for the primitive on first grep, not by copy-pasting the two-line
-    // stanza from a peer. Doc-comment mentions (`//! …`) are exempt via
-    // the leading-`//` filter — they cite the shape, they do not compose
-    // it.
+    // Caller shield (negative half): neither the two original consumer
+    // files (`commands/{product_release,rollback}.rs`) nor the fused
+    // dispatch module that supersedes them may spell the pre-lift raw
+    // `path_to_string_lossy(&product_dir.join(` fusion inline. The two
+    // pre-lift sites migrated onto [`product_service_dir_string`] (via
+    // the fused
+    // `commands/orchestrate_release_deploy_only_dispatch::dispatch_orchestrate_release_deploy_only_single_env`
+    // adapter that now owns the sole caller); the original files are
+    // retained in this scan to prevent a re-inlining regression. Any
+    // future consumer that wants the same fused composition reaches
+    // for the primitive on first grep, not by copy-pasting the
+    // two-line stanza from a peer. Doc-comment mentions (`//! …`) are
+    // exempt via the leading-`//` filter — they cite the shape, they
+    // do not compose it.
     //
     // Scoping to the pre-tests module body via
     // [`crate::test_support::module_body_before_first_cfg_test`] keeps
@@ -221,6 +226,10 @@ mod tests {
                 "commands/product_release.rs",
             ),
             (include_str!("commands/rollback.rs"), "commands/rollback.rs"),
+            (
+                include_str!("commands/orchestrate_release_deploy_only_dispatch.rs"),
+                "commands/orchestrate_release_deploy_only_dispatch.rs",
+            ),
         ];
         for (source, module_path) in CALLERS {
             let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
@@ -236,28 +245,29 @@ mod tests {
         }
     }
 
-    // Caller shield (positive half): each pre-lift consumer file MUST
-    // forward through [`product_service_dir_string`] at least once, so a
-    // migration that dropped one of the two call sites outright leaves
-    // the negative "no raw fusion" scan trivially satisfied by absence
-    // but the positive count still fails. Mirrors the sibling
+    // Caller shield (positive half): the fused dispatch module that now
+    // owns the sole deploy-only self-re-invoke caller MUST forward
+    // through [`product_service_dir_string`] at least once, so a
+    // migration that dropped its `product_service_dir_string(` call
+    // outright leaves the negative "no raw fusion" scan trivially
+    // satisfied by absence but the positive count still fails.
+    //
+    // Pre-lift the two Phase-2 / Deploy-previous-tags loop sites in
+    // `commands/{product_release,rollback}.rs::execute` each called
+    // this primitive directly. Post-lift both sites route through
+    // `commands/orchestrate_release_deploy_only_dispatch::dispatch_orchestrate_release_deploy_only_single_env`,
+    // which owns the sole call to this primitive from the deploy-only
+    // self-re-invoke pipeline. Mirrors the sibling
     // `every_prelift_module_forwards_through_product_environment_namespace`
     // shield in [`crate::product_environment_namespace`].
     #[test]
     fn every_prelift_caller_forwards_through_product_service_dir_string() {
         const NEEDLE: &str = "product_service_dir_string(";
-        const CALLERS: &[(&str, &str, usize)] = &[
-            (
-                include_str!("commands/product_release.rs"),
-                "commands/product_release.rs",
-                1,
-            ),
-            (
-                include_str!("commands/rollback.rs"),
-                "commands/rollback.rs",
-                1,
-            ),
-        ];
+        const CALLERS: &[(&str, &str, usize)] = &[(
+            include_str!("commands/orchestrate_release_deploy_only_dispatch.rs"),
+            "commands/orchestrate_release_deploy_only_dispatch.rs",
+            1,
+        )];
         for (source, module_path, min_count) in CALLERS {
             let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
             let hits = crate::test_support::code_line_hits(body, NEEDLE);

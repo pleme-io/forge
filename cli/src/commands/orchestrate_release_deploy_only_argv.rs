@@ -294,24 +294,29 @@ mod tests {
         );
     }
 
-    /// Positive delegation shield: each pre-lift command module MUST
-    /// forward through
+    /// Positive delegation shield: the dispatch module that fuses the
+    /// three-step self-re-invoke composition
+    /// (`crate::commands::orchestrate_release_deploy_only_dispatch`)
+    /// MUST forward through
     /// [`orchestrate_release_deploy_only_single_env_argv`] at least
-    /// once, so a migration that dropped a call site outright leaves
-    /// the negative "no raw 15-slot argv literal" scan (below)
-    /// trivially satisfied by absence but the positive count still
-    /// fails.
+    /// once, so a migration that dropped the argv-builder call
+    /// outright leaves the negative "no raw 15-slot argv literal"
+    /// scan (below) trivially satisfied by absence but the positive
+    /// count still fails.
     ///
-    /// Rollback.rs (×1: deploy-previous-tags loop in `execute` at
-    /// :232-249). Product-release.rs (×1: Phase-2 deploy loop in
-    /// `execute` at :727-744).
+    /// Pre-lift the two Phase-2 / Deploy-previous-tags loop sites in
+    /// `commands/{rollback,product_release}.rs::execute` each called
+    /// the argv builder directly. Post-lift both sites route through
+    /// the sibling `orchestrate_release_deploy_only_dispatch::dispatch_orchestrate_release_deploy_only_single_env`
+    /// adapter, which owns the sole call to this argv builder from
+    /// the deploy-only self-re-invoke pipeline.
     #[test]
     fn every_prelift_module_forwards_through_argv_builder() {
         use std::path::PathBuf;
         let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("src")
             .join("commands");
-        let expectations: &[(&str, usize)] = &[("rollback.rs", 1), ("product_release.rs", 1)];
+        let expectations: &[(&str, usize)] = &[("orchestrate_release_deploy_only_dispatch.rs", 1)];
         // Reconstruct the delegation needle via `format!` so this
         // shield's own source text does not false-match itself.
         let needle = format!("{}(", "orchestrate_release_deploy_only_single_env_argv");

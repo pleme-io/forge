@@ -702,22 +702,17 @@ pub async fn product_release(
             let registry_url =
                 DeployConfig::load_service_registry_url(&product, &svc.path, &repo_root)?;
 
-            let service_dir = crate::product_service_dir_string::product_service_dir_string(
-                &repo_root, &product, &svc.path,
-            );
-
             // Always call orchestrate-release directly (not via nix run) to avoid
             // re-evaluating the nix derivation which would rebuild the docker image.
             // Phase 1 already built and pushed the image; Phase 2 only needs to deploy.
-            run_forge_subcommand(
-                &crate::commands::orchestrate_release_deploy_only_argv::orchestrate_release_deploy_only_single_env_argv(
-                    &svc.name,
-                    &service_dir,
-                    &repo_root,
-                    &registry_url,
-                    &image_tag,
-                    env_name,
-                ),
+            crate::commands::orchestrate_release_deploy_only_dispatch::dispatch_orchestrate_release_deploy_only_single_env(
+                &svc.name,
+                &product,
+                &svc.path,
+                &repo_root,
+                &registry_url,
+                &image_tag,
+                env_name,
             )
             .await?;
 

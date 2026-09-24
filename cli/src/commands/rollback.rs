@@ -14,7 +14,7 @@ use crate::commands::cluster_overlay_release_preamble::format_amd64_release_tag;
 use crate::config::DeployConfig;
 use crate::infrastructure::registry::{extract_organization, RegistryClient};
 
-use super::product_release::{run_forge_subcommand, run_health_check};
+use super::product_release::run_health_check;
 
 /// A rollback plan entry for a single service.
 struct RollbackEntry {
@@ -225,21 +225,14 @@ pub async fn execute(
         crate::ui::print_env_scope_open(env_name);
 
         for (i, entry) in entries.iter().enumerate() {
-            let service_dir = crate::product_service_dir_string::product_service_dir_string(
-                &repo_root,
+            crate::commands::orchestrate_release_deploy_only_dispatch::dispatch_orchestrate_release_deploy_only_single_env(
+                &entry.name,
                 &product,
                 &entry.path,
-            );
-
-            run_forge_subcommand(
-                &crate::commands::orchestrate_release_deploy_only_argv::orchestrate_release_deploy_only_single_env_argv(
-                    &entry.name,
-                    &service_dir,
-                    &repo_root,
-                    &entry.registry_url,
-                    &entry.previous_tag,
-                    env_name,
-                ),
+                &repo_root,
+                &entry.registry_url,
+                &entry.previous_tag,
+                env_name,
             )
             .await?;
 
