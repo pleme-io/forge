@@ -338,33 +338,21 @@ pub async fn execute(
 
         let spinner = crate::nix_build_spinner::nix_build_spinner();
 
-        // Route the status-only `nix build` spawn through the canonical
-        // `crate::retry::run_inherited_status` primitive so the pre-lift
-        // `.status().await.context(…)?` + `if !build_result.success() {
-        // anyhow::bail!("Nix build failed") }` stanza — which dropped the
-        // exit code from the operator log line (`status.code()` was in
-        // scope and unread) — collapses onto the primitive and the
-        // canonical `"nix build failed (exit {code})"` envelope emerges by
-        // construction at the primitive's ONE body. Binding the outcome
-        // before the `?` propagation also fixes a pre-lift spinner leak
-        // on the spawn-error path: `?` on `.context("Failed to run nix
-        // build")` ran BEFORE `spinner.finish_and_clear()`, so a missing-
-        // nix bubble left the terminal with a live spinner animating
-        // beneath the printed error. Post-lift the spinner clears on
-        // every path (success, non-zero exit, AND spawn error). Sibling
-        // of every recent status-only-spawn lift onto `run_inherited_
-        // status` (build.rs 72a7adf, pangea.rs c5ff1c4, product_release
-        // .rs bf6d836, image_release.rs b5d9573) and its sync twin
-        // (a3d51eb through 6cb9442).
+        // Route the spawn-plus-spinner-cleanup through the canonical
+        // `crate::nix_build_spinner::run_nix_build_under_spinner`
+        // primitive — the sibling of the identically-shaped stanza at
+        // `commands/build.rs`. The primitive owns the load-bearing
+        // bind-before-`?` order (pre-lift a `?` on `.context("Failed
+        // to run nix build")` at this site left a live spinner
+        // animating beneath the printed error on the spawn-failure
+        // path), plus the `"nix build"` op-label pin via the module's
+        // `NIX_BUILD_OP_LABEL` const, so both flows' failure envelopes
+        // are byte-identical by construction.
         let mut build_cmd = Command::new(get_tool_path("NIX_BIN", "nix"));
         build_cmd
             .current_dir(&working_dir)
             .args(&["build", ".#dockerImage", "--print-build-logs"]);
-        let outcome = crate::retry::run_inherited_status(build_cmd, "nix build").await;
-
-        spinner.finish_and_clear();
-
-        outcome?;
+        crate::nix_build_spinner::run_nix_build_under_spinner(build_cmd, spinner).await?;
 
         // Read the nix store path from result symlink
         let result_path = crate::nix_result_link_path::nix_result_link_path(&working_dir, "result");

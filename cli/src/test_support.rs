@@ -2078,13 +2078,22 @@ pub fn assert_source_routes_status_only_spawns_through_run_inherited_status(
 
     let direct = code_line_hits(body, "run_inherited_status(").len();
     let wrapped = code_line_hits(body, "run_bin_args_inherited_status(").len();
-    let delegations = direct + wrapped;
+    // `run_nix_build_under_spinner(cmd, spinner)` in `nix_build_spinner.rs` composes
+    // onto `crate::retry::run_inherited_status` internally with the pinned `"nix build"`
+    // op-label, so a call to it IS a delegation to the same
+    // `classify_inherited_status` body the direct primitive routes to — same widening
+    // rationale the wrapper form above carries. Without this arm the shield double-
+    // counts: a legitimate lift onto the specialized spinner-safe primitive at
+    // `commands/{build,github_runner_ci}.rs` reads as a dropped call.
+    let under_spinner = code_line_hits(body, "run_nix_build_under_spinner(").len();
+    let delegations = direct + wrapped + under_spinner;
     assert!(
         delegations >= min_delegations,
         "{module_path} must route {spawns_description} through \
-         `run_inherited_status` or `run_bin_args_inherited_status` — \
-         found only {delegations} delegation call(s) (direct: \
-         {direct}, wrapped: {wrapped}); a dropped call would leave \
+         `run_inherited_status`, `run_bin_args_inherited_status`, or \
+         `run_nix_build_under_spinner` — found only {delegations} \
+         delegation call(s) (direct: {direct}, wrapped: {wrapped}, \
+         under_spinner: {under_spinner}); a dropped call would leave \
          the negative `.status().await` scan satisfied by absence"
     );
 }

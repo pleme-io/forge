@@ -182,26 +182,20 @@ pub async fn execute(
         );
     }
 
-    // Route the status-only spawn through the canonical primitive so
-    // the pre-lift `.status().await.context(...)?` + `if !success()
-    // { bail! }` stanza (which dropped the exit code from the operator
-    // log line — `"Nix build failed"` carried no `code` even though
-    // `status.code()` was in scope) collapses onto
-    // `crate::retry::run_inherited_status`, and the canonical
-    // `"nix build failed (exit {code})"` envelope emerges by
-    // construction. Binding the result before the `?` propagation
-    // keeps the spinner-clear on the failure path — pre-lift the
-    // `?` on `.context("Failed to run nix build")` ran *before*
-    // `spinner.finish_and_clear()`, so a spawn error bubbled with the
-    // live spinner still animating beneath the printed error; post-
-    // lift the spinner clears on every path (success, non-zero exit,
-    // AND spawn error). Sibling of every recent status-only-spawn lift
-    // onto `run_inherited_status_sync` (a3d51eb through 6cb9442).
-    let outcome = crate::retry::run_inherited_status(cmd, "nix build").await;
-
-    spinner.finish_and_clear();
-
-    outcome?;
+    // Route the spawn-plus-spinner-cleanup through the canonical
+    // `crate::nix_build_spinner::run_nix_build_under_spinner` primitive
+    // so the three-line `run_inherited_status(cmd, "nix build")` +
+    // `spinner.finish_and_clear()` + `outcome?` stanza collapses onto
+    // ONE body across both nix-build phase-open flows. The primitive
+    // owns the bind-before-`?` order (a spawn error's `?` must not run
+    // before the spinner clears — pre-lift a `?` on `.context("Failed
+    // to run nix build")` at this site left a live spinner animating
+    // beneath the printed error), and the `"nix build"` op-label pin
+    // (via the module's `NIX_BUILD_OP_LABEL` const) so the operator-
+    // facing failure envelope — `"Failed to run nix build"` on spawn
+    // failure, `"nix build failed (exit {code})"` on non-zero exit —
+    // is byte-identical across the two flows by construction.
+    crate::nix_build_spinner::run_nix_build_under_spinner(cmd, spinner).await?;
 
     // Create custom symlink if requested
     if output != "result" {
