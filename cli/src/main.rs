@@ -307,6 +307,14 @@ mod smoke_query_failure_record;
 // `commands/post_deploy_verification.rs::verify_smoke_queries`:
 // HTTP non-2xx, missing/mismatched data field, JSON parse failure.
 mod smoke_query_step_failure_with_latency;
+// SQL identifier post-keyword extraction primitive. Owns the two
+// sibling `.split_whitespace().next()?.trim_matches(|c| c == '"' ||
+// c == '`' || c == '[' || c == ']')` walks in
+// `commands/migration_validation.rs::extract_table_name_from_{delete,
+// truncate}` and the four-char closed SQL identifier quote-char set
+// as one named constant, so a future dialect admission lands at ONE
+// construction surface rather than two disjunctions in lockstep.
+mod sql_identifier_first_token;
 mod stage_completion_ack;
 // Canonical `print_step_failure(&msg_with_count_noun_secs_1(<label>,
 // <count>, <noun>, duration))` step-failure fusion. Consumers:

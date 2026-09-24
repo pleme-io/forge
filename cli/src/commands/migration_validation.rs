@@ -552,13 +552,9 @@ fn extract_table_name_from_delete(line: &str) -> Option<String> {
 
     // Find "DELETE FROM" and extract the next word
     if let Some(pos) = upper.find("DELETE FROM") {
-        let after_from = &line[pos + 11..].trim_start();
-        let table_name = after_from
-            .split_whitespace()
-            .next()?
-            .trim_matches(|c| c == '"' || c == '`' || c == '[' || c == ']');
-
-        return Some(table_name.to_string());
+        return crate::sql_identifier_first_token::extract_first_sql_identifier_token(
+            &line[pos + 11..],
+        );
     }
 
     None
@@ -575,17 +571,9 @@ fn extract_table_name_from_truncate(line: &str) -> Option<String> {
         upper.find("TRUNCATE").map(|p| p + 8)
     };
 
-    if let Some(start) = pos {
-        let after_truncate = &line[start..].trim_start();
-        let table_name = after_truncate
-            .split_whitespace()
-            .next()?
-            .trim_matches(|c| c == '"' || c == '`' || c == '[' || c == ']');
-
-        return Some(table_name.to_string());
-    }
-
-    None
+    pos.and_then(|start| {
+        crate::sql_identifier_first_token::extract_first_sql_identifier_token(&line[start..])
+    })
 }
 
 /// Check if a file should be excluded from validation
