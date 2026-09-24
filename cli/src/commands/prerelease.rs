@@ -1228,11 +1228,10 @@ async fn run_cargo_check(backend_dir: &Path) -> Result<bool> {
             duration,
         );
         // Show first few errors
-        for line in stderr.lines().take(10) {
-            if line.contains("error") {
-                crate::ui::print_diagnostic_error_line(line);
-            }
-        }
+        crate::prerelease_cargo_gate_stderr_head_filter::print_prerelease_cargo_gate_stderr_head_filtered_lines(
+            &stderr,
+            crate::prerelease_cargo_gate_stderr_head_filter::PrereleaseCargoGateStderrHeadVariant::CargoCheckErrors,
+        );
         Ok(false)
     }
 }
@@ -1268,11 +1267,10 @@ async fn run_cargo_clippy(backend_dir: &Path) -> Result<bool> {
             duration,
         );
         // Show first few warnings
-        for line in stderr.lines().take(10) {
-            if line.contains("warning:") || line.contains("error:") {
-                crate::ui::print_diagnostic_line(line);
-            }
-        }
+        crate::prerelease_cargo_gate_stderr_head_filter::print_prerelease_cargo_gate_stderr_head_filtered_lines(
+            &stderr,
+            crate::prerelease_cargo_gate_stderr_head_filter::PrereleaseCargoGateStderrHeadVariant::CargoClippyWarningsAndErrors,
+        );
         Ok(false)
     }
 }

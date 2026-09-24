@@ -228,6 +228,15 @@ mod post_deploy_endpoint_transport_failure;
 mod post_deploy_gate_preamble;
 mod post_deploy_graphql_query;
 mod post_deploy_http_client;
+// Typed primitive: the fused `stderr.lines().take(10)` head walk +
+// `line.contains(<KW>)` keyword-any-match predicate + diagnostic-line
+// writer dispatch grammar for the two sibling prerelease cargo-gate
+// failure stanzas in `commands/prerelease.rs::{run_cargo_check,
+// run_cargo_clippy}`. The (keyword-set, sink-style) pair per gate is
+// pinned via the closed `PrereleaseCargoGateStderrHeadVariant` enum
+// so a rename of one gate's dialect reaches its sink style in
+// lockstep by construction.
+mod prerelease_cargo_gate_stderr_head_filter;
 // Typed primitive: the `<base> passed` / `<base> failed` step-timed
 // label-pair for the three closed prerelease-gate dialects
 // (Integration, E2E, Compilation check). Callers:

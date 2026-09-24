@@ -18095,9 +18095,20 @@ mod tests {
         // classify-and-print if/else bodies at the E2E stderr walk
         // and the two `run_cargo_test` failed-report walks lifted
         // onto `crate::classified_diagnostic_line::
-        // print_classified_diagnostic_line`. The two surviving
-        // direct calls live at the G1 `run_cargo_check` and G2
-        // `run_cargo_clippy` in-body diagnostic walks.
+        // print_classified_diagnostic_line`. A follow-up 2 → 1 lift
+        // migrated the G1 `run_cargo_check` failure-arm 10-line
+        // stderr-head keyword-filter stanza onto
+        // `crate::prerelease_cargo_gate_stderr_head_filter::
+        // print_prerelease_cargo_gate_stderr_head_filtered_lines`
+        // (the CargoCheckErrors variant, which routes internally
+        // through `write_diagnostic_error_line`), leaving one
+        // surviving direct call at the integration-tests failure
+        // stderr+stdout chained walk (`FAILED || panicked`
+        // predicate). That call's chained source and 15-line cap
+        // put it outside the current cargo-gate stderr-head filter
+        // primitive's variant set and it stays on the direct
+        // adapter until a future lift that widens the primitive's
+        // source axis.
         //
         // `frontend_validation.rs` migrated 2 → 0 when both sibling
         // walk-cap-filter-print-collect stanzas at
@@ -18117,7 +18128,7 @@ mod tests {
             (
                 include_str!("commands/prerelease.rs"),
                 "commands/prerelease.rs",
-                2,
+                1,
             ),
             (
                 include_str!("commands/frontend_validation.rs"),
@@ -18302,13 +18313,22 @@ mod tests {
         // onto `crate::classified_diagnostic_line::
         // print_classified_diagnostic_line` (which routes the
         // no-marker branch through `write_diagnostic_line`, keeping
-        // the byte-shape invariant intact). The two surviving
-        // direct calls live at the E2E stdout unclassified walk
-        // and the G2 `run_cargo_clippy` in-body diagnostic walk.
+        // the byte-shape invariant intact). A follow-up 2 → 1 lift
+        // migrated the G2 `run_cargo_clippy` failure-arm 10-line
+        // stderr-head keyword-filter stanza onto
+        // `crate::prerelease_cargo_gate_stderr_head_filter::
+        // print_prerelease_cargo_gate_stderr_head_filtered_lines`
+        // (the CargoClippyWarningsAndErrors variant, which routes
+        // internally through `write_diagnostic_line`), leaving one
+        // surviving direct call at the E2E stdout unclassified
+        // walk. That call is an unconditional walk (no keyword
+        // filter, no head cap) that stays on the direct adapter
+        // until a future lift that widens the primitive's
+        // predicate axis to admit an "always-match" variant.
         const CALLERS: &[(&str, &str, usize)] = &[(
             include_str!("commands/prerelease.rs"),
             "commands/prerelease.rs",
-            2,
+            1,
         )];
         for (source, module_path, expected_forwards) in CALLERS {
             let body = crate::test_support::module_body_before_first_cfg_test(source, module_path);
