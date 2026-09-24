@@ -472,26 +472,23 @@ pub async fn product_release(
                 .unwrap_or(false);
 
             if has_local && !skip_gates {
-                println!(
-                    "   {} {} (push prebuilt from E2E)",
-                    ">>".dimmed(),
-                    svc.name.cyan()
+                crate::push_source_announce::print_push_source_announce(
+                    &svc.name,
+                    crate::push_source_announce::PushSource::PushPrebuiltFromE2e,
                 );
                 let deploy_tag = format_amd64_release_tag(&git_sha);
                 push_prebuilt_image(&local_image, &registry_url, &deploy_tag).await?;
             } else {
                 // Fallback: build via Nix (when --skip-gates or no local image)
                 if skip_gates {
-                    println!(
-                        "   {} {} (build + push, gates were skipped)",
-                        ">>".dimmed(),
-                        svc.name.cyan()
+                    crate::push_source_announce::print_push_source_announce(
+                        &svc.name,
+                        crate::push_source_announce::PushSource::BuildAndPushGatesSkipped,
                     );
                 } else {
-                    println!(
-                        "   {} {} (build + push, no prebuilt image)",
-                        ">>".dimmed(),
-                        svc.name.cyan()
+                    crate::push_source_announce::print_push_source_announce(
+                        &svc.name,
+                        crate::push_source_announce::PushSource::BuildAndPushNoPrebuiltImage,
                     );
                 }
                 run_nix_release_app(&product, &svc.name, is_standalone, &["--push-only"]).await?;

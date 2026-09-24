@@ -234,6 +234,7 @@ mod product_service_id;
 mod product_workflow_intro_banner;
 mod prompt_confirm;
 mod push_op_label;
+mod push_source_announce;
 mod pushed_image_ref_list;
 mod pushing_progress_message;
 mod rebac_keys_probe;
