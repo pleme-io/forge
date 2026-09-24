@@ -28,6 +28,7 @@ mod deployment_manifest;
 mod duration;
 mod flux_get;
 mod flux_reconcile;
+mod flux_reconcile_announce_step;
 #[cfg(feature = "attestation")]
 mod flux_source_verification;
 #[cfg(feature = "attestation")]

@@ -375,23 +375,22 @@ pub async fn reconcile(namespace: String) -> Result<()> {
 ///
 /// Without this step, `flux reconcile kustomization` applies from
 /// whatever git revision is already cached, which may be stale.
+///
+/// Routes through the fusion primitive
+/// [`crate::flux_reconcile_announce_step::run_flux_reconcile_announce_step`]
+/// — the sole home for the three-space-indented `"   🔄 Reconciling
+/// <target>..."` announce + [`crate::ui::print_step_pass`] ack
+/// grammar this site shares with the sibling [`reconcile_kustomization`]
+/// stanza below. The underlying flux argv and typed
+/// `(source_name, namespace, exit_code, stderr)` failure surface
+/// still live under [`crate::flux_reconcile::reconcile_source_git`],
+/// which the fusion primitive dispatches through on the
+/// [`FluxReconcileAnnounceStep::GitSource`] arm.
 async fn reconcile_source() -> Result<()> {
-    println!("   🔄 Reconciling git source...");
-
-    // Route through the canonical `flux_reconcile::reconcile_source_git`
-    // primitive so this site honors `FLUX_BIN` (via
-    // `get_tool_path("flux")`) and — on failure — surfaces the typed
-    // `(source_name, namespace, exit_code, stderr)` record. Pre-lift
-    // `run_inherited_status` streamed flux's live progress to the
-    // operator; post-lift the primitive captures stderr and embeds it
-    // in the failure message, which is what the outer anyhow context
-    // ultimately needs.
-    crate::flux_reconcile::reconcile_source_git("flux-system", "flux-system")
-        .await
-        .context("Failed to reconcile FluxCD git source")?;
-
-    crate::ui::print_step_pass("Git source reconciled");
-    Ok(())
+    use crate::flux_reconcile_announce_step::{
+        run_flux_reconcile_announce_step, FluxReconcileAnnounceStep,
+    };
+    run_flux_reconcile_announce_step(FluxReconcileAnnounceStep::GitSource).await
 }
 
 /// Reconcile the product kustomization dependency chain
@@ -485,21 +484,26 @@ async fn reconcile_product_chain(namespace: &str) -> Result<()> {
 }
 
 /// Reconcile the root kustomization (cascades to all children)
+///
+/// Routes through the fusion primitive
+/// [`crate::flux_reconcile_announce_step::run_flux_reconcile_announce_step`]
+/// — the sole home for the three-space-indented `"   🔄 Reconciling
+/// <target>..."` announce + [`crate::ui::print_step_pass`] ack
+/// grammar this site shares with the sibling [`reconcile_source`]
+/// stanza above. The underlying flux argv and typed
+/// `(kustomization, namespace, with_source, exit_code, stderr)`
+/// failure surface still live under
+/// [`crate::flux_reconcile::reconcile_kustomization`], which the
+/// fusion primitive dispatches through on the
+/// [`FluxReconcileAnnounceStep::RootKustomization`] arm (with
+/// `with_source=false` — the root kustomization cascade does not
+/// re-fetch the git source; the sibling [`reconcile_source`] above
+/// owns that step).
 async fn reconcile_kustomization() -> Result<()> {
-    println!("   🔄 Reconciling kustomization...");
-
-    // Route through the canonical `flux_reconcile` primitive so this site honors
-    // `FLUX_BIN` (via `get_tool_path("flux")`) and — on failure — surfaces the
-    // typed `(kustomization, namespace, with_source, exit_code, stderr)` record.
-    // Pre-lift `run_inherited_status` streamed flux's live progress to the
-    // operator; post-lift the primitive captures stderr and embeds it in the
-    // failure message, which is what the outer anyhow context ultimately needs.
-    crate::flux_reconcile::reconcile_kustomization("flux-system", "flux-system", false)
-        .await
-        .context("Failed to reconcile root FluxCD kustomization")?;
-
-    crate::ui::print_step_pass("Kustomization reconciled");
-    Ok(())
+    use crate::flux_reconcile_announce_step::{
+        run_flux_reconcile_announce_step, FluxReconcileAnnounceStep,
+    };
+    run_flux_reconcile_announce_step(FluxReconcileAnnounceStep::RootKustomization).await
 }
 
 /// Verify that a deployment has the expected image tag
