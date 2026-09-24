@@ -209,15 +209,63 @@ pub fn resolve_deploy_yaml_path(
     }
 }
 
+/// Resolve a service's `deploy.yaml` path under the monorepo-fallback
+/// rule, without checking existence.
+///
+/// The nine-line
+///
+/// ```text
+/// let service_dir_path = PathBuf::from(service_dir);
+/// if let Some(product_dir) =
+///     crate::repo::find_product_dir(&service_dir_path, crate::repo::ProductDirLayout::Monorepo)
+/// {
+///     resolve_deploy_yaml_path(&product_dir, service, &service_dir_path)
+/// } else {
+///     service_dir_path.join("deploy.yaml")
+/// }
+/// ```
+///
+/// sub-body — the monorepo-fallback locate + `resolve_deploy_yaml_path` +
+/// service-dir `join("deploy.yaml")` else-arm — is now owned at ONE body
+/// across the crate. Two callers verify + branch differently on the
+/// resolved path:
+///
+/// 1. [`resolve_and_require_service_deploy_yaml_path`] gates on
+///    `.exists()` and bails with `"No deploy.yaml found at: {path}"` on
+///    miss (both `commands/status::execute` and
+///    `commands/integration_tests::execute_manual`).
+/// 2. [`crate::commands::test::load_web_tests_config`] gates on
+///    `.exists()` and early-returns `Ok(WebTestsConfig::default())` on
+///    miss, threading `info!("No deploy.yaml found, using default test
+///    configuration")` instead of a bail (the web-tests config is
+///    optional; a service with no `deploy.yaml` runs the default suite).
+///
+/// The resolution kernel is identical across all three sites; only the
+/// miss-arm handling diverges. This primitive splits the shared kernel
+/// out so the miss-arm branching stays at the caller and no consumer has
+/// to open the twelve-line inline stanza to change one arm.
+pub fn resolve_service_deploy_yaml_path_monorepo_fallback(
+    service: &str,
+    service_dir: &str,
+) -> PathBuf {
+    let service_dir_path = PathBuf::from(service_dir);
+    if let Some(product_dir) =
+        crate::repo::find_product_dir(&service_dir_path, crate::repo::ProductDirLayout::Monorepo)
+    {
+        resolve_deploy_yaml_path(&product_dir, service, &service_dir_path)
+    } else {
+        service_dir_path.join("deploy.yaml")
+    }
+}
+
 /// Locate a service's `deploy.yaml` under the monorepo-fallback rule and
 /// bail if it is missing.
 ///
-/// Fuses the twelve-line `service_dir` → monorepo-`resolve_deploy_yaml_path`
-/// with fallback → `.exists()` gate stanza that
-/// [`commands/status::execute`](crate::commands::status) and
-/// [`commands/integration_tests::execute_manual`](crate::commands::integration_tests)
-/// each spelled verbatim immediately after
-/// [`crate::repo::activate_root_flake`].
+/// Composes [`resolve_service_deploy_yaml_path_monorepo_fallback`] with
+/// an `.exists()` gate. The resolution kernel is shared with
+/// [`crate::commands::test::load_web_tests_config`], which composes the
+/// same primitive with an early-return default on miss rather than a
+/// bail.
 ///
 /// # Pre-lift shape
 ///
@@ -235,6 +283,12 @@ pub fn resolve_deploy_yaml_path(
 /// }
 /// ```
 ///
+/// Two consumers — [`commands/status::execute`](crate::commands::status)
+/// and
+/// [`commands/integration_tests::execute_manual`](crate::commands::integration_tests)
+/// — each spelled the stanza verbatim immediately after
+/// [`crate::repo::activate_root_flake`].
+///
 /// The primitive returns the resolved path so the caller can immediately
 /// parse it via [`crate::repo::read_yaml_sync`] into a module-local
 /// `RawDeployYaml` (the pre-lift consumers each carry their own
@@ -244,13 +298,11 @@ pub fn resolve_deploy_yaml_path(
 ///
 /// # Envelope
 ///
-/// - Monorepo terminal via [`crate::repo::find_product_dir`] with
-///   [`crate::repo::ProductDirLayout::Monorepo`], matching both pre-lift
-///   consumers (a standalone-layout consumer would use a different
-///   layout enum variant and would not share this shape).
-/// - Path resolution via [`resolve_deploy_yaml_path`] when a product
-///   directory is found; direct `{service_dir}/deploy.yaml` join
-///   otherwise.
+/// - Resolution via [`resolve_service_deploy_yaml_path_monorepo_fallback`]
+///   (monorepo terminal via
+///   [`crate::repo::find_product_dir`] with
+///   [`crate::repo::ProductDirLayout::Monorepo`], falling back to a direct
+///   `{service_dir}/deploy.yaml` join).
 /// - Miss-arm bail wording is `"No deploy.yaml found at: {path.display()}"`
 ///   verbatim, so an operator who has been coached to grep for the
 ///   pre-lift phrasing still finds it in the crate.
@@ -262,14 +314,7 @@ pub fn resolve_and_require_service_deploy_yaml_path(
     service: &str,
     service_dir: &str,
 ) -> Result<PathBuf> {
-    let service_dir_path = PathBuf::from(service_dir);
-    let deploy_yaml_path = if let Some(product_dir) =
-        crate::repo::find_product_dir(&service_dir_path, crate::repo::ProductDirLayout::Monorepo)
-    {
-        resolve_deploy_yaml_path(&product_dir, service, &service_dir_path)
-    } else {
-        service_dir_path.join("deploy.yaml")
-    };
+    let deploy_yaml_path = resolve_service_deploy_yaml_path_monorepo_fallback(service, service_dir);
     if !deploy_yaml_path.exists() {
         bail!("No deploy.yaml found at: {}", deploy_yaml_path.display());
     }
@@ -1740,9 +1785,10 @@ mod tests {
         );
     }
 
-    /// Pre-lift stanza scan: neither of the two consumer bodies
-    /// (`commands/status.rs`, `commands/integration_tests.rs`) may
-    /// re-open the pre-lift twelve-line
+    /// Pre-lift stanza scan: none of the three consumer bodies
+    /// (`commands/status.rs`, `commands/integration_tests.rs`,
+    /// `commands/test.rs`) may re-open the pre-lift monorepo-fallback
+    /// resolution stanza
     ///
     /// ```text
     /// let service_dir_path = PathBuf::from(service_dir);
@@ -1754,22 +1800,27 @@ mod tests {
     /// } else {
     ///     service_dir_path.join("deploy.yaml")
     /// };
-    /// if !deploy_yaml_path.exists() {
-    ///     anyhow::bail!("No deploy.yaml found at: {}", deploy_yaml_path.display());
-    /// }
     /// ```
     ///
-    /// stanza inline. The primitive
-    /// [`resolve_and_require_service_deploy_yaml_path`] owns the
-    /// monorepo-fallback locate + existence-gate at ONE body across the
-    /// crate; a hand-rolled inline copy pushes the count above zero and
-    /// fails this shield before the drift can ship. Anchors on both the
-    /// `find_product_dir(...ProductDirLayout::Monorepo` walker
-    /// invocation AND the `"No deploy.yaml found at:"` bail literal —
-    /// either one re-appearing in a consumer body signals a drift.
+    /// inline. The kernel primitive
+    /// [`resolve_service_deploy_yaml_path_monorepo_fallback`] owns the
+    /// resolution at ONE body across the crate. Two callers compose it
+    /// with a `.exists()` gate that either bails
+    /// ([`resolve_and_require_service_deploy_yaml_path`], consumed by
+    /// `commands/status.rs` and `commands/integration_tests.rs`) or
+    /// early-returns a default
+    /// ([`crate::commands::test::load_web_tests_config`]).
+    ///
+    /// A hand-rolled inline copy pushes the `ProductDirLayout::Monorepo`
+    /// needle count above zero at any of the three consumers and fails
+    /// this shield before the drift can ship. The bail-flavored miss
+    /// wording `"No deploy.yaml found at:"` is additionally scanned at
+    /// the two bail consumers — `commands/test.rs` never carried it
+    /// pre-lift (its miss-arm early-returns a default) but the scan is
+    /// still valid there (a zero-count needle stays zero-count).
     #[test]
-    fn test_resolve_and_require_service_deploy_yaml_path_pre_lift_stanza_is_gone_at_both_consumers()
-    {
+    fn test_resolve_service_deploy_yaml_path_monorepo_fallback_pre_lift_stanza_is_gone_at_all_consumers(
+    ) {
         let status_body = crate::test_support::module_body_before_tests(
             include_str!("../commands/status.rs"),
             "commands/status.rs",
@@ -1778,9 +1829,14 @@ mod tests {
             include_str!("../commands/integration_tests.rs"),
             "commands/integration_tests.rs",
         );
+        let test_body = crate::test_support::module_body_before_tests(
+            include_str!("../commands/test.rs"),
+            "commands/test.rs",
+        );
         for (module_path, body) in [
             ("commands/status.rs", status_body),
             ("commands/integration_tests.rs", integration_tests_body),
+            ("commands/test.rs", test_body),
         ] {
             for needle in [
                 "\"No deploy.yaml found at: {}\"",
@@ -1790,9 +1846,9 @@ mod tests {
                 assert!(
                     hits.is_empty(),
                     "{module_path} must NOT spell `{needle}` inline in \
-                     the module body — the monorepo-fallback locate + \
-                     `.exists()` gate lives at ONE body \
-                     (`config::resolve_and_require_service_deploy_yaml_path`) \
+                     the module body — the monorepo-fallback resolution \
+                     kernel lives at ONE body \
+                     (`config::resolve_service_deploy_yaml_path_monorepo_fallback`) \
                      across the crate. Found {} code-line hit(s): \
                      {hits:#?}. A hand-rolled inline copy re-opens the \
                      drift class the primitive was landed to close.",
@@ -1802,40 +1858,126 @@ mod tests {
         }
     }
 
-    /// Positive delegation shield: both post-lift consumer bodies must
-    /// forward through the primitive at least once. Pre-lift each
-    /// module inlined the stanza once; a refactor that removes the
-    /// call without restoring the inline (dead-code deletion, an
-    /// accidental early-return that bypasses the load) would be caught
+    /// Positive delegation shield: every post-lift consumer body must
+    /// forward through the fitting primitive at least once. Two bail-
+    /// flavored consumers (`commands/status.rs`,
+    /// `commands/integration_tests.rs`) forward through
+    /// [`resolve_and_require_service_deploy_yaml_path`]; the default-
+    /// early-return consumer (`commands/test.rs`) forwards through the
+    /// shared kernel [`resolve_service_deploy_yaml_path_monorepo_fallback`].
+    ///
+    /// Pre-lift each module inlined the stanza once; a refactor that
+    /// removes the call without restoring the inline (dead-code deletion,
+    /// an accidental early-return that bypasses the load) would be caught
     /// by the type checker on `raw_config` unused — this shield adds a
     /// grep-visible cross-check so the delegation is legible from the
     /// module's own text rather than only via the compile graph.
     #[test]
-    fn test_resolve_and_require_service_deploy_yaml_path_is_called_at_both_consumers() {
-        for (module_path, source) in [
+    fn test_resolve_service_deploy_yaml_path_primitives_are_called_at_every_consumer() {
+        for (module_path, source, needle) in [
             (
                 "commands/status.rs",
                 include_str!("../commands/status.rs") as &str,
+                "resolve_and_require_service_deploy_yaml_path(",
             ),
             (
                 "commands/integration_tests.rs",
                 include_str!("../commands/integration_tests.rs") as &str,
+                "resolve_and_require_service_deploy_yaml_path(",
+            ),
+            (
+                "commands/test.rs",
+                include_str!("../commands/test.rs") as &str,
+                "resolve_service_deploy_yaml_path_monorepo_fallback(",
             ),
         ] {
             let body = crate::test_support::module_body_before_tests(source, module_path);
-            let needle = "resolve_and_require_service_deploy_yaml_path(";
             let hits = crate::test_support::code_line_hits(body, needle);
             assert!(
                 !hits.is_empty(),
                 "{module_path} must delegate to \
-                 `crate::config::resolve_and_require_service_deploy_yaml_path(` \
-                 at least once — the pre-lift twelve-line inline stanza \
-                 was moved into the primitive, so every consumer that \
-                 loaded a service-flavored `deploy.yaml` under the \
-                 monorepo-fallback rule must now forward through it. \
-                 Found zero delegation hits in the module body.",
+                 `crate::config::{needle}` at least once — the pre-lift \
+                 monorepo-fallback resolution stanza was moved into the \
+                 shared kernel, so every consumer that resolves a \
+                 service-flavored `deploy.yaml` under that rule must \
+                 forward through the fitting primitive. Found zero \
+                 delegation hits in the module body.",
             );
         }
+    }
+
+    /// Byte-oracle: [`resolve_service_deploy_yaml_path_monorepo_fallback`]
+    /// returns the same `PathBuf` the pre-lift twelve-line inline stanza
+    /// produced, both in the found-product-dir arm and in the
+    /// service-dir fallback arm.
+    ///
+    /// Pins the resolution kernel against a drift where a future edit —
+    /// say, swapping [`crate::repo::ProductDirLayout::Monorepo`] for a
+    /// wider variant, or reversing the `if let Some(product_dir)` arms —
+    /// would silently change every consumer's resolved path without
+    /// tripping either the bail-flavored oracle above or the positive
+    /// delegation shield.
+    #[test]
+    fn test_resolve_service_deploy_yaml_path_monorepo_fallback_matches_pre_lift_inline_stanza() {
+        // Fallback arm: no `pkgs/products/{product}` ancestor, no
+        // `.git`+`deploy.yaml` marker — the walker returns `None`, so the
+        // primitive falls back to `{service_dir}/deploy.yaml`.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let service_dir = tmp.path().join("services").join("cart");
+        std::fs::create_dir_all(&service_dir).expect("service dir");
+        let pre_lift_fallback = {
+            let service_dir_path = PathBuf::from(service_dir.to_str().unwrap());
+            if let Some(product_dir) = crate::repo::find_product_dir(
+                &service_dir_path,
+                crate::repo::ProductDirLayout::Monorepo,
+            ) {
+                resolve_deploy_yaml_path(&product_dir, "cart", &service_dir_path)
+            } else {
+                service_dir_path.join("deploy.yaml")
+            }
+        };
+        let post_lift_fallback = resolve_service_deploy_yaml_path_monorepo_fallback(
+            "cart",
+            service_dir.to_str().unwrap(),
+        );
+        assert_eq!(
+            post_lift_fallback, pre_lift_fallback,
+            "fallback arm must match the pre-lift inline stanza's `service_dir_path.join(\"deploy.yaml\")` output",
+        );
+
+        // Found-product-dir arm: seed `pkgs/products/{product}/services/cart`
+        // with a `deploy.yaml` at the sibling `deploy/cart.yaml`. The
+        // walker terminates at the `{product}` ancestor and
+        // `resolve_deploy_yaml_path` picks the new-convention path.
+        let monorepo = tempfile::tempdir().expect("monorepo tempdir");
+        let product_dir = monorepo.path().join("pkgs/products/nexus");
+        let svc_dir = product_dir.join("services/cart");
+        std::fs::create_dir_all(&svc_dir).expect("svc dir");
+        std::fs::create_dir_all(product_dir.join("deploy")).expect("deploy dir");
+        std::fs::write(product_dir.join("deploy/cart.yaml"), "kind: deploy\n")
+            .expect("write deploy/cart.yaml");
+        let pre_lift_found = {
+            let service_dir_path = PathBuf::from(svc_dir.to_str().unwrap());
+            if let Some(product_dir) = crate::repo::find_product_dir(
+                &service_dir_path,
+                crate::repo::ProductDirLayout::Monorepo,
+            ) {
+                resolve_deploy_yaml_path(&product_dir, "cart", &service_dir_path)
+            } else {
+                service_dir_path.join("deploy.yaml")
+            }
+        };
+        let post_lift_found =
+            resolve_service_deploy_yaml_path_monorepo_fallback("cart", svc_dir.to_str().unwrap());
+        assert_eq!(
+            post_lift_found, pre_lift_found,
+            "found-product-dir arm must match the pre-lift inline stanza's `resolve_deploy_yaml_path(&product_dir, ...)` output",
+        );
+        assert_eq!(
+            post_lift_found,
+            product_dir.join("deploy/cart.yaml"),
+            "the seed picks up the new-convention `{{product_dir}}/deploy/{{service_name}}.yaml` path",
+        );
     }
 
     /// Pre-lift stanza scan: neither of the two consumer bodies

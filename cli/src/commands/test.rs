@@ -178,14 +178,14 @@ struct RawDeploymentSection {
 
 /// Load web tests configuration from deploy.yaml
 fn load_web_tests_config(service: &str, service_dir: &str) -> Result<WebTestsConfig> {
-    let service_dir_path = PathBuf::from(service_dir);
-    let deploy_yaml_path = if let Some(product_dir) =
-        crate::repo::find_product_dir(&service_dir_path, crate::repo::ProductDirLayout::Monorepo)
-    {
-        crate::config::resolve_deploy_yaml_path(&product_dir, service, &service_dir_path)
-    } else {
-        service_dir_path.join("deploy.yaml")
-    };
+    // Compose the shared monorepo-fallback resolution kernel with an
+    // early-return default on miss — the sibling
+    // `config::resolve_and_require_service_deploy_yaml_path` composes the
+    // same kernel with a `bail!` on miss. Both consumers of
+    // `resolve_service_deploy_yaml_path_monorepo_fallback` share the
+    // twelve-line resolution stanza that lived inline pre-lift.
+    let deploy_yaml_path =
+        crate::config::resolve_service_deploy_yaml_path_monorepo_fallback(service, service_dir);
 
     if !deploy_yaml_path.exists() {
         info!("No deploy.yaml found, using default test configuration");
