@@ -254,6 +254,85 @@ impl GitClient {
             .context("Failed to commit staged changes")
     }
 
+    /// Compose and execute a `git push [<trailer_args>...]` invocation
+    /// under the canonical retry + operator-envelope routing shared by
+    /// [`Self::push`] and [`Self::push_to`].
+    ///
+    /// # Why this primitive
+    ///
+    /// Two sibling public entry points ([`Self::push`] with a bare
+    /// `git push` argv and [`Self::push_to`] with an explicit
+    /// `(remote, branch)` argv trailer) each restated the identical
+    /// three-line body verbatim:
+    ///
+    /// ```text
+    /// let mut cmd = self.command();
+    /// cmd.args([...]);
+    /// crate::retry::run_inherited_status(cmd, "git push")
+    ///     .await
+    ///     .context("Failed to push commits to remote")
+    /// ```
+    ///
+    /// Four load-bearing invariants sit fused into that three-line
+    /// composition: (1) the [`Self::command`] preamble routing (which
+    /// itself was carved out in the prior lift to own the
+    /// `resolve_git_bin` + `working_dir`-application pair), (2) the
+    /// `push` argv head, (3) the [`crate::retry::run_inherited_status`]
+    /// retry routing under the op-label `"git push"`, and (4) the
+    /// canonical operator-facing envelope
+    /// `.context("Failed to push commits to remote")`. Two occurrences
+    /// sit at THEORY.md §VI.1's "two-is-a-coincidence" threshold; the
+    /// prior fleet-wide `Command::new(self.resolve_git_bin())` lift
+    /// on the sibling [`Self::command`] helper — which owned SIX
+    /// occurrences of a smaller sub-body — set the precedent that the
+    /// consumer count is the coincidence signal, not the body length,
+    /// and this primitive discharges the same discipline for the
+    /// push-retry-envelope terminal.
+    ///
+    /// # What compounds
+    ///
+    /// Four future edits that would otherwise strand across the two
+    /// pre-lift sites now land at ONE body:
+    ///
+    /// 1. **Op-label rename.** A migration from `"git push"` to a
+    ///    structured op-descriptor (e.g. carrying the target-endpoint
+    ///    tuple as an attribute) lands at this body — pre-lift it
+    ///    would need to touch both consumer sites in lockstep or risk
+    ///    surfacing an inconsistent op-label in the retry telemetry.
+    /// 2. **Operator-envelope rewording.** A rename of
+    ///    `"Failed to push commits to remote"` to a typed
+    ///    `#[error]` variant carrying `(remote, branch, exit_code)`
+    ///    structurally lands at this body.
+    /// 3. **Retry-policy widening.** A per-op retry-attempt cap (e.g.
+    ///    "push retries at most 3× to survive transient remote-side
+    ///    5xx from GitOps push endpoints") lands at this body rather
+    ///    than at two consumers that would otherwise drift.
+    /// 4. **Structured-provenance hook.** A future SLSA-provenance
+    ///    span capturing `(remote, branch, resolved_git_bin,
+    ///    duration_ms)` lands at this body — the argv trailer already
+    ///    carries the `(remote, branch)` tuple in typed form.
+    ///
+    /// # Contract
+    ///
+    /// The `trailer_args` slice is appended verbatim after the `push`
+    /// argv head. An empty slice reproduces the pre-lift
+    /// [`Self::push`] argv (`git push`); a two-element slice
+    /// `[remote, branch]` reproduces the pre-lift [`Self::push_to`]
+    /// argv (`git push <remote> <branch>`). No other argv shapes are
+    /// currently reached from within this module — any future
+    /// entry point (e.g. `push_tags`, `push_force_with_lease`)
+    /// composes its own trailer here rather than respelling the
+    /// three-line body inline.
+    async fn run_push(&self, trailer_args: &[&str]) -> Result<()> {
+        let mut cmd = self.command();
+        cmd.arg("push");
+        cmd.args(trailer_args);
+
+        crate::retry::run_inherited_status(cmd, "git push")
+            .await
+            .context("Failed to push commits to remote")
+    }
+
     /// Push to remote
     ///
     /// Routes through [`crate::retry::run_inherited_status`]. A denied
@@ -262,12 +341,7 @@ impl GitClient {
     /// with the sibling GitOps publish path migrated in fe3b1bc
     /// (`commands/push.rs::update_kustomization`).
     pub async fn push(&self) -> Result<()> {
-        let mut cmd = self.command();
-        cmd.arg("push");
-
-        crate::retry::run_inherited_status(cmd, "git push")
-            .await
-            .context("Failed to push commits to remote")
+        self.run_push(&[]).await
     }
 
     /// Push HEAD to an explicit `(remote, branch)` endpoint.
@@ -281,12 +355,7 @@ impl GitClient {
     /// failure record carries the exit code that the pre-migration
     /// `bail!("Failed to push release to git")` sites dropped.
     pub async fn push_to(&self, remote: &str, branch: &str) -> Result<()> {
-        let mut cmd = self.command();
-        cmd.args(["push", remote, branch]);
-
-        crate::retry::run_inherited_status(cmd, "git push")
-            .await
-            .context("Failed to push commits to remote")
+        self.run_push(&[remote, branch]).await
     }
 
     /// Return `true` iff `git diff --cached --name-only` reports any
@@ -1028,6 +1097,191 @@ mod tests {
              — the `GitClient::command` helper body. Every consumer \
              method must route through `self.command()` instead of \
              respelling the stanza inline. Found {} hit(s): {hits:#?}",
+            hits.len()
+        );
+    }
+
+    /// Whole-module shield: the `"git push"` op-label passed to
+    /// [`crate::retry::run_inherited_status`] MUST appear at exactly
+    /// one code line — inside the [`GitClient::run_push`] primitive
+    /// body. Pre-lift both [`GitClient::push`] and
+    /// [`GitClient::push_to`] each spelled the same
+    /// `crate::retry::run_inherited_status(cmd, "git push")` retry
+    /// call verbatim; the lift collapses them onto the primitive and
+    /// this shield forbids re-fusion at either consumer.
+    ///
+    /// The needle is reconstructed via [`format!`] from the retry-op
+    /// bare token so this shield's own source lines (and the
+    /// docstrings on the primitive that narrate the pre-lift shape by
+    /// literal quotation) do not self-match — [`crate::test_support::code_line_hits`]
+    /// filters `///` / `//!` / `//` comment lines by definition and
+    /// this shield's assertion-message text does not carry the
+    /// full-form parenthesised call. A regression that reintroduces
+    /// the retry call at either consumer (or that adds a third
+    /// consumer that hand-copies the three-line stanza) surfaces here
+    /// as a `hits.len() != 1` panic rather than as a silent
+    /// duplication-class re-opening.
+    #[test]
+    fn test_git_push_op_label_retry_call_is_only_at_run_push_primitive() {
+        const SOURCE: &str = include_str!("git.rs");
+
+        let needle = format!(
+            "crate::retry::run_inherited_status(cmd, \"{}\")",
+            "git push"
+        );
+        let hits = crate::test_support::code_line_hits(SOURCE, &needle);
+        assert_eq!(
+            hits.len(),
+            1,
+            "the `git push` retry call must appear at exactly one code \
+             line in `cli/src/infrastructure/git.rs` — the \
+             `GitClient::run_push` primitive body. Every push entry \
+             point (`push`, `push_to`, and any future variant) must \
+             route through `self.run_push(...)` instead of respelling \
+             the retry-plus-envelope stanza inline. Found {} hit(s): \
+             {hits:#?}",
+            hits.len()
+        );
+    }
+
+    /// Whole-module shield: the canonical operator-facing envelope
+    /// `"Failed to push commits to remote"` MUST appear at exactly one
+    /// code line — inside the [`GitClient::run_push`] primitive body.
+    /// Pre-lift both [`GitClient::push`] and [`GitClient::push_to`]
+    /// each carried the envelope verbatim on their trailing
+    /// `.context(...)` call; the lift collapses them onto the
+    /// primitive and this shield pins the "one envelope, one home"
+    /// contract.
+    ///
+    /// A future rename to a typed `#[error]` variant, a swap to a
+    /// structured tracing event, or a translation of the operator
+    /// wording lands at ONE literal position rather than at two that
+    /// would silently drift. Runs on the raw-source
+    /// [`crate::test_support::code_line_hits`] filter, so this
+    /// shield's own docstring quotation of the envelope does not
+    /// self-match.
+    ///
+    /// Sibling of
+    /// [`test_git_push_op_label_retry_call_is_only_at_run_push_primitive`]:
+    /// the two shields together pin the two halves of the retry
+    /// composition (op-label AND operator envelope) as belonging to
+    /// exactly one body each.
+    #[test]
+    fn test_push_failed_envelope_is_only_at_run_push_primitive() {
+        const SOURCE: &str = include_str!("git.rs");
+
+        let envelope = format!("Failed to push {}", "commits to remote");
+        let needle = format!(".context(\"{}\")", envelope);
+        let hits = crate::test_support::code_line_hits(SOURCE, &needle);
+        assert_eq!(
+            hits.len(),
+            1,
+            "the `Failed to push commits to remote` operator envelope \
+             must appear at exactly one code line in \
+             `cli/src/infrastructure/git.rs` — the `GitClient::run_push` \
+             primitive body. Every push entry point must route \
+             through `self.run_push(...)` so the envelope's operator \
+             wording (and any future migration to a typed `#[error]` \
+             variant) lands at one home. Found {} hit(s): {hits:#?}",
+            hits.len()
+        );
+    }
+
+    /// Positive delegation shield: both public push entry points
+    /// ([`GitClient::push`] and [`GitClient::push_to`]) MUST forward
+    /// through the [`GitClient::run_push`] primitive at exactly the
+    /// two expected delegation sites. Post-lift the two forward
+    /// stanzas each spell `self.run_push(<trailer>).await` — the
+    /// `push()` variant with an empty `&[]` trailer and the
+    /// `push_to(...)` variant with the `&[remote, branch]` trailer.
+    ///
+    /// Reconstructing the delegation needles at test time via
+    /// [`format!`] from a small vocabulary (the `run_push` primitive
+    /// name and the trailer tokens) sidesteps the self-match trap:
+    /// this shield's own docstring narrates the two spellings by
+    /// literal quotation but is filtered as `///`-comment lines by
+    /// [`crate::test_support::code_line_hits`], and the assertion
+    /// message uses the primitive name inline (not the parenthesised
+    /// call) so it does not false-fire.
+    ///
+    /// A regression that reinlined either the `cmd.arg("push")` +
+    /// `run_inherited_status` stanza at one entry point (silently
+    /// reopening the two-site duplication class this lift closes) or
+    /// that renamed [`GitClient::run_push`] without migrating both
+    /// callers surfaces here as a delegation-site count mismatch.
+    #[test]
+    fn test_push_entry_points_delegate_through_run_push_primitive() {
+        const SOURCE: &str = include_str!("git.rs");
+
+        // Bare-trailer form used by `GitClient::push`. Reconstruct
+        // the needle from three lexical tokens so the executable line
+        // in this shield's own body does not carry the needle
+        // verbatim: `run_push`, the bare-trailer literal `&[]`, and
+        // the `.await` suffix each appear separately in the source
+        // above (in docstrings) but only compose to the executable
+        // spelling at the ONE consumer site the shield pins.
+        let bare_needle = format!("self.{}({}).await", "run_push", "&[]");
+        let bare_hits = crate::test_support::code_line_hits(SOURCE, &bare_needle);
+        assert_eq!(
+            bare_hits.len(),
+            1,
+            "the bare-trailer push entry point must delegate through \
+             the primitive at exactly one code line in \
+             `cli/src/infrastructure/git.rs`. Found {} hit(s): \
+             {bare_hits:#?}",
+            bare_hits.len()
+        );
+
+        // (remote, branch)-trailer form used by `GitClient::push_to`.
+        // Same needle-reconstruction discipline.
+        let trailer_needle = format!("self.{}({}).await", "run_push", "&[remote, branch]");
+        let trailer_hits = crate::test_support::code_line_hits(SOURCE, &trailer_needle);
+        assert_eq!(
+            trailer_hits.len(),
+            1,
+            "the (remote, branch)-trailer push entry point must \
+             delegate through the primitive at exactly one code line \
+             in `cli/src/infrastructure/git.rs`. Found {} hit(s): \
+             {trailer_hits:#?}",
+            trailer_hits.len()
+        );
+    }
+
+    /// Negative caller shield: no consumer of the push primitive
+    /// (i.e. no code line in this module OTHER than
+    /// [`GitClient::run_push`] itself) may respell the
+    /// `cmd.args(["push", ...])` argv-composition head that the
+    /// primitive owns. Pre-lift [`GitClient::push_to`] spelled
+    /// `cmd.args(["push", remote, branch])` inline; the lift
+    /// migrated that composition into `run_push` (where it splits
+    /// into a `cmd.arg("push")` head + `cmd.args(trailer_args)`
+    /// tail), so the fused three-arg `["push", remote, branch]`
+    /// literal MUST NOT reappear anywhere in the module.
+    ///
+    /// This shield closes the specific re-inline shape that a future
+    /// consumer would reach for when composing a `git push <remote>
+    /// <branch>` argv without going through `run_push` — the identical
+    /// literal that [`GitClient::push_to`] carried pre-lift. A raw
+    /// reappearance surfaces here as a `hits.len() != 0` panic rather
+    /// than as a silent bypass of the primitive's retry-plus-envelope
+    /// routing.
+    ///
+    /// Reconstructs the needle at test time from the `push` bare token
+    /// and the `remote` / `branch` argument names so this shield's own
+    /// source lines do not self-match.
+    #[test]
+    fn test_no_caller_reinlines_pre_lift_push_to_argv_composition() {
+        const SOURCE: &str = include_str!("git.rs");
+
+        let needle = format!("cmd.args([\"{}\", remote, branch])", "push");
+        let hits = crate::test_support::code_line_hits(SOURCE, &needle);
+        assert!(
+            hits.is_empty(),
+            "no caller may respell the pre-lift three-arg push argv \
+             composition inline — every `git push <remote> <branch>` \
+             invocation must route through the primitive so the retry \
+             op-label and the operator envelope stay authored at \
+             one body. Found {} hit(s): {hits:#?}",
             hits.len()
         );
     }
