@@ -658,10 +658,7 @@ pub fn spec_gen(
             println!("{}", spec_content);
             println!();
         } else {
-            // Create spec directory
-            if let Some(parent) = spec_path.parent() {
-                crate::repo::create_dir_all_sync(parent)?;
-            }
+            crate::repo::create_parent_dir_sync(&spec_path)?;
             std::fs::write(&spec_path, &spec_content)?;
             info!("Generated: {}", spec_path.display());
         }

@@ -333,10 +333,7 @@ fn parse_seaorm_entities(
 
 /// Generate metadata JSON for Jsonnet consumption
 fn generate_metadata(entities: &[ObservedEntity], output_path: &Path) -> Result<()> {
-    // Ensure parent directory exists
-    if let Some(parent) = output_path.parent() {
-        crate::repo::create_dir_all_sync(parent)?;
-    }
+    crate::repo::create_parent_dir_sync(output_path)?;
 
     let metadata = serde_json::json!({
         "generated_at": crate::repo::now_rfc3339_utc(),

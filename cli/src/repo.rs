@@ -708,6 +708,58 @@ pub fn create_dir_all_sync(path: &Path) -> Result<()> {
         .with_context(|| format!("Failed to create directory {}", path.display()))
 }
 
+/// Scaffold the parent directory of `file_path` on the sync fs surface,
+/// or return `Ok(())` when `file_path` has no parent component (a bare
+/// filename in the current directory).
+///
+/// The write-side ceremony sibling of [`create_dir_all_sync`]: two
+/// pre-lift consumer sites carried an identical
+/// `if let Some(parent) = <file_path>.parent() {
+/// create_dir_all_sync(parent)?; }` three-line preface ahead of a
+/// [`std::fs::write`] / `serde_json::to_writer` sink into `file_path`
+/// (`commands/dashboards.rs::generate_metadata` — writer of
+/// `output_path` metadata JSON, `commands/pangea.rs::generate` — writer
+/// of the per-resource `spec_path` synthesis YAML), and both spelled
+/// the composition inline as three lines that split the "scaffold the
+/// destination" precondition from the sink one file surface below.
+/// Post-lift this primitive owns the two-step composition at ONE code
+/// point on the file surface so a caller that must persist a file into
+/// a directory that may not exist yet writes
+/// `create_parent_dir_sync(&file_path)?; std::fs::write(&file_path,
+/// bytes)?;` through two canonically-enveloped primitives rather than
+/// re-deriving the parent-branch guard inline.
+///
+/// # Semantics of the [`None`] arm
+///
+/// [`Path::parent`] returns [`None`] only for the filesystem root
+/// (`Path::new("/").parent()` is [`None`] on Unix) and for the empty
+/// path (`Path::new("").parent()` is [`None`]). Both pre-lift
+/// consumer sites are unreachable in that arm by construction —
+/// `output_path` and `spec_path` are always caller-supplied file paths
+/// with at least one non-root ancestor — and a future consumer that
+/// hands the primitive a bare-filename `Path::new("out.json")` sees
+/// `Some(Path::new(""))` from [`Path::parent`] (the empty-parent case
+/// that is NOT [`None`]), which [`create_dir_all_sync`] itself
+/// resolves to `Ok(())` because [`std::fs::create_dir_all`] on the
+/// empty path is a documented no-op. The primitive preserves the
+/// pre-lift semantics of every consumer arm — [`None`] is a no-op,
+/// [`Some`] threads through the canonical create-directory envelope.
+///
+/// # Errors
+///
+/// Returns `Err` from [`create_dir_all_sync`] on the [`Some`] arm when
+/// the parent directory cannot be scaffolded (see that primitive's
+/// `# Errors` for the ENOSPC / EACCES / EROFS / ENOTDIR classifier
+/// grammar). The offending `parent.display()` reaches the anyhow
+/// envelope through [`create_dir_all_sync`]'s
+/// `"Failed to create directory {path}"` classifier by construction.
+pub fn create_parent_dir_sync(file_path: &Path) -> Result<()> {
+    if let Some(parent) = file_path.parent() {
+        create_dir_all_sync(parent)?;
+    }
+    Ok(())
+}
+
 /// Replace the symlink at `link_name` so it points at `target`, on the
 /// async fs surface.
 ///
@@ -7447,6 +7499,174 @@ mod tests {
                      `crate::repo::create_dir_all_sync`. A re-inline would \
                      silently diverge the create arm from the seven sibling \
                      create-dir consumers routing through the primitive."
+                );
+            }
+        }
+    }
+
+    /// [`create_parent_dir_sync`] scaffolds the parent branch of a
+    /// file path whose parent directory does not exist pre-call. Pins
+    /// the primitive's [`Some`] arm to the shape every pre-lift
+    /// `if let Some(parent) = <path>.parent() { create_dir_all_sync(
+    /// parent)?; }` consumer relied on — a future refactor that
+    /// swapped the `.parent()` call for `.file_name()` (which would
+    /// scaffold the file *itself* as a directory and torpedo the
+    /// subsequent `std::fs::write` into the file surface with
+    /// `EISDIR`) or dropped the `create_dir_all_sync` call on the
+    /// [`Some`] arm (silently leaving the write to bounce with
+    /// `ENOENT` on a nested destination) would flip the on-disk
+    /// semantics beneath every consumer at once, and this shield
+    /// refuses that regression at the primitive body.
+    #[test]
+    fn create_parent_dir_sync_scaffolds_missing_parent_of_nested_file_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file_path = tmp.path().join("a").join("b").join("out.json");
+
+        create_parent_dir_sync(&file_path).expect("well-formed parent-dir scaffold must succeed");
+
+        let parent = file_path.parent().expect("file path has a parent branch");
+        assert!(
+            parent.is_dir(),
+            "create_parent_dir_sync() must scaffold every missing ancestor of \
+             the file path so a caller that then writes to the file sees a \
+             directory ready to receive its bytes"
+        );
+        assert!(
+            !file_path.exists(),
+            "create_parent_dir_sync() must scaffold the PARENT only — the file \
+             at the leaf must not be materialized, else a subsequent \
+             std::fs::write into it would collide (EEXIST as a directory) or \
+             corrupt the caller's write intent"
+        );
+    }
+
+    /// [`create_parent_dir_sync`]'s [`None`]-arm is a no-op — the
+    /// filesystem-root path (`Path::new("/").parent()` is [`None`] on
+    /// Unix) reaches the primitive without a corresponding
+    /// [`create_dir_all_sync`] call. Pins the primitive to the same
+    /// contract every consumer relied on pre-lift: an unconditional
+    /// `if let Some(parent) = …` guard that skipped the scaffold when
+    /// `Path::parent` returned [`None`]. A future refactor that
+    /// unwrapped `.parent()` (which would panic on the root path) or
+    /// substituted a default like `Path::new(".")` (which would
+    /// silently scaffold the current working directory, a real
+    /// side-effect a caller handing the primitive a root path never
+    /// authorized) would flip the [`None`]-arm semantics beneath every
+    /// consumer, and this shield refuses that regression.
+    #[test]
+    fn create_parent_dir_sync_no_op_on_parentless_root_path() {
+        let root = Path::new("/");
+        assert!(
+            root.parent().is_none(),
+            "pre-condition: Path::new(\"/\").parent() is None on Unix, which \
+             is the arm this test exercises"
+        );
+
+        create_parent_dir_sync(root).expect(
+            "parentless-path arm must be a no-op — no mkdir syscall, no error, \
+             just Ok(())",
+        );
+    }
+
+    /// Post-lift the two pre-lift consumer sites lifted onto
+    /// [`create_parent_dir_sync`] must forward through the primitive
+    /// at exactly one code point each — a delegation shield that
+    /// fires if a future refactor accidentally deletes the primitive
+    /// call (silently reintroducing the write-into-nonexistent-parent
+    /// bounce the lift closed) or adds a second call at the same site
+    /// (double-scaffolding the same parent branch, which is idempotent
+    /// on the filesystem but signals the pre-lift three-line ceremony
+    /// crept back in duplicated form). Both consumers persist a file
+    /// into a caller-supplied path whose parent MAY not exist yet —
+    /// `commands/dashboards.rs::generate_metadata` writes the
+    /// observability metadata JSON into `output_path` (a
+    /// `--output`-flag-supplied path), and `commands/pangea.rs`'s
+    /// synthesis-spec generator writes each `spec_path` into a
+    /// per-resource nested directory tree the generator itself
+    /// materializes.
+    #[test]
+    fn create_parent_dir_sync_consumers_forward_through_primitive() {
+        for (name, source, expected_forwards) in [
+            (
+                "commands/dashboards.rs",
+                include_str!("commands/dashboards.rs"),
+                1_usize,
+            ),
+            (
+                "commands/pangea.rs",
+                include_str!("commands/pangea.rs"),
+                1_usize,
+            ),
+        ] {
+            let forwards = source
+                .matches("crate::repo::create_parent_dir_sync(")
+                .count();
+            assert_eq!(
+                forwards, expected_forwards,
+                "{name} body must forward to \
+                 `crate::repo::create_parent_dir_sync(<file_path>)` at exactly \
+                 {expected_forwards} site(s) — one per pre-lift consumer in \
+                 this module. A fusion that folded two consumers into one, \
+                 or a deletion that dropped the primitive call, would drift \
+                 the count here and this shield refuses that."
+            );
+        }
+    }
+
+    /// Post-lift the two consumer sites lifted onto
+    /// [`create_parent_dir_sync`] must not silently re-inline the
+    /// primitive's shape at their call points — the raw
+    /// `if let Some(parent) = <path>.parent() { crate::repo::
+    /// create_dir_all_sync(parent)?; }` three-line composition the
+    /// two lifted sites carried pre-lift, which split the "scaffold
+    /// the destination" precondition from the sink one file surface
+    /// below. A helpful "just inline it, it's shorter" cleanup at
+    /// any one site re-opens the duplication class this lift closed
+    /// and forces the sibling consumer to divorce from the primitive
+    /// one edit at a time.
+    ///
+    /// The scan walks each consumer body window pair-wise: it fires
+    /// when the same source line spells `.parent()` inside an
+    /// `if let Some(parent) = …` guard AND the very next non-blank
+    /// line spells `crate::repo::create_dir_all_sync(parent)`. That
+    /// pair uniquely identifies the pre-lift stanza — the same
+    /// `.parent()` receiver appears in unrelated positions
+    /// (`config/mod.rs`'s repo-root walk, `repo.rs`'s flake.nix
+    /// discovery walk, both of which do NOT feed
+    /// `create_dir_all_sync` and thus stay carved-out) and the same
+    /// `create_dir_all_sync` primitive is called from several
+    /// straight-line consumer sites that legitimately hand it an
+    /// already-computed path (no `.parent()` guard). The paired
+    /// scan matches only the stanza this lift closed.
+    #[test]
+    fn create_parent_dir_sync_consumers_do_not_reinline_the_pre_lift_stanza() {
+        for (name, source) in [
+            (
+                "commands/dashboards.rs",
+                include_str!("commands/dashboards.rs"),
+            ),
+            ("commands/pangea.rs", include_str!("commands/pangea.rs")),
+        ] {
+            let lines: Vec<&str> = source.lines().collect();
+            for (idx, window) in lines.windows(2).enumerate() {
+                let first = window[0].trim_start();
+                let second = window[1].trim_start();
+                let opens_parent_guard =
+                    first.starts_with("if let Some(parent) = ") && first.contains(".parent()");
+                let calls_create_dir_all_sync_on_parent = second
+                    .starts_with("crate::repo::create_dir_all_sync(parent)")
+                    || second.starts_with("create_dir_all_sync(parent)");
+                assert!(
+                    !(opens_parent_guard && calls_create_dir_all_sync_on_parent),
+                    "{name} must NOT spell the inline pre-lift stanza \
+                     `if let Some(parent) = <path>.parent() {{ crate::repo::\
+                     create_dir_all_sync(parent)?; }}` (matched near line \
+                     {}) — that duplication was lifted onto \
+                     `crate::repo::create_parent_dir_sync(<file_path>)`. A \
+                     re-inline would silently diverge the parent-scaffold \
+                     arm from the sibling consumer routing through the \
+                     primitive.",
+                    idx + 1
                 );
             }
         }
