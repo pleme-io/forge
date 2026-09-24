@@ -1580,15 +1580,29 @@ pub fn compose_product_certification(
         cluster = cluster,
     );
 
+    // Bind the `{product}-{environment}` namespace ONCE and clone into
+    // both `namespace` and `kustomization`. The two `DeploymentAttestation`
+    // fields are structurally the same value by construction — every
+    // in-repo docstring pattern (`pod_health.rs`, `pod_listing.rs`,
+    // `helm_release_signature.rs`, `flux_source_verification.rs`) spells
+    // both fields with the same `product_environment_namespace(product,
+    // environment)` expression — but the pre-lift call site expressed
+    // that invariant with two independent calls. A future refinement of
+    // the namespace formula (a `.trim()` normalization, a per-cluster
+    // prefix, a routing through a typed `NamespaceRef` primitive) that
+    // touched one call and not the other silently forked the two fields
+    // and defeated the identity `namespace == kustomization` every
+    // consumer downstream reads on. Post-lift the two fields cannot
+    // drift: they are the same binding, cloned into two slots. THEORY
+    // §V.1 — the equality is a type invariant expressed at the
+    // construction site, not two independent expressions that happen to
+    // collide today; §VI.1 one-oracle discipline (the namespace formula
+    // is composed at one code line rather than at two).
+    let deployment_namespace =
+        crate::product_environment_namespace::product_environment_namespace(product, environment);
     let deployment = DeploymentAttestation {
-        namespace: crate::product_environment_namespace::product_environment_namespace(
-            product,
-            environment,
-        ),
-        kustomization: crate::product_environment_namespace::product_environment_namespace(
-            product,
-            environment,
-        ),
+        namespace: deployment_namespace.clone(),
+        kustomization: deployment_namespace,
         source_commit: source.commit.clone(),
         source_verified: source_verification_outcome.is_verified(),
         manifest_hash: deployment_manifest_outcome.manifest_hash(),
@@ -4362,6 +4376,112 @@ dependencies:
              record when no FluxCD probe ran inside the certification \
              function; the pre-fix `true` hardcode produced `true` here \
              regardless of any probe evidence",
+        );
+    }
+
+    /// **Load-bearing single-binding pin: the `DeploymentAttestation`
+    /// `namespace` and `kustomization` fields MUST both equal the
+    /// canonical `product_environment_namespace(product, environment)`
+    /// value, and MUST be structurally equal to each other.**
+    ///
+    /// Pre-lift the two fields were populated by two independent calls
+    /// to `product_environment_namespace(product, environment)` at
+    /// adjacent lines in `compose_product_certification`'s
+    /// `DeploymentAttestation` struct literal. The bool surface was
+    /// honest today — the two calls happened to yield the same string
+    /// under the current `{product}-{environment}` formula — but the
+    /// invariant `namespace == kustomization` (the identity every
+    /// in-repo docstring pattern, `pod_health.rs`, `pod_listing.rs`,
+    /// `helm_release_signature.rs`, `flux_source_verification.rs`,
+    /// spells) was expressed as coincidence, not construction. A
+    /// future refinement of the namespace formula (a `.trim()`
+    /// normalization, a per-cluster prefix, a routing through a typed
+    /// `NamespaceRef` primitive) that touched one call and not the
+    /// other silently forked the two fields — a downstream sekiban
+    /// verifier reading `namespace != kustomization` on a Phase 2
+    /// record would surface it as an admission failure against a
+    /// deployment whose cluster state actually matched.
+    ///
+    /// Post-lift the two fields share ONE binding: the shared
+    /// `product_environment_namespace(product, environment)` value is
+    /// computed once and cloned into two slots. This test pins the
+    /// invariant end-to-end through `compose_product_certification`:
+    /// (a) both fields carry the canonical formula's output; (b) they
+    /// are structurally equal to each other; (c) they carry the exact
+    /// `{product}-{environment}` byte spelling every in-repo
+    /// docstring names.
+    ///
+    /// THEORY §V.1 — the equality is a type invariant expressed at
+    /// the construction site, not two independent expressions that
+    /// happen to collide today; §VI.1 one-oracle discipline (the
+    /// namespace formula is composed at one code line rather than at
+    /// two).
+    #[test]
+    fn test_deployment_namespace_and_kustomization_share_one_binding() {
+        let source = ci::source_attestation(
+            "https://example.invalid/repo",
+            "deadbeef",
+            "refs/heads/main",
+            false,
+            Blake3Hash::digest(b"tree"),
+            Blake3Hash::digest(b"lock"),
+            1,
+            true,
+        );
+        let cert = compose_product_certification(
+            "myproduct",
+            "staging",
+            "plo",
+            source,
+            vec![build_at("backend", SlsaLevel::L2)],
+            vec![],
+            vec![],
+        )
+        .expect("certification composes");
+
+        // (a) `namespace` carries the canonical `{product}-{environment}`
+        // byte spelling — same output as the free-function
+        // `product_environment_namespace(product, environment)` every
+        // in-repo docstring pattern names.
+        assert_eq!(
+            cert.deployment.namespace,
+            crate::product_environment_namespace::product_environment_namespace(
+                "myproduct",
+                "staging",
+            ),
+            "DeploymentAttestation::namespace must equal \
+             `product_environment_namespace(product, environment)`",
+        );
+
+        // (b) `kustomization` carries the same value. This is the
+        // load-bearing pin: a future edit that changed only one of
+        // the two field expressions (a `.trim()`, a prefix, a
+        // routing through a typed wrapper) at the pre-lift call site
+        // would silently fork the two fields. Post-lift the two
+        // fields share one binding, so this equality is structural,
+        // not coincidental.
+        assert_eq!(
+            cert.deployment.namespace, cert.deployment.kustomization,
+            "DeploymentAttestation::namespace and \
+             ::kustomization MUST be structurally equal — they are \
+             populated from a single `product_environment_namespace(\
+             product, environment)` binding, cloned into two slots",
+        );
+
+        // (c) Byte-oracle pin on the exact `{product}-{environment}`
+        // spelling every in-repo `DeploymentAttestation` docstring
+        // names (`pod_health.rs::24-26`, `pod_listing.rs::24-26`,
+        // `helm_release_signature.rs::22-24`,
+        // `flux_source_verification.rs::18-20`). A future edit that
+        // rerouted the namespace formula through a differently-
+        // spelled primitive would fail this before any Phase 2
+        // record was published under the drift.
+        assert_eq!(
+            cert.deployment.namespace, "myproduct-staging",
+            "DeploymentAttestation::namespace must be the exact \
+             `{{product}}-{{environment}}` byte spelling; any drift \
+             from that shape would fork every in-repo docstring \
+             pattern that grounds it",
         );
     }
 
