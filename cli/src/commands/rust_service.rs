@@ -1237,11 +1237,9 @@ pub async fn orchestrate_release(
         if all_envs.len() != active_envs.len() {
             println!("📍 Environment Status:");
             for env in all_envs {
-                if active_envs.contains(env) {
-                    println!("   {} {} (active)", "●".green(), env.cyan());
-                } else {
-                    println!("   {} {} (inactive)", "○".dimmed(), env.dimmed());
-                }
+                let status =
+                    crate::env_activation_status::EnvActivationStatus::classify(env, active_envs);
+                crate::env_activation_status::print_env_activation_status_line(env, status);
             }
             println!();
         }
