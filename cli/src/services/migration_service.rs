@@ -285,35 +285,23 @@ spec:
                 anyhow::bail!("Timeout waiting for migration job");
             }
 
-            let output = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
-                &crate::kubectl_get_job_condition_status_argv::kubectl_get_job_condition_status_argv(
-                    crate::kubectl_get_job_condition_status_argv::JobCondition::Complete,
-                    name,
-                    namespace,
-                ),
-                "kubectl get job (Complete condition)",
+            if crate::kubectl_probe_job_condition_status::probe_job_condition_status(
+                crate::kubectl_get_job_condition_status_argv::JobCondition::Complete,
+                name,
+                namespace,
             )
-            .await?;
-
-            let status = crate::repo::utf8_lossy_borrow(&output.stdout);
-
-            if status.trim() == "True" {
+            .await?
+            {
                 return Ok(());
             }
 
-            // Check for failure
-            let output = crate::infrastructure::kubectl::kubectl_output_spawn_anyhow(
-                &crate::kubectl_get_job_condition_status_argv::kubectl_get_job_condition_status_argv(
-                    crate::kubectl_get_job_condition_status_argv::JobCondition::Failed,
-                    name,
-                    namespace,
-                ),
-                "kubectl get job (Failed condition)",
+            if crate::kubectl_probe_job_condition_status::probe_job_condition_status(
+                crate::kubectl_get_job_condition_status_argv::JobCondition::Failed,
+                name,
+                namespace,
             )
-            .await?;
-
-            let failed = crate::repo::utf8_lossy_borrow(&output.stdout);
-            if failed.trim() == "True" {
+            .await?
+            {
                 anyhow::bail!("Migration job failed");
             }
 

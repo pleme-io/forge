@@ -207,6 +207,7 @@ mod kubectl_get_job_condition_status_argv;
 mod kubectl_get_job_status_succeeded_argv;
 mod kubectl_get_pods_by_selector_argv;
 mod kubectl_logs_argv;
+mod kubectl_probe_job_condition_status;
 mod list_resource_names_by_selector_argv;
 mod migration_file_read;
 mod namespace_field;

@@ -154,6 +154,28 @@ impl JobCondition {
             Self::Failed => "jsonpath={.status.conditions[?(@.type==\"Failed\")].status}",
         }
     }
+
+    /// The exact `"kubectl get job (<Cond> condition)"` byte sequence
+    /// every per-variant [`crate::infrastructure::kubectl::kubectl_output_spawn_anyhow`]
+    /// probe site passes as its `op` argument. `&'static str` because
+    /// every variant's label is a compile-time literal; coerces into
+    /// the `&str` the shared spawn helper takes.
+    ///
+    /// The label is load-bearing at
+    /// [`crate::retry::classify_spawn_anyhow`] — a shared label would
+    /// fold the two probes' failure classes together in the retry log
+    /// and obscure which condition the poll loop tripped over. Owned
+    /// per-variant on the enum so the fused
+    /// [`crate::kubectl_probe_job_condition_status::probe_job_condition_status`]
+    /// primitive inherits it without re-spelling the two labels
+    /// verbatim at its own body — the enum dispatch keeps the label
+    /// paired to the variant it describes.
+    pub(crate) fn spawn_op_label(self) -> &'static str {
+        match self {
+            Self::Complete => "kubectl get job (Complete condition)",
+            Self::Failed => "kubectl get job (Failed condition)",
+        }
+    }
 }
 
 /// The pre-lift 7-element `get job <name> -n <namespace> -o
@@ -241,6 +263,55 @@ mod tests {
         assert_eq!(
             JobCondition::Failed.jsonpath_literal(),
             "jsonpath={.status.conditions[?(@.type==\"Failed\")].status}",
+        );
+    }
+
+    /// Byte-oracle: [`JobCondition::Complete`] projects the exact
+    /// pre-lift `"kubectl get job (Complete condition)"` op label
+    /// verbatim. The label is load-bearing at
+    /// [`crate::retry::classify_spawn_anyhow`] — a drift that (a)
+    /// dropped the parenthesized condition suffix, (b) swapped the
+    /// prefix from `"kubectl get job"` to `"kubectl get jobs"`, or
+    /// (c) collapsed the space between `job` and `(` (making the
+    /// suffix look like a function call) regresses this assertion.
+    /// Fused with the sibling [`JobCondition::Failed`] label so a
+    /// future consumer that greps the retry log for the pre-lift
+    /// wording still finds it.
+    #[test]
+    fn test_job_condition_complete_spawn_op_label_matches_pre_lift_bytes() {
+        assert_eq!(
+            JobCondition::Complete.spawn_op_label(),
+            "kubectl get job (Complete condition)",
+        );
+    }
+
+    /// Byte-oracle: [`JobCondition::Failed`] projects the exact
+    /// pre-lift `"kubectl get job (Failed condition)"` op label
+    /// verbatim. Guards against a variant-dispatch regression that
+    /// routed the Failed probe onto the Complete label at the
+    /// spawn-anyhow surface — a shared label would fold the two
+    /// probes' failure classes together in the retry log.
+    #[test]
+    fn test_job_condition_failed_spawn_op_label_matches_pre_lift_bytes() {
+        assert_eq!(
+            JobCondition::Failed.spawn_op_label(),
+            "kubectl get job (Failed condition)",
+        );
+    }
+
+    /// The two variants project distinct spawn op labels. A future
+    /// refactor that accidentally folded both arms of the `match`
+    /// onto the same label (e.g., a copy-paste in the arm bodies)
+    /// would fold both probes' failure classes together in the
+    /// retry log and hide which condition the wait loop tripped
+    /// over. Sibling of
+    /// [`test_job_condition_variants_project_distinct_jsonpath_literals`]
+    /// on the argv-tail axis.
+    #[test]
+    fn test_job_condition_variants_project_distinct_spawn_op_labels() {
+        assert_ne!(
+            JobCondition::Complete.spawn_op_label(),
+            JobCondition::Failed.spawn_op_label(),
         );
     }
 
@@ -431,20 +502,32 @@ mod tests {
         );
     }
 
-    /// Caller shield (positive half): the one pre-lift module that
-    /// housed both sites MUST forward through
-    /// [`kubectl_get_job_condition_status_argv`] at least twice, so a
-    /// migration that dropped a call site outright leaves the
-    /// negative "no raw inline shape" scan trivially satisfied by
-    /// absence but the positive count still fails. Mirrors the
-    /// sibling `every_prelift_module_forwards_through_*` shields the
-    /// crate carries against every other typed argv primitive.
+    /// Caller shield (positive half): the fused
+    /// [`crate::kubectl_probe_job_condition_status::probe_job_condition_status`]
+    /// primitive — the sole post-lift caller of this argv builder —
+    /// MUST forward through [`kubectl_get_job_condition_status_argv`]
+    /// at least once, so a future refactor that dropped the call
+    /// outright leaves the negative "no raw inline shape" scan
+    /// trivially satisfied by absence but the positive count still
+    /// fails. Mirrors the sibling `every_prelift_module_forwards_through_*`
+    /// shields the crate carries against every other typed argv
+    /// primitive.
+    ///
+    /// Pre-lift the two migration-Job-wait sites in
+    /// `cli/src/services/migration_service.rs::wait_for_job` each
+    /// called this argv builder directly (2 sites, 2 direct calls).
+    /// Post-lift both sites route through
+    /// `crate::kubectl_probe_job_condition_status::probe_job_condition_status`,
+    /// which owns the sole direct call to this argv builder from the
+    /// migration-Job-wait pipeline. The `wait_for_job` body no longer
+    /// spells `kubectl_get_job_condition_status_argv(` at all — the
+    /// forward count moved onto the fused probe primitive.
     #[test]
     fn every_prelift_module_forwards_through_kubectl_get_job_condition_status_argv() {
         use std::path::PathBuf;
         let crate_src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
         let expectations: &[(PathBuf, usize)] =
-            &[(crate_src.join("services").join("migration_service.rs"), 2)];
+            &[(crate_src.join("kubectl_probe_job_condition_status.rs"), 1)];
         let needle = "kubectl_get_job_condition_status_argv(";
         for (path, min_count) in expectations {
             let source = std::fs::read_to_string(path)
