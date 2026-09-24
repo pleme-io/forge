@@ -236,6 +236,7 @@ mod prerelease_gate_pass_fail_step;
 mod probe_dump;
 mod probe_verifying;
 mod product_environment_namespace;
+mod product_service_dir_string;
 mod product_service_id;
 mod product_workflow_intro_banner;
 mod prompt_confirm;

@@ -225,9 +225,11 @@ pub async fn execute(
         crate::ui::print_env_scope_open(env_name);
 
         for (i, entry) in entries.iter().enumerate() {
-            let product_dir =
-                crate::config::resolve_product_dir(std::path::Path::new(&repo_root), &product);
-            let service_dir = crate::repo::path_to_string_lossy(&product_dir.join(&entry.path));
+            let service_dir = crate::product_service_dir_string::product_service_dir_string(
+                &repo_root,
+                &product,
+                &entry.path,
+            );
 
             run_forge_subcommand(
                 &crate::commands::orchestrate_release_deploy_only_argv::orchestrate_release_deploy_only_single_env_argv(

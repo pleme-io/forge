@@ -702,9 +702,9 @@ pub async fn product_release(
             let registry_url =
                 DeployConfig::load_service_registry_url(&product, &svc.path, &repo_root)?;
 
-            let product_dir =
-                crate::config::resolve_product_dir(std::path::Path::new(&repo_root), &product);
-            let service_dir = crate::repo::path_to_string_lossy(&product_dir.join(&svc.path));
+            let service_dir = crate::product_service_dir_string::product_service_dir_string(
+                &repo_root, &product, &svc.path,
+            );
 
             // Always call orchestrate-release directly (not via nix run) to avoid
             // re-evaluating the nix derivation which would rebuild the docker image.
