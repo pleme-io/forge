@@ -290,13 +290,13 @@ async fn write_artifact_tags(
             attestation: attestation_info.cloned(),
         };
 
-        let json_path = crate::config::write_artifact_info(&product_dir, &svc.name, &artifact)?;
-
-        modified_files.push(crate::repo::path_to_string_lossy(&json_path));
-        crate::ui::print_step_ok(&format!(
-            "Updated artifact tag in deploy/{}.artifact.json",
-            svc.name
-        ));
+        crate::write_artifact_info_and_ack_step::write_artifact_info_and_ack_step(
+            &product_dir,
+            &svc.name,
+            &artifact,
+            &mut modified_files,
+            crate::write_artifact_info_and_ack_step::ArtifactJsonWriteAck::UpdatedArtifactTag,
+        )?;
     }
 
     if !modified_files.is_empty() {

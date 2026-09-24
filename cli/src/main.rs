@@ -278,6 +278,14 @@ mod workflow_complete_banner;
 // `commands/{deploy, github_runner_ci}.rs::execute` open bodies.
 mod workflow_intro_banner;
 mod workload_field;
+// Fused `write_artifact_info + modified_files.push +
+// print_step_ok(&format!("<verb-phrase> in deploy/{}.artifact.json",
+// <name>))` triad. Consumers:
+// `commands/product_release.rs::write_artifact_tags` (verb-phrase
+// `"Updated artifact tag"`) and `commands/rollback.rs::execute`
+// (verb-phrase `"Swapped tags"`) — the two sibling artifact-json
+// write sites, closed onto a `ArtifactJsonWriteAck` enum.
+mod write_artifact_info_and_ack_step;
 mod zone_id_field;
 
 // New architecture modules

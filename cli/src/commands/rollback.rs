@@ -288,13 +288,13 @@ pub async fn execute(
             attestation: None, // Attestation is not preserved during rollback
         };
 
-        let json_path = crate::config::write_artifact_info(&product_dir, &entry.name, &artifact)?;
-
-        modified_files.push(crate::repo::path_to_string_lossy(&json_path));
-        crate::ui::print_step_ok(&format!(
-            "Swapped tags in deploy/{}.artifact.json",
-            entry.name
-        ));
+        crate::write_artifact_info_and_ack_step::write_artifact_info_and_ack_step(
+            &product_dir,
+            &entry.name,
+            &artifact,
+            &mut modified_files,
+            crate::write_artifact_info_and_ack_step::ArtifactJsonWriteAck::SwappedTags,
+        )?;
     }
 
     // ─── Git commit + push ──────────────────────────────────────────────────
