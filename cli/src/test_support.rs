@@ -1997,21 +1997,25 @@ pub fn assert_source_routes_status_only_spawns_through_run_inherited_status_sync
 /// [`assert_source_routes_status_only_spawns_through_run_inherited_status_sync`]:
 /// every `tokio::process::Command`-driven status-only spawn in `source`
 /// MUST route through [`crate::retry::run_inherited_status`] (the
-/// direct primitive) OR
+/// direct primitive),
 /// [`crate::retry::run_bin_args_inherited_status`] (the
-/// `(bin, args)`-front wrapper), never through a hand-rolled
-/// `.status().await` builder-terminator that drops the exit code from
-/// the operator log line.
+/// `(bin, args)`-front wrapper), or
+/// [`crate::retry::run_bin_args_at_inherited_status`] (the
+/// `(bin, args, cwd)`-front sibling that folds `.current_dir(cwd)` onto
+/// the same envelope), never through a hand-rolled `.status().await`
+/// builder-terminator that drops the exit code from the operator log
+/// line.
 ///
 /// # Arguments
 ///
 /// Same shape as the sync sibling. `spawns_description` names WHICH
 /// async spawns the shield covers (e.g. `"the two `regenerate_compiler`
 /// status-only spawn sites (`bundle lock --update` and `bundix`)"`).
-/// `min_delegations` is the ≥-floor on the SUM of `run_inherited_status(`
-/// and `run_bin_args_inherited_status(` code-line hits — both forms
-/// route through the same [`crate::retry::classify_inherited_status`]
-/// body, so either counts as a valid delegation.
+/// `min_delegations` is the ≥-floor on the SUM of `run_inherited_status(`,
+/// `run_bin_args_inherited_status(`, and
+/// `run_bin_args_at_inherited_status(` code-line hits — all three
+/// forms route through the same [`crate::retry::classify_inherited_status`]
+/// body, so any counts as a valid delegation.
 ///
 /// # What it enforces
 ///
@@ -2025,19 +2029,21 @@ pub fn assert_source_routes_status_only_spawns_through_run_inherited_status_sync
 ///   consumer elsewhere in the module — should one ever land — does
 ///   not false-match this async shield.
 /// - The sum `code_line_hits(body, "run_inherited_status(").len() +
-///   code_line_hits(body, "run_bin_args_inherited_status(").len()`
+///   code_line_hits(body, "run_bin_args_inherited_status(").len() +
+///   code_line_hits(body, "run_bin_args_at_inherited_status(").len()`
 ///   must be at least `min_delegations`. A regression that deletes
 ///   even one delegation cannot leave the negative `.status().await`
-///   scan trivially satisfied by absence — the two halves are
-///   load-bearing together. The two needles are DISJOINT as
-///   substrings: the wrapper form starts
-///   `run_bin_args_inherited_status(` while the direct form is
-///   `run_inherited_status(`, and neither is a substring of the
-///   other (position 4 of the wrapper is `b`, not `i`), so summing
-///   `code_line_hits` counts across both patterns never
-///   double-counts a single call site. Both needles carry the
-///   trailing `(` so neither matches its `_sync(`-suffixed sync
-///   sibling — the async and sync frontiers count independently.
+///   scan trivially satisfied by absence — the three halves are
+///   load-bearing together. The three needles are DISJOINT as
+///   substrings: the `_at_` infix breaks any prefix match between
+///   `run_bin_args_inherited_status(` and
+///   `run_bin_args_at_inherited_status(`, and the direct form
+///   `run_inherited_status(` is not a substring of either wrapper
+///   (both wrappers start with `run_bin_args_`, so position 4 is `b`
+///   not `i`), so summing `code_line_hits` counts across all three
+///   patterns never double-counts a single call site. Every needle
+///   carries the trailing `(` so none matches its `_sync(`-suffixed
+///   sync sibling — the async and sync frontiers count independently.
 ///
 /// # Why one canonical helper
 ///
@@ -2078,6 +2084,18 @@ pub fn assert_source_routes_status_only_spawns_through_run_inherited_status(
 
     let direct = code_line_hits(body, "run_inherited_status(").len();
     let wrapped = code_line_hits(body, "run_bin_args_inherited_status(").len();
+    // `run_bin_args_at_inherited_status(bin, args, cwd, op)` composes the fixed-argv
+    // wrapper's `Command::new(bin).args(args)` build with a `.current_dir(cwd)` scope
+    // then routes through `run_inherited_status`. Adding it as a summed delegation form
+    // closes the async/sync algebra gap opened by its sibling
+    // `run_bin_args_at_inherited_status_sync` on the sync shield above: a future migration
+    // of a shielded async status-only site from `run_inherited_status(cmd, op)` to the
+    // `_at_` wrapper (or from a captured `.output().await` control path onto this
+    // pre-built shape) inherits the same delegation-counted treatment the sync sibling
+    // already grants. The needle `run_bin_args_inherited_status(` is NOT a substring of
+    // `run_bin_args_at_inherited_status(` (the `_at_` infix breaks the match at position 13),
+    // so summing across both patterns never double-counts a single call site.
+    let wrapped_at = code_line_hits(body, "run_bin_args_at_inherited_status(").len();
     // `run_nix_build_under_spinner(cmd, spinner)` in `nix_build_spinner.rs` composes
     // onto `crate::retry::run_inherited_status` internally with the pinned `"nix build"`
     // op-label, so a call to it IS a delegation to the same
@@ -2086,15 +2104,17 @@ pub fn assert_source_routes_status_only_spawns_through_run_inherited_status(
     // counts: a legitimate lift onto the specialized spinner-safe primitive at
     // `commands/{build,github_runner_ci}.rs` reads as a dropped call.
     let under_spinner = code_line_hits(body, "run_nix_build_under_spinner(").len();
-    let delegations = direct + wrapped + under_spinner;
+    let delegations = direct + wrapped + wrapped_at + under_spinner;
     assert!(
         delegations >= min_delegations,
         "{module_path} must route {spawns_description} through \
-         `run_inherited_status`, `run_bin_args_inherited_status`, or \
+         `run_inherited_status`, `run_bin_args_inherited_status`, \
+         `run_bin_args_at_inherited_status`, or \
          `run_nix_build_under_spinner` — found only {delegations} \
          delegation call(s) (direct: {direct}, wrapped: {wrapped}, \
-         under_spinner: {under_spinner}); a dropped call would leave \
-         the negative `.status().await` scan satisfied by absence"
+         wrapped_at: {wrapped_at}, under_spinner: {under_spinner}); \
+         a dropped call would leave the negative `.status().await` \
+         scan satisfied by absence"
     );
 }
 

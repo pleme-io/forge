@@ -464,11 +464,14 @@ pub async fn run_crate2nix(crate2nix_path: &str) -> Result<()> {
 /// (`commands/tool.rs::bump`'s Rust arm — `run_inherited_status_sync(cmd,
 /// "crate2nix generate")?` scoped to the per-tool `dir`).
 pub async fn run_crate2nix_in(crate2nix_path: &str, dir: impl AsRef<Path>) -> Result<()> {
-    let mut cmd = Command::new(crate2nix_path);
-    cmd.args(["generate"]).current_dir(dir.as_ref());
-    crate::retry::run_inherited_status(cmd, "crate2nix generate")
-        .await
-        .context("Failed to regenerate Cargo.nix")?;
+    crate::retry::run_bin_args_at_inherited_status(
+        crate2nix_path,
+        &["generate"],
+        dir.as_ref(),
+        "crate2nix generate",
+    )
+    .await
+    .context("Failed to regenerate Cargo.nix")?;
     Ok(())
 }
 
@@ -585,11 +588,14 @@ pub async fn run_cargo_update(cargo_path: &str) -> Result<()> {
 /// `_in`-scoped runner.
 pub async fn run_cargo_update_in(cargo_path: &str, dir: impl AsRef<Path>) -> Result<()> {
     info!("📦 Updating Cargo.lock...");
-    let mut cmd = Command::new(cargo_path);
-    cmd.args(["update"]).current_dir(dir.as_ref());
-    crate::retry::run_inherited_status(cmd, "cargo update")
-        .await
-        .context("Failed to update Cargo.lock")?;
+    crate::retry::run_bin_args_at_inherited_status(
+        cargo_path,
+        &["update"],
+        dir.as_ref(),
+        "cargo update",
+    )
+    .await
+    .context("Failed to update Cargo.lock")?;
     Ok(())
 }
 

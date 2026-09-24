@@ -86,7 +86,6 @@
 
 use anyhow::{Context, Result};
 use colored::Colorize;
-use tokio::process::Command;
 
 /// The closed set of Rust `cargo test` phases the CLI's
 /// `forge test rust` sub-command drives per service. Each variant
@@ -182,9 +181,12 @@ fn print_rust_test_phase_announce_line(phase: RustTestPhase, service: &str) {
 }
 
 /// The lifted 8-line fused stanza. Emits the phase announce line,
-/// spawns `cargo test <argv>` under the service's crate root via
-/// [`crate::retry::run_inherited_status`] with inherited stdio,
-/// and on success emits [`crate::ui::print_summary_pass`] with the
+/// spawns `cargo test <argv>` under the service's crate root via the
+/// `(bin, args, cwd, op)`-front async wrapper
+/// [`crate::retry::run_bin_args_at_inherited_status`] (which composes
+/// `Command::new(bin).args(args).current_dir(cwd)` and routes through
+/// [`crate::retry::run_inherited_status`] with inherited stdio), and
+/// on success emits [`crate::ui::print_summary_pass`] with the
 /// per-phase label. A non-zero exit propagates as an
 /// [`anyhow::Error`] under [`RustTestPhase::context_msg`], and the
 /// success ack does not fire on the error path.
@@ -192,8 +194,8 @@ fn print_rust_test_phase_announce_line(phase: RustTestPhase, service: &str) {
 /// `cargo` is the resolved `CARGO` binary path (both pre-lift sites
 /// read it through `crate::repo::get_tool_path("CARGO", "cargo")`);
 /// `service` is the service-name display body threaded through the
-/// announce line; `service_dir` is the working directory
-/// [`Command::current_dir`] scopes the spawn to.
+/// announce line; `service_dir` is the working directory scoped onto
+/// the spawn via the wrapper's `.current_dir(cwd)` fold.
 pub async fn announce_and_run_rust_test_phase(
     cargo: &str,
     service: &str,
@@ -202,11 +204,14 @@ pub async fn announce_and_run_rust_test_phase(
 ) -> Result<()> {
     print_rust_test_phase_announce_line(phase, service);
 
-    let mut cmd = Command::new(cargo);
-    cmd.args(phase.cargo_argv()).current_dir(service_dir);
-    crate::retry::run_inherited_status(cmd, phase.op_label())
-        .await
-        .context(phase.context_msg())?;
+    crate::retry::run_bin_args_at_inherited_status(
+        cargo,
+        phase.cargo_argv(),
+        service_dir,
+        phase.op_label(),
+    )
+    .await
+    .context(phase.context_msg())?;
 
     crate::ui::print_summary_pass(&phase.summary_pass_label());
     Ok(())
