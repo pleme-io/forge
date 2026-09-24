@@ -556,34 +556,22 @@ pub async fn product_release(
         let mut build_atts = Vec::new();
         let mut image_atts = Vec::new();
         for svc in &product_config.services {
-            match attestation::compute_build_attestation(&svc.name, repo_path).await {
-                Ok(att) => {
-                    build_atts.push(att);
-                    crate::ui::print_step_ok(&format!("Build attestation: {}", svc.name.cyan()));
-                }
-                Err(e) => {
-                    crate::ui::print_nonfatal_warn(
-                        &format!("Build attestation for {}", svc.name),
-                        &e,
-                    );
-                }
-            }
+            crate::attestation_compute_outcome_ack::record_attestation_compute_outcome(
+                crate::attestation_compute_outcome_ack::AttestationComputeKind::Build,
+                &svc.name,
+                attestation::compute_build_attestation(&svc.name, repo_path).await,
+                &mut build_atts,
+            );
 
             let registry_url =
                 DeployConfig::load_service_registry_url(&product, &svc.path, &repo_root)?;
             let image_tag = format_amd64_release_tag(&git_sha);
-            match attestation::compute_image_attestation(&registry_url, &image_tag).await {
-                Ok(att) => {
-                    image_atts.push(att);
-                    crate::ui::print_step_ok(&format!("Image attestation: {}", svc.name.cyan()));
-                }
-                Err(e) => {
-                    crate::ui::print_nonfatal_warn(
-                        &format!("Image attestation for {}", svc.name),
-                        &e,
-                    );
-                }
-            }
+            crate::attestation_compute_outcome_ack::record_attestation_compute_outcome(
+                crate::attestation_compute_outcome_ack::AttestationComputeKind::Image,
+                &svc.name,
+                attestation::compute_image_attestation(&registry_url, &image_tag).await,
+                &mut image_atts,
+            );
         }
 
         let certification = attestation::compose_product_certification(

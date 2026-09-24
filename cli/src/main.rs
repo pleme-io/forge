@@ -68,6 +68,18 @@ mod version;
 
 // Legacy modules (to be migrated)
 mod advisory_warning;
+// Attestation-compute outcome ack primitive — matches a `Result<T>`
+// from a `compute_<kind>_attestation` async and either pushes the
+// accepted attestation into the caller's accumulator + prints a
+// `"<Kind> attestation: <name>.cyan()"` step-ok, OR emits a
+// `"<Kind> attestation for <name>"` nonfatal warn on the failure arm.
+// Callers: `commands/product_release.rs`'s Phase 1.5 attestation loop
+// — two sibling stanzas (Build compute + Image compute) forward
+// through it. Generic over `T` (BuildAttestation / ImageAttestation)
+// so the primitive stays outside the `attestation` feature-gate while
+// its callers remain gated. Silences the resulting no-caller
+// dead-code warning under `#[cfg(not(feature = "attestation"))]`.
+mod attestation_compute_outcome_ack;
 mod attic_cache_alias;
 mod attic_configure_step;
 mod attic_login_argv;
