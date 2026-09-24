@@ -152,6 +152,13 @@ mod docker_tag_argv;
 // `commands/e2e.rs::{print_image_info (stdout sink),
 // print_failure_diagnostics (stderr sink)}`.
 mod e2e_docker_images_backend_or_web_line_filter;
+// Typed pair-probe primitive for the E2E `{backend, web}` Docker
+// image pair — the `let backend_exists = check_image_exists("backend")
+// <sink>; let <second>_exists = check_image_exists("web")<sink>;`
+// stanza collapsed onto one typed `E2eImagePairExistence { backend,
+// web }` construction. Callers: `commands/e2e.rs::{run_test_pyramid,
+// prepare_e2e_images, run_e2e_tests, run_e2e_tests_smart}`.
+mod e2e_image_pair_existence;
 // Per-env `● / ○` activation-status line primitive — the closed
 // `EnvActivationStatus {Active, Inactive}` dichotomy that owns the
 // correlated glyph / glyph-color / env-color / label quartet the

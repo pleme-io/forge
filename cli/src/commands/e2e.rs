@@ -346,10 +346,9 @@ pub fn run_test_pyramid(
         ui::print_header("Phase 4: E2E Tests");
 
         // Check if images exist, prepare if not
-        let backend_exists = check_image_exists("backend").unwrap_or(false);
-        let frontend_exists = check_image_exists("web").unwrap_or(false);
+        let existence = crate::e2e_image_pair_existence::probe_e2e_image_pair_existence_lossy();
 
-        if !backend_exists || !frontend_exists {
+        if existence.any_missing() {
             ui::print_warning("E2E images not found. Preparing them first...");
             if let Err(e) = prepare_e2e_images(Some(repo_root.clone()), false, false, false) {
                 ui::print_warning(&format!("Failed to prepare E2E images: {}", e));
@@ -568,10 +567,9 @@ pub fn prepare_e2e_images(
 
     // Step 2: Check if images already exist (unless force rebuild)
     if !force {
-        let backend_exists = check_image_exists("backend")?;
-        let frontend_exists = check_image_exists("web")?;
+        let existence = crate::e2e_image_pair_existence::probe_e2e_image_pair_existence()?;
 
-        if backend_exists && frontend_exists {
+        if existence.both_present() {
             ui::print_success("E2E images already exist. Use --force to rebuild.");
             println!();
             print_image_info()?;
@@ -623,10 +621,9 @@ pub fn run_e2e_tests(
     verify_docker()?;
 
     // Check if images are available
-    let backend_exists = check_image_exists("backend")?;
-    let frontend_exists = check_image_exists("web")?;
+    let existence = crate::e2e_image_pair_existence::probe_e2e_image_pair_existence()?;
 
-    if !backend_exists || !frontend_exists {
+    if existence.any_missing() {
         ui::print_warning("E2E images not found. Building them first...");
         println!();
         prepare_e2e_images(Some(repo_root.clone()), false, false, false)?;
@@ -1197,10 +1194,9 @@ pub fn run_e2e_tests_smart(
     ensure_docker_running()?;
 
     // Check if images exist, build if missing (or forced)
-    let backend_exists = check_image_exists("backend").unwrap_or(false);
-    let web_exists = check_image_exists("web").unwrap_or(false);
+    let existence = crate::e2e_image_pair_existence::probe_e2e_image_pair_existence_lossy();
 
-    if force_rebuild || !backend_exists || !web_exists {
+    if force_rebuild || existence.any_missing() {
         if force_rebuild {
             ui::print_info("Force rebuilding Docker images...");
         } else {
@@ -1210,8 +1206,8 @@ pub fn run_e2e_tests_smart(
 
         prepare_e2e_images(
             Some(repo_root.clone()),
-            backend_exists && !force_rebuild, // skip if exists and not forcing
-            web_exists && !force_rebuild,
+            existence.backend && !force_rebuild, // skip if exists and not forcing
+            existence.web && !force_rebuild,
             force_rebuild,
         )?;
         println!();
