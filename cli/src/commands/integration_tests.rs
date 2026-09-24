@@ -1436,31 +1436,22 @@ pub async fn execute_pre_deployment_tests(
             }
         };
 
-        // Print result
-        if result.success {
-            let test_info = result
-                .test_counts
-                .as_ref()
-                .map(|c| format!(" [{} passed]", c.passed))
-                .unwrap_or_default();
-            crate::ui::print_step_pass(&format!(
-                "{} - {:.2}s{}",
-                suite.name,
-                result.duration.as_secs_f64(),
-                test_info.bright_white()
-            ));
+        // Print result — the pass/fail branch dispatch and the per-arm
+        // counts fragment both project through the closed
+        // `PreDeploymentTestSuiteOutcome` variant so a caller can no
+        // longer flip one without the other.
+        let outcome = if result.success {
+            crate::pre_deployment_test_suite_outcome_step::PreDeploymentTestSuiteOutcome::Passed
         } else {
-            let test_info = result
-                .test_counts
-                .as_ref()
-                .map(|c| format!(" [{} passed, {} failed]", c.passed, c.failed))
-                .unwrap_or_default();
-            crate::ui::print_step_failure(&format!(
-                "{} - {:.2}s{}",
-                suite.name,
-                result.duration.as_secs_f64(),
-                test_info.bright_white()
-            ));
+            crate::pre_deployment_test_suite_outcome_step::PreDeploymentTestSuiteOutcome::Failed
+        };
+        crate::pre_deployment_test_suite_outcome_step::print_pre_deployment_test_suite_outcome_step(
+            outcome,
+            &suite.name,
+            result.duration,
+            result.test_counts.as_ref(),
+        );
+        if !result.success {
             // Print output for failed tests
             if !result.output.is_empty() {
                 crate::ui::print_light_rule(

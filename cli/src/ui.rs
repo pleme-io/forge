@@ -9943,14 +9943,18 @@ mod tests {
                 "commands/post_deploy_verification.rs",
             ),
             (
-                include_str!("commands/integration_tests.rs"),
-                "commands/integration_tests.rs",
-            ),
-            (
                 include_str!("commands/frontend_validation.rs"),
                 "commands/frontend_validation.rs",
             ),
         ];
+        // `commands/integration_tests.rs` no longer carries any inline
+        // `"❌".red()` grammar: the sole pre-lift consumer (the
+        // `execute_pre_deployment_test_suite` fail arm) routes through
+        // `crate::pre_deployment_test_suite_outcome_step::
+        // print_pre_deployment_test_suite_outcome_step`, which itself
+        // forwards through `crate::ui::print_step_failure(` on the
+        // `Failed` variant. The delegation shield on that sibling
+        // primitive pins the forwarding contract.
         // Non-step-failure sites that carry `"❌".red()` under a
         // different grammar (a gate-summary label header, a tracing
         // logger call). Each is anchored by a substring unique to that
@@ -10495,10 +10499,14 @@ mod tests {
                 include_str!("commands/frontend_validation.rs"),
                 "commands/frontend_validation.rs",
             ),
-            (
-                include_str!("commands/integration_tests.rs"),
-                "commands/integration_tests.rs",
-            ),
+            // `commands/integration_tests.rs` no longer carries any
+            // inline `"✅".green()` or `"   ✅ "`-`println!` grammar:
+            // the sole pre-lift consumer (the
+            // `execute_pre_deployment_test_suite` pass arm) routes
+            // through `crate::pre_deployment_test_suite_outcome_step::
+            // print_pre_deployment_test_suite_outcome_step`, which
+            // itself forwards through `crate::ui::print_step_pass(` on
+            // the `Passed` variant.
             (
                 include_str!("commands/rust_service.rs"),
                 "commands/rust_service.rs",

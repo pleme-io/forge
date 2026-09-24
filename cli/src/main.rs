@@ -228,6 +228,15 @@ mod post_deploy_endpoint_transport_failure;
 mod post_deploy_gate_preamble;
 mod post_deploy_graphql_query;
 mod post_deploy_http_client;
+// Typed primitive: the fused `format!("{} - {:.2}s{}", suite.name,
+// result.duration.as_secs_f64(), test_info.bright_white())`
+// message + `print_step_{pass|failure}` dispatch pair for the two
+// sibling pre-deployment test-suite outcome stanzas in
+// `commands/integration_tests.rs::execute_pre_deployment_test_suite`.
+// The two divergences (per-arm counts template, per-arm step-print
+// dispatch) collapse onto one `PreDeploymentTestSuiteOutcome`
+// variant so a caller can no longer flip one without the other.
+mod pre_deployment_test_suite_outcome_step;
 // Typed primitive: the fused `stderr.lines().take(10)` head walk +
 // `line.contains(<KW>)` keyword-any-match predicate + diagnostic-line
 // writer dispatch grammar for the two sibling prerelease cargo-gate
