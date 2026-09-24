@@ -439,10 +439,11 @@ pub async fn verify_smoke_queries(
             Ok((response, latency_ms)) => {
                 if !response.status().is_success() {
                     let status = response.status();
-                    crate::ui::print_step_failure(&format!(
-                        "{}: HTTP {} ({}ms)",
-                        smoke.name, status, latency_ms
-                    ));
+                    crate::smoke_query_step_failure_with_latency::print_smoke_query_step_failure_with_latency(
+                        &smoke.name,
+                        &format!("HTTP {}", status),
+                        latency_ms,
+                    );
                     crate::smoke_query_failure_record::record_smoke_query_failure(
                         &mut results,
                         &mut all_passed,
@@ -481,10 +482,11 @@ pub async fn verify_smoke_queries(
                                     smoke.expect_field
                                 )
                             };
-                            crate::ui::print_step_failure(&format!(
-                                "{}: {} ({}ms)",
-                                smoke.name, error_msg, latency_ms
-                            ));
+                            crate::smoke_query_step_failure_with_latency::print_smoke_query_step_failure_with_latency(
+                                &smoke.name,
+                                &error_msg,
+                                latency_ms,
+                            );
                             crate::smoke_query_failure_record::record_smoke_query_failure(
                                 &mut results,
                                 &mut all_passed,
@@ -495,10 +497,11 @@ pub async fn verify_smoke_queries(
                         }
                     }
                     Err(e) => {
-                        crate::ui::print_step_failure(&format!(
-                            "{}: Failed to parse response: {} ({}ms)",
-                            smoke.name, e, latency_ms
-                        ));
+                        crate::smoke_query_step_failure_with_latency::print_smoke_query_step_failure_with_latency(
+                            &smoke.name,
+                            &format!("Failed to parse response: {}", e),
+                            latency_ms,
+                        );
                         crate::smoke_query_failure_record::record_smoke_query_failure(
                             &mut results,
                             &mut all_passed,

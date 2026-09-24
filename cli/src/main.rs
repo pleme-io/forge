@@ -245,6 +245,12 @@ mod short_sha_tagging_preamble;
 mod skip_build_image_path;
 mod skipping_step;
 mod smoke_query_failure_record;
+// Smoke-query name-prefixed, latency-suffixed step-failure envelope.
+// Owns the three sibling `crate::ui::print_step_failure(&format!("{}:
+// <detail> ({}ms)", smoke.name, ..., latency_ms))` stanzas inside
+// `commands/post_deploy_verification.rs::verify_smoke_queries`:
+// HTTP non-2xx, missing/mismatched data field, JSON parse failure.
+mod smoke_query_step_failure_with_latency;
 mod stage_completion_ack;
 // Canonical `print_step_failure(&msg_with_count_noun_secs_1(<label>,
 // <count>, <noun>, duration))` step-failure fusion. Consumers:
