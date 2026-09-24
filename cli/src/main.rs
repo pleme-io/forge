@@ -350,6 +350,15 @@ mod workload_field;
 // (verb-phrase `"Swapped tags"`) — the two sibling artifact-json
 // write sites, closed onto a `ArtifactJsonWriteAck` enum.
 mod write_artifact_info_and_ack_step;
+// "Available top-level keys, comma-joined, `none`" primitive — the
+// closed six-line composition that owns the deploy.yaml miss-diagnostic
+// "Available <thing>: <listing>" tail. Consumers:
+// `commands/rust_service.rs::{resolve_namespace_for_env,
+// get_manifest_path_for_env}` — the two pre-lift sites each spelled
+// the `.and_then(|_| _.as_mapping()).map(|m| m.keys().filter_map(|k|
+// k.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_else(||
+// "none".to_string())` stanza verbatim.
+mod yaml_top_level_key_listing;
 mod zone_id_field;
 
 // New architecture modules

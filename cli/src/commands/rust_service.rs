@@ -1048,14 +1048,10 @@ fn resolve_namespace_for_env(env: &str, namespace_override: Option<&str>) -> Res
              Available environments: {}",
                 env,
                 resolved_env,
-                yaml.get("environments")
-                    .and_then(|e| e.as_mapping())
-                    .map(|m| m
-                        .keys()
-                        .filter_map(|k| k.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", "))
-                    .unwrap_or_else(|| "none".to_string())
+                crate::yaml_top_level_key_listing::joined_top_level_string_keys_or_none(
+                    &yaml,
+                    "environments"
+                )
             )
         })?;
 
@@ -1080,14 +1076,10 @@ fn get_manifest_path_for_env(env: &str) -> Result<String> {
              Available manifests: {}",
                 env,
                 resolved_env,
-                yaml.get("manifests")
-                    .and_then(|m| m.as_mapping())
-                    .map(|m| m
-                        .keys()
-                        .filter_map(|k| k.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", "))
-                    .unwrap_or_else(|| "none".to_string())
+                crate::yaml_top_level_key_listing::joined_top_level_string_keys_or_none(
+                    &yaml,
+                    "manifests"
+                )
             )
         })?;
 
