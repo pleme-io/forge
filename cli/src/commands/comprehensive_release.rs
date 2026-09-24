@@ -807,33 +807,32 @@ pub async fn execute(
         "║  ✅ Comprehensive Release Complete!                           ║",
     );
     println!("Summary:");
-    crate::ui::print_bullet_item(&format!(
-        "Unit tests: {}",
-        if skip_unit_tests { "SKIPPED" } else { "PASSED" }
-    ));
-    crate::ui::print_bullet_item(&format!(
-        "Integration tests: {}",
-        if skip_integration_tests || compose_file.is_none() {
-            "SKIPPED"
-        } else {
-            "PASSED"
-        }
-    ));
-    crate::ui::print_bullet_item(&format!(
-        "Docker build: {}",
-        if skip_build { "SKIPPED" } else { "SUCCESS" }
-    ));
-
-    let push_status = if skip_push {
-        "SKIPPED".to_string()
-    } else {
-        format!("SUCCESS (tag: {})", git_sha)
-    };
-    crate::ui::print_bullet_item(&format!("Registry push: {}", push_status));
-    crate::ui::print_bullet_item(&format!(
-        "Kubernetes deploy: {}",
-        if skip_deploy { "SKIPPED" } else { "SUCCESS" }
-    ));
+    crate::skip_or_success_summary_bullet::print_skip_or_success_summary_bullet(
+        "Unit tests",
+        skip_unit_tests,
+        "PASSED",
+    );
+    crate::skip_or_success_summary_bullet::print_skip_or_success_summary_bullet(
+        "Integration tests",
+        skip_integration_tests || compose_file.is_none(),
+        "PASSED",
+    );
+    crate::skip_or_success_summary_bullet::print_skip_or_success_summary_bullet(
+        "Docker build",
+        skip_build,
+        "SUCCESS",
+    );
+    let push_success = format!("SUCCESS (tag: {})", git_sha);
+    crate::skip_or_success_summary_bullet::print_skip_or_success_summary_bullet(
+        "Registry push",
+        skip_push,
+        &push_success,
+    );
+    crate::skip_or_success_summary_bullet::print_skip_or_success_summary_bullet(
+        "Kubernetes deploy",
+        skip_deploy,
+        "SUCCESS",
+    );
     println!();
     println!("Service {} is now deployed to {}", service_name, namespace);
     println!();

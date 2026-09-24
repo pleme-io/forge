@@ -12590,11 +12590,22 @@ mod tests {
                 true,
                 7,
             ),
+            // comprehensive_release.rs was 5 pre-lift; the SUMMARY-section
+            // lift onto
+            // `crate::skip_or_success_summary_bullet::print_skip_or_success_summary_bullet`
+            // folded all five sibling
+            // `print_bullet_item(&format!("<label>: {}", if <skip> {
+            // "SKIPPED" } else { <success> }))` stanzas onto that
+            // typed primitive (which emits through `write_bullet_item`
+            // directly, not `print_bullet_item`), dropping the forward
+            // hits from 5 to 0. The re-inline shield below (
+            // `!line.contains("\"  • ")`) still trips on any regression
+            // that reopens the raw two-space bullet stanza here.
             (
                 include_str!("commands/comprehensive_release.rs"),
                 "commands/comprehensive_release.rs",
                 true,
-                5,
+                0,
             ),
             (
                 include_str!("commands/deploy.rs"),

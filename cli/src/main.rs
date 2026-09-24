@@ -273,6 +273,15 @@ mod short_sha_tagging_preamble;
 // `commands/bootstrap.rs::push_single` and `commands/pangea.rs::push_single`
 // delegate through it so the wording of the error message lives at ONE line.
 mod skip_build_image_path;
+// Typed primitive: comprehensive-release SUMMARY-section
+// `"  • <label>: {SKIPPED|<success_status>}\n"` bullet. Lifts the
+// five sibling `print_bullet_item(&format!("<label>: {}", if <skip>
+// { "SKIPPED" } else { <success> }))` stanzas in
+// `commands/comprehensive_release.rs::execute` onto ONE construction
+// surface, so the `SKIPPED` sentinel lives at exactly one line and a
+// future summary bullet (a new phase's postamble) inherits the same
+// rendering by construction.
+mod skip_or_success_summary_bullet;
 mod skipping_step;
 mod smoke_query_failure_record;
 // Smoke-query name-prefixed, latency-suffixed step-failure envelope.
