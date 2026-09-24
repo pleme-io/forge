@@ -302,33 +302,24 @@ pub fn run_test_pyramid(
     // Phase 1: Backend Unit Tests
     if !skip_unit {
         ui::print_header("Phase 1: Backend Unit Tests");
-        let result = run_backend_unit_tests(&backend_dir, filter.as_deref());
-        if result.is_err() {
-            all_passed = false;
-            if fail_fast {
-                return result;
-            }
-            ui::print_error("Backend unit tests failed");
-        } else {
-            ui::print_success("Backend unit tests passed");
-        }
+        crate::commands::test_pyramid_phase_outcome::record_test_pyramid_phase_outcome(
+            run_backend_unit_tests(&backend_dir, filter.as_deref()),
+            crate::commands::test_pyramid_phase_outcome::TestPyramidPhase::BackendUnitTests,
+            &mut all_passed,
+            fail_fast,
+        )?;
         println!();
     }
 
     // Phase 2: Frontend Unit Tests
     if !skip_unit {
         ui::print_header("Phase 2: Frontend Unit Tests");
-        let result =
-            run_frontend_unit_tests(&web_dir, filter.as_deref(), report, report_path.as_deref());
-        if result.is_err() {
-            all_passed = false;
-            if fail_fast {
-                return result;
-            }
-            ui::print_error("Frontend unit tests failed");
-        } else {
-            ui::print_success("Frontend unit tests passed");
-        }
+        crate::commands::test_pyramid_phase_outcome::record_test_pyramid_phase_outcome(
+            run_frontend_unit_tests(&web_dir, filter.as_deref(), report, report_path.as_deref()),
+            crate::commands::test_pyramid_phase_outcome::TestPyramidPhase::FrontendUnitTests,
+            &mut all_passed,
+            fail_fast,
+        )?;
         println!();
     }
 
@@ -340,16 +331,12 @@ pub fn run_test_pyramid(
         if let Err(e) = verify_docker() {
             ui::print_warning(&format!("Skipping integration tests: {}", e));
         } else {
-            let result = run_backend_integration_tests(&backend_dir, filter.as_deref());
-            if result.is_err() {
-                all_passed = false;
-                if fail_fast {
-                    return result;
-                }
-                ui::print_error("Backend integration tests failed");
-            } else {
-                ui::print_success("Backend integration tests passed");
-            }
+            crate::commands::test_pyramid_phase_outcome::record_test_pyramid_phase_outcome(
+                run_backend_integration_tests(&backend_dir, filter.as_deref()),
+                crate::commands::test_pyramid_phase_outcome::TestPyramidPhase::BackendIntegrationTests,
+                &mut all_passed,
+                fail_fast,
+            )?;
         }
         println!();
     }
@@ -368,28 +355,20 @@ pub fn run_test_pyramid(
                 ui::print_warning(&format!("Failed to prepare E2E images: {}", e));
                 ui::print_info("Skipping E2E tests");
             } else {
-                let result = run_e2e_tests(Some(repo_root.clone()), true, filter.clone());
-                if result.is_err() {
-                    all_passed = false;
-                    if fail_fast {
-                        return result;
-                    }
-                    ui::print_error("E2E tests failed");
-                } else {
-                    ui::print_success("E2E tests passed");
-                }
+                crate::commands::test_pyramid_phase_outcome::record_test_pyramid_phase_outcome(
+                    run_e2e_tests(Some(repo_root.clone()), true, filter.clone()),
+                    crate::commands::test_pyramid_phase_outcome::TestPyramidPhase::E2eTests,
+                    &mut all_passed,
+                    fail_fast,
+                )?;
             }
         } else {
-            let result = run_e2e_tests(Some(repo_root.clone()), true, filter.clone());
-            if result.is_err() {
-                all_passed = false;
-                if fail_fast {
-                    return result;
-                }
-                ui::print_error("E2E tests failed");
-            } else {
-                ui::print_success("E2E tests passed");
-            }
+            crate::commands::test_pyramid_phase_outcome::record_test_pyramid_phase_outcome(
+                run_e2e_tests(Some(repo_root.clone()), true, filter.clone()),
+                crate::commands::test_pyramid_phase_outcome::TestPyramidPhase::E2eTests,
+                &mut all_passed,
+                fail_fast,
+            )?;
         }
         println!();
     }
