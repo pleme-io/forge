@@ -58,12 +58,12 @@ pub async fn release(
 
     // Step 3: Update primary cluster kustomization.yaml images[] overlay
     crate::step_header::announce_step_header(2, 4, "Update primary cluster kustomization");
-    update_kustomization_image(&primary_kustomization, &registry, &new_tag).await?;
+    update_kustomization_image(&primary_kustomization, &new_tag).await?;
     println!();
 
     // Step 4: Update secondary cluster kustomization.yaml images[] overlay
     crate::step_header::announce_step_header(3, 4, "Update secondary cluster kustomization");
-    update_kustomization_image(&secondary_kustomization, &registry, &new_tag).await?;
+    update_kustomization_image(&secondary_kustomization, &new_tag).await?;
     println!();
 
     // Step 5: Commit and push
@@ -86,63 +86,26 @@ pub async fn release(
 
 /// Update kustomization.yaml images[] overlay for kenshi
 ///
-/// Finds the kenshi image entry and updates the newTag.
-async fn update_kustomization_image(
-    kustomization_path: &str,
-    registry: &str,
-    new_tag: &str,
-) -> Result<()> {
-    let (path, content) =
-        crate::commands::kustomization_edit::open_for_update(kustomization_path).await?;
-
-    let mut updated = false;
-    let mut new_content = String::new();
-    let mut in_kenshi_image = false;
-
-    for line in content.lines() {
-        // Track if we're in the kenshi image block (but not kenshi-agent)
-        if line.contains("name:") && line.contains("kenshi") && !line.contains("kenshi-agent") {
-            in_kenshi_image = true;
-        }
-        // Exit the image block when we hit another image entry
-        if in_kenshi_image && line.trim().starts_with("- name:") && !line.contains(registry) {
-            in_kenshi_image = false;
-        }
-
-        // Update newTag within the kenshi image block. The
-        // indent-preserving `{indent}newTag: {new_tag}\n` splice is
-        // shared with the three sibling per-line splice sites (the
-        // kenshi-agent images[] pass, the nix-builder images[] pass,
-        // and the `commands/builder_pool_edit.rs::
-        // splice_builder_pool_field` `{agentImage,builderImage}: <img>`
-        // splice) via the pure `crate::repo::indent_preserving_kv_line`
-        // primitive, so a future refinement of the indent-computation
-        // or per-line YAML shape lands at ONE body across the four
-        // sibling flows rather than at each drifted call site.
-        if in_kenshi_image && line.contains("newTag:") {
-            new_content.push_str(&crate::repo::indent_preserving_kv_line(
-                line, "newTag", new_tag,
-            ));
-            updated = true;
-            in_kenshi_image = false; // Done with this block
-            crate::info_updated_field!("images[] newTag", new_tag);
-        } else {
-            new_content.push_str(line);
-            new_content.push('\n');
-        }
-    }
-
-    if !updated {
-        anyhow::bail!(
-            "No kenshi entry found in images[] in {}",
-            kustomization_path
-        );
-    }
-
-    crate::commands::kustomization_edit::finalize_and_announce(
-        path,
-        &new_content,
-        "Kustomization updated",
+/// Finds the kenshi image entry and updates the newTag. The walk +
+/// enter/exit + splice + emit + bail + finalize sequence rides the
+/// fused `commands::kustomization_edit::splice_first_images_new_tag`
+/// primitive — sibling of the `commands/nix_builder.rs::
+/// update_kustomization_image` flow and of the pure-transform
+/// `splice_first_images_new_tag_content` half the
+/// `commands/kenshi_agent.rs::update_kustomization_image` interleaved
+/// flow shares. The per-site predicate below rejects the adjacent
+/// `kenshi-agent` overlay by construction; the primitive threads it
+/// through both the enter and exit arms so a `- name: ghcr.io/…/kenshi-
+/// agent` line coherently exits the target block rather than being
+/// held inside by a registry-substring exit predicate that the pre-lift
+/// stanza carried latently.
+async fn update_kustomization_image(kustomization_path: &str, new_tag: &str) -> Result<()> {
+    crate::commands::kustomization_edit::splice_first_images_new_tag(
+        kustomization_path,
+        |line| line.contains("kenshi") && !line.contains("kenshi-agent"),
+        new_tag,
+        "images[] newTag",
+        "kenshi",
     )
     .await
 }

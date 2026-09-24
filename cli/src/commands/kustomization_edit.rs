@@ -202,6 +202,135 @@ pub async fn finalize_and_announce(
     Ok(())
 }
 
+/// Splice the `newTag:` value of the FIRST `images[]` entry whose `name:`
+/// line satisfies `image_name_line_matches`, returning the transformed
+/// content and whether any splice happened.
+///
+/// Walks `content` line-by-line: enters the target block on any line
+/// containing `name:` AND satisfying the predicate; exits on the next
+/// line whose trimmed prefix is `- name:` and which does NOT satisfy the
+/// predicate; splices `newTag:` within the target block via
+/// [`crate::repo::indent_preserving_kv_line`] so the pre-lift
+/// `{indent}newTag: {new_tag}\n` byte shape lands at ONE body. Every
+/// non-splice line is emitted verbatim with a `\n` terminator, matching
+/// the pre-lift `.lines()`-driven passthrough shape.
+///
+/// # Consolidated pre-lift stanza
+///
+/// Fusion primitive over the pre-lift `for line in content.lines() { …
+/// in_<block>_image toggle + newTag splice + passthrough … }` walk that
+/// three sibling `commands/{kenshi,kenshi_agent,nix_builder}.rs::
+/// update_kustomization_image` bodies each spelled inline (~30 lines
+/// each, verbatim modulo the per-site enter/exit predicate) before this
+/// module owned it. The three pre-lift openers
+/// (`let mut in_kenshi_image = false;`,
+/// `let mut in_kenshi_agent_image = false;`,
+/// `let mut in_target_image = false;`) collapse onto the single
+/// `in_target_image` flag inside this body.
+///
+/// # Predicate is called for both enter and exit
+///
+/// Pre-lift `commands/kenshi.rs` used
+/// `line.contains("kenshi") && !line.contains("kenshi-agent")` on the
+/// enter arm but `!line.contains(registry)` on the exit arm; the two
+/// arms could disagree on a `- name: ghcr.io/…/kenshi-agent` line (the
+/// enter predicate rejects it, but the exit predicate would ALSO reject
+/// leaving because the line contains the `ghcr.io/…/kenshi` registry
+/// substring). This body threads ONE predicate through both arms so a
+/// caller's enter and exit stay coherent by construction — a defect the
+/// pre-lift kenshi flow carried latently and this lift removes. On real
+/// overlay inputs (a single `kenshi` image and no adjacent
+/// `kenshi-agent` block sharing the same file) the byte-for-byte output
+/// is identical.
+///
+/// # Sibling per-line splice
+///
+/// The `newTag:` splice rides [`crate::repo::indent_preserving_kv_line`]
+/// — the same primitive the sibling
+/// `commands/builder_pool_edit::splice_builder_pool_field` uses for its
+/// `agentImage:` / `builderImage:` YAML field splice — so a future
+/// refinement of the indent-computation or per-line YAML shape lands at
+/// ONE body across the four sibling flows.
+pub fn splice_first_images_new_tag_content<F: Fn(&str) -> bool>(
+    content: &str,
+    image_name_line_matches: F,
+    new_tag: &str,
+) -> (String, bool) {
+    let mut new_content = String::new();
+    let mut updated = false;
+    let mut in_target_image = false;
+
+    for line in content.lines() {
+        if line.contains("name:") && image_name_line_matches(line) {
+            in_target_image = true;
+        }
+        if in_target_image && line.trim().starts_with("- name:") && !image_name_line_matches(line) {
+            in_target_image = false;
+        }
+
+        if in_target_image && line.contains("newTag:") {
+            new_content.push_str(&crate::repo::indent_preserving_kv_line(
+                line, "newTag", new_tag,
+            ));
+            updated = true;
+        } else {
+            new_content.push_str(line);
+            new_content.push('\n');
+        }
+    }
+
+    (new_content, updated)
+}
+
+/// Open a kustomization overlay, splice the FIRST `images[]` entry's
+/// `newTag:` matching `image_name_line_matches`, emit
+/// [`crate::info_updated_field!`] with `updated_field_label` on splice,
+/// bail on miss with `"No <missing_target_label> entry found in images[]
+/// in <path>"`, and finalize + announce the write.
+///
+/// # Consolidated pre-lift stanza
+///
+/// Fusion primitive over the pre-lift `open_for_update + walk + emit +
+/// bail-or-finalize` closing sequence that
+/// `commands/{kenshi,nix_builder}.rs::update_kustomization_image` each
+/// spelled inline. The sibling
+/// `commands/kenshi_agent.rs::update_kustomization_image` reaches for
+/// only the pure [`splice_first_images_new_tag_content`] transform
+/// because it interleaves an AGENT_IMAGE env-var splice into the same
+/// open→finalize span and its bail phrase names both branches.
+///
+/// # Canonicalized miss envelope
+///
+/// The unified miss envelope pins the operator-facing miss line at ONE
+/// grammar across kenshi and nix-builder. The pre-lift nix-builder
+/// stanza rendered `"No images[] entry found for <registry> in <path>"`
+/// with the same semantic content in a different word order; the
+/// unification here means a future refinement (a
+/// `next-step ls {path}` suggestion, a typed
+/// `KustomizationImageMissing { path, target }` variant) reaches both
+/// consumers by construction.
+pub async fn splice_first_images_new_tag<F: Fn(&str) -> bool>(
+    kustomization_path: &str,
+    image_name_line_matches: F,
+    new_tag: &str,
+    updated_field_label: &str,
+    missing_target_label: &str,
+) -> Result<()> {
+    let (path, content) = open_for_update(kustomization_path).await?;
+    let (new_content, updated) =
+        splice_first_images_new_tag_content(&content, image_name_line_matches, new_tag);
+    if updated {
+        crate::info_updated_field!(updated_field_label, new_tag);
+    } else {
+        anyhow::bail!(
+            "No {} entry found in images[] in {}",
+            missing_target_label,
+            kustomization_path
+        );
+    }
+    finalize_and_announce(path, &new_content, "Kustomization updated").await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,12 +629,16 @@ mod tests {
         let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("src")
             .join("commands");
-        // (module basename, minimum forward count from the pre-lift census)
-        let expectations: &[(&str, usize)] = &[
-            ("kenshi.rs", 1),
-            ("kenshi_agent.rs", 1),
-            ("nix_builder.rs", 2),
-        ];
+        // (module basename, minimum forward count from the current-tree
+        // census). kenshi.rs and nix_builder.rs::update_kustomization_
+        // image both migrated onto the fused `splice_first_images_new_
+        // tag` primitive, which owns the finalize forward inside this
+        // module — the direct forwards from those two call sites are
+        // now subsumed there. kenshi_agent.rs still finalizes directly
+        // because it interleaves an AGENT_IMAGE env-var splice into
+        // the same open→finalize span. nix_builder.rs keeps one direct
+        // forward from `update_kenshi_builder_image`.
+        let expectations: &[(&str, usize)] = &[("kenshi_agent.rs", 1), ("nix_builder.rs", 1)];
         for (basename, min_count) in expectations {
             let path = commands_dir.join(basename);
             let source = std::fs::read_to_string(&path).unwrap();
@@ -536,10 +669,17 @@ mod tests {
             .join("src")
             .join("commands");
         // (module basename, minimum forward count from the pre-lift census)
+        // kenshi.rs and nix_builder.rs::update_kustomization_image both
+        // migrated onto the fused `splice_first_images_new_tag`
+        // primitive, so their direct forwards through `open_for_update`
+        // are subsumed by the fusion primitive's forward (which lives in
+        // this module's body). kenshi_agent.rs still opens directly
+        // because it interleaves an AGENT_IMAGE env-var splice into the
+        // same open→finalize span. nix_builder.rs retains one direct
+        // forward from `update_kenshi_builder_image`.
         let expectations: &[(&str, usize)] = &[
-            ("kenshi.rs", 1),
             ("kenshi_agent.rs", 1),
-            ("nix_builder.rs", 2),
+            ("nix_builder.rs", 1),
             ("push.rs", 1),
         ];
         for (basename, min_count) in expectations {
@@ -554,6 +694,355 @@ mod tests {
                  site(s) through `crate::commands::kustomization_edit::open_for_update(`; \
                  found {forwards}. A dropped call would leave the negative raw-label scan \
                  satisfied by absence.",
+            );
+        }
+    }
+
+    // ---- splice_first_images_new_tag_content ----------------------------
+    //
+    // The pre-lift `for line in content.lines() { … in_<block>_image
+    // toggle + newTag splice … }` walk that
+    // `commands/{kenshi,kenshi_agent,nix_builder}.rs::update_kustomization_image`
+    // each spelled inline. Each case pins the primitive's byte-for-byte
+    // output on a canonical kustomization overlay input against the
+    // predicate that pre-lift site used, so a future refinement of the
+    // enter/exit selector coherence, the passthrough-line trailing-
+    // newline shape, or the indent-preserving newTag splice regresses
+    // this assertion at one site rather than silently across three.
+    //
+    // Fail-before-pass-after: the primitive did not exist pre-lift; each
+    // case would have been a compile error before the primitive landed
+    // and a passing shape assertion after.
+
+    /// Kenshi kustomization overlay pre-lift shape: an `images:` header
+    /// followed by a single `- name: …/kenshi` entry with an inline
+    /// `newTag:`. The predicate is the pre-lift kenshi selector
+    /// `contains("kenshi") && !contains("kenshi-agent")`. The primitive
+    /// MUST land a byte-identical transform.
+    #[test]
+    fn splice_first_images_new_tag_content_kenshi_shape() {
+        let input = "\
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+images:
+  - name: ghcr.io/pleme-io/kenshi
+    newName: ghcr.io/pleme-io/kenshi
+    newTag: amd64-oldsha
+";
+        let (rendered, updated) = splice_first_images_new_tag_content(
+            input,
+            |line| line.contains("kenshi") && !line.contains("kenshi-agent"),
+            "amd64-newsha",
+        );
+        assert!(updated, "kenshi predicate must hit the images[] entry");
+        assert_eq!(
+            rendered,
+            "\
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+images:
+  - name: ghcr.io/pleme-io/kenshi
+    newName: ghcr.io/pleme-io/kenshi
+    newTag: amd64-newsha
+"
+        );
+    }
+
+    /// Kenshi-agent kustomization overlay pre-lift shape: the predicate
+    /// is the pre-lift kenshi-agent selector `contains("kenshi-agent")`.
+    /// The transform must splice only the `- name: …/kenshi-agent`
+    /// entry's `newTag:` and leave the adjacent `- name: …/kenshi`
+    /// entry's `newTag:` verbatim — the enter/exit predicate coherence
+    /// pinned at ONE body.
+    #[test]
+    fn splice_first_images_new_tag_content_kenshi_agent_shape_leaves_sibling_kenshi_untouched() {
+        let input = "\
+images:
+  - name: ghcr.io/pleme-io/kenshi
+    newTag: amd64-kenshi-old
+  - name: ghcr.io/pleme-io/kenshi-agent
+    newTag: amd64-agent-old
+";
+        let (rendered, updated) = splice_first_images_new_tag_content(
+            input,
+            |line| line.contains("kenshi-agent"),
+            "amd64-agent-new",
+        );
+        assert!(
+            updated,
+            "kenshi-agent predicate must hit its images[] entry"
+        );
+        assert_eq!(
+            rendered,
+            "\
+images:
+  - name: ghcr.io/pleme-io/kenshi
+    newTag: amd64-kenshi-old
+  - name: ghcr.io/pleme-io/kenshi-agent
+    newTag: amd64-agent-new
+",
+            "the predicate must gate BOTH enter and exit so the sibling \
+             kenshi block's newTag survives verbatim"
+        );
+    }
+
+    /// Nix-builder kustomization overlay pre-lift shape: the predicate
+    /// is the pre-lift nix-builder selector `contains(registry)`. Pin
+    /// the indent-preserving `newTag:` splice at a six-space indent
+    /// (the canonical nested indent under `  - name:`) so a drift in
+    /// the indent computation regresses this case.
+    #[test]
+    fn splice_first_images_new_tag_content_nix_builder_shape() {
+        let registry = "ghcr.io/pleme-io/nix-builder";
+        let input = "\
+images:
+  - name: ghcr.io/pleme-io/nix-builder
+    newName: ghcr.io/pleme-io/nix-builder
+    newTag: amd64-oldbuilder
+";
+        let (rendered, updated) = splice_first_images_new_tag_content(
+            input,
+            |line| line.contains(registry),
+            "amd64-newbuilder",
+        );
+        assert!(updated, "nix-builder predicate must hit the images[] entry");
+        assert_eq!(
+            rendered,
+            "\
+images:
+  - name: ghcr.io/pleme-io/nix-builder
+    newName: ghcr.io/pleme-io/nix-builder
+    newTag: amd64-newbuilder
+"
+        );
+    }
+
+    /// Miss arm: the predicate matches nothing in the content. The
+    /// transform MUST return `updated == false` and the passthrough
+    /// content (with `.lines()`-normalized trailing newlines) so the
+    /// caller can spell its own bail-vs-continue behavior at the site.
+    #[test]
+    fn splice_first_images_new_tag_content_returns_updated_false_on_no_match() {
+        let input = "\
+images:
+  - name: ghcr.io/other/service
+    newTag: amd64-something
+";
+        let (rendered, updated) = splice_first_images_new_tag_content(
+            input,
+            |line| line.contains("kenshi"),
+            "amd64-newsha",
+        );
+        assert!(
+            !updated,
+            "no matching name: line must yield updated == false"
+        );
+        assert_eq!(
+            rendered, input,
+            "the passthrough must preserve every source byte on a miss"
+        );
+    }
+
+    /// Passthrough lines outside the target block MUST be emitted
+    /// verbatim with a trailing `\n` — the pre-lift `push_str(line) +
+    /// push('\n')` shape at every site. This case pins the trailing-
+    /// newline shape on lines the primitive did NOT splice.
+    #[test]
+    fn splice_first_images_new_tag_content_appends_newline_to_passthrough_lines() {
+        let input = "kind: Kustomization\nimages: []";
+        let (rendered, updated) = splice_first_images_new_tag_content(input, |_| false, "amd64-x");
+        assert!(!updated);
+        // The `.lines()` iterator strips the terminator; every emitted
+        // line MUST re-append exactly one `\n`.
+        assert_eq!(rendered, "kind: Kustomization\nimages: []\n");
+    }
+
+    /// The primitive MUST route the `newTag:` splice through
+    /// `crate::repo::indent_preserving_kv_line` so the pre-lift
+    /// `{indent}newTag: {new_tag}\n` byte shape lands at one body. Pin
+    /// the ten-space `newTag:` indent nested under an eight-space
+    /// `- name:` header that deeply-nested overlays use.
+    #[test]
+    fn splice_first_images_new_tag_content_preserves_deep_new_tag_indent() {
+        let input = "\
+        - name: ghcr.io/org/svc
+          newTag: amd64-old
+";
+        let (rendered, _) = splice_first_images_new_tag_content(
+            input,
+            |line| line.contains("ghcr.io/org/svc"),
+            "amd64-new",
+        );
+        assert!(
+            rendered.contains("          newTag: amd64-new\n"),
+            "ten-space `newTag:` indent must be preserved verbatim by \
+             the indent-preserving-kv-line delegate. Got: {rendered:?}"
+        );
+    }
+
+    /// The `splice_first_images_new_tag` fusion primitive MUST bail
+    /// with the canonical miss envelope `"No <label> entry found in
+    /// images[] in <path>"` on a predicate miss, pinning the operator-
+    /// facing miss line at ONE grammar across kenshi + nix-builder.
+    #[tokio::test]
+    async fn splice_first_images_new_tag_bails_with_canonical_miss_envelope() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("kustomization.yaml");
+        tokio::fs::write(
+            &file,
+            "\
+images:
+  - name: ghcr.io/other/service
+    newTag: amd64-x
+",
+        )
+        .await
+        .unwrap();
+        let file_str = file.to_str().unwrap();
+
+        let err = splice_first_images_new_tag(
+            file_str,
+            |line| line.contains("kenshi"),
+            "amd64-newsha",
+            "images[] newTag",
+            "kenshi",
+        )
+        .await
+        .unwrap_err();
+        let rendered = format!("{}", err);
+        assert!(
+            rendered.starts_with("No kenshi entry found in images[] in "),
+            "miss envelope must open with `No <label> entry found in images[] in `; \
+             got: {rendered:?}"
+        );
+        assert!(
+            rendered.contains(file_str),
+            "miss envelope must echo the offending path verbatim; got: {rendered:?}"
+        );
+    }
+
+    /// The `splice_first_images_new_tag` fusion primitive MUST write
+    /// the transformed content through
+    /// [`finalize_and_announce`] on a predicate hit — end-to-end pin
+    /// spanning open → transform → emit → finalize.
+    #[tokio::test]
+    async fn splice_first_images_new_tag_writes_finalized_transform_on_hit() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("kustomization.yaml");
+        tokio::fs::write(
+            &file,
+            "\
+images:
+  - name: ghcr.io/pleme-io/kenshi
+    newTag: amd64-oldsha
+",
+        )
+        .await
+        .unwrap();
+        let file_str = file.to_str().unwrap();
+
+        splice_first_images_new_tag(
+            file_str,
+            |line| line.contains("kenshi") && !line.contains("kenshi-agent"),
+            "amd64-newsha",
+            "images[] newTag",
+            "kenshi",
+        )
+        .await
+        .unwrap();
+
+        let written = tokio::fs::read_to_string(&file).await.unwrap();
+        assert_eq!(
+            written,
+            "\
+images:
+  - name: ghcr.io/pleme-io/kenshi
+    newTag: amd64-newsha
+"
+        );
+    }
+
+    /// Whole-module shield: no source line under `cli/src/commands/`
+    /// (excluding this module) may spell any of the pre-lift walk
+    /// openers `let mut in_kenshi_image = false;`,
+    /// `let mut in_kenshi_agent_image = false;`, or
+    /// `let mut in_target_image = false;` any more. Every kustomization
+    /// overlay `images[] newTag` walk must route through
+    /// [`splice_first_images_new_tag_content`] (or its
+    /// bail-plus-finalize sibling [`splice_first_images_new_tag`]) so a
+    /// future refinement of the enter/exit-selector coherence, the
+    /// passthrough shape, or the indent-preserving splice reaches all
+    /// consumers by construction.
+    #[test]
+    fn no_command_module_still_spells_pre_lift_target_image_flag_opener() {
+        use std::path::PathBuf;
+        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands");
+        let openers: &[&str] = &[
+            "let mut in_kenshi_image = false;",
+            "let mut in_kenshi_agent_image = false;",
+            "let mut in_target_image = false;",
+        ];
+        let mut offenders: Vec<(PathBuf, usize, String)> = Vec::new();
+        for entry in std::fs::read_dir(&commands_dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            if path.file_name().and_then(|n| n.to_str()) == Some("kustomization_edit.rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            for (idx, line) in source.lines().enumerate() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                    continue;
+                }
+                for needle in openers {
+                    if line.contains(needle) {
+                        offenders.push((path.clone(), idx + 1, line.to_string()));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "raw target-image walk opener(s) survive under `commands/` — route each \
+             through `crate::commands::kustomization_edit::splice_first_images_new_tag_content` \
+             (or its bail+finalize sibling `splice_first_images_new_tag`) instead:\n{:#?}",
+            offenders
+        );
+    }
+
+    /// Positive half of the target-image walk shield: the three pre-
+    /// lift modules under `commands/` MUST each forward through one of
+    /// the two new primitives (`splice_first_images_new_tag(` for
+    /// kenshi + nix-builder; `splice_first_images_new_tag_content(` for
+    /// kenshi-agent whose outer wrapper still spans the AGENT_IMAGE
+    /// env-var pass) so a migration that dropped a call site outright
+    /// leaves the negative opener-scan trivially satisfied by absence
+    /// but the positive count still fails.
+    #[test]
+    fn every_prelift_module_forwards_through_splice_first_images_new_tag() {
+        use std::path::PathBuf;
+        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands");
+        // (module basename, needle, minimum forward count from the pre-lift census)
+        let expectations: &[(&str, &str, usize)] = &[
+            ("kenshi.rs", "splice_first_images_new_tag(", 1),
+            ("nix_builder.rs", "splice_first_images_new_tag(", 1),
+            ("kenshi_agent.rs", "splice_first_images_new_tag_content(", 1),
+        ];
+        for (basename, needle, min_count) in expectations {
+            let path = commands_dir.join(basename);
+            let source = std::fs::read_to_string(&path).unwrap();
+            let forwards = source.matches(needle).count();
+            assert!(
+                forwards >= *min_count,
+                "{basename} must forward at least {min_count} images[] newTag walk site(s) \
+                 through `crate::commands::kustomization_edit::{needle}`; found {forwards}.",
             );
         }
     }

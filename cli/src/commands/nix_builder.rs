@@ -359,64 +359,26 @@ pub async fn release(
 /// Finds `images:` section and updates the `newTag` for the matching image name.
 /// Standard kustomization pattern: default image in deployment is :latest,
 /// kustomization overlay specifies specific tag.
+///
+/// Walk + enter/exit + splice + emit + bail + finalize rides the fused
+/// `commands::kustomization_edit::splice_first_images_new_tag` primitive
+/// — sibling of the `commands/kenshi.rs::update_kustomization_image`
+/// flow and of the pure-transform half the `commands/kenshi_agent.rs`
+/// interleaved flow shares. The registry-substring predicate below
+/// threads through both the enter and exit arms so the target-block
+/// span stays coherent even when a sibling image entry shares a
+/// registry prefix.
 async fn update_kustomization_image(
     kustomization_path: &str,
     registry: &str,
     new_tag: &str,
 ) -> Result<()> {
-    let (path, content) =
-        crate::commands::kustomization_edit::open_for_update(kustomization_path).await?;
-
-    // Find and replace newTag in images[] section
-    // Pattern:
-    //   images:
-    //     - name: ghcr.io/org/nix-builder
-    //       newName: ghcr.io/org/nix-builder
-    //       newTag: amd64-xxxxxxxx
-    let mut updated = false;
-    let mut new_content = String::new();
-    let mut in_target_image = false;
-
-    for line in content.lines() {
-        // Check if we're entering the target image block
-        if line.contains("name:") && line.contains(registry) {
-            in_target_image = true;
-        }
-        // Check if we're leaving the image block (next image or end of images section)
-        if in_target_image && (line.trim().starts_with("- name:") && !line.contains(registry)) {
-            in_target_image = false;
-        }
-
-        // Update newTag within the target image block. The
-        // indent-preserving `{indent}newTag: {new_tag}\n` splice rides
-        // the shared `crate::repo::indent_preserving_kv_line` primitive
-        // — sibling of the kenshi and kenshi-agent images[] splices and
-        // of the builder-pool field splice — so the byte shape stays
-        // pinned at one body across the four sibling flows.
-        if in_target_image && line.contains("newTag:") {
-            new_content.push_str(&crate::repo::indent_preserving_kv_line(
-                line, "newTag", new_tag,
-            ));
-            updated = true;
-            crate::info_updated_field!("newTag", new_tag);
-        } else {
-            new_content.push_str(line);
-            new_content.push('\n');
-        }
-    }
-
-    if !updated {
-        anyhow::bail!(
-            "No images[] entry found for {} in {}",
-            registry,
-            kustomization_path
-        );
-    }
-
-    crate::commands::kustomization_edit::finalize_and_announce(
-        path,
-        &new_content,
-        "Kustomization updated",
+    crate::commands::kustomization_edit::splice_first_images_new_tag(
+        kustomization_path,
+        |line| line.contains(registry),
+        new_tag,
+        "newTag",
+        registry,
     )
     .await
 }

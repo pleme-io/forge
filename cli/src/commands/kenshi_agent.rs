@@ -134,6 +134,24 @@ pub async fn release(
 ///
 /// Finds the kenshi-agent image entry and updates the newTag.
 /// Also updates AGENT_IMAGE env var if present in patches.
+///
+/// # Two orthogonal splices, one open→finalize span
+///
+/// The images[] `newTag:` walk rides the pure
+/// `commands::kustomization_edit::splice_first_images_new_tag_content`
+/// transform — sibling of the fused
+/// `splice_first_images_new_tag` primitive that
+/// `commands/{kenshi,nix_builder}.rs::update_kustomization_image` use
+/// directly. This site reaches for only the transform (not the fused
+/// primitive) because it interleaves an AGENT_IMAGE env-var splice
+/// into the same open→finalize span and its bail phrase names both
+/// branches (`"No kenshi-agent entry found in images[] or
+/// AGENT_IMAGE in <path>"`); the AGENT_IMAGE env-var splice runs as a
+/// second pass over the pass-1 output and is byte-identical to the
+/// pre-lift single-loop shape because a spliced `newTag` line no
+/// longer contains the `AGENT_IMAGE` substring the second pass filters
+/// for, and the two per-line predicates operate on disjoint YAML
+/// tokens on real inputs.
 async fn update_kustomization_image(
     kustomization_path: &str,
     registry: &str,
@@ -143,52 +161,28 @@ async fn update_kustomization_image(
         crate::commands::kustomization_edit::open_for_update(kustomization_path).await?;
 
     let new_image = crate::oci_manifest::image_reference(registry, new_tag);
-    let mut updated_images = false;
-    let mut updated_env = false;
+
+    // Pass 1: images[] newTag splice via the shared kustomization_edit
+    // transform (byte-identical to the pre-lift `in_kenshi_agent_image`
+    // walk on real overlay inputs; the `kenshi-agent` selector threads
+    // through both the enter and exit arms of the primitive).
+    let (content_after_tag, updated_images) =
+        crate::commands::kustomization_edit::splice_first_images_new_tag_content(
+            &content,
+            |line| line.contains("kenshi-agent"),
+            new_tag,
+        );
+    if updated_images {
+        crate::info_updated_field!("images[] newTag", new_tag);
+    }
+
+    // Pass 2: AGENT_IMAGE env-var splice via the shared registry-
+    // anchored primitive (sibling of the `nix_builder.rs::
+    // update_kenshi_builder_image` BUILDER_IMAGE arm).
     let mut new_content = String::new();
-    let mut in_kenshi_agent_image = false;
-
-    for line in content.lines() {
-        // Track if we're in the kenshi-agent image block
-        if line.contains("name:") && line.contains("kenshi-agent") {
-            in_kenshi_agent_image = true;
-        }
-        // Exit the image block when we hit another image entry
-        if in_kenshi_agent_image
-            && line.trim().starts_with("- name:")
-            && !line.contains("kenshi-agent")
-        {
-            in_kenshi_agent_image = false;
-        }
-
-        // Update newTag within the kenshi-agent image block. The
-        // indent-preserving `{indent}newTag: {new_tag}\n` splice rides
-        // the shared `crate::repo::indent_preserving_kv_line` primitive
-        // — sibling of the kenshi and nix-builder images[] splices and
-        // of the builder-pool field splice — so the byte shape stays
-        // pinned at one body across the four sibling flows.
-        if in_kenshi_agent_image && line.contains("newTag:") {
-            new_content.push_str(&crate::repo::indent_preserving_kv_line(
-                line, "newTag", new_tag,
-            ));
-            updated_images = true;
-            crate::info_updated_field!("images[] newTag", new_tag);
-        }
-        // Update AGENT_IMAGE env var reference if present. The
-        // registry-anchored `{prefix}{new_image}{suffix}\n` splice
-        // (`line.find(registry)` → `find(|c| c == '"' || c == '\'' ||
-        // c == ' ' || c == '\n')` → three-piece format) now rides the
-        // pure `crate::repo::splice_registry_anchored_image_ref`
-        // primitive — sibling of the `nix_builder.rs::
-        // update_kenshi_builder_image` BUILDER_IMAGE arm — so the
-        // delimiter alphabet, the trailing-newline shape, and the miss
-        // envelope stay pinned at ONE body across both flows. The
-        // pre-lift `unwrap_or(0) + if start_idx > 0` conservative guard
-        // becomes the `if let Some { .. } else { push verbatim }` shape
-        // below: byte-identical because the outer `line.contains(
-        // "AGENT_IMAGE") && line.contains("kenshi-agent:")` predicate
-        // makes an unindented AGENT_IMAGE line unreachable in practice.
-        else if line.contains("AGENT_IMAGE") && line.contains("kenshi-agent:") {
+    let mut updated_env = false;
+    for line in content_after_tag.lines() {
+        if line.contains("AGENT_IMAGE") && line.contains("kenshi-agent:") {
             if let Some(rewritten) =
                 crate::repo::splice_registry_anchored_image_ref(line, registry, &new_image)
             {

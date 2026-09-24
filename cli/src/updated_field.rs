@@ -389,11 +389,20 @@ mod tests {
 
     // Caller shield (positive half): the four pre-lift command modules
     // MUST each forward through `crate::info_updated_field!(` at least
-    // once, so a migration that dropped a call site outright leaves the
-    // negative "no raw inline shape" scan trivially satisfied by absence
-    // but the positive count still fails. The minimum-per-module counts
-    // reflect the pre-lift census: kenshi.rs (1), kenshi_agent.rs (2),
-    // nix_builder.rs (2), builder_pool_edit.rs (1).
+    // once (or, for modules whose walk migrated onto the fused
+    // `kustomization_edit::splice_first_images_new_tag` primitive, at
+    // least through that fusion which emits the acknowledgment itself),
+    // so a migration that dropped a call site outright leaves the
+    // negative "no raw inline shape" scan trivially satisfied by
+    // absence but the positive count still fails. The minimum-per-
+    // module counts reflect the current-tree census: kenshi.rs (0
+    // direct; the fused `splice_first_images_new_tag` primitive owns
+    // the emit for its site), kenshi_agent.rs (2: the AGENT_IMAGE env
+    // arm keeps its own inline emit + the pass-1 caller-side emit that
+    // fires when the pure content transform reports updated), nix_
+    // builder.rs (1: the fused primitive owns the kustomization emit,
+    // BUILDER_IMAGE configMap arm keeps its own inline emit),
+    // builder_pool_edit.rs (1).
     #[test]
     fn every_prelift_module_forwards_through_info_updated_field_macro() {
         use std::path::PathBuf;
@@ -401,9 +410,8 @@ mod tests {
             .join("src")
             .join("commands");
         let expectations: &[(&str, usize)] = &[
-            ("kenshi.rs", 1),
             ("kenshi_agent.rs", 2),
-            ("nix_builder.rs", 2),
+            ("nix_builder.rs", 1),
             ("builder_pool_edit.rs", 1),
         ];
         for (basename, min_count) in expectations {
