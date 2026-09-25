@@ -509,8 +509,9 @@ pub async fn release(
         }
 
         let trimmed = line.trim();
-        if trimmed.starts_with("- name:") {
-            let name_value = trimmed.trim_start_matches("- name:").trim();
+        if let Some(name_value) =
+            crate::yaml_list_name_entry_value::yaml_list_name_entry_value(trimmed)
+        {
             if name_value.contains("bootstrap") {
                 info!("   Updated: {} -> {}", name_value, tag_suffix);
                 matched_bootstrap = true;

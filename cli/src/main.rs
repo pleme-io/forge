@@ -360,6 +360,18 @@ mod write_artifact_info_and_ack_step;
 // k.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_else(||
 // "none".to_string())` stanza verbatim.
 mod yaml_top_level_key_listing;
+// `- name:` YAML list-entry name-value extraction primitive — the
+// four-line stanza `let trimmed = line.trim(); if
+// trimmed.starts_with("- name:") { let name_value =
+// trimmed.trim_start_matches("- name:").trim(); if <predicate>(name_value)
+// { <state mutation> } }` lifted onto a single closed body. Callers:
+// `commands/bootstrap.rs::update_bootstrap_manifest`,
+// `commands/rust_service.rs::update_helm_release_manifest`, and
+// `commands/push.rs::update_kustomization_manifest` — three sibling
+// manifest walkers that scan a `kustomization.yaml` / HelmRelease line
+// by line to find `- name:` entries matching a caller-supplied service
+// or bootstrap component name.
+mod yaml_list_name_entry_value;
 mod zone_id_field;
 
 // New architecture modules
