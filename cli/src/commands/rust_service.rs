@@ -2510,21 +2510,17 @@ pub async fn release_rust_service(
         // Construct the service directory path from config
         // We know: repo_root, product name, service name
         // Structure: {repo_root}/pkgs/products/{product}/services/rust/{service}
-        let service_dir = repo_root
-            .join("pkgs")
-            .join("products")
-            .join(&deploy_config.product.name)
-            .join("services")
-            .join("rust")
-            .join(&service);
+        let service_dir =
+            crate::pkgs_product_dir::pkgs_product_dir(&repo_root, &deploy_config.product.name)
+                .join("services")
+                .join("rust")
+                .join(&service);
 
         // Construct path to federation-tests: pkgs/products/{product}/tests/federation
-        let federation_tests_dir = repo_root
-            .join("pkgs")
-            .join("products")
-            .join(&deploy_config.product.name)
-            .join("tests")
-            .join("federation");
+        let federation_tests_dir =
+            crate::pkgs_product_dir::pkgs_product_dir(&repo_root, &deploy_config.product.name)
+                .join("tests")
+                .join("federation");
 
         if !federation_tests_dir.exists() {
             bail!(
@@ -2577,10 +2573,8 @@ pub async fn release_rust_service(
             "   📝 Updating {}'s deploy.yaml with federation-tests tag...",
             service
         );
-        let fed_product_dir = repo_root
-            .join("pkgs")
-            .join("products")
-            .join(&deploy_config.product.name);
+        let fed_product_dir =
+            crate::pkgs_product_dir::pkgs_product_dir(&repo_root, &deploy_config.product.name);
         let fed_deploy_yaml = resolve_deploy_yaml_path(&fed_product_dir, &service, &service_dir);
 
         update_service_federation_tests_tag(

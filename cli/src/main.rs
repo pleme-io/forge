@@ -228,6 +228,7 @@ mod nonfatal_warning;
 mod observability;
 mod package_phase_announce;
 mod path_builder;
+mod pkgs_product_dir;
 mod pod_probe_pending_wait_line;
 mod poll_backoff_advance;
 mod post_deploy_endpoint_check_pass;

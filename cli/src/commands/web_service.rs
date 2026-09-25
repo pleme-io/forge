@@ -113,11 +113,8 @@ pub async fn web_regenerate(product: String, service: String, repo_root: String)
     );
 
     let repo_root_path = Path::new(&repo_root);
-    let service_dir = repo_root_path
-        .join("pkgs")
-        .join("products")
-        .join(&product)
-        .join(&service);
+    let service_dir =
+        crate::pkgs_product_dir::pkgs_product_dir(repo_root_path, &product).join(&service);
     let hanabi_dir = crate::hanabi_dir::hanabi_dir(repo_root_path);
 
     // Verify paths exist
