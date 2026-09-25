@@ -331,22 +331,24 @@ pub async fn execute(
             product,
             rolled_back_to.join(", ")
         );
-        // Git commit — routes through the idempotent-no-op peer of
-        // `crate::git::git_run_inherited_status`: `git commit` with
-        // nothing to commit returns non-zero, and the rollback path
-        // treats that as a benign no-op (re-run against a tree already
-        // rolled back to the previous tag). The primitive body at
-        // `crate::git::git_commit_idempotent` owns the spawn +
-        // stdio-inherit + warn-on-non-zero shape at ONE code line
-        // across the crate, so this consumer observes the same warning
-        // envelope as the sibling
-        // `commands/push.rs::update_kustomization` idempotent-commit
-        // call by construction rather than by convention.
-        crate::git::git_commit_idempotent(&commit_msg, "Failed to commit rollback tags").await?;
-
-        crate::git::git_push_origin_main()
-            .await
-            .context("Failed to push rollback tags")?;
+        // Idempotent commit + bail-on-failure push — fused through the
+        // shared `git_commit_idempotent_and_push_origin_main` primitive
+        // so the ordering (commit FIRST, push SECOND), the failure-
+        // dispatch polarity (`git commit` returning non-zero warns and
+        // continues on the "nothing to commit" idempotency carve-out
+        // — the "re-run against a tree already rolled back to the
+        // previous tag" scenario; `git push origin main` returning
+        // non-zero bails with the per-site push context), and the two
+        // canonical op labels (`"git commit"`, `"git push origin main"`)
+        // all stay owned by ONE typed body across this consumer and the
+        // sibling `commands/push.rs::update_kustomization` post-
+        // `kustomization.yaml` commit-push ceremony.
+        crate::git::git_commit_idempotent_and_push_origin_main(
+            &commit_msg,
+            "Failed to commit rollback tags",
+            "Failed to push rollback tags",
+        )
+        .await?;
 
         crate::ui::print_step_ok("Rollback tags committed and pushed");
     }
@@ -416,14 +418,17 @@ mod tests {
              `crate::git::git_run_inherited_status(&[...], \"git …\")` \
              (the async bail-on-non-zero fusion primitive), \
              `crate::git::git_commit_idempotent(&msg, ctx)` (the async \
-             warn-on-non-zero idempotent-`git commit` peer), or \
-             `crate::git::git_command_async()` so `GIT_BIN` overrides land \
-             at the shared primitive. Found the pre-migration spawn body \
-             in execute()."
+             warn-on-non-zero idempotent-`git commit` peer), \
+             `crate::git::git_commit_idempotent_and_push_origin_main(\
+             &msg, ctx, push_ctx)` (the fused idempotent-commit + \
+             bail-on-failure-push peer), or `crate::git::git_command_async()` \
+             so `GIT_BIN` overrides land at the shared primitive. Found \
+             the pre-migration spawn body in execute()."
         );
         assert!(
             fn_body.contains("crate::git::git_run_inherited_status(")
                 || fn_body.contains("crate::git::git_commit_idempotent(")
+                || fn_body.contains("crate::git::git_commit_idempotent_and_push_origin_main(")
                 || fn_body.contains("crate::git::git_command_async()"),
             "execute() must delegate every git spawn to \
              `crate::git::git_run_inherited_status(&[...], \"git …\")` \
@@ -432,7 +437,11 @@ mod tests {
              `run_inherited_status`), to `crate::git::git_commit_idempotent(\
              &msg, ctx)` (the async warn-on-non-zero peer for the \
              documented idempotent-no-op `git commit` carve-out, which \
-             also routes through `git_command_async()`), OR to \
+             also routes through `git_command_async()`), to \
+             `crate::git::git_commit_idempotent_and_push_origin_main(\
+             &msg, ctx, push_ctx)` (the fused peer that internally \
+             delegates through both `git_commit_idempotent` and \
+             `git_push_origin_main`), OR to \
              `crate::git::git_command_async()` directly for any other \
              specialized shape — no delegation string was found in \
              execute()."
@@ -442,6 +451,7 @@ mod tests {
                 || fn_body.contains("crate::git::git_add_path(")
                 || fn_body.contains("crate::git::git_push_origin_main(")
                 || fn_body.contains("crate::git::git_commit_or_bail(")
+                || fn_body.contains("crate::git::git_commit_idempotent_and_push_origin_main(")
                 || fn_body.contains("crate::retry::run_inherited_status"),
             "execute() must dispatch `git add` / `git commit -m` / \
              `git push` through the structural `(op, exit_code)`-\
@@ -451,11 +461,14 @@ mod tests {
              `crate::retry::run_inherited_status`), the fixed-argv \
              single-path staging primitive `crate::git::git_add_path(&path)`, \
              the fixed-argv bail-on-failure commit primitive \
-             `crate::git::git_commit_or_bail(&msg)`, or the fixed-argv \
+             `crate::git::git_commit_or_bail(&msg)`, the fixed-argv \
              post-commit push primitive \
-             `crate::git::git_push_origin_main()` (all of which also \
-             delegate through `git_run_inherited_status`), or directly \
-             through `crate::retry::run_inherited_status`. None of these \
+             `crate::git::git_push_origin_main()`, the fused \
+             idempotent-commit + bail-on-failure-push primitive \
+             `crate::git::git_commit_idempotent_and_push_origin_main(\
+             &msg, ctx, push_ctx)` (all of which also delegate through \
+             `git_run_inherited_status`), or directly through \
+             `crate::retry::run_inherited_status`. None of these \
              delegation strings was found in execute()."
         );
     }

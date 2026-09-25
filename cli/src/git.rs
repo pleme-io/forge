@@ -1481,6 +1481,100 @@ pub async fn git_commit_or_bail(commit_msg: &str) -> anyhow::Result<()> {
     git_run_inherited_status(["commit", "-m", commit_msg], "git commit").await
 }
 
+/// `git commit -m <commit_msg>` (idempotent no-op on non-zero exit) followed
+/// by `git push origin main` (bail on non-zero exit) — the fused
+/// post-stage commit-then-push ceremony two sibling post-`git_add_path`
+/// sites now share.
+///
+/// # Pre-lift census — two call sites, one triad shape
+///
+/// `commands/push.rs::update_kustomization` (post-`kustomization.yaml`
+/// stage) and `commands/rollback.rs::execute` (post-artifact.json stage)
+/// each spelled the same two-primitive sequence verbatim:
+///
+/// ```ignore
+/// crate::git::git_commit_idempotent(&commit_msg, "<Failed to commit …>").await?;
+/// crate::git::git_push_origin_main()
+///     .await
+///     .context("<Failed to push …>")?;
+/// ```
+///
+/// Same [`git_commit_idempotent`] → [`git_push_origin_main`] ordering;
+/// same "commit is idempotent (non-zero warns and continues), push MUST
+/// land (non-zero bails with the per-site push context on the outer
+/// chain)" failure-dispatch shape; same absence of a "did the commit
+/// actually produce anything?" branch between the two (the pre-lift
+/// sequence always pushes, even after a warn-continued no-op commit —
+/// preserved verbatim here since a no-op push against the current head is
+/// itself a benign no-op that the operator log surfaces as
+/// `Everything up-to-date`). The three variable slots (`commit_msg`,
+/// `commit_spawn_context`, `push_context`) surface as the primitive's
+/// three parameters; nothing else varied between the two pre-lift sites.
+///
+/// # Why this lift
+///
+/// The pre-lift stanza fanned the mixed-failure-dispatch contract across
+/// TWO sites: each site had to spell `git_commit_idempotent` FIRST (the
+/// warn-on-nonzero peer, because "nothing to commit" is a benign
+/// re-run) then `git_push_origin_main` SECOND (the bail-on-nonzero peer,
+/// because a push that fails to land is a hard error the caller must
+/// surface). A future consumer that copy-pasted the sequence but swapped
+/// the ORDER (push before commit, which pushes stale HEAD to origin) or
+/// swapped the WARN/BAIL polarity (`git_commit_or_bail` in place of
+/// `git_commit_idempotent`, which would fail every re-release against a
+/// tree already at the target SHA) would have observed the same
+/// operator-facing shape — no test to catch it, no shield to bail on the
+/// drift. This fusion primitive owns the ordering, the polarity, and the
+/// two op labels at ONE construction surface so a future refinement
+/// (skip the push when the commit was a no-op, verify remote reachability
+/// before the commit, wrap the pair in a retry-with-rebase-on-conflict
+/// loop) lands here and every consumer inherits by construction.
+///
+/// # Failure dispatch — inherited from the delegated primitives
+///
+/// - `commit_msg` and `commit_spawn_context` forward verbatim to
+///   [`git_commit_idempotent`]. Non-zero exit warns via
+///   [`tracing::warn!`] and continues (the "nothing to commit" idempotency
+///   carve-out); spawn failure bails with `commit_spawn_context` attached
+///   to the anyhow chain via `.with_context(|| ...)`.
+/// - `push_context` layers onto the outer chain of
+///   [`git_push_origin_main`] via `.context(push_context.to_string())`.
+///   Non-zero exit bails via [`crate::retry::classify_inherited_status`]
+///   with the canonical `"git push origin main failed (exit {code})"`
+///   envelope; spawn failure bails with
+///   `"Failed to run git push origin main"` — both surfaces then wrap in
+///   the per-site `push_context`.
+///
+/// # `GIT_BIN` env override
+///
+/// Both delegated primitives resolve `git` through [`git_command_async`]
+/// so a Nix-hermetic runner's `GIT_BIN` override wins over ambient `PATH`
+/// — same discipline every git-mutation site in forge honors.
+///
+/// # When NOT to reach for this
+///
+/// - The push targets a branch other than `origin/main` → reach for the
+///   raw [`git_run_inherited_status`] surface or a future
+///   `git_push_to(remote, branch)` primitive.
+/// - The commit MUST land (no idempotency carve-out) → the caller wants
+///   a fused [`git_commit_or_bail`] + [`git_push_origin_main`] primitive
+///   instead; add it when a second site emerges.
+/// - The caller needs to inspect the commit's exit status between the
+///   commit and the push (e.g. to skip the push on a no-op commit) →
+///   keep the two direct calls and add a `commit_produced_change`
+///   branch. Every observed consumer today unconditionally pushes.
+pub async fn git_commit_idempotent_and_push_origin_main(
+    commit_msg: &str,
+    commit_spawn_context: &str,
+    push_context: &str,
+) -> anyhow::Result<()> {
+    git_commit_idempotent(commit_msg, commit_spawn_context).await?;
+    git_push_origin_main()
+        .await
+        .context(push_context.to_string())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2883,10 +2977,13 @@ mod tests {
 
     /// Positive half of the shield: the three pre-lift files under
     /// `commands/` MUST each forward through
-    /// `crate::git::git_push_origin_main(` at least once, so a
-    /// migration that dropped a call site outright leaves the
-    /// negative "no raw argv" scan trivially satisfied by absence but
-    /// the positive count still fails.
+    /// `crate::git::git_push_origin_main(` at least once — either
+    /// directly or through the fused idempotent-commit + push peer
+    /// [`git_commit_idempotent_and_push_origin_main`] which delegates
+    /// through `git_push_origin_main` internally — so a migration that
+    /// dropped a call site outright leaves the negative "no raw argv"
+    /// scan trivially satisfied by absence but the positive count still
+    /// fails.
     #[test]
     fn every_prelift_module_forwards_through_git_push_origin_main() {
         use std::path::PathBuf;
@@ -2899,14 +2996,353 @@ mod tests {
         for (basename, min_count) in expectations {
             let path = commands_dir.join(basename);
             let source = std::fs::read_to_string(&path).unwrap();
-            let forwards = source.matches("git_push_origin_main(").count();
+            // Count direct `git_push_origin_main(` calls plus deliveries
+            // through the fused idempotent-commit + push peer, whose
+            // spelling contains `push_origin_main(` as its own tail. The
+            // fused peer at `git_commit_idempotent_and_push_origin_main`
+            // internally delegates through `git_push_origin_main`, so a
+            // consumer that reaches for the fused peer still satisfies
+            // the "post-commit push routes through the canonical
+            // primitive" contract this shield certifies — one substring
+            // spelling covers both direct and delegated forms.
+            let forwards = source.matches("push_origin_main(").count();
             assert!(
                 forwards >= *min_count,
                 "{basename} must forward at least {min_count} \
                  post-commit `git push origin main` site(s) through \
-                 `crate::git::git_push_origin_main(`; found {forwards}. \
+                 `crate::git::git_push_origin_main(` (directly) or \
+                 `crate::git::git_commit_idempotent_and_push_origin_main(` \
+                 (fused idempotent-commit + push peer); found {forwards}. \
                  A dropped call would leave the negative raw-argv scan \
                  satisfied by absence.",
+            );
+        }
+    }
+
+    /// [`git_commit_idempotent_and_push_origin_main`] MUST forward the
+    /// full two-child argv sequence — `["commit", "-m", <msg>]` on the
+    /// first child, then `["push", "origin", "main"]` on the second —
+    /// verbatim to the GIT_BIN-resolved shim, in that order. Pins the
+    /// fused primitive's contract: the ORDER (commit FIRST, push
+    /// SECOND) and the FIXED-ARGV shape of BOTH children are what the
+    /// two pre-lift sibling sites
+    /// (`commands/push.rs::update_kustomization`,
+    /// `commands/rollback.rs::execute`) each hand-spelled — a regression
+    /// that swapped the order (push before commit, which would push
+    /// stale HEAD to origin) or dropped `"-m"` / `"origin"` / `"main"`
+    /// would silently redirect the git mutation every consumer depends
+    /// on for the post-`git_add_path` commit-push ceremony.
+    ///
+    /// Runs under [`GIT_BIN_ENV_LOCK`] to serialize against every other
+    /// test that either mutates `GIT_BIN` or invokes a no-bin production
+    /// entry point that reads it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_git_commit_idempotent_and_push_origin_main_forwards_both_argv_in_order() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let argv_log = crate::test_support::ArgvLog::reserve();
+        let (_shim_dir, shim) = make_git_shim(&argv_log.shim_body(""));
+        let _scope = GitBinScope::set(&shim);
+
+        git_commit_idempotent_and_push_origin_main(
+            "deploy: forge fusion primitive probe",
+            "spawn ctx (unused on zero exit)",
+            "push ctx (unused on zero exit)",
+        )
+        .await
+        .expect("zero-exit shim must surface as Ok(())");
+
+        let logged = argv_log.read_argv_log();
+        let lines: Vec<&str> = logged.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                "commit",
+                "-m",
+                "deploy: forge fusion primitive probe",
+                "push",
+                "origin",
+                "main",
+            ],
+            "git_commit_idempotent_and_push_origin_main must spawn the \
+             commit child FIRST (with the fixed `[\"commit\", \"-m\", \
+             <msg>]` argv) then the push child SECOND (with the fixed \
+             `[\"push\", \"origin\", \"main\"]` argv) — proves the fused \
+             primitive delegates through `git_commit_idempotent` then \
+             `git_push_origin_main` in that order, does not swap the \
+             order, and does not silently drop or re-tokenize any \
+             element of either argv"
+        );
+    }
+
+    /// [`git_commit_idempotent_and_push_origin_main`] MUST surface a
+    /// non-zero commit exit as `Ok(())` on the commit half (the
+    /// idempotent-no-op carve-out the sibling [`git_commit_idempotent`]
+    /// owns) — the fusion primitive inherits that polarity by
+    /// construction so the "re-run against a tree already at the target
+    /// SHA" carve-out survives the lift, and then still proceeds to the
+    /// push. A regression that swapped the commit primitive for
+    /// [`git_commit_or_bail`] would fail this test because the whole
+    /// fused call would bail on the non-zero commit exit before the
+    /// push child ever spawned.
+    ///
+    /// Runs under [`GIT_BIN_ENV_LOCK`] to serialize against every other
+    /// test that either mutates `GIT_BIN` or invokes a no-bin production
+    /// entry point that reads it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_git_commit_idempotent_and_push_origin_main_non_zero_commit_still_pushes() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let argv_log = crate::test_support::ArgvLog::reserve();
+        // Shim exits non-zero on the FIRST invocation ("commit" — mimics
+        // `git commit` on a clean tree, `nothing to commit, working
+        // tree clean` → non-zero), zero on every subsequent invocation
+        // ("push"). Logs every argv so the test proves BOTH children
+        // spawned and observes the exit-code side-channel via a
+        // temp-file counter — a regression that bailed on the non-zero
+        // commit exit would spawn only ONE child.
+        let counter_file = argv_log.path().with_file_name("invocation.count");
+        let counter = counter_file.display();
+        let log = argv_log.path().display();
+        let shim_body = format!(
+            "#!/bin/sh\n\
+             for a in \"$@\"; do printf '%s\\n' \"$a\" >> '{log}'; done\n\
+             n=$(cat '{counter}' 2>/dev/null || echo 0)\n\
+             n=$((n + 1))\n\
+             printf '%s' \"$n\" > '{counter}'\n\
+             if [ \"$n\" -eq 1 ]; then exit 1; else exit 0; fi\n"
+        );
+        let (_shim_dir, shim) = make_git_shim(&shim_body);
+        let _scope = GitBinScope::set(&shim);
+
+        git_commit_idempotent_and_push_origin_main(
+            "chore: forge idempotent no-op probe",
+            "spawn ctx (unused on non-zero exit)",
+            "push ctx (unused on zero-exit push)",
+        )
+        .await
+        .expect(
+            "fused primitive must surface a non-zero COMMIT exit as \
+                 `Ok(())` (idempotent-no-op carve-out) and then still \
+                 spawn the push child; a regression that bailed on the \
+                 non-zero commit would fail here",
+        );
+
+        let logged = argv_log.read_argv_log();
+        let lines: Vec<&str> = logged.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                "commit",
+                "-m",
+                "chore: forge idempotent no-op probe",
+                "push",
+                "origin",
+                "main",
+            ],
+            "fused primitive must spawn BOTH children when the commit \
+             exits non-zero — proves the idempotency carve-out on the \
+             commit half does not short-circuit the push half; got only: \
+             {lines:?}"
+        );
+    }
+
+    /// [`git_commit_idempotent_and_push_origin_main`] MUST surface a
+    /// non-zero push exit through the canonical
+    /// `"git push origin main failed (exit {code})"` envelope with the
+    /// caller's `push_context` layered on top via `.context(...)`. Pins
+    /// the OTHER half of the fusion primitive's failure-dispatch
+    /// polarity: the commit half is idempotent (warn on non-zero), but
+    /// the push half MUST bail on non-zero — every consumer surfaces a
+    /// denied push (auth, branch protection, non-fast-forward) as an
+    /// operator-actionable error rather than a silent-success downstream
+    /// against an unpushed branch. A regression that swapped the push
+    /// primitive for a warn-on-nonzero peer would let a rejected push
+    /// through with the primitive still returning `Ok(())`.
+    ///
+    /// Runs under [`GIT_BIN_ENV_LOCK`] to serialize against every other
+    /// test that either mutates `GIT_BIN` or invokes a no-bin production
+    /// entry point that reads it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_git_commit_idempotent_and_push_origin_main_non_zero_push_bails_with_context() {
+        let _guard = GIT_BIN_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        // Shim exits zero on the FIRST invocation ("commit"), non-zero
+        // on every subsequent invocation ("push" — mimics `git push`
+        // rejected as non-fast-forward or auth-denied → non-zero).
+        let counter_dir = tempfile::tempdir().expect("counter tempdir");
+        let counter_file = counter_dir.path().join("invocation.count");
+        let counter = counter_file.display();
+        let shim_body = format!(
+            "#!/bin/sh\n\
+             n=$(cat '{counter}' 2>/dev/null || echo 0)\n\
+             n=$((n + 1))\n\
+             printf '%s' \"$n\" > '{counter}'\n\
+             if [ \"$n\" -eq 1 ]; then exit 0; else echo 'remote: rejected' 1>&2; exit 29; fi\n"
+        );
+        let (_shim_dir, shim) = make_git_shim(&shim_body);
+        let _scope = GitBinScope::set(&shim);
+
+        let err = git_commit_idempotent_and_push_origin_main(
+            "deploy: forge push-bail probe",
+            "spawn ctx (unused on zero-exit commit)",
+            "SIGIL_FORGE_FUSED_PUSH_CONTEXT_29ab13",
+        )
+        .await
+        .expect_err("non-zero push exit must bail");
+        let msg = format!("{err:#}");
+
+        assert!(
+            msg.contains("SIGIL_FORGE_FUSED_PUSH_CONTEXT_29ab13"),
+            "fused primitive must layer the caller's `push_context` on \
+             the anyhow chain via `.context(push_context.to_string())` — \
+             proves the pre-lift `.await.context(\"<Failed to push …>\")?` \
+             per-site envelope survives the fusion verbatim; got: {msg:?}"
+        );
+        assert!(
+            msg.contains("git push origin main"),
+            "fused primitive must surface `\"git push origin main\"` as \
+             the inner op label via the anyhow chain — proves the push \
+             half delegates through `git_push_origin_main` and its \
+             pinned canonical label reaches the operator; got: {msg:?}"
+        );
+        assert!(
+            msg.contains("exit 29"),
+            "fused primitive must surface the push shim's exit code via \
+             the anyhow chain — proves the push half delegates through \
+             `retry::run_inherited_status`'s `classify_inherited_status` \
+             envelope, not a bare `.status().await?` that silently drops \
+             the exit code; got: {msg:?}"
+        );
+    }
+
+    /// Caller shield: no source file under `cli/src/commands/` may
+    /// spell the raw `git_commit_idempotent(<msg>, ctx)` +
+    /// `git_push_origin_main()` sibling stanza inline — every fused
+    /// idempotent-commit + bail-on-failure-push ceremony MUST route
+    /// through [`git_commit_idempotent_and_push_origin_main`] so the
+    /// ordering (commit FIRST, push SECOND) and the two op labels
+    /// (`"git commit"`, `"git push origin main"`) stay owned by ONE
+    /// primitive rather than by two per-site conventions.
+    ///
+    /// The scan is deliberately structural (does any `commands/*.rs`
+    /// file's pre-test slice contain BOTH `git_commit_idempotent(` and
+    /// `git_push_origin_main(` at code lines) rather than semantic — a
+    /// future consumer that legitimately needs the commit and push
+    /// halves at DIFFERENT points in its execution (e.g. a commit at
+    /// phase 3, an unrelated push at phase 7) is a legitimate deviation
+    /// from the fused-ceremony shape and would reach for the two
+    /// primitives directly; when that consumer emerges, this shield's
+    /// allow-list documents the deviation instead of drift becoming the
+    /// silent-default shape.
+    ///
+    /// # Why the scan bounds to the pre-`#[cfg(test)]` slice
+    ///
+    /// Every `commands/*.rs` shield-test module below its production
+    /// code legitimately spells `.contains("crate::git::\
+    /// git_commit_idempotent(")` and `.contains("crate::git::\
+    /// git_push_origin_main(")` inside its own delegation-OR-list
+    /// asserts (the shield-of-the-shield pattern). Scanning the whole
+    /// file would trip on those literal-string spellings even after
+    /// the production code has been migrated; bounding to the slice
+    /// BEFORE `\n#[cfg(test)]` scopes the check to production code
+    /// only, matching the same discipline the sibling
+    /// `commands/push.rs::test_update_kustomization_routes_git_through_git_command_async_not_raw_command`
+    /// and `commands/rollback.rs::test_execute_routes_git_through_git_command_async_not_raw_command`
+    /// shields use to bound their own scans.
+    #[test]
+    fn no_command_module_still_spells_raw_idempotent_commit_plus_push_pair() {
+        use std::path::PathBuf;
+        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands");
+        let mut offenders: Vec<PathBuf> = Vec::new();
+        for entry in std::fs::read_dir(&commands_dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            // Bound the scan to the production code above the file's
+            // `#[cfg(test)]` marker, per the docstring justification
+            // above.
+            let production_slice = source
+                .split_once("\n#[cfg(test)]")
+                .map(|(pre, _)| pre)
+                .unwrap_or(&source);
+            // Count only occurrences on non-comment code lines so the
+            // docstring citations in production-code docstrings do not
+            // trip the scan (mirrors the sibling
+            // `git_run_inherited_status` scan discipline in the shields
+            // immediately above).
+            let mut has_commit_idempotent = false;
+            let mut has_push_origin_main = false;
+            for line in production_slice.lines() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                    continue;
+                }
+                if line.contains("git_commit_idempotent(") {
+                    has_commit_idempotent = true;
+                }
+                // Exact `git_push_origin_main(` — the fused peer's
+                // `git_commit_idempotent_and_push_origin_main(` spelling
+                // shares the same suffix but is preceded by
+                // `git_commit_idempotent_and_`, so an equality against
+                // the leading-context character rules it out.
+                for hit_idx in line.match_indices("git_push_origin_main(").map(|(i, _)| i) {
+                    let pre = line[..hit_idx].as_bytes();
+                    let is_fused_peer = pre.ends_with(b"git_commit_idempotent_and_");
+                    if !is_fused_peer {
+                        has_push_origin_main = true;
+                    }
+                }
+            }
+            if has_commit_idempotent && has_push_origin_main {
+                offenders.push(path);
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "raw `git_commit_idempotent(&msg, ctx)` + \
+             `git_push_origin_main()` sibling stanza(s) survive at code \
+             lines under `commands/` — route each through \
+             `crate::git::git_commit_idempotent_and_push_origin_main(\
+             &msg, ctx, push_ctx)` instead so the ordering and the two \
+             op labels stay pinned at ONE body:\n{offenders:#?}",
+        );
+    }
+
+    /// Positive half of the shield: the two pre-lift files under
+    /// `commands/` MUST each forward through
+    /// `crate::git::git_commit_idempotent_and_push_origin_main(` at
+    /// least once, so a migration that dropped a call site outright
+    /// leaves the negative "no raw pair" scan trivially satisfied by
+    /// absence but the positive count still fails.
+    #[test]
+    fn every_prelift_module_forwards_through_git_commit_idempotent_and_push_origin_main() {
+        use std::path::PathBuf;
+        let commands_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("commands");
+        // (module basename, minimum forward count from the pre-lift census)
+        let expectations: &[(&str, usize)] = &[("push.rs", 1), ("rollback.rs", 1)];
+        for (basename, min_count) in expectations {
+            let path = commands_dir.join(basename);
+            let source = std::fs::read_to_string(&path).unwrap();
+            let forwards = source
+                .matches("git_commit_idempotent_and_push_origin_main(")
+                .count();
+            assert!(
+                forwards >= *min_count,
+                "{basename} must forward at least {min_count} \
+                 idempotent-commit + push ceremony site(s) through \
+                 `crate::git::git_commit_idempotent_and_push_origin_main(`; \
+                 found {forwards}. A dropped call would leave the \
+                 negative raw-pair scan satisfied by absence.",
             );
         }
     }
