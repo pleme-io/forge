@@ -362,6 +362,49 @@ async fn commit_artifact_tags(
         .await
 }
 
+/// Phase-3 orchestration primitive: print the canonical
+/// `"Phase 3: Persist artifact tags"` step heading, invoke
+/// [`write_artifact_tags`] to write the per-service
+/// `{service}.artifact.json` files (and commit-push them through the
+/// canonical [`commit_artifact_tags`] envelope when the modified-files
+/// set is non-empty), then emit the trailing `println!()` blank line
+/// that separates the phase from the next section in the
+/// [`product_release`] transcript.
+///
+/// Pre-lift both [`product_release`] callers — the `build_only`
+/// short-circuit branch (Phase-2 skip) and the post-deploy tail —
+/// spelled the same three-line stanza inline:
+/// `print_step_heading("Phase 3: Persist artifact tags")` +
+/// `write_artifact_tags(...)` + `println!()`. The second caller
+/// additionally carried a stale
+/// `let att_record = attestation_info.as_ref().cloned();`
+/// intermediate that laundered `Option<&AttestationInfoRecord>`
+/// through `Option<AttestationInfoRecord>` and back to
+/// `Option<&AttestationInfoRecord>` — a no-op the lift drops so both
+/// callers share the identical `attestation_info.as_ref()` argv shape
+/// at the primitive's ONE call site.
+///
+/// Post-lift a future adjustment to the phase (a rename of the
+/// heading label, an injected spinner, a swap of the trailing
+/// `println!()` for a scoped `print_env_scope_close` terminator, an
+/// added guard against attempting the write when the services list is
+/// empty) lands at this one body and reaches both consumers by
+/// construction (THEORY.md §V solve-once-at-the-primitive;
+/// THEORY.md §VI.1 duplication-is-a-bug (PRIME DIRECTIVE) redeemed at
+/// the two-caller threshold).
+async fn persist_artifact_tags_phase(
+    product: &str,
+    services: &[crate::config::ProductServiceConfig],
+    repo_root: &str,
+    git_sha: &str,
+    attestation_info: Option<&crate::config::AttestationInfoRecord>,
+) -> Result<()> {
+    crate::ui::print_step_heading("Phase 3: Persist artifact tags");
+    write_artifact_tags(product, services, repo_root, git_sha, attestation_info).await?;
+    println!();
+    Ok(())
+}
+
 /// Product-level release orchestration.
 ///
 /// Coordinates all services through build, deploy, and verification phases.
@@ -626,8 +669,7 @@ pub async fn product_release(
         crate::ui::print_phase_skipped("Phase 2: Skipping deploy (--build-only)");
 
         // Jump straight to Phase 3: persist artifact tags
-        crate::ui::print_step_heading("Phase 3: Persist artifact tags");
-        write_artifact_tags(
+        persist_artifact_tags_phase(
             &product,
             &product_config.services,
             &repo_root,
@@ -635,7 +677,6 @@ pub async fn product_release(
             attestation_info.as_ref(),
         )
         .await?;
-        println!();
 
         crate::commands::product_release_phase_skipped::print_product_release_phase_skipped(
             crate::commands::product_release_phase_skipped::ProductReleaseSkippablePhase::DashboardSync,
@@ -738,17 +779,14 @@ pub async fn product_release(
     println!();
 
     // ─── Phase 3: Write artifact tags ───────────────────────────────────────
-    crate::ui::print_step_heading("Phase 3: Persist artifact tags");
-    let att_record = attestation_info.as_ref().cloned();
-    write_artifact_tags(
+    persist_artifact_tags_phase(
         &product,
         &product_config.services,
         &repo_root,
         &git_sha,
-        att_record.as_ref(),
+        attestation_info.as_ref(),
     )
     .await?;
-    println!();
 
     // ─── Phase 4: Dashboard sync ────────────────────────────────────────────
     if !skip_dashboards && product_config.dashboards {
@@ -1523,6 +1561,175 @@ mod product_dir_working_dir_forge_argv_delegation_tests {
              the argv triple re-inlined at one of the pre-lift \
              `run_forge_subcommand(&[...])` sites — the exact \
              flag-drift class the lift was landed to close.",
+            hits.len()
+        );
+    }
+}
+
+#[cfg(test)]
+mod persist_artifact_tags_phase_delegation_tests {
+    //! Byte-oracle + delegation shields for the
+    //! `persist_artifact_tags_phase` primitive lift.
+    //!
+    //! Pre-lift both `commands/product_release.rs::product_release`
+    //! callers — the `build_only` short-circuit branch (Phase-2 skip)
+    //! and the post-deploy tail — spelled the same three-line stanza
+    //! inline: a `print_step_heading("Phase 3: Persist artifact tags")`
+    //! call, then a `write_artifact_tags(...)` invocation, then a
+    //! trailing `println!()`. The second caller additionally carried a
+    //! stale `let att_record = attestation_info.as_ref().cloned();`
+    //! intermediate that laundered `Option<&AttestationInfoRecord>`
+    //! through `Option<AttestationInfoRecord>` and back — the lift
+    //! drops the no-op clone so both callers share the identical
+    //! `attestation_info.as_ref()` argv shape at the primitive's ONE
+    //! call site.
+    //!
+    //! Post-lift the composition lives at one body
+    //! (`persist_artifact_tags_phase`). The shields below pin:
+    //! - the exact phase-label byte-shape at the primitive body
+    //!   (`"Phase 3: Persist artifact tags"` verbatim);
+    //! - the positive delegation count (3 code-line hits — two
+    //!   callers plus one `async fn` signature) in the pre-tests
+    //!   module body;
+    //! - the negative caller shield (the phase-label literal appears
+    //!   at EXACTLY one code line in the pre-tests module body — the
+    //!   primitive body — so a re-inlined heading at either caller
+    //!   bumps the count to ≥2 and fails here);
+    //! - the negative stale-clone shield (the pre-lift
+    //!   `att_record = attestation_info.as_ref().cloned()` launder
+    //!   intermediate is gone).
+    //!
+    //! Sibling of `product_dir_working_dir_forge_argv_delegation_tests`
+    //! above — same THEORY.md §VI.1 recurring-shape-to-helper
+    //! discipline redeemed at two callers sharing a three-line
+    //! phase-write stanza instead of a three-line argv preamble.
+
+    /// Byte-oracle: the primitive body MUST spell the canonical phase
+    /// label `"Phase 3: Persist artifact tags"` verbatim. Pins the
+    /// audit-visible transcript token against a rename drift (e.g. a
+    /// silent switch to `"Phase 3: Write artifact tags"` or
+    /// `"Phase 3 — Persist artifact tags"`) that would desync a
+    /// downstream `grep 'Phase 3: Persist artifact tags'` transcript
+    /// audit. The presence-only assertion is intentional — the
+    /// duplication half is pinned separately below.
+    #[test]
+    fn test_persist_artifact_tags_phase_label_pins_phase_3_wording() {
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            include_str!("product_release.rs"),
+            "commands/product_release.rs",
+        );
+        assert!(
+            body.contains("\"Phase 3: Persist artifact tags\""),
+            "commands/product_release.rs must spell the canonical \
+             phase label `\"Phase 3: Persist artifact tags\"` \
+             verbatim at the `persist_artifact_tags_phase` primitive \
+             body in the pre-tests module body. A rename that \
+             broke this pin would desync a downstream \
+             `grep 'Phase 3: Persist artifact tags'` transcript audit."
+        );
+    }
+
+    /// Positive delegation shield: the module body (bounded by the
+    /// first `#[cfg(test)]` marker via
+    /// [`crate::test_support::module_body_before_first_cfg_test`])
+    /// MUST reference `persist_artifact_tags_phase(` at EXACTLY three
+    /// code lines — the two `product_release` callers (build_only
+    /// short-circuit + post-deploy tail) plus the primitive's own
+    /// `async fn` signature. Pins the two-caller reuse the primitive
+    /// was landed to consolidate; a regression that re-inlined one
+    /// caller and deleted the other's delegation would leave the
+    /// negative shield below trivially satisfied by absence.
+    #[test]
+    fn test_persist_artifact_tags_phase_delegated_at_two_callers() {
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            include_str!("product_release.rs"),
+            "commands/product_release.rs",
+        );
+        let hits = crate::test_support::code_line_hits(body, "persist_artifact_tags_phase(");
+        assert_eq!(
+            hits.len(),
+            3,
+            "commands/product_release.rs must reference \
+             `persist_artifact_tags_phase(` at EXACTLY 3 code lines \
+             in the pre-tests module body (2 callers + 1 `async fn` \
+             signature). Found {} code-line hit(s): {hits:#?}. A \
+             missing delegation would leave the negative caller \
+             shield below trivially satisfied by absence; an extra \
+             hit means a new caller landed without a corresponding \
+             update here.",
+            hits.len()
+        );
+    }
+
+    /// Negative caller shield: the canonical phase label
+    /// `"Phase 3: Persist artifact tags"` MUST appear at EXACTLY one
+    /// code line in the pre-tests module body — the
+    /// `persist_artifact_tags_phase` primitive body. A regression
+    /// that re-inlined the `print_step_heading("Phase 3: Persist
+    /// artifact tags")` call at either the `build_only` branch or
+    /// the post-deploy tail would bump the count to ≥2 and fail here
+    /// rather than silently re-introducing the two-site drift.
+    ///
+    /// Scoping via
+    /// [`crate::test_support::module_body_before_first_cfg_test`]
+    /// keeps this shield's own docstring mentions of the label
+    /// (which live below the first `#[cfg(test)]` marker) out of the
+    /// count on top of the `///` / `//!` / `//` filter that
+    /// [`crate::test_support::code_line_hits`] applies.
+    #[test]
+    fn test_phase_3_persist_label_lives_at_one_code_line_post_lift() {
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            include_str!("product_release.rs"),
+            "commands/product_release.rs",
+        );
+        let needle = "\"Phase 3: Persist artifact tags\"";
+        let hits = crate::test_support::code_line_hits(body, needle);
+        assert_eq!(
+            hits.len(),
+            1,
+            "commands/product_release.rs must spell \
+             `{needle}` at EXACTLY one code line in the pre-tests \
+             module body (the `persist_artifact_tags_phase` \
+             primitive body). Found {} code-line hit(s): \
+             {hits:#?}. A second hit means the phase heading \
+             re-inlined at one of the pre-lift `build_only` or \
+             post-deploy caller sites — the exact drift class the \
+             lift was landed to close.",
+            hits.len()
+        );
+    }
+
+    /// Negative stale-clone shield: the pre-lift launder-clone
+    /// intermediate `let att_record = attestation_info.as_ref()
+    /// .cloned();` — a no-op that turned
+    /// `Option<&AttestationInfoRecord>` into
+    /// `Option<AttestationInfoRecord>` and then back into
+    /// `Option<&AttestationInfoRecord>` at the post-deploy caller —
+    /// MUST NOT appear at any code line in the pre-tests module
+    /// body. Both callers of `persist_artifact_tags_phase` now pass
+    /// `attestation_info.as_ref()` directly through the primitive's
+    /// borrow-carrying arg. A regression that re-introduced the
+    /// intermediate `att_record` binding at either site would fail
+    /// here rather than silently paying a per-call
+    /// `AttestationInfoRecord` clone.
+    #[test]
+    fn test_stale_att_record_launder_clone_intermediate_removed_post_lift() {
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            include_str!("product_release.rs"),
+            "commands/product_release.rs",
+        );
+        let needle = "let att_record = attestation_info.as_ref().cloned();";
+        let hits = crate::test_support::code_line_hits(body, needle);
+        assert_eq!(
+            hits.len(),
+            0,
+            "commands/product_release.rs must NOT re-introduce the \
+             pre-lift `{needle}` launder-clone intermediate. Found \
+             {} code-line hit(s): {hits:#?}. Both callers of \
+             `persist_artifact_tags_phase` now pass \
+             `attestation_info.as_ref()` directly through the \
+             primitive's borrow-carrying arg — the launder-clone \
+             was a no-op the lift dropped.",
             hits.len()
         );
     }
