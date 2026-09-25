@@ -130,6 +130,87 @@ async fn bun_output_at(args: &[&str], cwd: &Path, op: &str) -> Result<std::proce
     )
 }
 
+/// Announce a bun captured-output gate through the visible
+/// `<title>` heading grammar, spawn `bun` with the given argv under
+/// `cwd` via [`bun_output_at`], and return the raw output alongside
+/// the elapsed clock the caller drives its per-tool verdict off. Bun-
+/// frontier sibling of the cargo-frontier
+/// `announce_gate_and_run_cargo_output_at` at
+/// `commands/prerelease.rs:221` (d513b9a) — same three-line
+/// announce-then-elapse pairing, same `Ok((output, duration))`
+/// projection, same "one spawn per start-clock" invariant, only the
+/// captured-output primitive differs (`bun_output_at` vs.
+/// `cargo_output_at`).
+///
+/// # Fusion of two sibling occurrences
+///
+/// Pre-lift `run_type_check` (title
+/// `"Running TypeScript type check..."`, argv `["run", "type-check"]`,
+/// op `"bun run type-check"`) and `run_unit_tests` (title
+/// `"Running unit tests..."`, argv
+/// `["run", "test", "--", "--run"]`, op
+/// `"bun run test -- --run"`) each spelled the same three-line
+/// preamble verbatim modulo argv, title and op label:
+///
+/// ```text
+/// let start = crate::ui::print_step_heading_start(<title>);
+/// let output = bun_output_at(&[..], web_dir, <op>).await?;
+/// let duration = start.elapsed();
+/// ```
+///
+/// Both sites read `output.status.success()` to branch, then feed
+/// `duration` into the pass/fail step-emit primitives
+/// ([`crate::frontend_validation_clean_pass_step`],
+/// [`crate::test_count_pass_step`],
+/// [`crate::step_failure_count_noun`]). Two occurrences past the
+/// duplication threshold the compounding directive names ("solve
+/// once, load-bearing fixes only"): each pre-lift site was one place
+/// a future consumer could drift — forget to snapshot `start` before
+/// the spawn (losing the timing entirely), take the elapsed sample
+/// off a hand-rolled second `Instant::now()` clock (dropping the
+/// pre-announce wall time from the duration), or spell the announce
+/// grammar inconsistently between the two gates and hide one of them
+/// from a fleet-wide grep on the canonical
+/// `print_step_heading_start("Running <what>...")` framing.
+///
+/// # Excluded sibling call sites
+///
+/// `run_biome_lint` and the ESLint arm of `run_lint_with_config`
+/// intentionally do NOT ride this primitive: each drives its own
+/// bold-title `println!("Running {}...", ...)` announce grammar off
+/// an `Instant::now()` clock rather than through
+/// [`crate::ui::print_step_heading_start`], and `run_biome_lint`
+/// drives TWO bun spawns (auto-fix `bun x biome check --write` then
+/// verify `bun x biome check`) off ONE start clock. A single-spawn
+/// primitive would either collapse the two-arm shape or double-sample
+/// the elapsed clock, so both sites keep the hand-rolled preamble at
+/// the caller. Same carve-out `run_cargo_fmt_check` (G3) uses on the
+/// sibling cargo primitive.
+///
+/// # Envelope shape by construction
+///
+/// The `output` return preserves `output.status.success()` verbatim
+/// off the pass-through
+/// [`bun_output_at`]/[`crate::retry::classify_spawn_anyhow`] chain,
+/// so a caller's downstream verdict parsing (`error TS` counting,
+/// vitest's `Tests  N passed` line, biome's `✖` markers) sees the
+/// exact raw stdout/stderr bytes the underlying `bun` spawn emitted.
+/// The `duration` return is the elapsed
+/// [`std::time::Duration`] between the pre-spawn announce and the
+/// post-spawn sample — the same duration the sibling gates thread
+/// into their `crate::repo::msg_with_*_secs_*` step-emit primitives.
+async fn announce_bun_gate_and_run_bun_output_at(
+    title: &str,
+    args: &[&str],
+    cwd: &Path,
+    op: &str,
+) -> Result<(std::process::Output, std::time::Duration)> {
+    let start = crate::ui::print_step_heading_start(title);
+    let output = bun_output_at(args, cwd, op).await?;
+    let duration = start.elapsed();
+    Ok((output, duration))
+}
+
 /// Result of frontend validation
 #[derive(Debug)]
 pub struct FrontendValidationResult {
@@ -162,12 +243,18 @@ impl FrontendValidationResult {
 /// Executes `bun run type-check` or `tsc --noEmit` to verify type safety.
 /// Returns (passed, detail_lines).
 pub async fn run_type_check(web_dir: &Path) -> Result<(bool, Vec<String>)> {
-    let start = crate::ui::print_step_heading_start("Running TypeScript type check...");
-
-    // Try bun run type-check first (defined in package.json)
-    let output = bun_output_at(&["run", "type-check"], web_dir, "bun run type-check").await?;
-
-    let duration = start.elapsed();
+    // Announce + captured-spawn + elapse three-line preamble routes
+    // through `announce_bun_gate_and_run_bun_output_at`, the bun-
+    // frontier sibling of the cargo-frontier
+    // `announce_gate_and_run_cargo_output_at` primitive on
+    // `commands/prerelease.rs`. Shared with `run_unit_tests` below.
+    let (output, duration) = announce_bun_gate_and_run_bun_output_at(
+        "Running TypeScript type check...",
+        &["run", "type-check"],
+        web_dir,
+        "bun run type-check",
+    )
+    .await?;
 
     if output.status.success() {
         crate::frontend_validation_clean_pass_step::emit_frontend_validation_clean_pass_step(
@@ -347,16 +434,17 @@ async fn run_biome_lint(web_dir: &Path) -> Result<(bool, Vec<String>)> {
 ///
 /// Executes `bun run test` (vitest) to verify unit test coverage.
 pub async fn run_unit_tests(web_dir: &Path) -> Result<(bool, Option<usize>, Vec<String>)> {
-    let start = crate::ui::print_step_heading_start("Running unit tests...");
-
-    let output = bun_output_at(
+    // Announce + captured-spawn + elapse three-line preamble routes
+    // through `announce_bun_gate_and_run_bun_output_at`, the bun-
+    // frontier sibling shared with `run_type_check` above.
+    let (output, duration) = announce_bun_gate_and_run_bun_output_at(
+        "Running unit tests...",
         &["run", "test", "--", "--run"], // --run for non-watch mode
         web_dir,
         "bun run test -- --run",
     )
     .await?;
 
-    let duration = start.elapsed();
     let combined = crate::repo::utf8_lossy_streams_joined(&output);
 
     // Parse test count from vitest output
@@ -730,5 +818,104 @@ mod tests {
             test_details: vec![],
         };
         assert!(!failed_result.is_valid());
+    }
+
+    /// Whole-module shield: the two bun-frontier one-shot gates
+    /// `run_type_check` and `run_unit_tests` MUST route their three-line
+    /// announce-then-captured-spawn-then-elapse preamble through the
+    /// [`announce_bun_gate_and_run_bun_output_at`] fusion primitive.
+    /// Bun-frontier sibling of the cargo-frontier shield
+    /// `cargo_fast_gate_announce_preamble_routes_through_announce_gate_and_run_cargo_output_at`
+    /// at `commands/prerelease.rs` (d513b9a) — same two-arm pin, same
+    /// count-eq-0 assertion on the per-site numbered opener paired
+    /// with a delegation-count-floor.
+    ///
+    /// # Two-arm pin
+    ///
+    /// Negative side pins that the per-site
+    /// `crate::ui::print_step_heading_start("Running <what>...")`
+    /// opener for each of `run_type_check` and `run_unit_tests` never
+    /// re-appears in the module body — a reconstruction of the
+    /// announce alone would take it and the paired
+    /// `let duration = start.elapsed()` off separate paths (the
+    /// announce inline, the elapse still through the primitive) and
+    /// drift the pairing one axis at a time. Positive side pins ≥2
+    /// `announce_bun_gate_and_run_bun_output_at(` delegation call
+    /// sites — one per migrated gate; a deletion drops the count and
+    /// cannot leave the negative-side scan trivially satisfied by
+    /// absence.
+    ///
+    /// # Carve-outs
+    ///
+    /// `run_lint_with_config` (ESLint arm) and `run_biome_lint`
+    /// intentionally do NOT ride this primitive: each drives its own
+    /// bold-title `println!("Running {}...", ...)` announce grammar
+    /// off an `Instant::now()` clock rather than through
+    /// [`crate::ui::print_step_heading_start`], and `run_biome_lint`
+    /// drives TWO bun spawns (auto-fix `bun x biome check --write`
+    /// then verify `bun x biome check`) off ONE start clock — a
+    /// single-spawn primitive would either collapse the two-arm shape
+    /// or double-sample the elapsed clock. Same carve-out
+    /// `run_cargo_fmt_check` (G3) uses on the sibling cargo primitive.
+    ///
+    /// # Boundary marker
+    ///
+    /// [`crate::test_support::module_body_before_tests`] slices from
+    /// file start to the `\n#[cfg(test)]\nmod tests {` marker above,
+    /// so this shield's own docstring stays out of scope AND every
+    /// current or future one-shot bun-gate helper landing anywhere in
+    /// the top-level module body cannot silently ride along without
+    /// going through the fusion.
+    ///
+    /// # Fail-before-pass-after
+    ///
+    /// Pre-lift the two `run_type_check` / `run_unit_tests` sites each
+    /// spelled the numbered
+    /// `print_step_heading_start("Running <what>...")` opener
+    /// verbatim — this shield's count-eq-0 assertion on each of the
+    /// two openers fails-before at 1 (per site) and passes-after
+    /// at 0. The needles are literals in the assertion vec so this
+    /// shield's own docstring mentions of the openers (living in
+    /// `///`-prefixed comment lines) never self-match via
+    /// [`crate::test_support::code_line_hits`]'s doc-comment filter.
+    #[test]
+    fn bun_gate_announce_preamble_routes_through_announce_bun_gate_and_run_bun_output_at() {
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("frontend_validation.rs"),
+            "commands/frontend_validation.rs",
+        );
+        for needle in [
+            "print_step_heading_start(\"Running TypeScript type check",
+            "print_step_heading_start(\"Running unit tests",
+        ] {
+            let hits = crate::test_support::code_line_hits(body, needle);
+            assert!(
+                hits.is_empty(),
+                "commands/frontend_validation.rs must NOT spell the \
+                 per-site `crate::ui::print_step_heading_start(\
+                 \"Running <what>...\")` announce half of the pre-lift \
+                 three-line preamble for `run_type_check` or \
+                 `run_unit_tests` — the announce + captured-spawn + \
+                 elapse preamble routes through \
+                 `announce_bun_gate_and_run_bun_output_at`. Re-inlining \
+                 the announce alone would take it and the paired \
+                 `let duration = start.elapsed()` off separate paths. \
+                 Offending needle `{needle}`, hits: {hits:?}",
+            );
+        }
+        let delegations =
+            crate::test_support::code_line_hits(body, "announce_bun_gate_and_run_bun_output_at(")
+                .len();
+        assert!(
+            delegations >= 2,
+            "commands/frontend_validation.rs must route the announce + \
+             captured-spawn + elapse three-line preamble on the \
+             `run_type_check` and `run_unit_tests` one-shot bun gates \
+             through the `announce_bun_gate_and_run_bun_output_at` \
+             fusion — found only {delegations} delegation call(s); a \
+             dropped call would leave the negative-side scan \
+             trivially satisfied by absence. The two load-bearing \
+             sites are `run_type_check` and `run_unit_tests`.",
+        );
     }
 }
