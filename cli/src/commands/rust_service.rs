@@ -653,10 +653,17 @@ pub async fn build_rust_service(
         // single-arch sibling remains on its own `info!`/`warn_nonfatal!`
         // dialect — the operator-visible verb (info vs println) is a
         // deliberate difference that survives the lift.
-        push_arch_closure_to_attic("AMD64", "result-amd64", &cache_target).await;
+        //
+        // The per-arch discriminator is the typed
+        // [`crate::target_arch::TargetArch`] enum: its
+        // `upper_label()` and `result_symlink()` projections are the
+        // byte-oracle inverses of the pre-lift correlated `("AMD64",
+        // "result-amd64")` / `("ARM64", "result-arm64")` `&str` pair,
+        // so a caller can no longer flip one slot without the other.
+        push_arch_closure_to_attic(crate::target_arch::TargetArch::Amd64, &cache_target).await;
 
         if should_build_arm64 {
-            push_arch_closure_to_attic("ARM64", "result-arm64", &cache_target).await;
+            push_arch_closure_to_attic(crate::target_arch::TargetArch::Arm64, &cache_target).await;
         }
 
         println!();
@@ -699,7 +706,12 @@ pub async fn build_rust_service(
 /// AMD64 and ARM64 arms in [`build_rust_service`]. Both arms differed
 /// only in the arch label (`AMD64` / `ARM64`) and the `result-*`
 /// symlink path — the lift owns the shared body at ONE construction
-/// surface, and the caller picks the label + symlink per arch.
+/// surface, and the caller picks the arch via a single
+/// [`crate::target_arch::TargetArch`] discriminator. Its
+/// `upper_label()` / `result_symlink()` projections are byte-oracle
+/// inverses of the pre-lift correlated `("AMD64", "result-amd64")` /
+/// `("ARM64", "result-arm64")` `&str` pair, so a caller can no longer
+/// pass one slot's value in place of the other.
 ///
 /// # Non-fatal contract
 ///
@@ -719,7 +731,9 @@ pub async fn build_rust_service(
 /// deliberate difference. A future unification of the two dialects
 /// lands in ONE follow-up commit; this lift closes only the
 /// byte-identical AMD64/ARM64 pair.
-async fn push_arch_closure_to_attic(arch_label: &str, result_path: &str, cache_target: &str) {
+async fn push_arch_closure_to_attic(arch: crate::target_arch::TargetArch, cache_target: &str) {
+    let arch_label = arch.upper_label();
+    let result_path = arch.result_symlink();
     println!("   Analyzing {} closure...", arch_label);
     match crate::nix::path_info_recursive(result_path).await {
         Err(e) => crate::ui::eprint_step_warn(
@@ -3366,18 +3380,55 @@ mod push_arch_closure_lift_tests {
             helper_call_hits.len()
         );
 
-        for arch in ["AMD64", "ARM64"] {
-            let arch_call_needle = format!("push_arch_closure_to_attic(\"{}\"", arch);
+        // Post-lift the per-arch discriminator is the typed
+        // [`crate::target_arch::TargetArch`] enum — its two variants
+        // (`Amd64`, `Arm64`) carry the correlated `(upper_label,
+        // result_symlink)` pair the pre-lift two-`&str` positional
+        // signature admitted as free arguments. The needle asserts one
+        // call site per variant inside `build_rust_service`; the module
+        // itself has no other consumer, so the count is exactly one.
+        for variant in ["Amd64", "Arm64"] {
+            let arch_call_needle =
+                format!("push_arch_closure_to_attic(crate::target_arch::TargetArch::{variant}");
             let arch_call_hits = crate::test_support::code_line_hits(body, &arch_call_needle);
             assert_eq!(
                 arch_call_hits.len(),
                 1,
-                "commands/rust_service.rs must pass the arch label \
-                 {arch:?} to `push_arch_closure_to_attic(...)` at \
-                 EXACTLY one code line — the corresponding arch's \
-                 call site inside `build_rust_service`. Found {} \
+                "commands/rust_service.rs must pass the typed arch \
+                 variant `TargetArch::{variant}` to \
+                 `push_arch_closure_to_attic(...)` at EXACTLY one code \
+                 line — the corresponding arch's call site inside \
+                 `build_rust_service`. A regression that dropped the \
+                 variant, or reverted to the pre-lift `&str, &str` \
+                 positional pair, would fail here. Found {} \
                  code-line hit(s): {arch_call_hits:#?}.",
                 arch_call_hits.len()
+            );
+        }
+
+        // Negative shield: neither the pre-lift `push_arch_closure_to_attic(
+        // "AMD64"` nor `push_arch_closure_to_attic("ARM64"` `&str`
+        // positional shape survives. A regression that re-inlined
+        // either string literal at a call site (bypassing the typed
+        // `TargetArch` discriminator, breaking the label/symlink
+        // correlation invariant) fails here.
+        for label in ["AMD64", "ARM64"] {
+            let raw_str_needle = format!("push_arch_closure_to_attic(\"{label}\"");
+            let raw_hits = crate::test_support::code_line_hits(body, &raw_str_needle);
+            assert_eq!(
+                raw_hits.len(),
+                0,
+                "commands/rust_service.rs must NOT re-inline the \
+                 pre-lift `push_arch_closure_to_attic(\"{label}\", …)` \
+                 `&str` positional shape — the typed \
+                 `crate::target_arch::TargetArch::{{Amd64|Arm64}}` \
+                 discriminator owns the (upper_label, result_symlink) \
+                 correlation at ONE surface. A regression that \
+                 bypassed the enum would silently re-admit the \
+                 pre-lift bug class where the label slot and the \
+                 symlink slot could drift out of lockstep. Found {} \
+                 code-line hit(s): {raw_hits:#?}.",
+                raw_hits.len()
             );
         }
     }
@@ -3405,17 +3456,27 @@ mod push_arch_closure_lift_tests {
     #[test]
     fn test_push_arch_closure_to_attic_returns_unit_and_swallows_failures() {
         const SOURCE: &str = include_str!("rust_service.rs");
+        // Post-lift the two-`&str` pair `(arch_label, result_path)`
+        // collapses onto the single typed
+        // `crate::target_arch::TargetArch` discriminator; the return
+        // type stays implicit-unit (no `-> Result<…>`) so a transient
+        // Attic unreachability cannot abort the whole
+        // `build_rust_service` flow via `?` propagation at the caller.
         let signature_needle =
-            "async fn push_arch_closure_to_attic(arch_label: &str, result_path: &str, cache_target: &str) {";
+            "async fn push_arch_closure_to_attic(arch: crate::target_arch::TargetArch, cache_target: &str) {";
         assert!(
             SOURCE.contains(signature_needle),
             "commands/rust_service.rs must expose \
-             `push_arch_closure_to_attic` with the return-unit shape — \
-             the signature `{signature_needle}` was not found. A \
-             regression that swapped the return type to `Result<…>` \
-             would let a transient Attic unreachability abort the \
-             whole `build_rust_service` flow via `?` propagation at \
-             the caller — an outcome the pre-lift arms deliberately \
+             `push_arch_closure_to_attic` with the typed-arch return-unit \
+             shape — the signature `{signature_needle}` was not found. \
+             A regression that reverted to the pre-lift `arch_label: \
+             &str, result_path: &str` positional pair would re-open the \
+             correlated-slot drift bug class the `TargetArch` \
+             discriminator was landed to close; a regression that \
+             swapped the return type to `Result<…>` would let a \
+             transient Attic unreachability abort the whole \
+             `build_rust_service` flow via `?` propagation at the \
+             caller — an outcome the pre-lift arms deliberately \
              avoided by matching-and-warning on every failure path."
         );
     }

@@ -351,6 +351,17 @@ mod step_header_with_trailing_blank;
 mod success_step;
 mod supergraph_content_hash;
 mod tags_field;
+// Closed per-arch build-target enum — `TargetArch { Amd64, Arm64 }`
+// with typed `upper_label()` / `result_symlink()` projections that
+// collapse the correlated `("AMD64", "result-amd64")` /
+// `("ARM64", "result-arm64")` pair the pre-lift
+// `commands/rust_service.rs::push_arch_closure_to_attic(arch_label,
+// result_path, cache_target)` two-`&str` positional signature admitted.
+// The two callers in `build_rust_service` (AMD64 unconditional, ARM64
+// gated by `should_build_arm64`) pass a single discriminator whose
+// upper-label and result-symlink projections are byte-oracle inverses
+// of each other by construction.
+mod target_arch;
 mod test_count_pass_step;
 mod tokio_command_inherit_stdio;
 mod tokio_command_piped_stdio;
