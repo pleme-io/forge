@@ -22,6 +22,57 @@ pub enum DatabaseType {
     None,
 }
 
+impl DatabaseType {
+    /// Human-readable database name for operator-visible diagnostics —
+    /// the `db_label` bytes the migration `MigrationTracker` records
+    /// on every migration-job start / fail / pass event and the string
+    /// the `📊 Database type:` dispatch header renders.
+    ///
+    /// Pre-lift the four bytes lived at two sites in the migration
+    /// dispatch (a `match` at the `db_type_str` computation head and
+    /// three sibling `run_<backend>_migrations` wrappers each spelling
+    /// the `db_label` slot verbatim at the `run_migration_job` call
+    /// site — the same four constants across two decision points, so
+    /// a fifth backend on the fleet's roadmap (`ClickHouse` per the
+    /// [`crate::domain::migration::DatabaseType`] sibling on the
+    /// domain-layer surface) would have to be added at both sites in
+    /// lockstep. Post-lift the display bytes live at ONE typed body,
+    /// projected off the enum variant.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Postgres => "PostgreSQL",
+            Self::Databend => "Databend",
+            Self::Elasticsearch => "Elasticsearch",
+            Self::None => "None",
+        }
+    }
+
+    /// `RUN_MODE` env-var value the migration Job container reads to
+    /// select the backend-specific migration path — `Some` for every
+    /// backend that runs a migration Job, `None` for the sentinel
+    /// [`DatabaseType::None`] variant that gates the whole migration
+    /// dispatch off.
+    ///
+    /// Pre-lift the three per-backend `RUN_MODE` string constants
+    /// (`"migrate"`, `"MIGRATE"`, `"migrate_elasticsearch"`) lived on
+    /// three sibling `run_<backend>_migrations` wrapper fns, each of
+    /// which called into the shared `run_migration_job` primitive with
+    /// its constant spelled verbatim at the `run_mode` argument slot.
+    /// Post-lift the three constants live at ONE typed body, projected
+    /// off the enum variant. Same closed-enum + typed-accessor
+    /// discipline the sibling
+    /// [`crate::domain::migration::DatabaseType::run_mode`] carries on
+    /// the domain-layer surface.
+    pub fn run_mode(&self) -> Option<&'static str> {
+        match self {
+            Self::Postgres => Some("migrate"),
+            Self::Databend => Some("MIGRATE"),
+            Self::Elasticsearch => Some("migrate_elasticsearch"),
+            Self::None => None,
+        }
+    }
+}
+
 /// Validate Kubernetes memory resource format (e.g., "128Mi", "1Gi")
 fn validate_memory_resource(s: &str) -> Result<()> {
     if s.is_empty() {
@@ -258,5 +309,60 @@ impl ServiceConfig {
     /// Get migration CPU limit
     pub fn migration_cpu_limit(&self) -> &str {
         &self.migration_cpu_limit
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DatabaseType;
+
+    /// Byte-oracle for [`DatabaseType::display_name`] — every variant
+    /// renders to the exact `db_label` bytes the pre-lift dispatch
+    /// `db_type_str` `match` at `commands/migrations.rs::run_migrations`
+    /// composed and the three sibling `run_<backend>_migrations`
+    /// wrappers each spelled at the `run_migration_job` call site's
+    /// `db_label` slot. A drift here (e.g., a rename to `"Postgres"`
+    /// dropping the `SQL`, or `"ES"` for Elasticsearch) would show up
+    /// as an operator-visible name change in the `📊 Database type:`
+    /// dispatch header AND as a `MigrationTracker` label drift on
+    /// every migration-job start / fail / pass event — a wire-visible
+    /// change to the observability surface a length check would not
+    /// catch. Pinning the bytes verbatim keeps the display surface
+    /// stable across the lift.
+    #[test]
+    fn database_type_display_name_matches_pre_lift_bytes() {
+        assert_eq!(DatabaseType::Postgres.display_name(), "PostgreSQL");
+        assert_eq!(DatabaseType::Databend.display_name(), "Databend");
+        assert_eq!(DatabaseType::Elasticsearch.display_name(), "Elasticsearch");
+        assert_eq!(DatabaseType::None.display_name(), "None");
+    }
+
+    /// Byte-oracle for [`DatabaseType::run_mode`] — every variant
+    /// renders to the exact `RUN_MODE` env-var string the pre-lift
+    /// sibling `run_<backend>_migrations` wrappers passed at
+    /// `run_migration_job`'s `run_mode` argument slot. A drift here
+    /// (a lowercase `"migrate"` for Databend, a capitalised
+    /// `"Migrate_Elasticsearch"`, a rename to `"esearch"`) would flip
+    /// the migration Job container's `RUN_MODE`-driven backend
+    /// selection at the wire and silently route a real migration to
+    /// the wrong migration codepath in the service binary — a
+    /// wire-visible / operator-visible divergence pinning the bytes
+    /// verbatim closes. The [`DatabaseType::None`] arm returns `None`
+    /// because the `run_migrations` dispatch gates the whole flow off
+    /// on that variant with an early `Ok(())` return before any
+    /// [`DatabaseType::run_mode`] call — no `RUN_MODE` string is
+    /// meaningful without a Job to run — and the `Option`-typed
+    /// return closes the "invalid states unrepresentable" surface
+    /// (THEORY §V.1) so no caller can pass a `None`-backend `RUN_MODE`
+    /// slot through the fusion primitive by construction.
+    #[test]
+    fn database_type_run_mode_matches_pre_lift_bytes() {
+        assert_eq!(DatabaseType::Postgres.run_mode(), Some("migrate"));
+        assert_eq!(DatabaseType::Databend.run_mode(), Some("MIGRATE"));
+        assert_eq!(
+            DatabaseType::Elasticsearch.run_mode(),
+            Some("migrate_elasticsearch")
+        );
+        assert_eq!(DatabaseType::None.run_mode(), None);
     }
 }

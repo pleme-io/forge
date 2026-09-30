@@ -337,29 +337,35 @@ pub async fn run_migrations(
         return Ok(());
     }
 
-    // Log database type and delegate to database-specific migration function
-    let db_type_str = match config.database_type() {
-        DatabaseType::Postgres => "PostgreSQL",
-        DatabaseType::Databend => "Databend",
-        DatabaseType::Elasticsearch => "Elasticsearch",
-        DatabaseType::None => unreachable!(),
-    };
-    println!("📊 Database type: {}", db_type_str);
+    // Log database type and delegate through the fused primitive. The
+    // per-backend `RUN_MODE` / `db_label` bytes now live on
+    // [`DatabaseType::run_mode`] / [`DatabaseType::display_name`] —
+    // the two typed accessors carry the per-backend rendering so a
+    // future 4th backend (`ClickHouse` per the
+    // [`crate::domain::migration::DatabaseType`] sibling on the
+    // domain-layer surface) adds ONE arm to each accessor rather than
+    // a fourth `run_<backend>_migrations` wrapper + a fourth arm on
+    // each of the two `match` heads that lived pre-lift.
+    let db = config.database_type();
+    let db_label = db.display_name();
+    println!("📊 Database type: {}", db_label);
     crate::ui::print_tag_field("Image tag", &image_tag);
 
-    // Delegate to database-specific migration implementation
-    match config.database_type() {
-        DatabaseType::Postgres => {
-            run_postgres_migrations(config, namespace, image_tag, deploy_config).await
-        }
-        DatabaseType::Databend => {
-            run_databend_migrations(config, namespace, image_tag, deploy_config).await
-        }
-        DatabaseType::Elasticsearch => {
-            run_elasticsearch_migrations(config, namespace, image_tag, deploy_config).await
-        }
-        DatabaseType::None => unreachable!(),
-    }
+    let run_mode = db.run_mode().unwrap_or_else(|| {
+        unreachable!(
+            "DatabaseType::None was gated out by the early return above; \
+             run_mode() is Some for every other DatabaseType variant"
+        )
+    });
+    run_migration_job(
+        config,
+        namespace,
+        image_tag,
+        run_mode,
+        db_label,
+        deploy_config,
+    )
+    .await
 }
 
 /// Common migration job runner for all database types
@@ -707,70 +713,6 @@ spec:
 
         bail!("{}", error_msg);
     }
-}
-
-/// Run PostgreSQL migrations via Kubernetes Job
-async fn run_postgres_migrations(
-    config: &ServiceConfig,
-    namespace: String,
-    image_tag: String,
-    deploy_config: &DeployConfig,
-) -> Result<()> {
-    run_migration_job(
-        config,
-        namespace,
-        image_tag,
-        "migrate",
-        "PostgreSQL",
-        deploy_config,
-    )
-    .await
-}
-
-/// Run Databend migrations via Kubernetes Job
-///
-/// Databend migrations for the analytics service use standard SQL migration scripts
-/// compatible with PostgreSQL syntax via sqlx.
-///
-/// NOTE: Analytics service must implement main.rs logic to handle RUN_MODE=MIGRATE
-async fn run_databend_migrations(
-    config: &ServiceConfig,
-    namespace: String,
-    image_tag: String,
-    deploy_config: &DeployConfig,
-) -> Result<()> {
-    run_migration_job(
-        config,
-        namespace,
-        image_tag,
-        "MIGRATE",
-        "Databend",
-        deploy_config,
-    )
-    .await
-}
-
-/// Run Elasticsearch migrations via Kubernetes Job
-///
-/// Elasticsearch migrations for the search service manage index templates,
-/// mappings, and settings using the Elasticsearch REST API.
-///
-/// NOTE: Search service must implement main.rs logic to handle RUN_MODE=migrate_elasticsearch
-async fn run_elasticsearch_migrations(
-    config: &ServiceConfig,
-    namespace: String,
-    image_tag: String,
-    deploy_config: &DeployConfig,
-) -> Result<()> {
-    run_migration_job(
-        config,
-        namespace,
-        image_tag,
-        "migrate_elasticsearch",
-        "Elasticsearch",
-        deploy_config,
-    )
-    .await
 }
 
 /// Check if a Shinka DatabaseMigration exists and is stuck in Failed phase
@@ -1372,18 +1314,17 @@ fn format_timeout_diagnostic(
 #[cfg(test)]
 mod tests {
     /// Regression shield: every `kubectl`-spawning site in
-    /// `commands/migrations.rs`'s nineteen top-level async helpers
+    /// `commands/migrations.rs`'s top-level async helpers
     /// (`check_secret_exists`, `get_kustomize_resource_name`,
     /// `run_migration_job` apply/wait/status/logs-inherit/logs-capture/
-    /// cleanup, `run_databend_migrations` gate, `run_elasticsearch_migrations`
-    /// gate, `patch_shinka_migration_status` patch,
+    /// cleanup, `patch_shinka_migration_status` patch,
     /// `list_shinka_migration_jobs` get, `delete_shinka_migration_jobs`
     /// delete + cleanup-pods, `reset_shinka_migration` verify,
     /// `show_shinka_migration_status` get, `wait_for_shinka_migration_ready`
     /// get + get + annotate) MUST resolve the binary through
     /// [`crate::infrastructure::kubectl::kubectl_command_async`] rather
     /// than the pre-lift `Command::new("kubectl")` literal. Pre-migration
-    /// nineteen sites each spelled the bare `Command::new("kubectl")`
+    /// every such site spelled the bare `Command::new("kubectl")`
     /// shape verbatim and thereby bypassed the `KUBECTL_BIN` env override
     /// the tools-registry idiom (`crate::tools::get_tool_path(tools::KUBECTL)`,
     /// cli/src/tools.rs:102-105) resolves — the same class of bug the
@@ -1414,7 +1355,7 @@ mod tests {
     /// (which lives inside this `#[cfg(test)] mod tests` block below
     /// that marker) stays out of scope AND every current or future
     /// kubectl-spawning helper landing anywhere in the top-level
-    /// module body (i.e., in any of the nineteen migrated sites or
+    /// module body (i.e., in any of the migrated sites or
     /// any as-yet unadded sibling) cannot silently ride along without
     /// going through the primitive. Mirrors the whole-module boundary
     /// discipline the sibling `commands/status.rs` shield (c2760df) and
@@ -1763,7 +1704,16 @@ mod tests {
     /// anti-docstring-self-match discipline. Scope is
     /// `run_migration_job`'s fn body (via
     /// [`crate::test_support::fn_body_slice_between_markers`])
-    /// with end marker `\nasync fn run_postgres_migrations(`.
+    /// with end marker `\npub async fn check_and_reset_shinka_migration(`
+    /// — the pre-lift end marker `\nasync fn run_postgres_migrations(`
+    /// referred to the first of three sibling
+    /// `run_<backend>_migrations` wrappers whose per-backend
+    /// `RUN_MODE` / `db_label` bytes lived verbatim at their
+    /// `run_migration_job` call sites; those wrappers fused onto the
+    /// [`crate::commands::service_config::DatabaseType`] closed
+    /// enum's `run_mode` / `display_name` typed accessors and the
+    /// boundary between `run_migration_job` and the next top-level
+    /// async helper is now the Shinka-migration reset entrypoint.
     #[test]
     fn test_run_migration_job_manifest_path_routes_through_migration_job_manifest_file() {
         const SOURCE: &str = include_str!("migrations.rs");
@@ -1771,7 +1721,7 @@ mod tests {
             SOURCE,
             "commands/migrations.rs",
             "async fn run_migration_job(",
-            "\nasync fn run_postgres_migrations(",
+            "\npub async fn check_and_reset_shinka_migration(",
         );
         // Positive: run_migration_job delegates to the sigil.
         let delegation_hits =
@@ -1836,5 +1786,114 @@ mod tests {
              `kubectl_command_async()` — the delegation string was \
              not found in the module body."
         );
+    }
+
+    /// Positive delegation shield: `run_migrations`'s dispatch body
+    /// (pre-lift a `db_type_str` `match` head plus a three-arm
+    /// `match config.database_type() { … }` that called into three
+    /// sibling `run_<backend>_migrations` wrappers) MUST route the
+    /// per-backend `RUN_MODE` / `db_label` bytes through the two typed
+    /// accessors on
+    /// [`crate::commands::service_config::DatabaseType`]:
+    /// [`crate::commands::service_config::DatabaseType::display_name`]
+    /// (the `db_label` slot) and
+    /// [`crate::commands::service_config::DatabaseType::run_mode`]
+    /// (the `RUN_MODE` slot). Pin the fn body's `.display_name(` and
+    /// `.run_mode(` code-line counts at exactly 1 each, and the
+    /// `run_migration_job(` call-site count at exactly 1 — a
+    /// regression that reintroduced a per-backend `match` head or a
+    /// fourth `run_<backend>_migrations` wrapper would drive either
+    /// count above 1 and trip here.
+    ///
+    /// Bounds scope to `run_migrations`'s fn body (via
+    /// [`crate::test_support::fn_body_slice_between_markers`]) with
+    /// end marker `\n/// Common migration job runner for all database types`
+    /// — the doc-comment head on the `run_migration_job` primitive
+    /// that immediately follows `run_migrations` in the source.
+    #[test]
+    fn test_run_migrations_dispatch_routes_through_database_type_typed_accessors() {
+        const SOURCE: &str = include_str!("migrations.rs");
+        let body = crate::test_support::fn_body_slice_between_markers(
+            SOURCE,
+            "commands/migrations.rs",
+            "pub async fn run_migrations(",
+            "\n/// Common migration job runner for all database types",
+        );
+        let display_hits = code_line_hits(body, ".display_name(");
+        assert_eq!(
+            display_hits.len(),
+            1,
+            "run_migrations must project the operator-visible database \
+             label through `DatabaseType::display_name()` at exactly \
+             one code line — got {} hits: {display_hits:#?}",
+            display_hits.len(),
+        );
+        let run_mode_hits = code_line_hits(body, ".run_mode(");
+        assert_eq!(
+            run_mode_hits.len(),
+            1,
+            "run_migrations must project the migration-Job `RUN_MODE` \
+             string through `DatabaseType::run_mode()` at exactly one \
+             code line — got {} hits: {run_mode_hits:#?}",
+            run_mode_hits.len(),
+        );
+        let migration_job_hits = code_line_hits(body, "run_migration_job(");
+        assert_eq!(
+            migration_job_hits.len(),
+            1,
+            "run_migrations must delegate to `run_migration_job(` at \
+             exactly one code line (the single fused-primitive call \
+             site the three pre-lift sibling `run_<backend>_migrations` \
+             wrappers each spelled once) — got {} hits: \
+             {migration_job_hits:#?}",
+            migration_job_hits.len(),
+        );
+    }
+
+    /// Negative regression shield: no code line under the module body
+    /// may still define any of the three pre-lift sibling
+    /// `run_<backend>_migrations` wrappers whose per-backend
+    /// `RUN_MODE` / `db_label` bytes fused onto
+    /// [`crate::commands::service_config::DatabaseType::run_mode`] /
+    /// [`crate::commands::service_config::DatabaseType::display_name`].
+    /// A regression that reintroduced `async fn
+    /// run_postgres_migrations(...)` / `async fn
+    /// run_databend_migrations(...)` / `async fn
+    /// run_elasticsearch_migrations(...)` with a hand-rolled
+    /// `RUN_MODE` string spelled verbatim at the `run_migration_job`
+    /// call site would re-open the fifth-backend two-site drift the
+    /// closed-enum + typed-accessor lift closes.
+    ///
+    /// Scope is the module body before the `#[cfg(test)]` marker (via
+    /// [`crate::test_support::module_body_before_tests`]) so this
+    /// shield's own docstring mentions of the forbidden fn-def bytes
+    /// (which live inside this `mod tests` block) stay out of scope.
+    /// The forbidden needles are anchored to the fn-definition byte
+    /// sequence rather than the bare `run_<backend>_migrations`
+    /// identifier so a doc-comment or panic-message mention of the
+    /// pre-lift wrapper name elsewhere in the module body does not
+    /// false-match.
+    #[test]
+    fn test_no_module_body_still_defines_per_backend_run_migrations_wrappers() {
+        let module_body = crate::test_support::module_body_before_tests(
+            include_str!("migrations.rs"),
+            "commands/migrations.rs",
+        );
+        for forbidden in [
+            "async fn run_postgres_migrations(",
+            "async fn run_databend_migrations(",
+            "async fn run_elasticsearch_migrations(",
+        ] {
+            let hits = code_line_hits(module_body, forbidden);
+            assert!(
+                hits.is_empty(),
+                "migrations.rs module body must not still define the \
+                 pre-lift `{forbidden}...) -> Result<()>` sibling \
+                 wrapper — the per-backend `RUN_MODE` / `db_label` \
+                 bytes fuse onto the \
+                 `DatabaseType::run_mode` / `display_name` typed \
+                 accessors. Offending: {hits:#?}"
+            );
+        }
     }
 }
