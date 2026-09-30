@@ -154,20 +154,19 @@ async fn verify_k8s_service(service: &str, namespace: &str, port: u16) -> Result
         service, namespace, port
     );
 
-    // Use netcat to check if port is accessible
-    let nc_check = Command::new(nc_bin())
-        .args(&[
-            "-zv",
-            &format!("{}.{}.svc.cluster.local", service, namespace),
-            &port.to_string(),
-        ])
-        .output()
-        .context("Failed to execute netcat check")?;
-
-    if !nc_check.status.success() {
-        let stderr = crate::repo::utf8_lossy_borrow(&nc_check.stderr);
-        anyhow::bail!("Service not accessible: {}. Stderr: {}", service, stderr);
-    }
+    // Use netcat to check if port is accessible — routed through the
+    // typed `nc_tcp_probe_or_bail_sync` primitive so the spawn+extract+
+    // target-specific-diagnostic grammar lives at ONE typed body shared
+    // with the external-host probe below (see `crate::netcat_tcp_probe`
+    // for the pre-lift census + THEORY §V.1/§VI.1 grounding).
+    crate::netcat_tcp_probe::nc_tcp_probe_or_bail_sync(
+        &nc_bin(),
+        crate::netcat_tcp_probe::NetcatTcpProbeTarget::K8sClusterLocal {
+            service,
+            namespace,
+            port,
+        },
+    )?;
 
     crate::info_success!("Service {} is accessible on port {}", service, port);
     Ok(())
@@ -192,22 +191,17 @@ async fn verify_external(hostname: &str, port: u16) -> Result<()> {
         crate::info_success!("DNS resolved to: {}", ip.trim());
     }
 
-    // Check TCP connectivity with timeout
+    // Check TCP connectivity with timeout — routed through the typed
+    // `nc_tcp_probe_or_bail_sync` primitive so the spawn+extract+
+    // target-specific-diagnostic grammar lives at ONE typed body shared
+    // with the in-cluster K8s Service probe above (see
+    // `crate::netcat_tcp_probe` for the pre-lift census + THEORY
+    // §V.1/§VI.1 grounding).
     info!("Checking TCP connectivity to {}:{}", hostname, port);
-    let nc_check = Command::new(nc_bin())
-        .args(&["-zv", "-G", "5", hostname, &port.to_string()])
-        .output()
-        .context("Failed to execute netcat check")?;
-
-    if !nc_check.status.success() {
-        let stderr = crate::repo::utf8_lossy_borrow(&nc_check.stderr);
-        anyhow::bail!(
-            "Cannot connect to {}:{}. Stderr: {}",
-            hostname,
-            port,
-            stderr
-        );
-    }
+    crate::netcat_tcp_probe::nc_tcp_probe_or_bail_sync(
+        &nc_bin(),
+        crate::netcat_tcp_probe::NetcatTcpProbeTarget::ExternalHost { hostname, port },
+    )?;
 
     crate::info_success!("TCP connection to {}:{} successful", hostname, port);
     Ok(())
@@ -729,14 +723,20 @@ mod nix_bin_routing_tests {
     /// (`async fn verify_k8s_service(`) — so:
     ///
     /// - The sibling `nc_check` bail paths at
-    ///   `verify_k8s_service` (line 173-176 post-migration) and
-    ///   `verify_external` (line 208-215 post-migration) — which
-    ///   legitimately keep their custom
+    ///   `verify_k8s_service` and `verify_external` — whose custom
     ///   `"Service not accessible: {service}. Stderr: {stderr}"` /
     ///   `"Cannot connect to {hostname}:{port}. Stderr: {stderr}"`
-    ///   shapes carrying per-call service/host/port context that
-    ///   does NOT fit the primitive's
-    ///   `(op, exit_code, stderr)`-only envelope — stay out of scope.
+    ///   diagnostics carry per-call service/host/port context that
+    ///   does NOT fit the `(op, exit_code, stderr)`-only envelope
+    ///   `retry::classify_capture_anyhow` emits — stay out of scope
+    ///   here. Those two sibling stanzas migrated (post-lift) onto
+    ///   the sibling typed primitive
+    ///   [`crate::netcat_tcp_probe::nc_tcp_probe_or_bail_sync`],
+    ///   which owns the target-scoped `<target-descriptor>. Stderr:
+    ///   {stderr}` diagnostic surface for the two `nc` reachability
+    ///   probes and complements (does not collide with) the
+    ///   `(op, exit_code, stderr)` envelope this shield pins on the
+    ///   `test` fn's captured-output sites.
     /// - The migration-inline commentary above each migrated site
     ///   (which quotes the pre-lift bail literal for narrative
     ///   purposes) rides INSIDE the fn body, so the shield's

@@ -218,6 +218,19 @@ mod kubectl_probe_job_condition_status;
 mod list_resource_names_by_selector_argv;
 mod migration_file_read;
 mod namespace_field;
+// Typed primitive: the fused `Command::new(nc_bin()).args(<argv>)
+// .output().context("Failed to execute netcat check")? + if
+// !nc_check.status.success() { let stderr = ...; anyhow::bail!(
+// <target-specific diagnostic>); }` netcat-TCP-reachability probe
+// grammar for the two sibling stanzas in
+// `commands/nix_builder.rs::{verify_k8s_service, verify_external}`.
+// The (argv, failure-diagnostic) pair per target is pinned via the
+// closed `NetcatTcpProbeTarget` enum so a rename of one target's
+// argv shape reaches its diagnostic renderer in lockstep by
+// construction, and the whole spawn+extract+bail grammar lives at
+// ONE typed body so a future refinement (a per-probe telemetry
+// hook, a switch to async spawn, etc.) lands in one place.
+mod netcat_tcp_probe;
 mod next_steps_review_the_changes_opener;
 mod nix;
 mod nix_build_spinner;
