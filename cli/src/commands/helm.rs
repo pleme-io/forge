@@ -886,6 +886,88 @@ pub fn lint(chart_dir: &str) -> Result<()> {
     Ok(())
 }
 
+/// Resolve the effective chart directory a `_with_lib` helm-CLI
+/// wrapper reads for the wrapped call, dispatched on whether a
+/// library-chart workspace isolation was requested.
+///
+/// Returns `Ok((None, chart_dir.to_string()))` when `lib_chart_dir`
+/// is `None` — the caller reads `chart_dir` in place, matching the
+/// pre-lift `None => <tail>(chart_dir, …)` arm at every sibling
+/// site.
+///
+/// Returns `Ok((Some(tmpdir), tmp_chart_path))` when
+/// `lib_chart_dir` is `Some(lib_dir)` — parses `chart_name` and
+/// `parent_dir` from `chart_dir` (bailing with the pre-lift
+/// `Invalid chart directory name` / `Invalid chart parent
+/// directory` diagnostics each sibling body spelled verbatim on a
+/// path missing either segment), then delegates to
+/// [`prepare_chart_workspace`] to stage the isolated workspace.
+/// The caller reads `tmp_chart_path` and MUST keep `tmpdir` alive
+/// for the entire wrapped helm-CLI pass, since its `Drop` unlinks
+/// the whole prepared workspace.
+///
+/// # Sibling stanza fusion
+///
+/// Pre-lift `lint_with_lib` and `release_with_lib` each spelled
+/// the byte-identical eleven-line
+/// `match lib_chart_dir { Some(lib_dir) => { let chart_path =
+/// Path::new(chart_dir); let chart_name = chart_path.file_name()
+/// …context("Invalid chart directory name")?; let parent_dir =
+/// chart_path.parent()…context("Invalid chart parent directory")?;
+/// let (_tmpdir, tmp_chart_path) = prepare_chart_workspace(
+/// chart_name, parent_dir, Some(lib_dir), lib_chart_name)?;
+/// <tail>(&tmp_chart_path, …) } None => <tail>(chart_dir, …) }`
+/// stanza, byte-identical modulo the `<tail>` — `lint(&…)` for
+/// `lint_with_lib`, `release(&…, registry, version)` for
+/// `release_with_lib`. Two occurrences past the routine's ≥2
+/// PRIME-DIRECTIVE threshold; the fusion lands the workspace-
+/// resolution shape at ONE typed body while each `_with_lib`
+/// caller composes its own `<tail>` at the call site — a future
+/// third wrapper (`template_with_lib`, `bump_with_lib`, …)
+/// imports the primitive rather than re-copying the eleven-line
+/// block, and a change to how the isolated workspace is staged
+/// touches one body, not each `_with_lib` sibling in lockstep.
+///
+/// # Composition
+///
+/// Composes downstream through [`prepare_chart_workspace`], the
+/// pre-existing typed primitive that owns the staging discipline
+/// (chart-copy, library-copy, file-sibling-dep staging, third-
+/// party-dep mirror redirect). This helper adds the
+/// `Option<&str>`-dispatched `None`-branch shortcut plus the
+/// `chart_dir`-path parsing preamble around it, so the two
+/// sibling `_with_lib` sites read one line where they used to
+/// read eleven.
+///
+/// THEORY.md §VI.1 one-oracle discipline: the workspace-
+/// resolution shape is composed at ONE site (here), not re-
+/// inlined per `_with_lib` sibling body.
+fn resolve_chart_workspace(
+    chart_dir: &str,
+    lib_chart_dir: Option<&str>,
+    lib_chart_name: &str,
+) -> Result<(Option<tempfile::TempDir>, String)> {
+    let Some(lib_dir) = lib_chart_dir else {
+        return Ok((None, chart_dir.to_string()));
+    };
+
+    let chart_path = Path::new(chart_dir);
+    let chart_name = chart_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("Invalid chart directory name")?;
+
+    let parent_dir = chart_path
+        .parent()
+        .and_then(|p| p.to_str())
+        .context("Invalid chart parent directory")?;
+
+    let (tmpdir, tmp_chart_path) =
+        prepare_chart_workspace(chart_name, parent_dir, Some(lib_dir), lib_chart_name)?;
+
+    Ok((Some(tmpdir), tmp_chart_path))
+}
+
 /// Lint with optional library chart workspace isolation.
 ///
 /// If `lib_chart_dir` is provided, creates a temp workspace with the chart
@@ -895,26 +977,9 @@ pub fn lint_with_lib(
     lib_chart_dir: Option<&str>,
     lib_chart_name: &str,
 ) -> Result<()> {
-    match lib_chart_dir {
-        Some(lib_dir) => {
-            let chart_path = Path::new(chart_dir);
-            let chart_name = chart_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .context("Invalid chart directory name")?;
-
-            let parent_dir = chart_path
-                .parent()
-                .and_then(|p| p.to_str())
-                .context("Invalid chart parent directory")?;
-
-            let (_tmpdir, tmp_chart_path) =
-                prepare_chart_workspace(chart_name, parent_dir, Some(lib_dir), lib_chart_name)?;
-
-            lint(&tmp_chart_path)
-        }
-        None => lint(chart_dir),
-    }
+    let (_tmpdir, effective_dir) =
+        resolve_chart_workspace(chart_dir, lib_chart_dir, lib_chart_name)?;
+    lint(&effective_dir)
 }
 
 /// Release with optional library chart workspace isolation.
@@ -925,25 +990,130 @@ pub fn release_with_lib(
     lib_chart_dir: Option<&str>,
     lib_chart_name: &str,
 ) -> Result<()> {
-    match lib_chart_dir {
-        Some(lib_dir) => {
-            let chart_path = Path::new(chart_dir);
-            let chart_name = chart_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .context("Invalid chart directory name")?;
+    let (_tmpdir, effective_dir) =
+        resolve_chart_workspace(chart_dir, lib_chart_dir, lib_chart_name)?;
+    release(&effective_dir, registry, version)
+}
 
-            let parent_dir = chart_path
-                .parent()
-                .and_then(|p| p.to_str())
-                .context("Invalid chart parent directory")?;
+#[cfg(test)]
+mod resolve_chart_workspace_tests {
+    use super::resolve_chart_workspace;
 
-            let (_tmpdir, tmp_chart_path) =
-                prepare_chart_workspace(chart_name, parent_dir, Some(lib_dir), lib_chart_name)?;
+    /// `resolve_chart_workspace` with `lib_chart_dir == None` MUST
+    /// return `(None, chart_dir.to_string())` without touching the
+    /// filesystem or spawning [`prepare_chart_workspace`]. This is
+    /// the `None`-branch shortcut every pre-lift sibling body
+    /// carried as its `None => <tail>(chart_dir, …)` arm — the
+    /// primitive collapses it at ONE line.
+    #[test]
+    fn none_lib_chart_dir_returns_chart_dir_verbatim_without_tempdir() {
+        let (tmpdir, effective_dir) =
+            resolve_chart_workspace("does/not/exist/on/disk", None, "pleme-lib").unwrap();
+        assert!(
+            tmpdir.is_none(),
+            "resolve_chart_workspace(_, None, _) must return \
+             (None, chart_dir) with no TempDir bound — a Some(TempDir) \
+             would mean the primitive materialised a temp workspace \
+             the pre-lift `None => <tail>(chart_dir, …)` arm never \
+             did."
+        );
+        assert_eq!(effective_dir, "does/not/exist/on/disk");
+    }
 
-            release(&tmp_chart_path, registry, version)
+    /// `resolve_chart_workspace` with a `Some(_)` `lib_chart_dir`
+    /// but a `chart_dir` whose `Path::file_name()` is `None` MUST
+    /// bail with the pre-lift `Invalid chart directory name`
+    /// diagnostic. Byte-identical operator-grep target the
+    /// pre-lift sibling bodies spelled verbatim.
+    #[test]
+    fn some_lib_chart_dir_with_rootlike_chart_dir_bails_with_pre_lift_diagnostic() {
+        let err = resolve_chart_workspace("/", Some("/tmp/lib"), "pleme-lib").unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid chart directory name"),
+            "resolve_chart_workspace must surface the pre-lift \
+             `Invalid chart directory name` context on a chart_dir \
+             whose `Path::file_name()` is `None` (e.g. `/`), the \
+             byte-identical operator-grep target both sibling \
+             bodies spelled — got: {}",
+            err
+        );
+    }
+
+    /// Sibling-body fusion shield: `commands/helm.rs::lint_with_lib`
+    /// and `commands/helm.rs::release_with_lib` MUST BOTH route
+    /// through `resolve_chart_workspace(chart_dir, lib_chart_dir,
+    /// lib_chart_name)?` rather than re-inline the pre-lift
+    /// eleven-line `match lib_chart_dir { Some(lib_dir) => { let
+    /// chart_path = Path::new(chart_dir); … prepare_chart_workspace(
+    /// …)?; <tail>(&tmp_chart_path, …) } None => <tail>(chart_dir,
+    /// …) }` stanza. Positive delegation shield fixes the forward-
+    /// hit count at 1 on each sibling body; negative sibling-body
+    /// shield forbids the raw `prepare_chart_workspace(` call from
+    /// re-appearing under either signature (a future regression
+    /// that re-fused the eleven-line stanza would satisfy the
+    /// positive shield only if the delegation was ALSO restored,
+    /// which would flip the forward count above 1 and re-fail
+    /// here).
+    #[test]
+    fn lint_with_lib_and_release_with_lib_route_through_resolve_chart_workspace() {
+        const SOURCE: &str = include_str!("helm.rs");
+        let delegation_needle =
+            "resolve_chart_workspace(chart_dir, lib_chart_dir, lib_chart_name)?";
+        let prepare_needle = "prepare_chart_workspace(";
+
+        for (module_path, open_marker, end_marker) in [
+            (
+                "commands/helm.rs::lint_with_lib",
+                "pub fn lint_with_lib(",
+                "\n/// Release with optional library chart workspace isolation.",
+            ),
+            (
+                "commands/helm.rs::release_with_lib",
+                "pub fn release_with_lib(",
+                "\n#[cfg(test)]\nmod resolve_chart_workspace_tests {",
+            ),
+        ] {
+            let body = crate::test_support::fn_body_slice_between_markers(
+                SOURCE,
+                module_path,
+                open_marker,
+                end_marker,
+            );
+
+            let delegation_hits = crate::test_support::code_line_hits(body, delegation_needle);
+            assert_eq!(
+                delegation_hits.len(),
+                1,
+                "{module_path} must delegate its workspace resolution \
+                 to `resolve_chart_workspace(chart_dir, lib_chart_dir, \
+                 lib_chart_name)?` at EXACTLY one code line — the \
+                 pre-lift eleven-line `match lib_chart_dir {{ \
+                 Some(lib_dir) => …prepare_chart_workspace(…)?; \
+                 <tail>(&tmp_chart_path, …) None => <tail>(chart_dir, \
+                 …) }}` stanza lifts onto this ONE typed body. \
+                 Found {} code-line hit(s): {delegation_hits:#?}. A \
+                 regression that dropped the delegation cannot leave \
+                 the negative scan below trivially satisfied by \
+                 absence; this positive floor guards against that \
+                 class.",
+                delegation_hits.len(),
+            );
+
+            let prepare_hits = crate::test_support::code_line_hits(body, prepare_needle);
+            assert!(
+                prepare_hits.is_empty(),
+                "{module_path} must NOT spell `{prepare_needle}` \
+                 inline in its body — the workspace-staging call \
+                 routes through `resolve_chart_workspace`, the ONE \
+                 typed primitive that owns the (chart_name, \
+                 parent_dir, Some(lib_dir), lib_chart_name)-shaped \
+                 `prepare_chart_workspace` invocation. Found {} \
+                 code-line hit(s): {prepare_hits:#?}. A hand-rolled \
+                 inline copy re-opens the drift class the primitive \
+                 was landed to close.",
+                prepare_hits.len(),
+            );
         }
-        None => release(chart_dir, registry, version),
     }
 }
 
