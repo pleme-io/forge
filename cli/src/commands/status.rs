@@ -562,10 +562,20 @@ async fn fetch_related_services(namespace: &str, deployment_name: &str) -> Resul
     // Fetch redis - try multiple naming patterns:
     // 1. redis-{service} (Deployment) - most rust services
     // 2. {deployment_name}-redis (StatefulSet) - web service
-    let redis = if let Ok(r) = fetch_redis(namespace, &format!("redis-{}", deployment_name)).await {
+    let redis = if let Ok(r) = fetch_redis_workload(
+        RedisWorkloadKind::Deployment,
+        namespace,
+        &format!("redis-{}", deployment_name),
+    )
+    .await
+    {
         Some(r)
-    } else if let Ok(r) =
-        fetch_redis_statefulset(namespace, &format!("{}-redis", deployment_name)).await
+    } else if let Ok(r) = fetch_redis_workload(
+        RedisWorkloadKind::StatefulSet,
+        namespace,
+        &format!("{}-redis", deployment_name),
+    )
+    .await
     {
         Some(r)
     } else {
@@ -620,34 +630,81 @@ async fn fetch_statefulset(namespace: &str, name: &str) -> Result<StatefulSetInf
     })
 }
 
-async fn fetch_redis(namespace: &str, name: &str) -> Result<ResourceInfo> {
-    let output = kubectl_get_object("deployment", name, namespace).await?;
-
-    let dep = kubectl_get_item(&output, "Redis deployment not found")?;
-    let (ready, status) = replica_readiness_display(&dep);
-
-    Ok(ResourceInfo {
-        name: name.to_string(),
-        status,
-        ready,
-        image: dep
-            .pointer("/spec/template/spec/containers/0/image")
-            .and_then(|i| i.as_str())
-            .map(String::from),
-    })
+/// The two Kubernetes workload kinds `fetch_redis_workload` probes when
+/// resolving a Redis instance for the operator-visible status render.
+///
+/// Ruby-idiomatic closed enum: adding a new workload kind (a hypothetical
+/// `DaemonSet` variant, or a `Job`-hosted single-shot Redis for a
+/// migration-scoped cache) surfaces as a compile-time pattern-match
+/// exhaustion in [`RedisWorkloadKind::kubectl_kind_literal`] and
+/// [`RedisWorkloadKind::not_found_msg`] rather than as a silent
+/// `&str`-slot spawn against an unrouted kind. Same closed-enum
+/// discipline `commands/builder_pool_edit.rs`
+/// (`BuilderPoolField::{AgentImage, BuilderImage}` at commit ff…) uses
+/// against its two YAML field names, and `commands/gem.rs` uses for its
+/// version-form palette (forge `CLAUDE.md` `## ★★ Version bumping`: "A
+/// closed enum whose `render` is the inverse of the `pattern` that
+/// detected it.").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RedisWorkloadKind {
+    /// `kubectl get deployment …` — most rust services host Redis under
+    /// the `redis-<service>` Deployment naming convention.
+    Deployment,
+    /// `kubectl get statefulset …` — the web service hosts Redis under
+    /// the `<service>-redis` StatefulSet naming convention.
+    StatefulSet,
 }
 
-async fn fetch_redis_statefulset(namespace: &str, name: &str) -> Result<ResourceInfo> {
-    let output = kubectl_get_object("statefulset", name, namespace).await?;
+impl RedisWorkloadKind {
+    /// The kubectl `-o json` resource-kind literal for this workload —
+    /// the second arg of `kubectl get <kind> <name> -n <ns> -o json`
+    /// composed by [`kubectl_get_object`].
+    fn kubectl_kind_literal(self) -> &'static str {
+        match self {
+            Self::Deployment => "deployment",
+            Self::StatefulSet => "statefulset",
+        }
+    }
 
-    let sts = kubectl_get_item(&output, "Redis statefulset not found")?;
-    let (ready, status) = replica_readiness_display(&sts);
+    /// The bail-diagnostic literal [`kubectl_get_item`] surfaces on a
+    /// non-success `kubectl get` exit for this workload — an operator's
+    /// grep target (`"Redis deployment not found"` vs `"Redis statefulset
+    /// not found"`) that the pre-lift split spelled verbatim in each
+    /// sibling body.
+    fn not_found_msg(self) -> &'static str {
+        match self {
+            Self::Deployment => "Redis deployment not found",
+            Self::StatefulSet => "Redis statefulset not found",
+        }
+    }
+}
+
+/// Fetch a Redis workload's `ResourceInfo` render for the operator-facing
+/// `forge status` command. Fuses the pre-lift two-sibling
+/// `fetch_redis` / `fetch_redis_statefulset` bodies — byte-identical
+/// modulo the `("deployment", "Redis deployment not found")` vs
+/// `("statefulset", "Redis statefulset not found")` pair — onto ONE
+/// typed body dispatched by [`RedisWorkloadKind`]. The enum's typed
+/// accessors ([`RedisWorkloadKind::kubectl_kind_literal`] and
+/// [`RedisWorkloadKind::not_found_msg`]) render the per-kind bytes so a
+/// future third workload kind adds a variant and the exhaustive `match`
+/// arms force both renders to land in lockstep by construction rather
+/// than one drifting from the other.
+async fn fetch_redis_workload(
+    kind: RedisWorkloadKind,
+    namespace: &str,
+    name: &str,
+) -> Result<ResourceInfo> {
+    let output = kubectl_get_object(kind.kubectl_kind_literal(), name, namespace).await?;
+
+    let doc = kubectl_get_item(&output, kind.not_found_msg())?;
+    let (ready, status) = replica_readiness_display(&doc);
 
     Ok(ResourceInfo {
         name: name.to_string(),
         status,
         ready,
-        image: sts
+        image: doc
             .pointer("/spec/template/spec/containers/0/image")
             .and_then(|i| i.as_str())
             .map(String::from),
@@ -689,11 +746,12 @@ async fn fetch_configmap(namespace: &str, name: &str) -> Result<ConfigMapInfo> {
 ///   with a richer `stderr`-bearing bail arm on non-success exit.
 /// - [`fetch_statefulset`] — `("statefulset", <name>, <ns>)`; routes
 ///   through [`kubectl_get_item`] with `"StatefulSet not found"`.
-/// - [`fetch_redis`] — `("deployment", <name>, <ns>)`; routes through
+/// - [`fetch_redis_workload`] with [`RedisWorkloadKind::Deployment`] —
+///   `("deployment", <name>, <ns>)`; routes through
 ///   [`kubectl_get_item`] with `"Redis deployment not found"`.
-/// - [`fetch_redis_statefulset`] — `("statefulset", <name>, <ns>)`;
-///   routes through [`kubectl_get_item`] with `"Redis statefulset not
-///   found"`.
+/// - [`fetch_redis_workload`] with [`RedisWorkloadKind::StatefulSet`] —
+///   `("statefulset", <name>, <ns>)`; routes through
+///   [`kubectl_get_item`] with `"Redis statefulset not found"`.
 /// - [`fetch_configmap`] — `("configmap", <name>, <ns>)`; routes through
 ///   [`kubectl_get_item`] with `"ConfigMap not found"`.
 ///
@@ -923,8 +981,10 @@ fn kubectl_get_items(output: &std::process::Output) -> Result<Vec<serde_json::Va
 /// # Consumers
 ///
 /// - [`fetch_statefulset`] — bails `"StatefulSet not found"`
-/// - [`fetch_redis`] — bails `"Redis deployment not found"`
-/// - [`fetch_redis_statefulset`] — bails `"Redis statefulset not found"`
+/// - [`fetch_redis_workload`] with [`RedisWorkloadKind::Deployment`] —
+///   bails `"Redis deployment not found"`
+/// - [`fetch_redis_workload`] with [`RedisWorkloadKind::StatefulSet`] —
+///   bails `"Redis statefulset not found"`
 /// - [`fetch_configmap`] — bails `"ConfigMap not found"`
 ///
 /// Four sibling call sites past the "two is a coincidence; three is a
@@ -964,8 +1024,10 @@ fn kubectl_get_item(
 /// # Consumers
 ///
 /// - [`fetch_statefulset`] — StatefulSet document, drives `StatefulSetInfo::{ready, status}`
-/// - [`fetch_redis`] — Deployment document, drives `ResourceInfo::{ready, status}`
-/// - [`fetch_redis_statefulset`] — StatefulSet document, drives `ResourceInfo::{ready, status}`
+/// - [`fetch_redis_workload`] with [`RedisWorkloadKind::Deployment`] —
+///   Deployment document, drives `ResourceInfo::{ready, status}`
+/// - [`fetch_redis_workload`] with [`RedisWorkloadKind::StatefulSet`] —
+///   StatefulSet document, drives `ResourceInfo::{ready, status}`
 ///
 /// Three sibling call sites past the "two is a coincidence; three is a
 /// law" threshold — see the retry-schedule
@@ -1605,9 +1667,9 @@ mod tests {
     }
 
     /// Regression shield: every `kubectl`-spawning site in
-    /// `commands/status.rs`'s ten top-level async fetch helpers
+    /// `commands/status.rs`'s nine top-level async fetch helpers
     /// (`fetch_deployment`, `fetch_pods`, `fetch_statefulset`,
-    /// `fetch_redis`, `fetch_redis_statefulset`, `fetch_configmap`,
+    /// `fetch_redis_workload`, `fetch_configmap`,
     /// `fetch_secrets`, `fetch_k8s_services`, `fetch_migrations`,
     /// `fetch_events`) MUST resolve the binary through
     /// [`crate::infrastructure::kubectl::kubectl_command_async`]
@@ -2777,5 +2839,174 @@ mod tests {
              negative scan above trivially satisfied by absence.",
             delegate_hits.len()
         );
+    }
+
+    // ====================================================================
+    // RedisWorkloadKind + fetch_redis_workload — sibling-body fusion shields
+    // ====================================================================
+    //
+    // Pre-lift `fetch_redis` (Deployment, `"Redis deployment not found"`)
+    // and `fetch_redis_statefulset` (StatefulSet, `"Redis statefulset not
+    // found"`) each spelled the verbatim seven-line
+    // `kubectl_get_object(<kind>, name, namespace).await? +
+    // kubectl_get_item(&output, "<not-found-msg>")? +
+    // replica_readiness_display(&doc) + Ok(ResourceInfo { … })` body,
+    // byte-identical modulo the `(<kind>, <not-found-msg>)` pair. Two
+    // occurrences past the routine's `≥2` PRIME-DIRECTIVE threshold; the
+    // fusion lands the shape at ONE typed body dispatched by
+    // `RedisWorkloadKind::{Deployment, StatefulSet}`, whose typed
+    // accessors project each variant onto its per-kind bytes.
+
+    #[test]
+    fn redis_workload_kind_kubectl_kind_literal_matches_pre_lift_bytes() {
+        // Byte-oracle: the two variant projections match the pre-lift
+        // literal-kind bytes each sibling body passed to
+        // `kubectl_get_object` as its first arg. A swap here would
+        // silently probe the wrong Kubernetes resource kind (a Deployment
+        // named `<svc>-redis` under the StatefulSet naming convention
+        // would 404-collapse to `None` even where the StatefulSet is
+        // healthy, and vice-versa) while the diagnostic still named
+        // Redis — a wire-visible / operator-visible divergence a length
+        // check would not catch.
+        assert_eq!(
+            super::RedisWorkloadKind::Deployment.kubectl_kind_literal(),
+            "deployment"
+        );
+        assert_eq!(
+            super::RedisWorkloadKind::StatefulSet.kubectl_kind_literal(),
+            "statefulset"
+        );
+    }
+
+    #[test]
+    fn redis_workload_kind_not_found_msg_matches_pre_lift_bytes() {
+        // Byte-oracle: the two variant projections match the pre-lift
+        // caller-visible bail diagnostics each sibling body passed to
+        // `kubectl_get_item`. An operator's grep target on the render
+        // error stream ("Redis deployment not found" vs "Redis statefulset
+        // not found", distinguishable so `forge status` diagnostics
+        // disambiguate the naming-pattern miss) survives the fusion
+        // byte-for-byte.
+        assert_eq!(
+            super::RedisWorkloadKind::Deployment.not_found_msg(),
+            "Redis deployment not found"
+        );
+        assert_eq!(
+            super::RedisWorkloadKind::StatefulSet.not_found_msg(),
+            "Redis statefulset not found"
+        );
+    }
+
+    /// Positive delegation shield: `commands/status.rs`'s non-test body
+    /// MUST invoke `fetch_redis_workload(` at exactly the two pre-lift
+    /// call sites (one Deployment-naming attempt, one StatefulSet-naming
+    /// attempt) so the sequential-fallback try-Deployment-then-StatefulSet
+    /// discipline `fetch_related_services` carried in the pre-lift split
+    /// survives the fusion. Fixes the forward-hit count at 2 so a
+    /// migration that dropped a call site outright leaves the negative
+    /// "no `async fn fetch_redis(` sibling body reappears" shield below
+    /// trivially satisfied by absence; this positive floor guards
+    /// against that regression class.
+    #[test]
+    fn fetch_related_services_routes_through_fetch_redis_workload_at_two_sites() {
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("status.rs"),
+            "commands/status.rs",
+        );
+
+        let all_hits = crate::test_support::code_line_hits(body, "fetch_redis_workload(");
+        let (def_hits, call_hits): (Vec<_>, Vec<_>) = all_hits
+            .into_iter()
+            .partition(|l| l.contains("async fn fetch_redis_workload("));
+        assert_eq!(
+            def_hits.len(),
+            1,
+            "commands/status.rs must define `async fn fetch_redis_workload(` \
+             at EXACTLY one code line — the fused primitive's own body. \
+             Found {} code-line hit(s): {def_hits:#?}. A duplicate \
+             definition would silently re-open the two-siblings-in-lockstep \
+             duplication class this lift redeems.",
+            def_hits.len()
+        );
+        assert_eq!(
+            call_hits.len(),
+            2,
+            "commands/status.rs must invoke `fetch_redis_workload(` at \
+             EXACTLY two call sites — the Deployment-naming attempt and \
+             the StatefulSet-naming attempt in `fetch_related_services` — \
+             so the sequential-fallback try-one-then-the-other discipline \
+             survives the fusion. Found {} call-site hit(s): \
+             {call_hits:#?}. A missing delegation would leave the \
+             negative sibling-body shield trivially satisfied by \
+             absence.",
+            call_hits.len()
+        );
+
+        assert!(
+            body.contains("RedisWorkloadKind::Deployment"),
+            "commands/status.rs must invoke `fetch_redis_workload` with \
+             `RedisWorkloadKind::Deployment` for the `redis-<svc>` \
+             naming-pattern attempt — the pre-lift `fetch_redis` sibling's \
+             Deployment-kind slot."
+        );
+        assert!(
+            body.contains("RedisWorkloadKind::StatefulSet"),
+            "commands/status.rs must invoke `fetch_redis_workload` with \
+             `RedisWorkloadKind::StatefulSet` for the `<svc>-redis` \
+             naming-pattern attempt — the pre-lift `fetch_redis_statefulset` \
+             sibling's StatefulSet-kind slot."
+        );
+    }
+
+    /// Negative regression shield: neither pre-lift sibling body may
+    /// reappear as its own `async fn` definition in the module body. A
+    /// future regression that re-forked one arm of the fused shape (e.g.
+    /// re-introducing `async fn fetch_redis(…)` with a hand-rolled
+    /// `kubectl_get_object("deployment", …)` body when the "Redis
+    /// deployment not found" diagnostic surface needed a per-kind tweak)
+    /// fails here rather than silently splitting the seven-line body
+    /// across the primitive and the re-forked site and re-introducing
+    /// the two-siblings-in-lockstep duplication this lift redeems.
+    ///
+    /// Needles anchor on `async fn ` prefix + `(namespace: &str,` param
+    /// signature so a stray backtick prose mention of `fetch_redis` in a
+    /// docstring (there are several documenting the pre-lift consumer
+    /// enumeration for `kubectl_get_object`, `kubectl_get_item`, and
+    /// `replica_readiness_display`) does not self-match as a phantom
+    /// hit. Routes through
+    /// [`crate::test_support::module_body_before_tests`] +
+    /// [`crate::test_support::code_line_hits`] so the shield's own
+    /// docstring mention of `async fn fetch_redis(` stays out of scope
+    /// (it lives inside `#[cfg(test)] mod tests`), the same
+    /// code-line-filter discipline the sibling `code_line_hits`
+    /// consumers established at prior claude-routine commits.
+    #[test]
+    fn no_module_body_still_defines_two_sibling_redis_fetch_functions() {
+        let body = crate::test_support::module_body_before_tests(
+            include_str!("status.rs"),
+            "commands/status.rs",
+        );
+
+        for pre_lift in [
+            "async fn fetch_redis(namespace: &str,",
+            "async fn fetch_redis_statefulset(namespace: &str,",
+        ] {
+            let hits = crate::test_support::code_line_hits(body, pre_lift);
+            assert!(
+                hits.is_empty(),
+                "commands/status.rs must NOT define `{pre_lift}…)` in \
+                 the module body — the pre-lift `fetch_redis` / \
+                 `fetch_redis_statefulset` sibling bodies fuse onto the \
+                 typed `fetch_redis_workload(kind: RedisWorkloadKind, …)` \
+                 primitive so the `(<kind>, <not-found-msg>)` pair \
+                 renders through the enum's typed accessors at ONE \
+                 body rather than one-per-sibling. Found {} \
+                 code-line hit(s): {hits:#?}. A future regression that \
+                 re-forks one arm of the fused shape fails here rather \
+                 than silently re-introducing the two-siblings-in-lockstep \
+                 duplication.",
+                hits.len(),
+            );
+        }
     }
 }
