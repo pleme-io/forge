@@ -325,8 +325,15 @@ pub async fn build_rust_service(
         );
     }
 
-    // Remove existing symlinks to avoid conflicts
-    for symlink in &["result-amd64", "result-arm64"] {
+    // Remove existing symlinks to avoid conflicts. The per-arch
+    // `result-<arch>` names are projected from the canonical
+    // [`crate::target_arch::TargetArch::ALL`] enumeration through
+    // [`crate::target_arch::TargetArch::result_symlink`], so a future
+    // third-arch admission (adding a variant to the enum) propagates
+    // to this cleanup site by construction rather than by hand-audit
+    // across every `result-<arch>` `&str` literal in the module.
+    for arch in crate::target_arch::TargetArch::ALL {
+        let symlink = arch.result_symlink();
         if Path::new(symlink).exists() {
             std::fs::remove_file(symlink)
                 .with_context(|| format!("Failed to remove existing symlink: {}", symlink))?;
@@ -3736,6 +3743,119 @@ mod load_deploy_yaml_and_resolve_env_lift_tests {
              the exact `manifest path lookup` trailer — the byte-form \
              the pre-lift bail at `get_manifest_path_for_env` spelled \
              verbatim."
+        );
+    }
+}
+
+#[cfg(test)]
+mod build_rust_service_stale_symlink_cleanup_lift_tests {
+    /// Regression shield: the `build_rust_service` prelude's stale-
+    /// symlink cleanup loop must iterate over the typed
+    /// [`crate::target_arch::TargetArch::ALL`] enumeration and derive
+    /// each `result-<arch>` name via
+    /// [`crate::target_arch::TargetArch::result_symlink`] — never
+    /// re-inline the pre-lift `for symlink in &["result-amd64",
+    /// "result-arm64"]` bare `&str` array literal at the loop head.
+    ///
+    /// # Why the lift matters
+    ///
+    /// Pre-lift the cleanup loop's arity was pinned at 2 by the array
+    /// literal itself, which drifted from the two-variant
+    /// `TargetArch` enum only by convention. A hypothetical
+    /// third-arch admission (adding `TargetArch::Riscv64`) would
+    /// have compiled cleanly with a `result-riscv64` symlink orphan
+    /// silently accumulating across builds — the loop's `&str` array
+    /// literal did not participate in the enum's exhaustiveness by
+    /// construction. Post-lift the loop iterates over
+    /// [`crate::target_arch::TargetArch::ALL`], so every new variant
+    /// admitted at the enum surface propagates to the cleanup site by
+    /// construction (THEORY §V.1 — make invalid states unrepresentable;
+    /// §VI.1 — recurring-shape-to-helper).
+    ///
+    /// # Scan discipline
+    ///
+    /// The shield reads the module body up to the FIRST `\n#[cfg(test)]\n`
+    /// marker via [`crate::test_support::module_body_before_first_cfg_test`]
+    /// so this shield's own docstring mentions of the pre-lift array
+    /// literal (living inside a `#[cfg(test)]` block below that first
+    /// marker) stay out of scope. Every hit routes through
+    /// [`crate::test_support::code_line_hits`] for anti-docstring-
+    /// self-match discipline: `///`-prefixed doc-comment lines in the
+    /// module body (e.g. the cleanup site's own leading comment) do
+    /// not self-match as phantom hits — the same code-line-filter
+    /// discipline the sibling `push_arch_closure_lift_tests` shield
+    /// established.
+    #[test]
+    fn test_build_rust_service_stale_symlink_cleanup_iterates_target_arch_all() {
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            include_str!("rust_service.rs"),
+            "commands/rust_service.rs",
+        );
+
+        // Positive delegation shield: the cleanup loop head routes
+        // through `TargetArch::ALL` at exactly ONE code line — the
+        // prelude's stale-symlink cleanup at `build_rust_service`.
+        // The module has no other consumer of the enumeration slot.
+        let all_iter_needle = "for arch in crate::target_arch::TargetArch::ALL";
+        let all_iter_hits = crate::test_support::code_line_hits(body, all_iter_needle);
+        assert_eq!(
+            all_iter_hits.len(),
+            1,
+            "commands/rust_service.rs must iterate the stale-symlink \
+             cleanup loop over `crate::target_arch::TargetArch::ALL` \
+             at EXACTLY one code line — the prelude in \
+             `build_rust_service`. A missing iteration would drop the \
+             cleanup entirely (letting a stale `result-<arch>` \
+             symlink survive across builds and conflict with the next \
+             Nix `--out-link`); a duplicated iteration would restate \
+             the cleanup at a second surface, splitting the contract. \
+             Found {} code-line hit(s): {all_iter_hits:#?}.",
+            all_iter_hits.len()
+        );
+
+        // Positive projection shield: the loop body derives the
+        // per-arch `result-<arch>` symlink name through
+        // `arch.result_symlink()` — never inlines the literal
+        // `"result-amd64"` / `"result-arm64"` `&str` at the cleanup
+        // site.
+        let projection_needle = "arch.result_symlink()";
+        let projection_hits = crate::test_support::code_line_hits(body, projection_needle);
+        assert!(
+            !projection_hits.is_empty(),
+            "commands/rust_service.rs must derive the `result-<arch>` \
+             symlink name via `arch.result_symlink()` inside the \
+             `TargetArch::ALL` cleanup loop — dropping the projection \
+             would either leave the loop's `symlink` binding \
+             undefined or force a re-inline of the pre-lift literal \
+             `\"result-amd64\"` / `\"result-arm64\"` array, \
+             re-opening the correlated-slot drift bug class the \
+             `TargetArch` discriminator was landed to close. Found {} \
+             code-line hit(s): {projection_hits:#?}.",
+            projection_hits.len()
+        );
+
+        // Negative shield: the pre-lift bare `&str` array literal
+        // must not survive at the cleanup-loop head. A regression
+        // that reverted to the literal would silently pin the loop's
+        // arity at 2 and drift from the `TargetArch` enum's true
+        // arity forever after — the exact bug class this lift closed.
+        let raw_literal_needle = "for symlink in &[\"result-amd64\", \"result-arm64\"]";
+        let raw_literal_hits = crate::test_support::code_line_hits(body, raw_literal_needle);
+        assert_eq!(
+            raw_literal_hits.len(),
+            0,
+            "commands/rust_service.rs must NOT re-inline the pre-lift \
+             `for symlink in &[\"result-amd64\", \"result-arm64\"]` \
+             bare `&str` array literal at the stale-symlink cleanup \
+             loop head — the typed \
+             `crate::target_arch::TargetArch::ALL` enumeration owns \
+             the per-arch iteration at ONE surface, so a future \
+             third-arch admission propagates by construction. A \
+             regression here would silently pin the cleanup arity at \
+             two and orphan every future variant's `result-<arch>` \
+             symlink across builds. Found {} code-line hit(s): \
+             {raw_literal_hits:#?}.",
+            raw_literal_hits.len()
         );
     }
 }

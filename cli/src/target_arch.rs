@@ -79,6 +79,57 @@ pub enum TargetArch {
 }
 
 impl TargetArch {
+    /// Canonical enumeration of every arch forge builds Rust services
+    /// for, in the order operator-visible narration prints them (AMD64
+    /// first, ARM64 second — mirroring the unconditional-then-gated
+    /// ordering at `commands/rust_service.rs::build_rust_service`).
+    ///
+    /// # Duplication being lifted
+    ///
+    /// Pre-lift the `build_rust_service` prelude enumerated the two
+    /// `result-<arch>` symlinks as a bare `&'static [&'static str; 2]`
+    /// literal at `commands/rust_service.rs::build_rust_service`
+    /// (~L329) to clean up any stale symlinks left by an earlier
+    /// build:
+    ///
+    /// ```ignore
+    /// for symlink in &["result-amd64", "result-arm64"] { … }
+    /// ```
+    ///
+    /// The `&str` array literal restated the `result-<arch>` naming
+    /// convention the sibling closure-push and image-composition sites
+    /// already routed through [`TargetArch::result_symlink`]. A
+    /// hypothetical third-arch admission (adding `Riscv64` to the
+    /// enum) would silently miss this cleanup site — the array's
+    /// hard-coded arity of 2 could not be discovered from the enum
+    /// definition. Post-lift the cleanup iterates over
+    /// [`TargetArch::ALL`], so a new variant propagates by
+    /// construction rather than by hand-audit across every callsite.
+    ///
+    /// # Why a const, not a method
+    ///
+    /// The variant set is fixed at compile time and evaluated in const
+    /// contexts (e.g. type-level tests, `#[test]` byte-oracle
+    /// assertions on the exact ordering). A `pub const` slot in the
+    /// impl block gives every consumer one canonical `for arch in
+    /// TargetArch::ALL { … }` idiom without an intervening call
+    /// syntax; the array-value type (`[Self; 2]`) participates in the
+    /// edition-2021 by-value array `for` loop so a consumer never
+    /// deals with a slice-of-references.
+    ///
+    /// # Dead-code baseline
+    ///
+    /// `#[allow(dead_code)]` here mirrors the enum-level flag above:
+    /// the sole consumer today, `commands/rust_service.rs::
+    /// build_rust_service`'s stale-symlink cleanup, sits inside an
+    /// async orchestrator surface whose reachability clippy does not
+    /// resolve across module boundaries from `main.rs`'s CLI dispatch
+    /// surface. The attribute keeps this lift's clippy delta at 0
+    /// new baseline warnings — the byte-oracle unit tests below
+    /// exercise the constant unconditionally under `cargo test`.
+    #[allow(dead_code)]
+    pub const ALL: [Self; 2] = [Self::Amd64, Self::Arm64];
+
     /// The uppercase operator-visible label forge's per-arch narration
     /// interpolates into `println!` progress lines: `"AMD64"` /
     /// `"ARM64"`. This is the string the pre-lift
@@ -150,5 +201,58 @@ mod tests {
                 format!("result-{}", lower)
             );
         }
+    }
+
+    /// Byte-oracle: [`TargetArch::ALL`] enumerates exactly the two
+    /// variants forge currently builds for, in the canonical order
+    /// AMD64-then-ARM64. This ordering mirrors the unconditional-
+    /// then-gated arch dispatch at
+    /// `commands/rust_service.rs::build_rust_service` — a reversal
+    /// would drift the operator-visible per-arch narration from the
+    /// dispatch order and silently swap the "unconditional" arch
+    /// with the gated one at every downstream consumer that iterates
+    /// through `ALL`.
+    #[test]
+    fn all_enumerates_amd64_then_arm64() {
+        assert_eq!(
+            TargetArch::ALL,
+            [TargetArch::Amd64, TargetArch::Arm64],
+            "TargetArch::ALL must enumerate exactly [Amd64, Arm64] in \
+             that order — the pre-lift `for symlink in \
+             &[\"result-amd64\", \"result-arm64\"]` cleanup at \
+             `commands/rust_service.rs::build_rust_service` (~L329) \
+             ordered AMD64 first (unconditionally built) and ARM64 \
+             second (built when cross-compilation is available); a \
+             reversal here would flip the two downstream cleanup and \
+             narration ordering by construction. Found: {:?}",
+            TargetArch::ALL
+        );
+    }
+
+    /// Byte-oracle: [`TargetArch::ALL`] projected through
+    /// [`TargetArch::result_symlink`] reproduces the pre-lift
+    /// `&["result-amd64", "result-arm64"]` `&str` array literal
+    /// verbatim, in the same order. A drift on either the enumeration
+    /// (a dropped variant, a re-ordered variant) or the projection (a
+    /// renamed symlink) fails here rather than surfacing as a
+    /// half-cleaned build tree with a stale `result-<arch>` symlink
+    /// pointing to a previous derivation.
+    #[test]
+    fn all_result_symlink_projections_match_pre_lift_array_literal() {
+        let projected: Vec<&'static str> =
+            TargetArch::ALL.iter().map(|a| a.result_symlink()).collect();
+        assert_eq!(
+            projected,
+            vec!["result-amd64", "result-arm64"],
+            "TargetArch::ALL projected through .result_symlink() must \
+             reproduce the pre-lift `&[\"result-amd64\", \
+             \"result-arm64\"]` `&str` array literal at \
+             `commands/rust_service.rs::build_rust_service` (~L329) \
+             verbatim. A drift here would silently orphan a stale \
+             `result-<arch>` symlink from a previous build, causing \
+             the next build to fail with a Nix `--out-link` conflict \
+             error the pre-lift cleanup was landed to close. Found: \
+             {projected:?}"
+        );
     }
 }
