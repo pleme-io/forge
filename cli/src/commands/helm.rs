@@ -2762,6 +2762,67 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Banner-and-workspace-prep dispatch verb for the chart-batch loops in
+/// [`lint_all`] and [`release_all`]. Every variant closes over the
+/// gerund label used verbatim inside the pre-lift
+/// `print_ascii_bar_banner(&format!("<gerund> {chart_name}"))` line —
+/// the ONE axis that differs between the two sibling stanzas the
+/// [`banner_and_prepare_chart_workspace_or_record`] primitive fuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum HelmChartLoopBannerVerb {
+    /// The `Linting {chart_name}` banner emitted by [`lint_all`].
+    Linting,
+    /// The `Releasing {chart_name}` banner emitted by [`release_all`].
+    Releasing,
+}
+
+impl HelmChartLoopBannerVerb {
+    /// The gerund label spelled verbatim inside the pre-lift
+    /// `print_ascii_bar_banner(&format!("<gerund> {chart_name}"))`
+    /// call. One source of truth so a future rename touches ONE arm
+    /// rather than each sibling `format!` string in lockstep.
+    const fn gerund(self) -> &'static str {
+        match self {
+            Self::Linting => "Linting",
+            Self::Releasing => "Releasing",
+        }
+    }
+}
+
+/// Emit the chart-batch loop's per-chart ASCII-bar banner and prepare
+/// the chart's isolated workspace, recording a `WorkspacePrep` failure
+/// onto `failed` (via
+/// [`crate::commands::chart_release_phase_failure::record_chart_release_phase_failure`])
+/// and returning `None` when the prep bails so the caller can
+/// `continue` its outer loop without re-authoring the per-site match
+/// arm. The pre-lift 22-line stanza at each of
+/// `commands/helm.rs::{lint_all, release_all}` collapses to a single
+/// `let ... else { continue };` at the call site; the banner-verb
+/// gerund is the ONE axis that differs and lands in the closed
+/// [`HelmChartLoopBannerVerb`] enum.
+fn banner_and_prepare_chart_workspace_or_record(
+    banner_verb: HelmChartLoopBannerVerb,
+    chart_name: &str,
+    charts_dir: &str,
+    lib_chart_dir: Option<&str>,
+    lib_chart_name: &str,
+    failed: &mut Vec<(String, String)>,
+) -> Option<(tempfile::TempDir, String)> {
+    crate::ui::print_ascii_bar_banner(&format!("{} {}", banner_verb.gerund(), chart_name));
+    match prepare_chart_workspace(chart_name, charts_dir, lib_chart_dir, lib_chart_name) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            crate::commands::chart_release_phase_failure::record_chart_release_phase_failure(
+                failed,
+                chart_name,
+                crate::commands::chart_release_phase_failure::ChartReleasePhase::WorkspacePrep,
+                &e,
+            );
+            None
+        }
+    }
+}
+
 /// Lint all charts in a directory.
 ///
 /// Discovers charts, sets up temp workspaces with library dependencies,
@@ -2773,27 +2834,19 @@ pub fn lint_all(charts_dir: &str, lib_chart_dir: Option<&str>, lib_chart_name: &
     let mut failed: Vec<(String, String)> = Vec::new();
 
     for chart_name in &charts {
-        crate::ui::print_ascii_bar_banner(&format!("Linting {}", chart_name));
-
-        // Workspace prep is isolated too — a single chart's copy/stage/
-        // redirect failure must not `?`-abort the remaining charts, same as
-        // the lint step below.
-        let (_tmpdir, chart_path) = match prepare_chart_workspace(
+        // Banner-plus-workspace-prep is a fused typed primitive so a
+        // single chart's copy/stage/redirect failure records the phase
+        // once, without ?-aborting the remaining charts (same isolation
+        // discipline as the lint step below).
+        let Some((_tmpdir, chart_path)) = banner_and_prepare_chart_workspace_or_record(
+            HelmChartLoopBannerVerb::Linting,
             chart_name,
             charts_dir,
             lib_chart_dir,
             lib_chart_name,
-        ) {
-            Ok(v) => v,
-            Err(e) => {
-                crate::commands::chart_release_phase_failure::record_chart_release_phase_failure(
-                    &mut failed,
-                    chart_name,
-                    crate::commands::chart_release_phase_failure::ChartReleasePhase::WorkspacePrep,
-                    &e,
-                );
-                continue;
-            }
+            &mut failed,
+        ) else {
+            continue;
         };
 
         match lint(&chart_path) {
@@ -2866,31 +2919,25 @@ pub fn release_all(
     }
 
     for chart_name in &charts {
-        crate::ui::print_ascii_bar_banner(&format!("Releasing {}", chart_name));
-
         // Every chart is independent from here down: a failure at ANY stage
         // (workspace prep / lint / package / push) records the chart + a
         // specific reason and `continue`s to the next chart. Nothing in this
         // loop is allowed to `?`-propagate and abort the batch — one chart's
         // GHCR permission gap or bad dependency version must never prevent
         // an unrelated, already-clean chart later in the list from
-        // publishing (task pleme-io/helmworks-akeyless#143).
-        let (_tmpdir, chart_path) = match prepare_chart_workspace(
+        // publishing (task pleme-io/helmworks-akeyless#143). The banner-
+        // plus-workspace-prep opener collapses onto the shared typed
+        // primitive; the remaining Lint/Package/Push branches keep their
+        // own inline `record_chart_release_phase_failure(...)` continues.
+        let Some((_tmpdir, chart_path)) = banner_and_prepare_chart_workspace_or_record(
+            HelmChartLoopBannerVerb::Releasing,
             chart_name,
             charts_dir,
             lib_chart_dir,
             lib_chart_name,
-        ) {
-            Ok(v) => v,
-            Err(e) => {
-                crate::commands::chart_release_phase_failure::record_chart_release_phase_failure(
-                    &mut failed,
-                    chart_name,
-                    crate::commands::chart_release_phase_failure::ChartReleasePhase::WorkspacePrep,
-                    &e,
-                );
-                continue;
-            }
+            &mut failed,
+        ) else {
+            continue;
         };
 
         // Lint
@@ -2979,6 +3026,158 @@ pub fn release_all(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod banner_and_prepare_chart_workspace_or_record_tests {
+    use super::{banner_and_prepare_chart_workspace_or_record, HelmChartLoopBannerVerb};
+
+    /// [`HelmChartLoopBannerVerb::gerund`] MUST return the pre-lift
+    /// byte-exact `"Linting"` / `"Releasing"` gerunds that the two
+    /// sibling `print_ascii_bar_banner(&format!("<gerund> {chart}"))`
+    /// stanzas spelled verbatim before the fusion. One source of truth
+    /// for both banner-line axes — a drift here would rename ONE loop's
+    /// banner without touching the other, producing operator-visible
+    /// inconsistency across the lint and release passes.
+    #[test]
+    fn gerund_gives_pre_lift_linting_and_releasing_bytes() {
+        assert_eq!(HelmChartLoopBannerVerb::Linting.gerund(), "Linting");
+        assert_eq!(HelmChartLoopBannerVerb::Releasing.gerund(), "Releasing");
+    }
+
+    /// [`banner_and_prepare_chart_workspace_or_record`] MUST return
+    /// `None` (and RECORD onto `failed`) when
+    /// [`super::prepare_chart_workspace`] bails — the pre-lift
+    /// `Err(e) => { record_chart_release_phase_failure(&mut failed,
+    /// chart_name, WorkspacePrep, &e); continue }` arm's observable
+    /// effect. Reproduced here by pointing `charts_dir` at a directory
+    /// name whose child does not exist, which bails at the
+    /// `copy_dir_recursive(&src_chart, &dst_chart)` step with the
+    /// `Failed to copy chart <name>` context, so the primitive records
+    /// exactly one `WorkspacePrep` reason and returns None. The caller
+    /// then reads the recorded reason back through the
+    /// [`super::format_failure_summary`] tail — this test pins that
+    /// end-to-end shape at the primitive's boundary so a regression
+    /// that dropped the record call (silently returning None without
+    /// recording) would fail here even without landing at a call site.
+    #[test]
+    fn workspace_prep_bail_records_failed_reason_and_returns_none() {
+        let mut failed: Vec<(String, String)> = Vec::new();
+        let out = banner_and_prepare_chart_workspace_or_record(
+            HelmChartLoopBannerVerb::Linting,
+            "chart-that-does-not-exist",
+            "/does/not/exist/on/disk",
+            None,
+            "pleme-lib",
+            &mut failed,
+        );
+        assert!(
+            out.is_none(),
+            "banner_and_prepare_chart_workspace_or_record must return \
+             None when prepare_chart_workspace bails — got Some(_), \
+             which would mean the caller's `let Some(...) else \
+             {{ continue }}` shortcut would fall through to the \
+             lint/package/push stages on a broken workspace.",
+        );
+        assert_eq!(
+            failed.len(),
+            1,
+            "banner_and_prepare_chart_workspace_or_record must record \
+             EXACTLY one failure onto the shared `failed` vec on the \
+             prep bail branch — got {} recorded reason(s): {failed:?}. \
+             Zero would mean a regression dropped the \
+             record_chart_release_phase_failure call, silently \
+             swallowing the failure; more than one would mean the \
+             record was doubled.",
+            failed.len(),
+        );
+        let (chart, reason) = &failed[0];
+        assert_eq!(chart, "chart-that-does-not-exist");
+        assert!(
+            reason.starts_with("workspace prep:"),
+            "recorded reason must open with the pre-lift `workspace \
+             prep:` label (the one that `ChartReleasePhase::WorkspacePrep\
+             .label()` spells) — got {reason:?}. This axis is what \
+             `format_failure_summary` renders back to the operator, so \
+             a drift here surfaces as a mislabelled batch-summary row.",
+        );
+    }
+
+    /// Sibling-body fusion shield: `commands/helm.rs::lint_all` and
+    /// `commands/helm.rs::release_all` MUST BOTH route their per-chart
+    /// banner-plus-workspace-prep opener through
+    /// `banner_and_prepare_chart_workspace_or_record(` at exactly one
+    /// code-line hit each, and NEITHER may still spell the raw
+    /// `prepare_chart_workspace(` call inline. Positive delegation
+    /// shield fixes the forward count at 1; negative sibling-body
+    /// shield forbids the pre-lift 22-line `match prepare_chart_workspace
+    /// { Ok => v, Err => record + continue }` stanza from re-fusing at
+    /// either sibling. A regression that dropped the delegation cannot
+    /// leave the negative scan trivially satisfied — the positive
+    /// floor guards against that class.
+    #[test]
+    fn lint_all_and_release_all_route_through_banner_and_prepare_chart_workspace_or_record() {
+        const SOURCE: &str = include_str!("helm.rs");
+        let delegation_needle = "banner_and_prepare_chart_workspace_or_record(";
+        let prepare_needle = "prepare_chart_workspace(";
+
+        for (module_path, open_marker, end_marker) in [
+            (
+                "commands/helm.rs::lint_all",
+                "pub fn lint_all(charts_dir: &str,",
+                "\n/// Release all charts: lint → package → push to OCI registry.",
+            ),
+            (
+                "commands/helm.rs::release_all",
+                "pub fn release_all(",
+                "\n#[cfg(test)]\nmod banner_and_prepare_chart_workspace_or_record_tests {",
+            ),
+        ] {
+            let body = crate::test_support::fn_body_slice_between_markers(
+                SOURCE,
+                module_path,
+                open_marker,
+                end_marker,
+            );
+
+            let delegation_hits = crate::test_support::code_line_hits(body, delegation_needle);
+            assert_eq!(
+                delegation_hits.len(),
+                1,
+                "{module_path} must delegate its per-chart banner-plus-\
+                 workspace-prep opener to \
+                 `banner_and_prepare_chart_workspace_or_record(` at \
+                 EXACTLY one code line — the pre-lift 22-line \
+                 `print_ascii_bar_banner(&format!(\"<gerund> \
+                 {{chart}}\")) + match prepare_chart_workspace {{ Ok \
+                 => v, Err => record_chart_release_phase_failure(_, _, \
+                 WorkspacePrep, &e); continue }}` stanza lifts onto \
+                 this ONE typed body. Found {} code-line hit(s): \
+                 {delegation_hits:#?}. A regression that dropped the \
+                 delegation cannot leave the negative scan below \
+                 trivially satisfied by absence; this positive floor \
+                 guards against that class.",
+                delegation_hits.len(),
+            );
+
+            let prepare_hits = crate::test_support::code_line_hits(body, prepare_needle);
+            assert!(
+                prepare_hits.is_empty(),
+                "{module_path} must NOT spell `{prepare_needle}` \
+                 inline in its body — the workspace-staging call \
+                 routes through \
+                 `banner_and_prepare_chart_workspace_or_record`, the \
+                 ONE typed primitive that owns the (chart_name, \
+                 charts_dir, lib_chart_dir, lib_chart_name)-shaped \
+                 `prepare_chart_workspace` invocation and its paired \
+                 `record_chart_release_phase_failure(WorkspacePrep)` \
+                 arm. Found {} code-line hit(s): {prepare_hits:#?}. A \
+                 hand-rolled inline copy re-opens the drift class the \
+                 primitive was landed to close.",
+                prepare_hits.len(),
+            );
+        }
+    }
 }
 
 // --- Helpers ---
@@ -4640,12 +4839,22 @@ mod chart_release_phase_failure_routing_tests {
     }
 
     /// Positive-delegation shield: `commands/helm.rs` MUST forward
-    /// through the primitive at ≥5 sites — the workspace-prep in
-    /// `lint_all` and the workspace-prep / lint / package / push
-    /// arms in `release_all`. A drop below the floor cannot leave the
-    /// negative shield above trivially satisfied by absence.
+    /// through the primitive at ≥4 sites — the fused workspace-prep
+    /// site inside
+    /// [`super::super::helm::banner_and_prepare_chart_workspace_or_record`]
+    /// (which both `lint_all` and `release_all` delegate their
+    /// per-chart banner-plus-workspace-prep opener through) and the
+    /// lint / package / push arms in `release_all`. Before the fused
+    /// primitive was landed this floor stood at ≥5 sites (a separate
+    /// workspace-prep arm at each of `lint_all` and `release_all`);
+    /// consolidating those two arms onto one site reduces the raw
+    /// forwarding-count by one but preserves the property this shield
+    /// guards: every phase-annotated chart-batch failure branch under
+    /// commands/helm.rs still routes through the typed primitive. A
+    /// drop below the floor cannot leave the negative shield above
+    /// trivially satisfied by absence.
     #[test]
-    fn helm_rs_forwards_through_record_chart_release_phase_failure_primitive_at_five_sites() {
+    fn helm_rs_forwards_through_record_chart_release_phase_failure_primitive_at_four_sites() {
         const SOURCE: &str = include_str!("helm.rs");
         // Reconstruct at test time so this shield's own needle-string
         // does not itself count as one of the hits.
@@ -4655,12 +4864,13 @@ mod chart_release_phase_failure_routing_tests {
         );
         let hits = crate::test_support::code_line_hits(SOURCE, &needle);
         assert!(
-            hits.len() >= 5,
+            hits.len() >= 4,
             "commands/helm.rs must forward through the \
-             `record_chart_release_phase_failure` primitive at ≥5 \
-             sites (workspace-prep in `lint_all`; workspace-prep / \
-             lint / package / push in `release_all`). Found \
-             code-line hits: {hits:#?}"
+             `record_chart_release_phase_failure` primitive at ≥4 \
+             sites (the fused workspace-prep site inside \
+             `banner_and_prepare_chart_workspace_or_record`; lint / \
+             package / push in `release_all`). Found code-line hits: \
+             {hits:#?}"
         );
     }
 }

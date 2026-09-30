@@ -15181,28 +15181,35 @@ mod tests {
              inline occurrences."
         );
         // Positive assertion — the module forwards through the
-        // primitive at exactly three sites, one per pre-lift
-        // consumer (`Releasing {lib_chart_name} {version} (library)`,
-        // `Linting {chart_name}`, `Releasing {chart_name}`). A
-        // fusion that folds one of the three consumer sites back
-        // to inline `println!`s (silently splitting the visual
-        // grammar across two chart actions) fails here — the
-        // negative half above would still pass, but this positive
-        // count would fall to two.
+        // primitive at exactly two sites. Pre-lift the count was
+        // three, one per consumer (`Releasing {lib_chart_name}
+        // {version} (library)`, `Linting {chart_name}`, `Releasing
+        // {chart_name}`); the per-chart Linting and Releasing sites
+        // have since been fused onto the shared
+        // `commands/helm.rs::banner_and_prepare_chart_workspace_or_record`
+        // typed primitive, whose ONE `crate::ui::print_ascii_bar_banner(
+        // &format!("{gerund} {chart_name}"))` body serves BOTH
+        // per-chart consumers. The library-releasing site keeps its
+        // own call. A fusion that folds one of the remaining sites
+        // back to inline `println!`s (silently splitting the visual
+        // grammar across chart actions) fails here — the negative
+        // half above would still pass, but this positive count
+        // would fall to one.
         let forward_hits = HELM_SRC
             .matches("crate::ui::print_ascii_bar_banner(")
             .count();
         assert_eq!(
-            forward_hits, 3,
+            forward_hits, 2,
             "commands/helm.rs must forward through \
              `crate::ui::print_ascii_bar_banner(<title>)` at \
-             exactly THREE sites — one per pre-lift consumer \
-             (the library-releasing site, the per-chart linting \
-             site, the per-chart releasing site). A fusion that \
-             folds one back to inline `println!`s or that adds a \
-             fourth caller without extending this shield's \
-             expected count fails here. Found {forward_hits} \
-             forwarding hits."
+             exactly TWO sites — the library-releasing site AND \
+             the fused per-chart body inside \
+             `banner_and_prepare_chart_workspace_or_record` \
+             (which both `lint_all` and `release_all` delegate \
+             through). A fusion that folds one back to inline \
+             `println!`s or that adds a further caller without \
+             extending this shield's expected count fails here. \
+             Found {forward_hits} forwarding hits."
         );
     }
 
