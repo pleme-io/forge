@@ -681,9 +681,23 @@ pub async fn build_rust_service(
     }
 
     crate::stage_completion_ack::print_stage_completion_ack("Build complete!");
-    println!("   AMD64: result-amd64");
+    // Per-arch build-complete narration tail — the correlated
+    // `("AMD64", "result-amd64")` / `("ARM64", "result-arm64")`
+    // `&str` pair the pre-lift two sibling `println!` stanzas
+    // restated verbatim now lives at ONE construction surface (the
+    // typed `crate::target_arch::TargetArch` discriminator with its
+    // `upper_label` / `result_symlink` correlated projections). The
+    // AMD64-unconditional / ARM64-gated ordering mirrors the sibling
+    // `push_arch_closure_to_attic` per-arch Attic cache warm-up at
+    // ~L670-674, so the two consumers stay in lockstep on which
+    // arches actually built.
+    crate::built_arch_symlink_line::print_built_arch_symlink_line(
+        crate::target_arch::TargetArch::Amd64,
+    );
     if should_build_arm64 {
-        println!("   ARM64: result-arm64");
+        crate::built_arch_symlink_line::print_built_arch_symlink_line(
+            crate::target_arch::TargetArch::Arm64,
+        );
     }
     println!("   Per-crate derivations cached in Attic for 60-80% faster future builds");
 
@@ -3857,5 +3871,152 @@ mod build_rust_service_stale_symlink_cleanup_lift_tests {
              {raw_literal_hits:#?}.",
             raw_literal_hits.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod build_rust_service_built_arch_symlink_tail_lift_tests {
+    /// Regression shield: the `build_rust_service` build-complete
+    /// narration tail must route each per-arch stanza through
+    /// [`crate::built_arch_symlink_line::print_built_arch_symlink_line`]
+    /// against the typed [`crate::target_arch::TargetArch`]
+    /// discriminator — never re-inline the pre-lift
+    /// `println!("   AMD64: result-amd64");` /
+    /// `println!("   ARM64: result-arm64");` `&str` literal pair at
+    /// the tail body.
+    ///
+    /// # Why the lift matters
+    ///
+    /// Pre-lift the tail restated the `("AMD64", "result-amd64")` /
+    /// `("ARM64", "result-arm64")` correlated pair verbatim as two
+    /// hard-coded `println!` literals. That pair is exactly what the
+    /// closed `TargetArch` enum's `upper_label` / `result_symlink`
+    /// projections own (introduced at bf956cf). A drift at the enum
+    /// surface (a renamed variant, a re-cased label, a re-prefixed
+    /// symlink) would leave the two literals here stale, silently
+    /// mislabelling the operator-visible narration for every build.
+    /// Post-lift both stanzas derive both slots from the same
+    /// discriminator by construction (THEORY §V.1 — make invalid
+    /// states unrepresentable; §VI.1 — recurring-shape-to-helper).
+    ///
+    /// # Scan discipline
+    ///
+    /// The shield reads the module body up to the FIRST
+    /// `\n#[cfg(test)]\n` marker via
+    /// [`crate::test_support::module_body_before_first_cfg_test`] so
+    /// this shield's own docstring mentions of the pre-lift literals
+    /// (living inside a `#[cfg(test)]` block below that first marker)
+    /// stay out of scope. Every hit routes through
+    /// [`crate::test_support::code_line_hits`] for
+    /// anti-docstring-self-match discipline: `///`-prefixed
+    /// doc-comment lines in the module body do not self-match as
+    /// phantom hits.
+    #[test]
+    fn test_build_rust_service_tail_delegates_to_built_arch_symlink_line() {
+        let body = crate::test_support::module_body_before_first_cfg_test(
+            include_str!("rust_service.rs"),
+            "commands/rust_service.rs",
+        );
+
+        // Positive delegation shield: the tail routes through
+        // `print_built_arch_symlink_line` at exactly TWO code lines —
+        // the AMD64 stanza (unconditional) and the ARM64 stanza
+        // (guarded by `should_build_arm64`), mirroring the
+        // sibling `push_arch_closure_to_attic` call pair at
+        // ~L670-674. The module has no other consumer of the
+        // print helper, so a third hit would indicate an unintended
+        // duplication and a hit count below two would indicate a
+        // dropped arm.
+        let helper_call_needle = "crate::built_arch_symlink_line::print_built_arch_symlink_line(";
+        let helper_call_hits = crate::test_support::code_line_hits(body, helper_call_needle);
+        assert_eq!(
+            helper_call_hits.len(),
+            2,
+            "commands/rust_service.rs must reach \
+             `crate::built_arch_symlink_line::print_built_arch_symlink_line(` \
+             at EXACTLY two code lines — one per built arch (AMD64 \
+             unconditional, ARM64 guarded by `should_build_arm64`). \
+             A missing arm would drop that arch's build-complete \
+             narration entirely, so the operator would see the \
+             `Build complete!` stage ack with no per-arch symlink \
+             line beneath it. Found {} code-line hit(s): \
+             {helper_call_hits:#?}.",
+            helper_call_hits.len()
+        );
+
+        // Positive delegation shield (per-variant): each `TargetArch`
+        // variant reaches the helper at EXACTLY one code line — the
+        // corresponding arch's call site inside the build-complete
+        // tail. This pins the AMD64-then-ARM64 unconditional-then-
+        // gated ordering by variant rather than by call position.
+        for variant in ["Amd64", "Arm64"] {
+            let variant_call_needle = format!(
+                "crate::built_arch_symlink_line::print_built_arch_symlink_line(\n            crate::target_arch::TargetArch::{variant}"
+            );
+            // Fall back to a whitespace-tolerant contains check via
+            // `code_line_hits` on the fully-qualified variant path —
+            // the rustfmt block layout for a single-argument call
+            // may break the argument onto its own line, so a
+            // line-scoped `code_line_hits` on the multiline needle
+            // would not match. Instead, count the fully-qualified
+            // variant path against the helper call: it appears once
+            // per arm at the tail (and zero times elsewhere in the
+            // module's code lines outside the `push_arch_closure_to_attic`
+            // sibling site, which is picked up separately below).
+            let _ = variant_call_needle; // documentation aid only
+            let variant_qualified_needle = format!("crate::target_arch::TargetArch::{variant}");
+            let variant_hits = crate::test_support::code_line_hits(body, &variant_qualified_needle);
+            // The tail's per-arm call adds one hit per variant on top
+            // of the pre-existing `push_arch_closure_to_attic(crate::
+            // target_arch::TargetArch::<variant>` sibling call at
+            // ~L670-674 (established at bf956cf). Both call sites
+            // pass the fully-qualified variant path, so post-lift the
+            // per-variant hit count is exactly two per variant.
+            assert_eq!(
+                variant_hits.len(),
+                2,
+                "commands/rust_service.rs must reach the fully-\
+                 qualified `crate::target_arch::TargetArch::{variant}` \
+                 path at EXACTLY two code lines — the \
+                 `push_arch_closure_to_attic` per-arch Attic warm-up \
+                 site at ~L670-674 and the \
+                 `print_built_arch_symlink_line` per-arch build-\
+                 complete narration site at ~L695-702. A missing \
+                 site would drop that arch's contract at either the \
+                 Attic warm-up or the build-complete narration; a \
+                 duplicated site would restate the contract at a \
+                 third surface. Found {} code-line hit(s): \
+                 {variant_hits:#?}.",
+                variant_hits.len()
+            );
+        }
+
+        // Negative shield: the pre-lift `println!("   AMD64:
+        // result-amd64")` / `println!("   ARM64: result-arm64")`
+        // hard-coded literal pair must not survive at the tail. A
+        // regression that re-inlined either literal would bypass the
+        // typed `TargetArch` discriminator and re-open the correlated-
+        // slot drift bug class the enum was landed to close.
+        for (label, symlink) in [("AMD64", "result-amd64"), ("ARM64", "result-arm64")] {
+            let raw_literal_needle = format!("println!(\"   {label}: {symlink}\")");
+            let raw_hits = crate::test_support::code_line_hits(body, &raw_literal_needle);
+            assert_eq!(
+                raw_hits.len(),
+                0,
+                "commands/rust_service.rs must NOT re-inline the \
+                 pre-lift `println!(\"   {label}: {symlink}\")` \
+                 hard-coded literal at the build-complete tail — the \
+                 typed `crate::target_arch::TargetArch::{{Amd64|Arm64}}` \
+                 discriminator owns the (upper_label, result_symlink) \
+                 correlation at ONE surface via \
+                 `print_built_arch_symlink_line`. A regression that \
+                 bypassed the enum would silently re-admit the \
+                 pre-lift bug class where the label slot and the \
+                 symlink slot could drift out of lockstep with the \
+                 sibling `push_arch_closure_to_attic` per-arch Attic \
+                 warm-up. Found {} code-line hit(s): {raw_hits:#?}.",
+                raw_hits.len()
+            );
+        }
     }
 }

@@ -96,6 +96,17 @@ mod bookmark_git_sha_field;
 // accessor that pins the `pkgs/platform` prefix at one construction surface.
 mod bootstrap_dir;
 mod building_progress_message;
+// Per-arch build-complete narration line — the
+// `"   <UPPER_LABEL>: <result_symlink>\n"` stanza the pre-lift
+// `commands/rust_service.rs::build_rust_service` tail spelled inline as
+// two sibling `println!` literals at ~L684-686. Post-lift both stanzas
+// forward through `print_built_arch_symlink_line` against the typed
+// `crate::target_arch::TargetArch` discriminator, so the correlated
+// `("AMD64", "result-amd64")` / `("ARM64", "result-arm64")` `&str`
+// pair lives at ONE construction surface (`TargetArch::upper_label` /
+// `TargetArch::result_symlink`) rather than being restated verbatim at
+// the tail.
+mod built_arch_symlink_line;
 mod bun_argv;
 mod bun_install_frozen_lockfile_capture;
 mod bun_x_graphql_codegen_capture;
