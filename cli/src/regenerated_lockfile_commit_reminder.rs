@@ -460,14 +460,31 @@ mod tests {
     }
 
     /// Post-lift shield (positive half): the two pre-lift modules
-    /// that housed the three sites MUST each forward through
-    /// [`print_regenerated_lockfile_commit_reminder`] at least the
-    /// pre-lift count of times, so a migration that dropped a call
-    /// site outright leaves the negative "no raw inline shape" scan
-    /// trivially satisfied by absence but the positive count still
-    /// fails. Mirrors the sibling
+    /// that housed the three sites MUST each forward through EITHER
+    /// [`print_regenerated_lockfile_commit_reminder`] directly OR
+    /// through a downstream composed primitive that itself delegates
+    /// to the reminder writer, at least the pre-lift count of times,
+    /// so a migration that dropped a call site outright leaves the
+    /// negative "no raw inline shape" scan trivially satisfied by
+    /// absence but the positive count still fails. Mirrors the sibling
     /// `every_prelift_module_forwards_through_*` shields the crate
     /// carries against every other typed primitive.
+    ///
+    /// The downstream composed primitive today is
+    /// [`crate::pangea_regenerate_success_and_reminder::print_pangea_regenerate_success_and_reminder`],
+    /// which fuses the pre-lift four-line
+    /// `println!(); println!("Pangea <X> regenerated successfully!".bright_green().bold());
+    /// print_regenerated_lockfile_commit_reminder(<pair>); println!()`
+    /// success-banner + commit-reminder + framing-blank stanza the two
+    /// `commands/pangea.rs::{regenerate, regenerate_compiler}` sites
+    /// each spelled inline pre-lift. The composed primitive delegates
+    /// its reminder half to
+    /// [`write_regenerated_lockfile_commit_reminder`], so pangea sites
+    /// forwarding through the composed primitive still route through
+    /// the reminder module's own writer by construction — the
+    /// `pangea_regenerate_success_and_reminder::tests::
+    /// write_pangea_regenerate_success_and_reminder_delegates_reminder_verbatim`
+    /// byte-oracle pins that delegation invariant.
     #[test]
     fn every_prelift_module_forwards_through_print_regenerated_lockfile_commit_reminder() {
         use std::path::PathBuf;
@@ -476,17 +493,40 @@ mod tests {
             .join("commands");
         // pangea.rs = 2 (regenerate + regenerate_compiler),
         // bootstrap.rs = 1 (regenerate).
-        let expectations: &[(&str, usize)] = &[("pangea.rs", 2), ("bootstrap.rs", 1)];
-        let needle = "print_regenerated_lockfile_commit_reminder(";
-        for (basename, min_count) in expectations {
+        //
+        // Each expectation names the downstream composed primitives
+        // that also count as forwarders for the module — pangea's two
+        // sites forward through
+        // `print_pangea_regenerate_success_and_reminder` (which itself
+        // delegates to `write_regenerated_lockfile_commit_reminder`),
+        // so a raw `print_regenerated_lockfile_commit_reminder(` needle
+        // hit AND a `print_pangea_regenerate_success_and_reminder(`
+        // needle hit both count as forwarding through the reminder
+        // module by construction.
+        let expectations: &[(&str, usize, &[&str])] = &[
+            (
+                "pangea.rs",
+                2,
+                &[
+                    "print_regenerated_lockfile_commit_reminder(",
+                    "print_pangea_regenerate_success_and_reminder(",
+                ],
+            ),
+            (
+                "bootstrap.rs",
+                1,
+                &["print_regenerated_lockfile_commit_reminder("],
+            ),
+        ];
+        for (basename, min_count, needles) in expectations {
             let path = commands_dir.join(basename);
             let source = std::fs::read_to_string(&path)
                 .unwrap_or_else(|_| panic!("expected {} to exist", path.display()));
-            let forwards = source.matches(needle).count();
+            let forwards: usize = needles.iter().map(|n| source.matches(n).count()).sum();
             assert!(
                 forwards >= *min_count,
                 "{basename} must forward at least {min_count} \
-                 post-regenerate reminder stanza(s) through `{needle}`; \
+                 post-regenerate reminder stanza(s) through one of {needles:?}; \
                  found {forwards}. A dropped call would leave the \
                  negative raw-shape scan satisfied by absence.",
             );

@@ -480,17 +480,9 @@ pub async fn regenerate(pangea_dir: Option<String>) -> Result<()> {
     })
     .await?;
 
-    println!();
-    println!(
-        "{}",
-        "Pangea Cargo.nix regenerated successfully!"
-            .bright_green()
-            .bold()
-    );
-    crate::regenerated_lockfile_commit_reminder::print_regenerated_lockfile_commit_reminder(
+    crate::pangea_regenerate_success_and_reminder::print_pangea_regenerate_success_and_reminder(
         crate::regenerated_lockfile_commit_reminder::RegeneratedLockfilePair::CargoNix,
     );
-    println!();
 
     Ok(())
 }
@@ -548,17 +540,9 @@ pub async fn regenerate_compiler() -> Result<()> {
     })
     .await?;
 
-    println!();
-    println!(
-        "{}",
-        "Pangea gemset.nix regenerated successfully!"
-            .bright_green()
-            .bold()
-    );
-    crate::regenerated_lockfile_commit_reminder::print_regenerated_lockfile_commit_reminder(
+    crate::pangea_regenerate_success_and_reminder::print_pangea_regenerate_success_and_reminder(
         crate::regenerated_lockfile_commit_reminder::RegeneratedLockfilePair::GemsetNix,
     );
-    println!();
 
     Ok(())
 }

@@ -240,6 +240,15 @@ mod nix_result_link_path;
 mod nonfatal_warning;
 mod observability;
 mod package_phase_announce;
+// Typed primitive: the fused four-line
+// `println!(); println!("Pangea <X> regenerated successfully!".bright_green().bold());
+// print_regenerated_lockfile_commit_reminder(<pair>); println!()`
+// success-banner + commit-reminder stanza for the two sibling
+// `commands/pangea.rs::{regenerate, regenerate_compiler}` regenerate
+// commands. The (banner-file, reminder-pair) correlation is projected
+// from the already-typed `RegeneratedLockfilePair` enum so the banner
+// slot and the reminder pair cannot silently drift.
+mod pangea_regenerate_success_and_reminder;
 mod path_builder;
 mod pkgs_product_dir;
 mod pod_probe_pending_wait_line;
