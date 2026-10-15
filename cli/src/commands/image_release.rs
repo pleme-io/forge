@@ -68,9 +68,9 @@ pub async fn execute(
 
     // Resolve amd64 image path
     let amd64_path = match (amd64_image, amd64_attr) {
-        (Some(path), _) => path.to_string(),
-        (None, Some(attr)) => build_nix_image(attr, working_dir).await?,
-        (None, None) => bail!("Either --amd64-image or --amd64-attr is required"),
+        (Some(path), _) => Some(path.to_string()),
+        (None, Some(attr)) => Some(build_nix_image(attr, working_dir).await?),
+        (None, None) => None,
     };
 
     // Resolve arm64 image path (optional)
@@ -80,19 +80,25 @@ pub async fn execute(
         (None, None) => None,
     };
 
-    // Push amd64 — gate the loader before the push (default on).
-    if verify_elf {
-        info!("Verifying {} (amd64) image loader before push...", name);
-        verify_image_arch(&doca, &amd64_path, "amd64")?;
+    if amd64_path.is_none() && arm64_path.is_none() {
+        bail!("At least one of --amd64-image/--amd64-attr or --arm64-image/--arm64-attr is required");
     }
+
+    // Push amd64 — gate the loader before the push (default on).
     let amd64_tag = format_amd64_release_tag(&sha);
-    info!(
-        "Pushing {} (amd64) as {}...",
-        name,
-        crate::oci_manifest::image_reference(registry, &amd64_tag)
-    );
-    push_image(&doca, &amd64_path, registry, &amd64_tag)?;
-    push_image(&doca, &amd64_path, registry, "amd64-latest")?;
+    if let Some(ref amd64) = amd64_path {
+        if verify_elf {
+            info!("Verifying {} (amd64) image loader before push...", name);
+            verify_image_arch(&doca, amd64, "amd64")?;
+        }
+        info!(
+            "Pushing {} (amd64) as {}...",
+            name,
+            crate::oci_manifest::image_reference(registry, &amd64_tag)
+        );
+        push_image(&doca, amd64, registry, &amd64_tag)?;
+        push_image(&doca, amd64, registry, "amd64-latest")?;
+    }
 
     // Push arm64 if available
     if let Some(ref arm64) = arm64_path {
@@ -116,7 +122,7 @@ pub async fn execute(
     // images via repeated `--ref` flags). The legacy `manifest put`
     // syntax — which took source refs as positional args — was removed
     // and now reads manifest content from stdin only.
-    if arm64_path.is_some() {
+    if amd64_path.is_some() && arm64_path.is_some() {
         info!("Creating multi-arch manifest index...");
 
         let regctl = get_tool_path("regctl");
@@ -164,10 +170,11 @@ pub async fn execute(
     // The previous summary printed a single misleading tag (`:sha`) which
     // didn't always exist (e.g. when arm64_path is None, no multi-arch
     // index is created and the unprefixed tag never gets created).
-    let mut tags_pushed = vec![
-        crate::oci_manifest::image_reference(registry, &format_amd64_release_tag(&sha)),
-        crate::oci_manifest::image_reference(registry, "amd64-latest"),
-    ];
+    let mut tags_pushed = Vec::new();
+    if amd64_path.is_some() {
+        tags_pushed.push(crate::oci_manifest::image_reference(registry, &amd64_tag));
+        tags_pushed.push(crate::oci_manifest::image_reference(registry, "amd64-latest"));
+    }
     if arm64_path.is_some() {
         tags_pushed.push(crate::oci_manifest::image_reference(
             registry,
@@ -177,6 +184,8 @@ pub async fn execute(
             registry,
             "arm64-latest",
         ));
+    }
+    if amd64_path.is_some() && arm64_path.is_some() {
         tags_pushed.push(crate::oci_manifest::image_reference(registry, &sha));
         tags_pushed.push(crate::oci_manifest::image_reference(registry, "latest"));
     }
