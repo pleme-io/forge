@@ -128,23 +128,6 @@ pub fn declares_top_level_image(values_yaml: &str) -> bool {
         .any(|l| l.starts_with("image:") || l.starts_with("image :"))
 }
 
-#[cfg(test)]
-mod lint_image_injection_tests {
-    use super::declares_top_level_image;
-
-    #[test]
-    fn only_a_chart_that_declares_image_gets_the_placeholder() {
-        assert!(declares_top_level_image(
-            "replicaCount: 1\nimage:\n  repository: x\n"
-        ));
-        assert!(!declares_top_level_image("engenho:\n  package: \"\"\n"));
-        assert!(!declares_top_level_image(
-            "sidecar:\n  image:\n    tag: x\n"
-        ));
-        assert!(!declares_top_level_image("# image: commented\nunit: {}\n"));
-    }
-}
-
 /// Run `program <args>` with a hard wall-clock timeout, inheriting stdio so
 /// output still streams to CI. Returns `Ok(true)` on success, `Ok(false)` on a
 /// clean non-zero exit, and `Err` if the process had to be killed at the
@@ -4903,5 +4886,22 @@ mod chart_release_phase_failure_routing_tests {
              package / push in `release_all`). Found code-line hits: \
              {hits:#?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod lint_image_injection_tests {
+    use super::declares_top_level_image;
+
+    #[test]
+    fn only_a_chart_that_declares_image_gets_the_placeholder() {
+        assert!(declares_top_level_image(
+            "replicaCount: 1\nimage:\n  repository: x\n"
+        ));
+        assert!(!declares_top_level_image("engenho:\n  package: \"\"\n"));
+        assert!(!declares_top_level_image(
+            "sidecar:\n  image:\n    tag: x\n"
+        ));
+        assert!(!declares_top_level_image("# image: commented\nunit: {}\n"));
     }
 }
