@@ -628,8 +628,7 @@ async fn build_lock_target_with_bin(
 /// keeping it green.
 const FLEET_CLIPPY_TOML: &str = r#"# pleme-io typed-emission enforcement — supplied by `forge tool check`.
 #
-# Canonical: https://github.com/pleme-io/theory/blob/main/TYPED-EMISSION.md
-# Mirrors:   substrate/lib/build/rust/format-ban.clippy.toml
+# Mirrors: substrate/lib/build/rust/format-ban.clippy.toml
 #
 # `format!()` is banned across pleme-io Rust crates. Use:
 #   - `write!()` / `writeln!()` inside `Display`/`Debug`/`Serialize` impls
@@ -640,7 +639,7 @@ const FLEET_CLIPPY_TOML: &str = r#"# pleme-io typed-emission enforcement — sup
 # MUST STAY ON ONE LINE — see FLEET_CLIPPY_TOML's doc comment in
 # forge/cli/src/commands/tool.rs. A multi-line inline table is invalid TOML and
 # makes clippy abort the compile instead of linting.
-disallowed-macros = [{ path = "std::format", reason = "format!() is banned per pleme-io/theory/TYPED-EMISSION.md. Use write!() inside Display/Debug impls, tracing::* for logs, anyhow::anyhow!()/bail!() for errors, or a typed AST renderer. Free-form string composition is a substrate gap; close it." }]
+disallowed-macros = [{ path = "std::format", reason = "format!() is banned across pleme-io Rust crates. Use write!() inside Display/Debug impls, tracing::* for logs, anyhow::anyhow!()/bail!() for errors, or a typed AST renderer. Free-form string composition is a substrate gap; close it." }]
 "#;
 
 /// Decide what configuration directory clippy should read for `dir`.
