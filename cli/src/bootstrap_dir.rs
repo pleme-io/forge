@@ -38,9 +38,9 @@
 //! consumer surface reaches for a name matching its component rather
 //! than the generic accessor.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the Bootstrap platform-directory
+//! Solve-once-at-the-primitive: the Bootstrap platform-directory
 //! composition lives at ONE construction surface so a future refinement
 //! (a `SERVICE_DIR`-env-var-first probe promotion into this module, a
 //! rename of the platform layout, a swap onto `PathBuf::from(env!(

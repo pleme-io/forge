@@ -26,8 +26,7 @@ use crate::config::FrontendGatesConfig;
 /// `commands/e2e.rs:87` (170ecac), and the sibling `docker_bin()` /
 /// `crossplane_bin()` / `cosign_bin()` / `jsonnet_bin()` sigil
 /// discipline on other command modules (23241a6 / 6b3ac16 /
-/// a070a3c / a826ac0). Solve-once at the sigil (THEORY §I.5 —
-/// duplication budget zero; every recurring shape becomes a helper
+/// a070a3c / a826ac0). Solve-once at the sigil (duplication budget zero; every recurring shape becomes a helper
 /// before it becomes duplicated code) means a future added `bun`
 /// spawn cannot silently re-copy the two-argument resolve and drift
 /// away from the `BUN_BIN` override at exactly the tier the
@@ -84,7 +83,7 @@ fn bun_bin() -> String {
 /// // caller then inspects `output.status.success()` to decide next step
 /// ```
 ///
-/// Six occurrences past THEORY.md §VI.1's three-times threshold ("two
+/// Six occurrences past the three-times threshold ("two
 /// occurrences is a coincidence; three is a law"). Each pre-lift site
 /// was one place a future consumer could drift: forget the
 /// `.current_dir(web_dir)` and spawn `bun` in the caller's cwd

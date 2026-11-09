@@ -36,7 +36,7 @@
 //!    to decide whether to fire the follow-on `annotate` spawn — a
 //!    missing CRD is a no-op, not a failure).
 //!
-//! Four identically-shaped bodies past THEORY §VI.1's duplication
+//! Four identically-shaped bodies past the duplication
 //! trigger (PRIME DIRECTIVE: duplication budget is zero). A Shinka
 //! `DatabaseMigration` fetch-argv drift — a rename of the `-n` short
 //! form to `--namespace`, an argv-order shuffle putting `-n <ns>`

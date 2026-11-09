@@ -7,7 +7,7 @@
 //! path)`. Three test modules — `git.rs`, `nix.rs`, and
 //! `infrastructure/attic.rs` — each carried a private `make_X_shim`
 //! helper differing only in the binary name. Three identically-shaped
-//! copies past the three-times threshold (THEORY §VI.1: "two occurrences
+//! copies past the three-times threshold ("two occurrences
 //! is a coincidence; three is a law"). This module is the
 //! law-redeeming consolidation.
 //!
@@ -152,7 +152,7 @@ pub static ROOT_FLAKE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(())
 /// `activate_root_flake_publishes_env_vars_even_when_chdir_fails`,
 /// `activate_root_flake_error_context_names_the_repo_root_path`,
 /// `activate_root_flake_accepts_str_and_string_and_path_args`) — 6×
-/// past THEORY §VI.1's three-times-is-a-law threshold with the
+/// past the three-times-is-a-law threshold with the
 /// additional defect that a panic between snapshot and restore
 /// silently leaked the three surfaces to every subsequent test the
 /// process ran. RAII drop closes that leak by construction.
@@ -223,7 +223,7 @@ impl Drop for RootFlakeEnvSnapshot {
 /// `struct { prior: Result<String, VarError> }` + `capture()` +
 /// `Drop { match &self.prior { Ok(v) => set_var(NAME, v), Err(_) =>
 /// remove_var(NAME) } }` body, differing only in the hardcoded env-var
-/// name string. Three isomorphic copies past THEORY §VI.1's
+/// name string. Three isomorphic copies past the
 /// three-times threshold ("two occurrences is a coincidence; three is
 /// a law"). This helper is the law-redeeming carve-out: the shape
 /// (`prior: Result<String, VarError>` + snapshot-on-`capture` + restore-
@@ -242,7 +242,7 @@ impl Drop for RootFlakeEnvSnapshot {
 /// Sibling of the compound [`RootFlakeEnvSnapshot`] (three surfaces:
 /// cwd + `REPO_ROOT` + `SERVICE_DIR`) and the set-then-restore
 /// [`GitBinScope`] (mutates on construction, not just on drop).
-/// THEORY §V (solve-once-at-the-primitive); §VI.1
+/// (solve-once-at-the-primitive);
 /// (recurring-shape-to-helper).
 pub struct EnvVarSnapshot {
     name: &'static str,
@@ -303,7 +303,7 @@ impl Drop for EnvVarSnapshot {
 /// std::env::set_var(NAME, value); Self { prior } }` + `impl Drop {
 /// match &self.prior { Ok(v) => set_var(NAME, v), Err(_) =>
 /// remove_var(NAME) } }` triple, differing only in the hardcoded
-/// env-var name string. Two isomorphic copies past THEORY §VI.1's
+/// env-var name string. Two isomorphic copies past the
 /// three-is-a-law threshold in intent — the pair had to agree on the
 /// field type spelling, the set-then-snapshot ordering (mutate FIRST,
 /// snapshot the pre-mutation value SECOND — the reverse ordering
@@ -319,7 +319,7 @@ impl Drop for EnvVarSnapshot {
 /// as [`make_executable_shim`] applied at the three-times threshold");
 /// with 13 kubectl_bin call sites and 40+ git_bin call sites the
 /// pre-lift docstring justification is well past the anticipated
-/// threshold. THEORY §V (solve-once-at-the-primitive); §VI.1
+/// threshold. (solve-once-at-the-primitive);
 /// (recurring-shape-to-helper).
 pub struct EnvVarScope {
     name: &'static str,
@@ -388,7 +388,7 @@ impl GitBinScope {
 /// `cli/src/commands/release_commit.rs`, and
 /// `cli/src/commands/product_release.rs` — each re-spelled this exact
 /// thirteen-line stanza VERBATIM. Three identically-shaped copies past
-/// THEORY §VI.1's three-is-a-law threshold; this helper is the
+/// the three-is-a-law threshold; this helper is the
 /// law-redeeming carve-out. A future fourth release-commit test (the
 /// shape this fixture exists to drive — a typed commit-and-push
 /// primitive that needs a real git working tree against a real bare
@@ -466,7 +466,7 @@ pub fn init_repo_with_one_commit(dir: &Path) {
 ///
 /// Three test modules carried near-identical copies of this fixture
 /// with the `--initial-branch=main` flag drifting in two of three
-/// (THEORY §VI.1: "two occurrences is a coincidence; three is a
+/// ("two occurrences is a coincidence; three is a
 /// law"). The pre-lift `cli/src/infrastructure/git.rs` copy omitted
 /// the flag — papered over by the fact that its sole call site
 /// asserted only on `CommitPushOutcome` and never probe-cloned. The
@@ -558,7 +558,7 @@ pub fn add_bare_origin(work_dir: &Path, bare_dir: &Path) {
 ///   (self-test of `clone_bare_and_read_head_subject`, kept inline
 ///   for the same reason)
 ///
-/// Six identically-shaped copies past THEORY.md §VI.1's
+/// Six identically-shaped copies past the
 /// three-times-is-a-law threshold ("two occurrences is a
 /// coincidence; three is a law"). This primitive is the
 /// law-redeeming consolidation. The three self-tests here in
@@ -635,7 +635,7 @@ pub fn make_seeded_work_and_bare_origin() -> (tempfile::TempDir, PathBuf, PathBu
 /// - [`tests::test_clone_bare_and_read_head_subject_returns_trimmed_string`]
 ///   (self-test of [`clone_bare_and_read_head_subject`])
 ///
-/// Six identically-shaped copies past THEORY.md §VI.1's
+/// Six identically-shaped copies past the
 /// three-times-is-a-law threshold ("two occurrences is a coincidence;
 /// three is a law"). Same law-redeeming consolidation shape as the
 /// sibling [`make_seeded_work_and_bare_origin`] carries for the six
@@ -677,7 +677,7 @@ pub fn seed_push_work_main_to_origin(work: &Path) {
 /// the crate — a `git log -1 --pretty=%s` spawn against a chosen
 /// working directory, followed by a `String::from_utf8_lossy(&stdout)
 /// .trim().to_string()` decode — appears at three sibling sites past
-/// THEORY.md §VI.1's three-times-is-a-law threshold ("two occurrences
+/// the three-times-is-a-law threshold ("two occurrences
 /// is a coincidence; three is a law"):
 ///
 /// 1. The tail of [`clone_bare_and_read_head_subject`] — reads the
@@ -772,7 +772,7 @@ pub fn read_head_subject(dir: &Path) -> String {
 ///     .to_string();
 /// ```
 ///
-/// Three identically-shaped copies past THEORY.md §VI.1's
+/// Three identically-shaped copies past the
 /// three-times-is-a-law threshold ("two occurrences is a coincidence;
 /// three is a law"). This helper is the law-redeeming carve-out: the
 /// `&["clone", <bare>, <probe>]` and `&["log", "-1", "--pretty=%s"]`
@@ -841,7 +841,7 @@ pub fn clone_bare_and_read_head_subject(bare_dir: &Path, probe_dir: &Path) -> St
 /// Fifteen shield tests across ten modules (`cli/src/git.rs`,
 /// `cli/src/infrastructure/git.rs`, `cli/src/test_support.rs`, and
 /// seven `cli/src/commands/*.rs`) each re-spelled the same three
-/// `format!` lines verbatim (THEORY.md §VI.1: "when a pattern repeats
+/// `format!` lines verbatim ("when a pattern repeats
 /// three times, extract an archetype/backend/synthesizer and generate
 /// from it. Two occurrences is a coincidence; three is a law"). Five
 /// times over the threshold. This helper is the law-redeeming
@@ -912,7 +912,7 @@ pub fn forbidden_spawn_shapes(bare: &str) -> [String; 3] {
 /// same three-`assert!(!SOURCE.contains(...))` block verbatim,
 /// differing only in `module_path` / `bare` / the remediation
 /// sentence. Thirteen occurrences × three assertions each = 39
-/// verbatim `!source.contains(...)`-style call sites past THEORY §VI.1's
+/// verbatim `!source.contains(...)`-style call sites past the
 /// three-times threshold. This helper is the law-redeeming
 /// consolidation: a future edit to the message wording (say adding a
 /// `"see substrate mkRuntimeToolsEnv"` link, or refining the
@@ -1002,7 +1002,7 @@ pub fn assert_source_forbids_bare_spawn_shapes(
 /// `let X_hits = code_line_hits(SOURCE, &raw_X); assert!(X_hits.is_empty(), "…{X_hits:?}")`
 /// blocks verbatim, differing only in the module-path prefix and the
 /// remediation phrase. Two occurrences × three assertions each = six
-/// verbatim four-line stanzas past THEORY §VI.1's three-times threshold
+/// verbatim four-line stanzas past the three-times threshold
 /// ("two occurrences is a coincidence; three is a law"). The
 /// pre-existing [`assert_source_forbids_bare_spawn_shapes`] cannot
 /// serve these two shields: its raw `source.contains(...)` predicate
@@ -1118,7 +1118,7 @@ pub fn assert_source_forbids_bare_spawn_shapes_code_line(
 ///     .collect();
 /// ```
 ///
-/// Six occurrences past THEORY.md §VI.1's three-times threshold ("two
+/// Six occurrences past the three-times threshold ("two
 /// occurrences is a coincidence; three is a law"). This helper is the
 /// law-redeeming consolidation: a future edit to the code-line
 /// predicate (say adding block-comment `/*` handling, or narrowing to
@@ -1195,7 +1195,7 @@ pub fn code_line_hits(source: &str, needle: &str) -> Vec<String> {
 /// `format!` template verbatim, differing only in the substituted
 /// `env_var` / `bare` tokens (three called `format!` with a
 /// `_BIN`-baked template; two spelled the literal directly). Five
-/// occurrences past THEORY.md §VI.1's three-times threshold ("two
+/// occurrences past the three-times threshold ("two
 /// occurrences is a coincidence; three is a law"). This helper is the
 /// law-redeeming carve-out: a future edit to the canonical shape (a
 /// rename of `crate::repo::get_tool_path` to
@@ -1333,7 +1333,7 @@ pub fn deriving_one_arg_sigil_needle_literal(bare: &str) -> String {
 ///
 /// The pre-lift shape was replicated verbatim across three shields
 /// (`commands/local.rs`, `commands/infra.rs`, `commands/prerelease.rs`)
-/// — well past THEORY §VI.1's three-times threshold. Each site
+/// — well past the three-times threshold. Each site
 /// hand-spelled the `format!` needle constructor, a `code_line_hits`
 /// call, and a fifteen-line panic-message stanza. Consolidating them
 /// here means a future edit to the remediation prose (say, refining
@@ -1433,7 +1433,7 @@ pub fn get_tool_path_two_arg_call_needle(env_var: &str, bare: &str) -> String {
 /// the same `assert!(SOURCE.contains("get_tool_path(\"<BIN>\", \"<bare>\")"),
 /// "…")` block verbatim, differing only in the substituted
 /// `env_var` / `bare` tokens and per-site remediation prose. Eleven
-/// occurrences past THEORY §VI.1's three-times threshold ("two
+/// occurrences past the three-times threshold ("two
 /// occurrences is a coincidence; three is a law"). This helper is the
 /// law-redeeming consolidation: a future edit to the remediation prose
 /// (say, refining the audit-visibility phrasing or naming the
@@ -1528,7 +1528,7 @@ pub fn sigil_bin_fn_definition_needle(tool_bin_name: &str) -> String {
 /// verbatim, differing only in the substituted `tool_bin_name` /
 /// `env_var` / `bare` tokens plus incidental prose variance (a
 /// "tools-registry" prefix present at some sites, absent at others).
-/// Fifteen occurrences past THEORY.md §VI.1's three-times threshold
+/// Fifteen occurrences past the three-times threshold
 /// ("two occurrences is a coincidence; three is a law"). This helper
 /// is the law-redeeming consolidation: a future edit to the
 /// remediation prose lands in one place and propagates to every
@@ -1622,7 +1622,7 @@ pub fn constructor_call_needle(constructor_name: &str) -> String {
 /// `commands/attestation.rs`, `cli/src/test_support.rs`) and absent on
 /// the four `kubectl_command_async()` sites (`commands/rust_service.rs`,
 /// `commands/integration_tests.rs`, `commands/rollout.rs`,
-/// `commands/search_sync.rs`). Eight occurrences past THEORY.md §VI.1's
+/// `commands/search_sync.rs`). Eight occurrences past the
 /// three-times threshold ("two occurrences is a coincidence; three is a
 /// law"). This helper is the law-redeeming consolidation: a future edit
 /// to the remediation prose lands in one place and propagates to every
@@ -1732,7 +1732,7 @@ pub fn which_which_probe_needle(bare: &str) -> String {
 /// `which::which(\"<bare>\")` crate call — the required form was not
 /// found in the module.")` block verbatim, differing only in the
 /// substituted `bare` / `module_path` tokens. Three occurrences at
-/// THEORY.md §VI.1's three-times threshold ("two occurrences is a
+/// the three-times threshold ("two occurrences is a
 /// coincidence; three is a law"). This helper is the law-redeeming
 /// consolidation: a future edit to the remediation prose lands in one
 /// place and propagates to every shield, and a new probe-family shield
@@ -1840,7 +1840,7 @@ pub fn assert_source_probes_via_which_which_code_line(source: &str, module_path:
 ///   directly)
 /// - `infrastructure/docker.rs` — `docker`
 ///
-/// Twelve occurrences is 4× THEORY §VI.1's three-times-is-a-law
+/// Twelve occurrences is 4× the three-times-is-a-law
 /// threshold ("two occurrences is a coincidence; three is a law").
 /// This helper is the law-redeeming consolidation: a future edit to
 /// the composition (say, adding a fourth invariant every sibling
@@ -1937,7 +1937,7 @@ pub fn assert_source_routes_bare_spawn_through_two_arg_sigil(
 /// `pangea_infra` a6e9b96, `rust_service` 5b5c765, `test_ci` a21bd67,
 /// `tool` a3d51eb), differing only in `SOURCE`, `module_path`,
 /// `min_delegations`, and `spawns_description`. Ten occurrences is
-/// >3× THEORY.md §VI.1's three-times-is-a-law threshold ("two
+/// >3× the three-times-is-a-law threshold ("two
 /// occurrences is a coincidence; three is a law"); this helper is the
 /// law-redeeming consolidation. A future refinement (say broadening
 /// `.status()` to also flag a new terminator form, adding a third
@@ -2206,8 +2206,8 @@ pub fn assert_source_routes_status_only_spawns_through_run_inherited_status(
 /// The eight-line shield body is spelled verbatim across the three
 /// migrated consumer sites in this commit (`commands/dashboards.rs`,
 /// `commands/sync.rs::generate_entities`,
-/// `commands/federation_tests.rs::run_federation_tests`) — past THEORY
-/// §VI.1's three-is-a-law threshold in its own right. A future
+/// `commands/federation_tests.rs::run_federation_tests`) — past
+/// the three-is-a-law threshold in its own right. A future
 /// refinement (structured diagnostic hook, broadened inline needle,
 /// tighter cutoff) lands in one body per frontier rather than at every
 /// site — the same discipline
@@ -2312,7 +2312,7 @@ pub fn assert_source_routes_captured_bails_through_classify_capture_anyhow(
 ///
 /// Each site spelled the same body-cutoff + three-assertion stanza
 /// verbatim, differing only in `source` / `module_path` / `bare` /
-/// `env_var`. Five occurrences past THEORY.md §VI.1's three-times
+/// `env_var`. Five occurrences past the three-times
 /// threshold ("two occurrences is a coincidence; three is a law"), and
 /// the shield's SOLITARY-RESOLVE invariant is a specific defect-class
 /// the sibling [`assert_source_routes_bare_spawn_through_two_arg_sigil`]
@@ -2432,7 +2432,7 @@ pub fn assert_source_routes_bare_spawn_through_sigil_bin_fn_at_exactly_one_resol
 /// `commands/integration_tests.rs`, `commands/seed.rs`,
 /// `commands/sessions.rs`, `infrastructure/kubectl.rs`, and
 /// `services/migration_service.rs`. Twenty-three occurrences is >7×
-/// THEORY.md §VI.1's three-times-is-a-law threshold ("two occurrences
+/// the three-times-is-a-law threshold ("two occurrences
 /// is a coincidence; three is a law"); this helper is the law-redeeming
 /// consolidation. A future refinement (say attaching a byte-offset
 /// return alongside the slice, tolerating a preceding `#[allow(...)]`
@@ -2507,7 +2507,7 @@ pub fn module_body_before_tests<'a>(source: &'a str, module_path: &str) -> &'a s
 /// (×1), `commands/crossplane.rs` (×1), `commands/e2e.rs` (×5),
 /// `commands/github_runner_ci.rs` (×1), `commands/nix_builder.rs` (×3),
 /// and `commands/rust_service.rs` (×1). Fifteen occurrences is >5×
-/// THEORY.md §VI.1's three-times-is-a-law threshold ("two occurrences
+/// the three-times-is-a-law threshold ("two occurrences
 /// is a coincidence; three is a law"); this helper is the law-redeeming
 /// consolidation for the shorter-marker half of the family, mirroring
 /// what [`module_body_before_tests`] closed for the longer-marker half.
@@ -2635,7 +2635,7 @@ pub fn fn_body_slice_between_markers<'a>(
 /// .expect(...)` per fake-`Output` construction — a few hundred
 /// microseconds per call, summed across 80+ call sites in
 /// `retry::tests` alone). PRIME DIRECTIVE: duplication budget is zero
-/// (THEORY §VI.1). This helper is the law-redeeming consolidation for
+///. This helper is the law-redeeming consolidation for
 /// both the `ExitStatusExt::from_raw` and the fork-based shapes. All
 /// four consumer sites now delegate to this ONE body (the
 /// `retry::tests` and `error::tests` sites via a local `use ... as
@@ -2726,7 +2726,7 @@ pub fn synthetic_output(success: bool, stdout: &[u8], stderr: &[u8]) -> std::pro
 /// \"…", bare); assert!(!source.contains(&bypass_primitive), "…");`
 /// stanza — two guard the multi-line 8-space form (seed / sessions,
 /// kubectl), one guards the inline form (local, docker). Three
-/// occurrences past THEORY §VI.1's three-times-is-a-law threshold
+/// occurrences past the three-times-is-a-law threshold
 /// (PRIME DIRECTIVE: duplication budget is zero); this helper is the
 /// law-redeeming consolidation.
 ///
@@ -2802,7 +2802,7 @@ pub fn assert_source_forbids_bare_literal_as_run_query_capture_sync_first_arg(
 /// let _ = std::fs::remove_dir_all(&dir);
 /// ```
 ///
-/// Ten occurrences is >3× THEORY.md §VI.1's three-times-is-a-law
+/// Ten occurrences is >3× the three-times-is-a-law
 /// threshold ("two occurrences is a coincidence; three is a law").
 /// The pre-lift stanza also carries three defects the RAII lift
 /// closes by construction:
@@ -2891,7 +2891,7 @@ pub fn named_scratch_dir(prefix: &str) -> tempfile::TempDir {
 ///
 /// and read the file back with the same two-line
 /// `read_to_string + .lines().collect::<Vec<_>>()` stanza. That is
-/// four copies of one shape past THEORY §VI.1's three-times-is-a-law
+/// four copies of one shape past the three-times-is-a-law
 /// threshold, each independently able to drift off:
 ///
 /// 1. `tempfile::tempdir()` honoring `TMPDIR` (so a Nix
@@ -2911,7 +2911,7 @@ pub fn named_scratch_dir(prefix: &str) -> tempfile::TempDir {
 ///
 /// A `let _ = ArgvLog::reserve();` binding that drops the guard
 /// unlinks the file with it — the guard's lifetime is the log's
-/// lifetime by construction (THEORY §I.1 beat 2: the declaration is
+/// lifetime by construction (beat 2: the declaration is
 /// well-formed by its return type).
 pub struct ArgvLog {
     _dir: tempfile::TempDir,
@@ -2992,7 +2992,7 @@ impl ArgvLog {
 /// ```
 ///
 /// Four literal-payload copies plus two `format!`-derived copies is
-/// six copies of one shape past THEORY §VI.1's three-times-is-a-law
+/// six copies of one shape past the three-times-is-a-law
 /// threshold, each independently able to drift off:
 ///
 /// 1. `printf '%s'` — not `echo` — so the emitted stdout carries **no
@@ -4575,7 +4575,7 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
     ///
     /// Pre-lift all six sites spelled the same shim body verbatim,
     /// varying only in the payload literal / expression — six copies
-    /// of one shape past THEORY §VI.1's three-times-is-a-law
+    /// of one shape past the three-times-is-a-law
     /// threshold, each independently able to drift off:
     ///
     /// 1. `printf '%s'` (no `\n`, no `%b` escape expansion) — a
@@ -4668,7 +4668,7 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
     /// Pre-lift all four sites spelled the same reservation +
     /// shim-body triple verbatim, varying only in the `printf
     /// '%s' '<payload>'` stdout string — four copies of one shape
-    /// past THEORY §VI.1's three-times-is-a-law threshold, each
+    /// past the three-times-is-a-law threshold, each
     /// independently able to drift off the `printf '%s\n'`-vs-`echo`
     /// POSIX-sh portability discipline the primitive centralizes.
     /// A fifth argv-shim test added by copying a neighbor would
@@ -6943,7 +6943,7 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
     /// `commands/schema_validation.rs`'s twin
     /// `test_service_path_from_env_*` tests each spelled the
     /// five-line pattern VERBATIM around `super::service_path_from_env()`
-    /// — 4× isomorphic copies past THEORY §VI.1's three-times threshold,
+    /// — 4× isomorphic copies past the three-times threshold,
     /// each carrying the pre-lift panic-window defect.
     ///
     /// Detection: for each line matching `Err(_) => std::env::remove_var(`,
@@ -7039,7 +7039,7 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
     /// (`developer_tools.rs` × 2, `schema_validation.rs` × 2), six
     /// isomorphic hand-rolled snapshot-and-restore stanzas across four
     /// modules fuse onto ONE [`EnvVarSnapshot::capture`] body — well
-    /// past THEORY §VI.1's three-times-is-a-law threshold and each
+    /// past the three-times-is-a-law threshold and each
     /// carrying the same panic-window defect the primitive's `Drop`
     /// closes by construction (any panic between snapshot and manual
     /// restore leaks `<NAME>=<sentinel>` to every subsequent test).
@@ -7140,7 +7140,7 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
     /// sibling per-consumer shields left un-audited: `BUILD_ARM64` at
     /// `commands/rust_service.rs:337` and `REDIS_URL` at
     /// `commands/rebac_validation.rs:508` — both spelling the identical
-    /// shape past THEORY §VI.1's three-times threshold when combined
+    /// shape past the three-times threshold when combined
     /// with the eleven prior consumers. Post-lift the two sites each
     /// forward to `crate::repo::env_var_or_default(NAME, DEFAULT)`
     /// verbatim; a re-inline would silently reopen the shape at the
@@ -7247,7 +7247,7 @@ fn ok() { let _ = FORBIDDEN_MARKER; }
     /// list-jobs and orphaned-pod-cleanup calls, and
     /// `wait_for_shinka_migration`'s DatabaseMigration CRD pre-check.
     /// Together with 0e2d0cf's five, ten consumers total delegate
-    /// through ONE primitive body — well past THEORY §VI.1's
+    /// through ONE primitive body — well past the
     /// three-times-is-a-law threshold — and a re-inline of the stanza
     /// (or a new copy landing in a future `commands/` module) fires this
     /// shield with the exact offender file and 1-indexed line of the

@@ -61,9 +61,9 @@
 //! `<name>` is a run-time argument, and distinct in semantics
 //! (per-product source tree vs shared BFF component).
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the Hanabi platform-directory
+//! Solve-once-at-the-primitive: the Hanabi platform-directory
 //! composition lives at ONE construction surface so a future refinement
 //! (a `SERVICE_DIR`-env-var-first probe like `get_bootstrap_dir()`
 //! carries, a promotion to `PathBuf::from(env!("HANABI_DIR"))` for

@@ -78,9 +78,9 @@
 //!
 //! # Theory grounding
 //!
-//! THEORY.md §II (constructive substrate): the poll-loop clock is a
+//! (constructive substrate): the poll-loop clock is a
 //! typed value with a single constructor, not three separate locals a
-//! caller re-derives from convention. THEORY.md §VI.1 (three-times
+//! caller re-derives from convention. (three-times
 //! rule): two occurrences is the "coincidence" threshold; the third
 //! poll loop the fleet adds — which the pattern's structural momentum
 //! makes inevitable — forwards through this primitive at zero

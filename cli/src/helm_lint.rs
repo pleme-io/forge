@@ -31,7 +31,7 @@
 //! against a chart whose `helm lint` was never probed inside the
 //! certification surface — or whose lint produced ERROR-level diagnostics
 //! that an upstream caller failed to bail on — is false by construction
-//! (THEORY §V.2: attestation is cryptographic evidence, not a wish). The
+//! (attestation is cryptographic evidence, not a wish). The
 //! same false-by-construction shape commit e8a2df7 closed for
 //! `chart_hash` (`Blake3Hash::digest(format!("chart-{name}", ...))` →
 //! `b"no-chart-dir"`), commit 9c5a99f closed for `tree_hash`
@@ -70,7 +70,7 @@
 //!
 //! ## Why a typed enum, not a bool
 //!
-//! THEORY §V.4 Phase 1 attestation pattern-matches on the structural
+//! Phase 1 attestation pattern-matches on the structural
 //! record of one external probe to recover the probe shape
 //! (probe-absent vs probe-found-nothing vs probe-found-malformed vs
 //! probe-found-evidence). A collapsed `bool` discards three of the four

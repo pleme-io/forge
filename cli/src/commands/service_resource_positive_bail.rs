@@ -21,7 +21,7 @@
 //!    after parsing a `"0.5"`-shaped decimal string into `f64`, bails
 //!    on `value <= 0.0` with the CPU-noun wording.
 //!
-//! Three occurrences of a lockstep shape past THEORY §VI.1's
+//! Three occurrences of a lockstep shape past the
 //! three-is-a-law threshold (PRIME DIRECTIVE: the duplication budget
 //! is zero). A single-site drift — a rephrase to "must be positive",
 //! a change of "greater than" to `">="`, a swap of the single-quote
@@ -54,7 +54,7 @@
 //! stays fixed. Making the noun carrier a closed enum rather than a
 //! caller-supplied `&str` means the operator's vocabulary at this
 //! stderr line is decided here rather than at every future consumer
-//! (THEORY §II — "typed contracts turn a structural drift into a
+//! ("typed contracts turn a structural drift into a
 //! compile error").
 
 use anyhow::{bail, Result};

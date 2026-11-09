@@ -38,7 +38,7 @@
 //! affected site in lockstep pre-lift; post-lift the drift hits ONE
 //! typed body and every consumer inherits the change from the primitive.
 //! Past the PRIME DIRECTIVE's duplication-is-a-bug threshold
-//! (THEORY.md §VI.1) at four consumer sites.
+//! at four consumer sites.
 //!
 //! # Typed catalog
 //!

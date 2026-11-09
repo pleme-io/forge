@@ -65,8 +65,8 @@ fn product_working_dir_forge_argv<'a>(
 /// (an extra shared `--` sentinel, a swap of `--working-dir` for a
 /// `--product-dir` alias, a canonicalize hook on the resolved path,
 /// a telemetry sigil on the re-invoke) lands here and reaches every
-/// consumer by construction (THEORY.md §V.1 knowable-platform
-/// construction guarantee; THEORY.md §VI.1 recurring-shape-to-helper
+/// consumer by construction (knowable-platform
+/// construction guarantee; recurring-shape-to-helper
 /// past the three-times threshold — redeemed at two callers here, with
 /// every future `forge <subcmd> --working-dir <product_dir>`
 /// self-re-invoke inheriting the same shape).
@@ -182,7 +182,7 @@ pub(crate) async fn run_health_check(
 /// primitive — sibling of `e2e.rs::check_image_exists` (sync) and
 /// `push_prebuilt_image`'s inline image-id fetch. All three pre-lift
 /// sites spelled the same `docker images -q <name>` + trim +
-/// `is_empty` body verbatim (THEORY §VI.1 three-is-a-law); the typed
+/// `is_empty` body verbatim (three-is-a-law); the typed
 /// primitive consolidates them onto one shape.
 async fn check_local_image_exists(name: &str) -> Result<bool> {
     Ok(
@@ -201,7 +201,7 @@ async fn check_local_image_exists(name: &str) -> Result<bool> {
 async fn push_prebuilt_image(local_name: &str, registry: &str, deploy_tag: &str) -> Result<()> {
     // Get the image ID via the canonical typed primitive — sibling of
     // `check_local_image_exists` and `e2e.rs::check_image_exists`
-    // (THEORY §VI.1 three-is-a-law). The primitive's classifier picks
+    // (three-is-a-law). The primitive's classifier picks
     // the first line when multiple IDs match (the `.lines().next()`
     // arm pre-lift commented "Use the first image ID if multiple
     // exist") and collapses every failure shape to `None` so the
@@ -215,8 +215,7 @@ async fn push_prebuilt_image(local_name: &str, registry: &str, deploy_tag: &str)
     // `crate::oci_manifest::image_reference` — the typed
     // compositional inverse of `image_repository_and_tag` — so this
     // build path and every other `<repository>:<tag>` composition in
-    // the crate route through one canonical site (theory §VI.1
-    // generation over composition: the three-times rule tripped
+    // the crate route through one canonical site (generation over composition: the three-times rule tripped
     // across 20+ sites, extract the primitive).
     let full_tag = crate::oci_manifest::image_reference(registry, deploy_tag);
 
@@ -389,8 +388,8 @@ async fn commit_artifact_tags(
 /// `println!()` for a scoped `print_env_scope_close` terminator, an
 /// added guard against attempting the write when the services list is
 /// empty) lands at this one body and reaches both consumers by
-/// construction (THEORY.md §V solve-once-at-the-primitive;
-/// THEORY.md §VI.1 duplication-is-a-bug (PRIME DIRECTIVE) redeemed at
+/// construction (solve-once-at-the-primitive;
+/// duplication-is-a-bug (PRIME DIRECTIVE) redeemed at
 /// the two-caller threshold).
 async fn persist_artifact_tags_phase(
     product: &str,
@@ -1233,8 +1232,7 @@ mod status_spawn_routing_tests {
     /// `let mut cmd = Command::new(...); cmd.args(...);
     /// run_inherited_status(cmd, "...").await?;` triple and the
     /// canonical `"{op} failed (exit {code})"` envelope emerges by
-    /// construction at the primitive's ONE body (THEORY.md §V.1
-    /// knowable-platform construction guarantee; THEORY.md §VI.1
+    /// construction at the primitive's ONE body (knowable-platform construction guarantee;
     /// three-times-rule redeemed by lifting to the archetype rather
     /// than re-spelling the stanza).
     ///
@@ -1289,7 +1287,7 @@ mod release_git_sha_routing_tests {
     /// byte-equivalent `if !sha.is_empty()` copies at
     /// `commands/push.rs::get_git_sha` and
     /// `commands/rust_service.rs::get_tag_suffix`. Three consumers
-    /// past THEORY §VI.1's three-is-a-law threshold: the trio had to
+    /// past the three-is-a-law threshold: the trio had to
     /// agree on both the env-var spelling AND the
     /// empty-string-is-miss semantic (the Nix release wrapper
     /// exports the var unconditionally with an empty value on
@@ -1312,8 +1310,7 @@ mod release_git_sha_routing_tests {
     /// `substrate::ReleaseGitSha(String)` newtype, a telemetry sigil
     /// on the resolved SHA — lands at ONE body
     /// ([`crate::git::release_git_sha_from_env`]) and reaches every
-    /// consumer by construction (THEORY §V —
-    /// solve-once-at-the-primitive; §VI.1 —
+    /// consumer by construction (solve-once-at-the-primitive;
     /// recurring-shape-to-helper).
     ///
     /// The scan bounds on the whole-module boundary (from file start
@@ -1399,7 +1396,7 @@ mod product_dir_working_dir_forge_argv_delegation_tests {
     //! production.
     //!
     //! Sibling of `hanabi_dir.rs`, `bootstrap_dir.rs`,
-    //! `platform_component.rs` — same THEORY.md §VI.1
+    //! `platform_component.rs` — same
     //! recurring-shape-to-helper discipline redeemed at two callers
     //! sharing an argv composition instead of a path composition.
     use super::product_working_dir_forge_argv;
@@ -1600,7 +1597,7 @@ mod persist_artifact_tags_phase_delegation_tests {
     //!   intermediate is gone).
     //!
     //! Sibling of `product_dir_working_dir_forge_argv_delegation_tests`
-    //! above — same THEORY.md §VI.1 recurring-shape-to-helper
+    //! above — same recurring-shape-to-helper
     //! discipline redeemed at two callers sharing a three-line
     //! phase-write stanza instead of a three-line argv preamble.
 

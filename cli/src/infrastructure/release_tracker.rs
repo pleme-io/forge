@@ -49,7 +49,7 @@ fn format_failure(operation: &str, status: StatusCode, body: &str) -> String {
 /// `health_check`) each open-coded the same
 /// `if !response.status().is_success() { let status = ...; let body =
 /// ...; anyhow::bail!(...) }` branch — five occurrences well past
-/// THEORY §VI.1's three-times threshold ("two occurrences is a
+/// the three-times threshold ("two occurrences is a
 /// coincidence; three is a law"). Four of the five read the response
 /// body into the diagnostic; the fifth — `health_check` — silently
 /// dropped it, so a `503 Service Unavailable` returning a helpful

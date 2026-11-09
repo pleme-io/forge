@@ -85,18 +85,18 @@
 //!   primitive to grow three optional axes its two-site sibling family
 //!   does not exercise.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! - `THEORY.md §I.5` (duplication budget zero, generation before
+//! - (duplication budget zero, generation before
 //!   pattern before duplication): the two sibling fused stanzas were
 //!   past the two-occurrence coincidence threshold post the 59ac6f0
 //!   two-count and 584c20c collection lifts. This primitive collapses
 //!   the fusion at ONE construction surface.
-//! - `THEORY.md §V.2` (typed absorption): the "print-header + print-
+//! - (typed absorption): the "print-header + print-
 //!   and-collect + return details" composition is a single named
 //!   concept; both callers cite it rather than restating its three
 //!   component steps.
-//! - `THEORY.md §II.1` invariant 5 (composition preserves proofs):
+//! - Invariant 5 (composition preserves proofs):
 //!   composing [`crate::ui::print_step_failure`],
 //!   [`crate::repo::msg_with_two_counts_and_secs_1`], and
 //!   [`crate::frontend_lint_diagnostic_collect::print_and_collect_lint_diagnostic_lines`]

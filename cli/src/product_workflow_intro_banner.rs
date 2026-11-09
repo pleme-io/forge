@@ -62,9 +62,9 @@
 //! standardization of the rule width across all banner classes lands
 //! in ONE place and every banner primitive inherits by composition.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the `>> <product> <label>
+//! Solve-once-at-the-primitive: the `>> <product> <label>
 //! <detail>` product-workflow intro shape lives at ONE construction
 //! surface — a future refinement (a `>>` → `»` prefix swap under a
 //! fleet-wide symbol rebrand, an added OTLP

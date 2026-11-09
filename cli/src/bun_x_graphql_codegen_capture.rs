@@ -90,14 +90,14 @@
 //! spawn in the same function) continues to feed both spawn sites
 //! from the same one resolution.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the `bun x graphql-codegen`
+//! Solve-once-at-the-primitive: the `bun x graphql-codegen`
 //! captured-output spawn composition lives at ONE construction
 //! surface so a future refinement lands in one place rather than at
 //! every consumer.
 //!
-//! §VI.1 one-oracle typed contract: the tokio-`Command` builder
+//! One-oracle typed contract: the tokio-`Command` builder
 //! chain is a construction surface with one owner; every consumer
 //! reaches for [`run_bun_x_graphql_codegen_capture_at`] on first
 //! grep, not by copy-pasting the raw six-line chain from an existing

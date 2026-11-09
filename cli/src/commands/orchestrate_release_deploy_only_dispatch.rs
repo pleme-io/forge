@@ -49,16 +49,16 @@
 //! builder, not an argv-plus-spawn fuser`), so the spawn adapter lives
 //! HERE, above the argv builder, where its two consumers meet.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! - THEORY.md §V.1 (Construction guarantees; Types → Invariants →
+//! - (Construction guarantees; Types → Invariants →
 //!   Proofs → Render Anywhere): the returned `Result<()>` composes the
 //!   three underlying primitives (`product_service_dir_string`,
 //!   `orchestrate_release_deploy_only_single_env_argv`,
 //!   `run_forge_subcommand`) into one typed pipeline — a caller cannot
 //!   skip a step (say, forget the `service_dir` synthesis and pass
 //!   `""`) and still compile.
-//! - THEORY.md §VI.1 (three-times rule; "two occurrences is a
+//! - (three-times rule; "two occurrences is a
 //!   coincidence, three is a law"): two sibling occurrences at the
 //!   threshold — this lift closes the class before a third caller
 //!   re-inlines the fused stanza.

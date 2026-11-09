@@ -102,10 +102,10 @@ const BLAKE3_HEX_LEN: usize = 64;
 /// still living as a bare `&str` prefix inside the parse function's
 /// `match` body.
 ///
-/// THEORY.md §III.1 typescape: the digest-algorithm axis is a typed
+/// Typescape: the digest-algorithm axis is a typed
 /// primitive on the platform (one bounded variant set), not a bare
 /// `&str` prefix restated at every consumer that pins a per-algorithm
-/// policy. THEORY.md §VI.1 generation over composition: the
+/// policy. Generation over composition: the
 /// canonical label ↔ variant table is named at one site
 /// ([`DigestAlgorithm::as_str`] and its inverse [`DigestAlgorithm::parse`]),
 /// and every algorithm dispatch surface — the [`ContentDigest::parse`]
@@ -281,11 +281,11 @@ impl std::fmt::Display for DigestAlgorithm {
 /// at every variant is pinned by
 /// [`tests::test_digest_algorithm_as_ref_str_carries_through_generic_consumer`].
 ///
-/// THEORY.md §V.4 typed primitives: the byte-slice-coercion surface
+/// Typed primitives: the byte-slice-coercion surface
 /// is a typed-primitive site on [`DigestAlgorithm`] itself (one
 /// `AsRef<str>` impl routing through [`DigestAlgorithm::as_str`]),
 /// not a per-consumer `.as_str()` restatement at every downstream
-/// site that accepts `impl AsRef<str>`. THEORY.md §VI.1 one-oracle:
+/// site that accepts `impl AsRef<str>`. One-oracle:
 /// the canonical label is named at one site
 /// ([`DigestAlgorithm::as_str`]) and every surface — `as_str`,
 /// `Display`, this `AsRef<str>`, the byte-slice peer [`AsRef<[u8]>
@@ -368,12 +368,12 @@ impl AsRef<str> for DigestAlgorithm {
 /// `impl AsRef<[u8]>` inherits the new canonical label automatically
 /// with no downstream retyping.
 ///
-/// THEORY.md §III.1 typescape: the byte-slice borrowed-view surface
+/// Typescape: the byte-slice borrowed-view surface
 /// is a typed-primitive site on [`DigestAlgorithm`] itself (one
 /// `AsRef<[u8]>` impl routing through [`AsRef<str>`] and
 /// [`str::as_bytes`]), not a per-consumer `algo.as_str().as_bytes()`
 /// restatement at every downstream site that accepts
-/// `impl AsRef<[u8]>`. THEORY.md §VI.1 generation over composition:
+/// `impl AsRef<[u8]>`. Generation over composition:
 /// the canonical label is named at one site
 /// ([`DigestAlgorithm::as_str`]) and every borrowed-view surface —
 /// [`AsRef<str>`] (yields `&str`), this [`AsRef<[u8]>`] (yields
@@ -465,12 +465,12 @@ impl PartialOrd for DigestAlgorithm {
 /// per-variant byte writes beyond what [`<str as Hash>::hash`] itself
 /// performs on the canonical label bytes.
 ///
-/// THEORY.md §III.1 typescape: the identity-container-key hashing
+/// Typescape: the identity-container-key hashing
 /// surface is a typed-primitive site on [`DigestAlgorithm`] itself (one
 /// hand-rolled [`Hash`] impl routing through [`DigestAlgorithm::as_str`]),
 /// not an opaque derived discriminant hash whose byte-write trace
 /// downstream `HashMap`-probe machinery cannot align with a raw `&str`
-/// key. THEORY.md §VI.1 one-oracle: the canonical label is named at
+/// key. One-oracle: the canonical label is named at
 /// one site ([`DigestAlgorithm::as_str`]), and every byte-write
 /// surface — the format machinery [`std::fmt::Display`], the borrowed-
 /// view read peers [`AsRef<str>`] / [`AsRef<[u8]>`], this
@@ -557,13 +557,13 @@ impl std::hash::Hash for DigestAlgorithm {
 /// identity contract than [`String`] carries, at the same
 /// zero-allocation probe cost.
 ///
-/// THEORY.md §III.1 typescape: the identity-container-lookup borrowed
+/// Typescape: the identity-container-lookup borrowed
 /// UTF-8 projection is a typed-primitive site on [`DigestAlgorithm`]
 /// itself (one [`Borrow<str>`] impl routing through
 /// [`DigestAlgorithm::as_str`]), not a per-consumer
 /// `DigestAlgorithm::parse(str_key).and_then(|a| map.get(&a))`
 /// restatement at every downstream identity-container probe site.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`DigestAlgorithm::as_str`]), and every borrowed-view surface —
 /// the format machinery [`std::fmt::Display`], the trait-generic UTF-8
 /// read peer [`AsRef<str>`], the trait-generic byte-slice read peer
@@ -641,12 +641,12 @@ impl std::borrow::Borrow<str> for DigestAlgorithm {
 /// admitted label and at rejection) is pinned by
 /// [`tests::test_digest_algorithm_from_str_agrees_with_parse`].
 ///
-/// THEORY.md §V.4 typed primitives: the canonical-label parse surface
+/// Typed primitives: the canonical-label parse surface
 /// is a typed-primitive site on [`DigestAlgorithm`] itself (one
 /// [`FromStr`](std::str::FromStr) impl routing through the
 /// [`DigestAlgorithm::parse`] inverse oracle), not a per-consumer
 /// `match s { "sha256" => ... }` restatement at every downstream site
-/// that dispatches on the algorithm label. THEORY.md §VI.1 one-oracle:
+/// that dispatches on the algorithm label. One-oracle:
 /// canonical-label parsing lives at one site
 /// ([`DigestAlgorithm::parse`]) and every read surface — the inverse
 /// oracle itself, the [`ContentDigest::parse`] grammar oracle's
@@ -735,12 +735,12 @@ impl std::str::FromStr for DigestAlgorithm {
 /// the strict-rejection contract on non-canonical input is pinned by
 /// [`tests::test_digest_algorithm_try_from_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §III.1 typescape: the by-reference try-conversion surface is
+/// Typescape: the by-reference try-conversion surface is
 /// a typed-primitive site on [`DigestAlgorithm`] itself (one
 /// `TryFrom<&str>` impl routing through the [`std::str::FromStr`] parse
 /// oracle), not a per-consumer `.parse::<DigestAlgorithm>()` bridge at every
 /// downstream site that types its parse contract as `impl TryFrom<&str>`
-/// rather than [`std::str::FromStr`]. THEORY.md §VI.1 generation over
+/// rather than [`std::str::FromStr`]. Generation over
 /// composition: the canonical-label grammar is named at one site
 /// ([`DigestAlgorithm::as_str`]), inverted at one site
 /// ([`DigestAlgorithm::parse`]), and every parse surface —
@@ -835,13 +835,13 @@ impl TryFrom<&str> for DigestAlgorithm {
 /// the strict-rejection contract on non-canonical input is pinned by
 /// [`tests::test_digest_algorithm_try_from_string_rejects_non_canonical_input`].
 ///
-/// THEORY.md §III.1 typescape: the by-value owned-string try-conversion
+/// Typescape: the by-value owned-string try-conversion
 /// surface is a typed-primitive site on [`DigestAlgorithm`] itself (one
 /// `TryFrom<String>` impl routing through the [`std::str::FromStr`]
 /// parse oracle on [`String::as_str`]), not a per-consumer
 /// `s.parse::<DigestAlgorithm>()` bridge at every downstream site that
 /// types its parse contract as `impl TryFrom<String>` rather than
-/// [`std::str::FromStr`]. THEORY.md §VI.1 generation over composition:
+/// [`std::str::FromStr`]. Generation over composition:
 /// the canonical-label grammar is named at one site
 /// ([`DigestAlgorithm::as_str`]), inverted at one site
 /// ([`DigestAlgorithm::parse`]), and every parse surface —
@@ -948,14 +948,14 @@ impl TryFrom<String> for DigestAlgorithm {
 /// pinned by
 /// [`tests::test_digest_algorithm_try_from_cow_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §III.1 typescape: the borrowed-or-owned frontier try-
+/// Typescape: the borrowed-or-owned frontier try-
 /// conversion surface is a typed-primitive site on [`DigestAlgorithm`]
 /// itself (one `TryFrom<Cow<'_, str>>` impl routing through the
 /// [`std::str::FromStr`] parse oracle on [`Cow::as_ref`]), not a
 /// per-consumer `cow.as_ref().parse::<DigestAlgorithm>()` bridge at
 /// every downstream site that types its parse contract as
 /// `impl TryFrom<Cow<'_, str>>` rather than [`std::str::FromStr`].
-/// THEORY.md §VI.1 generation over composition: the canonical-label
+/// Generation over composition: the canonical-label
 /// grammar is named at one site ([`DigestAlgorithm::as_str`]), inverted
 /// at one site ([`DigestAlgorithm::parse`]), and every parse surface —
 /// [`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`], this
@@ -1043,13 +1043,13 @@ impl TryFrom<std::borrow::Cow<'_, str>> for DigestAlgorithm {
 /// the UTF-8-invalid rejection contract is pinned by
 /// [`tests::test_digest_algorithm_try_from_bytes_rejects_invalid_utf8`].
 ///
-/// THEORY.md §III.1 typescape: the borrowed-byte-slice try-conversion
+/// Typescape: the borrowed-byte-slice try-conversion
 /// surface is a typed-primitive site on [`DigestAlgorithm`] itself (one
 /// `TryFrom<&[u8]>` impl routing through [`std::str::from_utf8`] then
 /// [`std::str::FromStr`]), not a per-consumer
 /// `std::str::from_utf8(bytes)?.parse::<DigestAlgorithm>()` bridge at
 /// every downstream site that owns a byte slice and needs to reach a
-/// [`DigestAlgorithm`] value. THEORY.md §VI.1 generation over
+/// [`DigestAlgorithm`] value. Generation over
 /// composition: the canonical-label grammar is named at one site
 /// ([`DigestAlgorithm::as_str`]), inverted at one site
 /// ([`DigestAlgorithm::parse`]), and every parse surface —
@@ -1144,12 +1144,12 @@ impl TryFrom<&[u8]> for DigestAlgorithm {
 /// the UTF-8-invalid rejection contract is pinned by
 /// [`tests::test_digest_algorithm_try_from_vec_bytes_rejects_invalid_utf8`].
 ///
-/// THEORY.md §III.1 typescape: the by-value owned-byte-slice
+/// Typescape: the by-value owned-byte-slice
 /// try-conversion surface is a typed-primitive site on
 /// [`DigestAlgorithm`] itself (one [`TryFrom<Vec<u8>>`] impl routing
 /// through [`String::from_utf8`] then [`TryFrom<String>`]), not a
 /// per-consumer `String::from_utf8(bytes)?.try_into()` bridge at every
-/// downstream site that owns a byte buffer. THEORY.md §VI.1 generation
+/// downstream site that owns a byte buffer. Generation
 /// over composition: the canonical-label grammar is named at one site
 /// ([`DigestAlgorithm::as_str`]), inverted at one site
 /// ([`DigestAlgorithm::parse`]), and every parse surface —
@@ -1253,13 +1253,12 @@ impl TryFrom<Vec<u8>> for DigestAlgorithm {
 /// the strict-rejection contract on non-canonical input is pinned by
 /// [`tests::test_digest_algorithm_try_from_box_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §III.1 typescape: the by-value shrunk-owned UTF-8
+/// Typescape: the by-value shrunk-owned UTF-8
 /// try-conversion surface is a typed-primitive site on
 /// [`DigestAlgorithm`] itself (one [`TryFrom<Box<str>>`] impl routing
 /// through [`String::from`] then [`TryFrom<String>`]), not a
 /// per-consumer `String::from(boxed).try_into()` bridge at every
-/// downstream site that owns a shrunk UTF-8 label buffer. THEORY.md
-/// §VI.1 generation over composition: the canonical-label grammar is
+/// downstream site that owns a shrunk UTF-8 label buffer. Generation over composition: the canonical-label grammar is
 /// named at one site ([`DigestAlgorithm::as_str`]), inverted at one
 /// site ([`DigestAlgorithm::parse`]), and every parse surface —
 /// [`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`],
@@ -1363,13 +1362,12 @@ impl TryFrom<Box<str>> for DigestAlgorithm {
 /// the strict-rejection contract on non-canonical input is pinned by
 /// [`tests::test_digest_algorithm_try_from_arc_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §III.1 typescape: the by-value cross-thread shared-owned
+/// Typescape: the by-value cross-thread shared-owned
 /// UTF-8 try-conversion surface is a typed-primitive site on
 /// [`DigestAlgorithm`] itself (one [`TryFrom<Arc<str>>`] impl routing
 /// through [`AsRef::as_ref`] then [`TryFrom<&str>`]), not a per-consumer
 /// `shared.parse::<DigestAlgorithm>()` restatement at every downstream
-/// site that owns a cross-thread shared UTF-8 label buffer. THEORY.md
-/// §VI.1 one-oracle: the canonical-label grammar is named at one site
+/// site that owns a cross-thread shared UTF-8 label buffer. One-oracle: the canonical-label grammar is named at one site
 /// ([`DigestAlgorithm::as_str`]), inverted at one site
 /// ([`DigestAlgorithm::parse`]), and every parse surface —
 /// [`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`],
@@ -1502,13 +1500,12 @@ impl TryFrom<std::sync::Arc<str>> for DigestAlgorithm {
 /// the strict-rejection contract on non-canonical input is pinned by
 /// [`tests::test_digest_algorithm_try_from_rc_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §III.1 typescape: the by-value thread-local shared-owned
+/// Typescape: the by-value thread-local shared-owned
 /// UTF-8 try-conversion surface is a typed-primitive site on
 /// [`DigestAlgorithm`] itself (one [`TryFrom<Rc<str>>`] impl routing
 /// through [`AsRef::as_ref`] then [`TryFrom<&str>`]), not a per-consumer
 /// `shared.parse::<DigestAlgorithm>()` restatement at every downstream
-/// site that owns a thread-local shared UTF-8 label buffer. THEORY.md
-/// §VI.1 one-oracle: the canonical-label grammar is named at one site
+/// site that owns a thread-local shared UTF-8 label buffer. One-oracle: the canonical-label grammar is named at one site
 /// ([`DigestAlgorithm::as_str`]), inverted at one site
 /// ([`DigestAlgorithm::parse`]), and every parse surface —
 /// [`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`],
@@ -1618,13 +1615,13 @@ impl TryFrom<std::rc::Rc<str>> for DigestAlgorithm {
 /// pinned by
 /// [`tests::test_digest_algorithm_try_from_box_bytes_rejects_non_canonical_input`].
 ///
-/// THEORY.md §III.1 typescape: the by-value shrunk-owned byte-slice
+/// Typescape: the by-value shrunk-owned byte-slice
 /// try-conversion surface is a typed-primitive site on
 /// [`DigestAlgorithm`] itself (one [`TryFrom<Box<[u8]>>`] impl routing
 /// through [`Vec::<u8>::from`] then [`TryFrom<Vec<u8>>`]), not a
 /// per-consumer `Vec::from(boxed).try_into()` bridge at every
 /// downstream site that owns a shrunk-owned raw-byte label buffer.
-/// THEORY.md §VI.1 generation over composition: the canonical-label
+/// Generation over composition: the canonical-label
 /// grammar is named at one site ([`DigestAlgorithm::as_str`]),
 /// inverted at one site ([`DigestAlgorithm::parse`]), and every parse
 /// surface — [`std::str::FromStr`], [`TryFrom<&str>`],
@@ -1760,13 +1757,13 @@ impl TryFrom<Box<[u8]>> for DigestAlgorithm {
 /// pinned by
 /// [`tests::test_digest_algorithm_try_from_arc_bytes_rejects_non_canonical_input`].
 ///
-/// THEORY.md §III.1 typescape: the by-value cross-thread shared-owned
+/// Typescape: the by-value cross-thread shared-owned
 /// byte-slice try-conversion surface is a typed-primitive site on
 /// [`DigestAlgorithm`] itself (one [`TryFrom<Arc<[u8]>>`] impl routing
 /// through [`AsRef::as_ref`] then [`TryFrom<&[u8]>`]), not a per-consumer
 /// `shared.as_ref().try_into()` restatement at every downstream site
 /// that owns a cross-thread shared raw-byte label buffer.
-/// THEORY.md §VI.1 generation over composition: the canonical-label
+/// Generation over composition: the canonical-label
 /// grammar is named at one site ([`DigestAlgorithm::as_str`]), inverted
 /// at one site ([`DigestAlgorithm::parse`]), and every parse surface —
 /// [`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`],
@@ -1865,13 +1862,13 @@ impl TryFrom<std::sync::Arc<[u8]>> for DigestAlgorithm {
 /// pinned by
 /// [`tests::test_digest_algorithm_try_from_rc_bytes_rejects_non_canonical_input`].
 ///
-/// THEORY.md §III.1 typescape: the by-value thread-local shared-owned
+/// Typescape: the by-value thread-local shared-owned
 /// byte-slice try-conversion surface is a typed-primitive site on
 /// [`DigestAlgorithm`] itself (one [`TryFrom<Rc<[u8]>>`] impl routing
 /// through [`AsRef::as_ref`] then [`TryFrom<&[u8]>`]), not a per-consumer
 /// `shared.as_ref().try_into()` restatement at every downstream site
 /// that owns a thread-local shared raw-byte label buffer.
-/// THEORY.md §VI.1 generation over composition: the canonical-label
+/// Generation over composition: the canonical-label
 /// grammar is named at one site ([`DigestAlgorithm::as_str`]), inverted
 /// at one site ([`DigestAlgorithm::parse`]), and every parse surface —
 /// [`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`],
@@ -1960,13 +1957,13 @@ impl TryFrom<std::rc::Rc<[u8]>> for DigestAlgorithm {
 /// the UTF-8-invalid rejection contract on both arms is pinned by
 /// [`tests::test_digest_algorithm_try_from_cow_bytes_rejects_invalid_utf8`].
 ///
-/// THEORY.md §III.1 typescape: the by-value borrowed-or-owned-frontier
+/// Typescape: the by-value borrowed-or-owned-frontier
 /// byte-slice try-conversion surface is a typed-primitive site on
 /// [`DigestAlgorithm`] itself (one [`TryFrom<Cow<'_, [u8]>>`] impl
 /// dispatching to the two by-shape peers), not a per-consumer
 /// `match cow { Cow::Borrowed(s) => s.try_into(), Cow::Owned(v) =>
 /// v.try_into() }` bridge at every downstream site that owns a
-/// borrowed-or-owned byte payload. THEORY.md §VI.1 generation over
+/// borrowed-or-owned byte payload. Generation over
 /// composition: the canonical-label grammar is named at one site
 /// ([`DigestAlgorithm::as_str`]), inverted at one site
 /// ([`DigestAlgorithm::parse`]), and every parse surface —
@@ -2086,13 +2083,13 @@ impl TryFrom<std::borrow::Cow<'_, [u8]>> for DigestAlgorithm {
 /// variant) at every variant is pinned by
 /// [`tests::test_digest_algorithm_into_static_str_round_trips_through_parse`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value static-lifetime
+/// Typed primitives: the by-value static-lifetime
 /// UTF-8 conversion surface is a typed-primitive site on
 /// [`DigestAlgorithm`] itself (one
 /// `From<DigestAlgorithm> for &'static str` impl routing through
 /// [`DigestAlgorithm::as_str`]), not a per-consumer `.as_str()`
 /// restatement at every downstream site that accepts
-/// `impl Into<&'static str>`. THEORY.md §VI.1 one-oracle: the
+/// `impl Into<&'static str>`. One-oracle: the
 /// canonical label is named at one site
 /// ([`DigestAlgorithm::as_str`]) and every emit surface —
 /// [`std::fmt::Display`], [`AsRef<str>`], [`AsRef<[u8]>`], this
@@ -2166,13 +2163,13 @@ impl From<DigestAlgorithm> for &'static str {
 /// canonical label at every variant is pinned by
 /// [`tests::test_digest_algorithm_into_static_bytes_round_trips_through_from_utf8`].
 ///
-/// THEORY.md §III.1 typescape: the by-value static-lifetime byte-slice
+/// Typescape: the by-value static-lifetime byte-slice
 /// conversion surface is a typed-primitive site on
 /// [`DigestAlgorithm`] itself (one `From<DigestAlgorithm> for
 /// &'static [u8]` impl routing through [`DigestAlgorithm::as_str`]),
 /// not a per-consumer `.as_str().as_bytes()` restatement at every
 /// downstream site that accepts `impl Into<&'static [u8]>`.
-/// THEORY.md §VI.1 generation over composition: the canonical label
+/// Generation over composition: the canonical label
 /// is named at one site ([`DigestAlgorithm::as_str`]) and every emit
 /// surface — the inherent `as_str` accessor, the [`std::fmt::Display`]
 /// format machinery, the [`AsRef<str>`] / [`AsRef<[u8]>`] borrowed-
@@ -2278,17 +2275,17 @@ impl From<DigestAlgorithm> for &'static [u8] {
 /// pinned by
 /// [`tests::test_digest_algorithm_into_string_round_trips_through_parse`].
 ///
-/// THEORY.md §III.1 typescape: the by-value owned-string UTF-8
+/// Typescape: the by-value owned-string UTF-8
 /// conversion surface is a typed-primitive site on
 /// [`DigestAlgorithm`] itself (one `From<DigestAlgorithm> for String`
 /// impl routing through [`DigestAlgorithm::as_str`] via
 /// [`str::to_owned`]), not a per-consumer `.as_str().to_owned()`
 /// restatement at every downstream site that accepts
-/// `impl Into<String>`. THEORY.md §V.4 typed primitives: the by-
+/// `impl Into<String>`. Typed primitives: the by-
 /// value owned-string emit surface is closed at the primitive rather
 /// than at each downstream registry-URL / release-manifest / serde-
 /// container / attestation-storage call site.
-/// THEORY.md §VI.1 generation over composition: the canonical label
+/// Generation over composition: the canonical label
 /// is named at one site ([`DigestAlgorithm::as_str`]) and every emit
 /// surface — the inherent [`as_str`] accessor, the
 /// [`std::fmt::Display`] format machinery, the [`AsRef<str>`] /
@@ -2394,14 +2391,14 @@ impl From<DigestAlgorithm> for String {
 /// pinned by
 /// [`tests::test_digest_algorithm_into_owned_bytes_round_trips_through_try_from`].
 ///
-/// THEORY.md §III.1 typescape: the by-value owned-buffer byte-slice
+/// Typescape: the by-value owned-buffer byte-slice
 /// conversion surface is a typed-primitive site on
 /// [`DigestAlgorithm`] itself (one `From<DigestAlgorithm> for Vec<u8>`
 /// impl routing through [`DigestAlgorithm::as_str`] composed with
 /// [`str::as_bytes`] and [`<[u8]>::to_vec`]), not a per-consumer
 /// `.as_str().as_bytes().to_vec()` restatement at every downstream
 /// site that accepts `impl Into<Vec<u8>>`.
-/// THEORY.md §VI.1 generation over composition: the canonical label
+/// Generation over composition: the canonical label
 /// is named at one site ([`DigestAlgorithm::as_str`]) and every emit
 /// surface — the inherent [`as_str`] accessor, the
 /// [`std::fmt::Display`] format machinery, the [`AsRef<str>`] /
@@ -2513,14 +2510,14 @@ impl From<DigestAlgorithm> for Vec<u8> {
 /// emitted [`Box<str>`] at every variant is pinned by
 /// [`tests::test_digest_algorithm_into_box_str_round_trips_through_try_from`].
 ///
-/// THEORY.md §III.1 typescape: the by-value shrunk-owned UTF-8 emit
+/// Typescape: the by-value shrunk-owned UTF-8 emit
 /// surface is a typed-primitive site on [`DigestAlgorithm`] itself
 /// (one `From<DigestAlgorithm> for Box<str>` impl routing through
 /// [`DigestAlgorithm::as_str`] composed with [`str::to_owned`] and
 /// [`String::into_boxed_str`]), not a per-consumer
 /// `.as_str().to_owned().into_boxed_str()` restatement at every
 /// downstream site that accepts `impl Into<Box<str>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`DigestAlgorithm::as_str`]) and every emit surface — the
 /// inherent [`as_str`] accessor, the [`std::fmt::Display`] format
 /// machinery, the [`AsRef<str>`] / [`AsRef<[u8]>`] borrowed-view
@@ -2613,7 +2610,7 @@ impl From<DigestAlgorithm> for Box<str> {
 /// emitted [`Box<[u8]>`] at every variant is pinned by
 /// [`tests::test_digest_algorithm_into_box_bytes_round_trips_through_try_from`].
 ///
-/// THEORY.md §III.1 typescape: the by-value shrunk-owned byte-slice
+/// Typescape: the by-value shrunk-owned byte-slice
 /// emit surface is a typed-primitive site on [`DigestAlgorithm`]
 /// itself (one `From<DigestAlgorithm> for Box<[u8]>` impl routing
 /// through [`DigestAlgorithm::as_str`] composed with
@@ -2621,7 +2618,7 @@ impl From<DigestAlgorithm> for Box<str> {
 /// [`Vec::into_boxed_slice`]), not a per-consumer
 /// `.as_str().as_bytes().to_vec().into_boxed_slice()` restatement at
 /// every downstream site that accepts `impl Into<Box<[u8]>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`DigestAlgorithm::as_str`]) and every emit surface — the
 /// inherent [`as_str`] accessor, the [`std::fmt::Display`] format
 /// machinery, the [`AsRef<str>`] / [`AsRef<[u8]>`] borrowed-view
@@ -2721,14 +2718,14 @@ impl From<DigestAlgorithm> for Box<[u8]> {
 /// emitted [`std::sync::Arc<str>`] at every variant is pinned by
 /// [`tests::test_digest_algorithm_into_arc_str_round_trips_through_try_from`].
 ///
-/// THEORY.md §III.1 typescape: the by-value cross-thread shared-owned
+/// Typescape: the by-value cross-thread shared-owned
 /// UTF-8 emit surface is a typed-primitive site on [`DigestAlgorithm`]
 /// itself (one `From<DigestAlgorithm> for Arc<str>` impl routing
 /// through [`DigestAlgorithm::as_str`] via
 /// [`std::sync::Arc::<str>::from`]), not a per-consumer
 /// `Arc::<str>::from(algo.as_str())` restatement at every downstream
 /// site that accepts `impl Into<Arc<str>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`DigestAlgorithm::as_str`]) and every emit surface — the
 /// inherent [`as_str`] accessor, the [`std::fmt::Display`] format
 /// machinery, the [`AsRef<str>`] / [`AsRef<[u8]>`] borrowed-view
@@ -2856,7 +2853,7 @@ impl From<DigestAlgorithm> for std::sync::Arc<str> {
 /// emitted [`std::sync::Arc<[u8]>`] at every variant is pinned by
 /// [`tests::test_digest_algorithm_into_arc_bytes_round_trips_through_try_from`].
 ///
-/// THEORY.md §III.1 typescape: the by-value cross-thread shared-owned
+/// Typescape: the by-value cross-thread shared-owned
 /// byte-slice emit surface is a typed-primitive site on
 /// [`DigestAlgorithm`] itself (one `From<DigestAlgorithm> for Arc<[u8]>`
 /// impl routing through [`DigestAlgorithm::as_str`] composed with
@@ -2864,7 +2861,7 @@ impl From<DigestAlgorithm> for std::sync::Arc<str> {
 /// per-consumer `Arc::<[u8]>::from(algo.as_str().as_bytes())`
 /// restatement at every downstream site that accepts
 /// `impl Into<Arc<[u8]>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`DigestAlgorithm::as_str`]) and every emit surface — the
 /// inherent [`as_str`] accessor, the [`std::fmt::Display`] format
 /// machinery, the [`AsRef<str>`] / [`AsRef<[u8]>`] borrowed-view
@@ -2946,13 +2943,13 @@ impl From<DigestAlgorithm> for std::sync::Arc<[u8]> {
 /// at every variant is pinned by
 /// [`tests::test_digest_algorithm_into_rc_str_round_trips_through_try_from`].
 ///
-/// THEORY.md §III.1 typescape: the by-value thread-local shared-owned
+/// Typescape: the by-value thread-local shared-owned
 /// UTF-8 emit surface is a typed-primitive site on [`DigestAlgorithm`]
 /// itself (one `From<DigestAlgorithm> for Rc<str>` impl routing through
 /// [`DigestAlgorithm::as_str`] via [`std::rc::Rc::<str>::from`]), not a
 /// per-consumer `Rc::<str>::from(algo.as_str())` restatement at every
 /// downstream site that accepts `impl Into<Rc<str>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one site
+/// One-oracle: the canonical label is named at one site
 /// ([`DigestAlgorithm::as_str`]) and every emit surface — the inherent
 /// [`as_str`] accessor, the [`std::fmt::Display`] format machinery, the
 /// [`AsRef<str>`] / [`AsRef<[u8]>`] borrowed-view peers, the
@@ -3063,14 +3060,14 @@ impl From<DigestAlgorithm> for std::rc::Rc<str> {
 /// [`std::rc::Rc<[u8]>`] at every variant is pinned by
 /// [`tests::test_digest_algorithm_into_rc_bytes_round_trips_through_try_from`].
 ///
-/// THEORY.md §III.1 typescape: the by-value thread-local shared-owned
+/// Typescape: the by-value thread-local shared-owned
 /// byte-slice emit surface is a typed-primitive site on
 /// [`DigestAlgorithm`] itself (one `From<DigestAlgorithm> for Rc<[u8]>`
 /// impl routing through [`DigestAlgorithm::as_str`] composed with
 /// [`str::as_bytes`] and [`std::rc::Rc::<[u8]>::from`]), not a
 /// per-consumer `Rc::<[u8]>::from(algo.as_str().as_bytes())` restatement
 /// at every downstream site that accepts `impl Into<Rc<[u8]>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one site
+/// One-oracle: the canonical label is named at one site
 /// ([`DigestAlgorithm::as_str`]) and every emit surface — the inherent
 /// [`as_str`] accessor, the [`std::fmt::Display`] format machinery, the
 /// [`AsRef<str>`] / [`AsRef<[u8]>`] borrowed-view peers, the
@@ -3179,14 +3176,14 @@ impl From<DigestAlgorithm> for std::rc::Rc<[u8]> {
 /// pinned by
 /// [`tests::test_digest_algorithm_into_cow_str_round_trips_through_try_from`].
 ///
-/// THEORY.md §III.1 typescape: the by-value borrowed-or-owned frontier
+/// Typescape: the by-value borrowed-or-owned frontier
 /// UTF-8 emit surface is a typed-primitive site on [`DigestAlgorithm`]
 /// itself (one `From<DigestAlgorithm> for Cow<'static, str>` impl
 /// routing through [`DigestAlgorithm::as_str`] into
 /// [`std::borrow::Cow::Borrowed`]), not a per-consumer
 /// `Cow::Borrowed(algo.as_str())` restatement at every downstream site
 /// that accepts `impl Into<Cow<'static, str>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one site
+/// One-oracle: the canonical label is named at one site
 /// ([`DigestAlgorithm::as_str`]) and every emit surface — the inherent
 /// [`as_str`] accessor, the [`std::fmt::Display`] format machinery, the
 /// [`AsRef<str>`] / [`AsRef<[u8]>`] borrowed-view peers, the
@@ -3326,7 +3323,7 @@ impl From<DigestAlgorithm> for std::borrow::Cow<'static, str> {
 /// pinned by
 /// [`tests::test_digest_algorithm_into_cow_bytes_round_trips_through_try_from`].
 ///
-/// THEORY.md §III.1 typescape: the by-value borrowed-or-owned frontier
+/// Typescape: the by-value borrowed-or-owned frontier
 /// byte-slice emit surface is a typed-primitive site on
 /// [`DigestAlgorithm`] itself (one
 /// `From<DigestAlgorithm> for Cow<'static, [u8]>` impl routing through
@@ -3334,7 +3331,7 @@ impl From<DigestAlgorithm> for std::borrow::Cow<'static, str> {
 /// [`std::borrow::Cow::Borrowed`]), not a per-consumer
 /// `Cow::Borrowed(algo.as_str().as_bytes())` restatement at every
 /// downstream site that accepts `impl Into<Cow<'static, [u8]>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one site
+/// One-oracle: the canonical label is named at one site
 /// ([`DigestAlgorithm::as_str`]) and every emit surface — the inherent
 /// [`as_str`] accessor, the [`std::fmt::Display`] format machinery, the
 /// [`AsRef<str>`] / [`AsRef<[u8]>`] borrowed-view peers, the
@@ -3412,14 +3409,14 @@ impl From<DigestAlgorithm> for std::borrow::Cow<'static, [u8]> {
 /// is pinned by
 /// [`tests::test_digest_algorithm_partial_eq_str_rejects_non_canonical_labels`].
 ///
-/// THEORY.md §III.1 typescape: the borrowed UTF-8 dereffed-str-
+/// Typescape: the borrowed UTF-8 dereffed-str-
 /// receiver comparison surface is a typed-primitive site on
 /// [`DigestAlgorithm`] itself (one [`PartialEq<str>`] impl routing
 /// through [`DigestAlgorithm::as_str`]), not a per-consumer
 /// `algo.as_str() == label_ref` restatement at every downstream site
 /// that asks whether a [`DigestAlgorithm`] value names a specific
 /// canonical algorithm label through an already-dereffed `str` handle.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`DigestAlgorithm::as_str`]), and every borrowed UTF-8
 /// surface — the [`AsRef<str>`] borrowed-view sibling yielding `&str`,
 /// this [`PartialEq<str>`] answering a boolean equality query — reads
@@ -3488,14 +3485,14 @@ impl PartialEq<str> for DigestAlgorithm {
 /// is pinned by
 /// [`tests::test_digest_algorithm_partial_eq_str_ref_reflexive_at_own_label`].
 ///
-/// THEORY.md §III.1 typescape: the borrowed UTF-8 `&str`-receiver
+/// Typescape: the borrowed UTF-8 `&str`-receiver
 /// comparison surface is a typed-primitive site on [`DigestAlgorithm`]
 /// itself (one [`PartialEq<&str>`] impl routing through
 /// [`DigestAlgorithm::as_str`]), not a per-consumer
 /// `algo.as_str() == label_ref` restatement at every downstream site
 /// that asks whether a [`DigestAlgorithm`] value names a specific
 /// canonical algorithm label through an already-borrowed `&str`
-/// handle. THEORY.md §VI.1 one-oracle: the canonical label is named
+/// handle. One-oracle: the canonical label is named
 /// at one site ([`DigestAlgorithm::as_str`]), and every borrowed UTF-8
 /// surface — the [`AsRef<str>`] borrowed-view sibling yielding
 /// `&str`, the [`PartialEq<str>`] dereffed-str-receiver sibling
@@ -3579,14 +3576,14 @@ impl PartialEq<&str> for DigestAlgorithm {
 /// (variant, label) pair is pinned by
 /// [`tests::test_partial_eq_digest_algorithm_symmetric_with_forward_direction`].
 ///
-/// THEORY.md §III.1 typescape: the reverse-direction borrowed UTF-8
+/// Typescape: the reverse-direction borrowed UTF-8
 /// comparison surface is a typed-primitive site on [`DigestAlgorithm`]
 /// itself (one [`PartialEq<DigestAlgorithm>`] impl on [`str`] routing
 /// through [`DigestAlgorithm::as_str`]), not a per-consumer
 /// `label == algo.as_str()` restatement at every downstream site that
 /// asks whether a borrowed UTF-8 handle names the same canonical
-/// algorithm label as a [`DigestAlgorithm`] value. THEORY.md §VI.1
-/// one-oracle: the canonical label is named at one site
+/// algorithm label as a [`DigestAlgorithm`] value.
+/// One-oracle: the canonical label is named at one site
 /// ([`DigestAlgorithm::as_str`]), and every borrowed UTF-8 comparison
 /// surface — the forward-direction [`PartialEq<str> for
 /// DigestAlgorithm`] + [`PartialEq<&str> for DigestAlgorithm`] pair,
@@ -3625,14 +3622,14 @@ impl PartialEq<DigestAlgorithm> for str {
 /// == <DigestAlgorithm as PartialEq<&str>>::eq(&algo, &label_ref)`
 /// holds by construction at every `(label_ref, algo)` pair.
 ///
-/// THEORY.md §III.1 typescape: the reverse-direction borrowed UTF-8
+/// Typescape: the reverse-direction borrowed UTF-8
 /// `&str`-receiver comparison surface is a typed-primitive site on
 /// [`DigestAlgorithm`] itself (one [`PartialEq<DigestAlgorithm>`] impl
 /// on [`&str`] routing through [`DigestAlgorithm::as_str`]), not a
 /// per-consumer `label_ref == algo.as_str()` restatement at every
 /// downstream site that asks whether a borrowed `&str` handle names
 /// the same canonical algorithm label as a [`DigestAlgorithm`] value.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`DigestAlgorithm::as_str`]), and this reverse-direction
 /// `&str`-receiver surface reads through the same one-oracle
 /// discipline the three sibling comparison surfaces (forward-str,
@@ -3721,15 +3718,15 @@ impl PartialEq<DigestAlgorithm> for &str {
 /// known-bad byte-slice pair is pinned by
 /// [`tests::test_digest_algorithm_partial_eq_bytes_rejects_non_canonical_labels`].
 ///
-/// THEORY.md §III.1 typescape: the borrowed byte-slice comparison
+/// Typescape: the borrowed byte-slice comparison
 /// surface is a typed-primitive site on [`DigestAlgorithm`] itself
 /// (one [`PartialEq<[u8]>`] impl routing through
 /// [`<DigestAlgorithm as AsRef<[u8]>>::as_ref`]), not a per-consumer
 /// `<DigestAlgorithm as AsRef<[u8]>>::as_ref(&algo) == label_bytes`
 /// restatement at every downstream site that asks whether a
 /// [`DigestAlgorithm`] value names a specific canonical algorithm
-/// label through an already-borrowed `&[u8]` handle. THEORY.md §VI.1
-/// one-oracle: the canonical label is named at one site
+/// label through an already-borrowed `&[u8]` handle.
+/// One-oracle: the canonical label is named at one site
 /// ([`DigestAlgorithm::as_str`]), and every borrowed byte-slice
 /// surface — the [`AsRef<[u8]>`] borrowed-view sibling yielding
 /// `&[u8]`, this [`PartialEq<[u8]>`] answering a boolean equality
@@ -3790,15 +3787,15 @@ impl PartialEq<[u8]> for DigestAlgorithm {
 /// variant is pinned by
 /// [`tests::test_digest_algorithm_partial_eq_bytes_ref_reflexive_at_own_label`].
 ///
-/// THEORY.md §III.1 typescape: the borrowed byte-slice
+/// Typescape: the borrowed byte-slice
 /// `&[u8]`-receiver comparison surface is a typed-primitive site on
 /// [`DigestAlgorithm`] itself (one [`PartialEq<&[u8]>`] impl routing
 /// through [`<DigestAlgorithm as AsRef<[u8]>>::as_ref`]), not a per-
 /// consumer `<DigestAlgorithm as AsRef<[u8]>>::as_ref(&algo) == label_ref`
 /// restatement at every downstream site that asks whether a
 /// [`DigestAlgorithm`] value names a specific canonical algorithm
-/// label through an already-borrowed `&[u8]` handle. THEORY.md §VI.1
-/// one-oracle: the canonical label is named at one site
+/// label through an already-borrowed `&[u8]` handle.
+/// One-oracle: the canonical label is named at one site
 /// ([`DigestAlgorithm::as_str`]), and every borrowed byte-slice
 /// surface — the [`AsRef<[u8]>`] borrowed-view sibling yielding
 /// `&[u8]`, the [`PartialEq<[u8]>`] dereffed-slice-receiver sibling
@@ -3870,14 +3867,14 @@ impl PartialEq<&[u8]> for DigestAlgorithm {
 /// [`PartialEq<DigestAlgorithm> for str`] +
 /// [`PartialEq<DigestAlgorithm> for &str`] (lines 3405 / 3448).
 ///
-/// THEORY.md §III.1 typescape: the reverse-direction borrowed byte-slice
+/// Typescape: the reverse-direction borrowed byte-slice
 /// comparison surface is a typed-primitive site on [`DigestAlgorithm`]
 /// itself (one [`PartialEq<DigestAlgorithm>`] impl on [`[u8]`] routing
 /// through [`<DigestAlgorithm as AsRef<[u8]>>::as_ref`]), not a per-
 /// consumer `label_bytes == <DigestAlgorithm as AsRef<[u8]>>::as_ref(&algo)`
 /// restatement at every downstream site that asks whether an already-
 /// borrowed `&[u8]` handle names the same canonical algorithm label as
-/// a [`DigestAlgorithm`] value. THEORY.md §VI.1 one-oracle: the
+/// a [`DigestAlgorithm`] value. One-oracle: the
 /// canonical label is named at one site ([`DigestAlgorithm::as_str`]),
 /// and every borrowed byte-slice comparison surface — the forward-
 /// direction [`PartialEq<[u8]> for DigestAlgorithm`] +
@@ -3921,7 +3918,7 @@ impl PartialEq<DigestAlgorithm> for [u8] {
 /// == <DigestAlgorithm as PartialEq<&[u8]>>::eq(&algo, &bytes_ref)`
 /// holds by construction at every `(bytes_ref, algo)` pair.
 ///
-/// THEORY.md §III.1 typescape: the reverse-direction borrowed byte-slice
+/// Typescape: the reverse-direction borrowed byte-slice
 /// `&[u8]`-receiver comparison surface is a typed-primitive site on
 /// [`DigestAlgorithm`] itself (one [`PartialEq<DigestAlgorithm>`] impl
 /// on [`&[u8]`] routing through
@@ -3929,7 +3926,7 @@ impl PartialEq<DigestAlgorithm> for [u8] {
 /// `label_bytes_ref == <DigestAlgorithm as AsRef<[u8]>>::as_ref(&algo)`
 /// restatement at every downstream site that asks whether an already-
 /// borrowed `&[u8]` handle names the same canonical algorithm label as
-/// a [`DigestAlgorithm`] value. THEORY.md §VI.1 one-oracle: the
+/// a [`DigestAlgorithm`] value. One-oracle: the
 /// canonical label is named at one site ([`DigestAlgorithm::as_str`]),
 /// and this reverse-direction `&[u8]`-receiver surface reads through
 /// the same one-oracle discipline the three sibling byte-slice
@@ -4137,11 +4134,11 @@ impl ContentDigest {
     /// `allow(dead_code)`: part of the primitive read-back surface,
     /// same discipline as [`Self::algorithm`] / [`Self::hex`].
     ///
-    /// THEORY.md §III.1 typescape: the digest-algorithm axis is a
+    /// Typescape: the digest-algorithm axis is a
     /// typed-primitive projection off [`ContentDigest`] onto the
     /// [`DigestAlgorithm`] typed sum, not a per-consumer
     /// `digest.algorithm() == "sha256"` string comparison at every
-    /// downstream policy site. THEORY.md §VI.1 one-oracle: the
+    /// downstream policy site. One-oracle: the
     /// canonical label ↔ variant table is named at one site
     /// ([`DigestAlgorithm::as_str`] / [`DigestAlgorithm::parse`]), and
     /// this read-back accessor reads through it.
@@ -4195,13 +4192,13 @@ impl std::fmt::Display for ContentDigest {
 /// consumer already observes (`crate::helm_provenance::
 /// find_tarball_sha256`, `crate::cosign::parse_verify_output`).
 ///
-/// THEORY.md §III.1 typescape: the content-digest reference grammar
+/// Typescape: the content-digest reference grammar
 /// is a typed primitive on the platform, and its parse frontier is
 /// one oracle serving every idiomatic Rust read surface (inherent
 /// method, [`FromStr`](std::str::FromStr), `.parse::<T>()`,
 /// `T: FromStr` bounds), not a per-consumer restatement of
-/// "well-formed `<algorithm>:<hex>`". THEORY.md §VI.1
-/// generation over composition: the canonical parse predicate is
+/// "well-formed `<algorithm>:<hex>`".
+/// Generation over composition: the canonical parse predicate is
 /// named at one site ([`ContentDigest::parse`]), the derived read
 /// surfaces route through it, and a future refinement to the grammar
 /// (widening to `sha384`, tightening the trim behaviour) is a
@@ -4263,13 +4260,12 @@ impl std::str::FromStr for ContentDigest {
 /// the inherent [`ContentDigest::parse`] oracle without a per-derived-
 /// surface cascade.
 ///
-/// THEORY.md §III.1 typescape: the by-reference try-conversion surface
+/// Typescape: the by-reference try-conversion surface
 /// is a typed-primitive site on [`ContentDigest`] itself (one
 /// [`TryFrom<&str>`] impl routing through the [`FromStr`] parse oracle),
 /// not a per-consumer `.parse::<ContentDigest>()` bridge at every
 /// downstream site that types its parse contract as
-/// `impl TryFrom<&str>` rather than [`std::str::FromStr`]. THEORY.md
-/// §VI.1 one-oracle: the canonical `<algorithm>:<hex>` grammar is named
+/// `impl TryFrom<&str>` rather than [`std::str::FromStr`]. One-oracle: the canonical `<algorithm>:<hex>` grammar is named
 /// at one site ([`ContentDigest::parse`]), and every parse surface —
 /// [`std::str::FromStr`], this [`TryFrom<&str>`], a future
 /// [`serde::Deserialize`] impl — reads through it.
@@ -4324,13 +4320,12 @@ impl TryFrom<&str> for ContentDigest {
 /// not implement zero-copy borrow) reads through the same one-oracle
 /// predicate at zero per-consumer bridge cost.
 ///
-/// THEORY.md §III.1 typescape: the by-value try-conversion surface is
+/// Typescape: the by-value try-conversion surface is
 /// a typed-primitive site on [`ContentDigest`] itself (one
 /// [`TryFrom<String>`] impl routing through the [`TryFrom<&str>`]
 /// parse oracle), not a per-consumer `owned.as_str()` bridge at every
 /// downstream site that types its parse contract as
-/// `impl TryFrom<String>` rather than [`TryFrom<&str>`]. THEORY.md
-/// §VI.1 one-oracle: the canonical `<algorithm>:<hex>` grammar is
+/// `impl TryFrom<String>` rather than [`TryFrom<&str>`]. One-oracle: the canonical `<algorithm>:<hex>` grammar is
 /// named at one site ([`ContentDigest::parse`]), and every parse
 /// surface — [`std::str::FromStr`], [`TryFrom<&str>`], this
 /// [`TryFrom<String>`] — reads through it.
@@ -4382,13 +4377,13 @@ impl TryFrom<String> for ContentDigest {
 /// at its own frontier can distinguish arms directly off the
 /// [`Result<ContentDigest, ContentDigestError>`] the impl returns.
 ///
-/// THEORY.md §III.1 typescape: the borrowed/owned-frontier try-
+/// Typescape: the borrowed/owned-frontier try-
 /// conversion surface is a typed-primitive site on [`ContentDigest`]
 /// itself (one [`TryFrom<Cow<'_, str>>`] impl routing through the
 /// [`TryFrom<&str>`] parse oracle), not a per-consumer
 /// `cow.as_ref()` bridge at every downstream site that types its
 /// parse contract as `impl TryFrom<Cow<'_, str>>` rather than
-/// [`TryFrom<&str>`]. THEORY.md §VI.1 one-oracle: the canonical
+/// [`TryFrom<&str>`]. One-oracle: the canonical
 /// `<algorithm>:<hex>` grammar is named at one site
 /// ([`ContentDigest::parse`]), and every parse surface —
 /// [`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`],
@@ -4445,12 +4440,12 @@ impl TryFrom<std::borrow::Cow<'_, str>> for ContentDigest {
 /// arms directly off the
 /// [`Result<ContentDigest, ContentDigestError>`] the impl returns.
 ///
-/// THEORY.md §III.1 typescape: the byte-slice try-conversion surface
+/// Typescape: the byte-slice try-conversion surface
 /// is a typed-primitive site on [`ContentDigest`] itself (one
 /// [`TryFrom<&[u8]>`] impl routing through [`std::str::from_utf8`]
 /// then [`TryFrom<&str>`]), not a per-consumer
 /// `std::str::from_utf8(bytes)?.parse()` bridge at every downstream
-/// site that owns a byte slice. THEORY.md §VI.1 one-oracle: the
+/// site that owns a byte slice. One-oracle: the
 /// canonical `<algorithm>:<hex>` grammar is named at one site
 /// ([`ContentDigest::parse`]), and every parse surface —
 /// [`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`],
@@ -4545,13 +4540,13 @@ impl TryFrom<&[u8]> for ContentDigest {
 /// rendering names the exact bytes the caller supplied — no data
 /// loss between the intake buffer and the failure record.
 ///
-/// THEORY.md §III.1 typescape: the by-value owned-byte-slice
+/// Typescape: the by-value owned-byte-slice
 /// try-conversion surface is a typed-primitive site on
 /// [`ContentDigest`] itself (one [`TryFrom<Vec<u8>>`] impl routing
 /// through [`String::from_utf8`] then [`TryFrom<String>`]), not a
 /// per-consumer `String::from_utf8(bytes)?.try_into()` bridge at
-/// every downstream site that owns a byte buffer. THEORY.md §VI.1
-/// one-oracle: the canonical `<algorithm>:<hex>` grammar is named
+/// every downstream site that owns a byte buffer.
+/// One-oracle: the canonical `<algorithm>:<hex>` grammar is named
 /// at one site ([`ContentDigest::parse`]), and every parse surface —
 /// [`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`],
 /// [`TryFrom<Cow<'_, str>>`], [`TryFrom<&[u8]>`], this
@@ -4659,13 +4654,13 @@ impl TryFrom<Vec<u8>> for ContentDigest {
 /// UTF-8 gate the byte-frontier peers ([`TryFrom<&[u8]>`],
 /// [`TryFrom<Vec<u8>>`]) run is unreachable here.
 ///
-/// THEORY.md §III.1 typescape: the by-value shrunk-owned UTF-8
+/// Typescape: the by-value shrunk-owned UTF-8
 /// try-conversion surface is a typed-primitive site on
 /// [`ContentDigest`] itself (one [`TryFrom<Box<str>>`] impl routing
 /// through [`String::from`] then [`TryFrom<String>`]), not a
 /// per-consumer `String::from(boxed).try_into()` bridge at every
-/// downstream site that owns a shrunk UTF-8 buffer. THEORY.md §VI.1
-/// one-oracle: the canonical `<algorithm>:<hex>` grammar is named
+/// downstream site that owns a shrunk UTF-8 buffer.
+/// One-oracle: the canonical `<algorithm>:<hex>` grammar is named
 /// at one site ([`ContentDigest::parse`]), and every parse surface —
 /// [`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`],
 /// [`TryFrom<Cow<'_, str>>`], [`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`],
@@ -4777,13 +4772,13 @@ impl TryFrom<Box<str>> for ContentDigest {
 /// the type level, so the UTF-8 gate the byte-frontier peers
 /// ([`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`]) run is unreachable here.
 ///
-/// THEORY.md §III.1 typescape: the by-value shared-owned UTF-8
+/// Typescape: the by-value shared-owned UTF-8
 /// try-conversion surface is a typed-primitive site on
 /// [`ContentDigest`] itself (one [`TryFrom<Arc<str>>`] impl routing
 /// through [`AsRef::as_ref`] then [`TryFrom<&str>`]), not a
 /// per-consumer `shared.parse::<ContentDigest>()` restatement at every
-/// downstream site that owns a shared UTF-8 buffer. THEORY.md §VI.1
-/// one-oracle: the canonical `<algorithm>:<hex>` grammar is named at
+/// downstream site that owns a shared UTF-8 buffer.
+/// One-oracle: the canonical `<algorithm>:<hex>` grammar is named at
 /// one site ([`ContentDigest::parse`]), and every parse surface —
 /// [`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`],
 /// [`TryFrom<Cow<'_, str>>`], [`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`],
@@ -4919,13 +4914,13 @@ impl TryFrom<std::sync::Arc<str>> for ContentDigest {
 /// type level, so the UTF-8 gate the byte-frontier peers
 /// ([`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`]) run is unreachable here.
 ///
-/// THEORY.md §III.1 typescape: the by-value thread-local shared-owned
+/// Typescape: the by-value thread-local shared-owned
 /// UTF-8 try-conversion surface is a typed-primitive site on
 /// [`ContentDigest`] itself (one [`TryFrom<Rc<str>>`] impl routing
 /// through [`AsRef::as_ref`] then [`TryFrom<&str>`]), not a per-consumer
 /// `shared.parse::<ContentDigest>()` restatement at every downstream
-/// site that owns a thread-local shared UTF-8 buffer. THEORY.md §VI.1
-/// one-oracle: the canonical `<algorithm>:<hex>` grammar is named at
+/// site that owns a thread-local shared UTF-8 buffer.
+/// One-oracle: the canonical `<algorithm>:<hex>` grammar is named at
 /// one site ([`ContentDigest::parse`]), and every parse surface —
 /// [`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`],
 /// [`TryFrom<Cow<'_, str>>`], [`TryFrom<&[u8]>`], [`TryFrom<Vec<u8>>`],
@@ -5046,13 +5041,13 @@ impl TryFrom<std::rc::Rc<str>> for ContentDigest {
 /// arms directly off the [`Result<ContentDigest, ContentDigestError>`]
 /// the impl returns.
 ///
-/// THEORY.md §III.1 typescape: the borrowed/owned-frontier byte-slice
+/// Typescape: the borrowed/owned-frontier byte-slice
 /// try-conversion surface is a typed-primitive site on [`ContentDigest`]
 /// itself (one [`TryFrom<Cow<'_, [u8]>>`] impl arm-matching to the
 /// borrowed-byte and owned-byte parse peers), not a per-consumer
 /// arm-matching bridge at every downstream site that types its parse
 /// contract as `impl TryFrom<Cow<'_, [u8]>>` rather than a shape-
-/// specific byte-slice peer. THEORY.md §VI.1 one-oracle: the canonical
+/// specific byte-slice peer. One-oracle: the canonical
 /// `<algorithm>:<hex>` grammar is named at one site
 /// ([`ContentDigest::parse`]), and every parse surface —
 /// [`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`],
@@ -5165,13 +5160,12 @@ impl TryFrom<std::borrow::Cow<'_, [u8]>> for ContentDigest {
 /// distinguish arms directly off the
 /// [`Result<ContentDigest, ContentDigestError>`] the impl returns.
 ///
-/// THEORY.md §III.1 typescape: the by-value shrunk-owned byte-slice
+/// Typescape: the by-value shrunk-owned byte-slice
 /// try-conversion surface is a typed-primitive site on
 /// [`ContentDigest`] itself (one [`TryFrom<Box<[u8]>>`] impl
 /// routing through [`Vec::from`] then [`TryFrom<Vec<u8>>`]), not a
 /// per-consumer `Vec::from(boxed).try_into()` bridge at every
-/// downstream site that owns a shrunk raw-byte buffer. THEORY.md
-/// §VI.1 one-oracle: the canonical `<algorithm>:<hex>` grammar is
+/// downstream site that owns a shrunk raw-byte buffer. One-oracle: the canonical `<algorithm>:<hex>` grammar is
 /// named at one site ([`ContentDigest::parse`]), and every parse
 /// surface — [`std::str::FromStr`], [`TryFrom<&str>`],
 /// [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`],
@@ -5310,13 +5304,13 @@ impl TryFrom<Box<[u8]>> for ContentDigest {
 /// arms directly off the [`Result<ContentDigest, ContentDigestError>`]
 /// the impl returns.
 ///
-/// THEORY.md §III.1 typescape: the by-value cross-thread shared-owned
+/// Typescape: the by-value cross-thread shared-owned
 /// byte-slice try-conversion surface is a typed-primitive site on
 /// [`ContentDigest`] itself (one [`TryFrom<Arc<[u8]>>`] impl routing
 /// through [`AsRef::as_ref`] then [`TryFrom<&[u8]>`]), not a
 /// per-consumer `shared.as_ref().try_into()` restatement at every
 /// downstream site that owns a cross-thread shared raw-byte buffer.
-/// THEORY.md §VI.1 one-oracle: the canonical `<algorithm>:<hex>`
+/// One-oracle: the canonical `<algorithm>:<hex>`
 /// grammar is named at one site ([`ContentDigest::parse`]), and every
 /// parse surface — [`std::str::FromStr`], [`TryFrom<&str>`],
 /// [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`], [`TryFrom<&[u8]>`],
@@ -5450,12 +5444,12 @@ impl TryFrom<std::sync::Arc<[u8]>> for ContentDigest {
 /// policy at its own frontier can distinguish arms directly off the
 /// [`Result<ContentDigest, ContentDigestError>`] the impl returns.
 ///
-/// THEORY.md §III.1 typescape: the by-value thread-local shared-owned
+/// Typescape: the by-value thread-local shared-owned
 /// byte-slice try-conversion surface is a typed-primitive site on
 /// [`ContentDigest`] itself (one [`TryFrom<Rc<[u8]>>`] impl routing
 /// through [`AsRef::as_ref`] then [`TryFrom<&[u8]>`]), not a per-consumer
 /// `shared.as_ref().try_into()` restatement at every downstream site that
-/// owns a thread-local shared raw-byte buffer. THEORY.md §VI.1 one-oracle:
+/// owns a thread-local shared raw-byte buffer. One-oracle:
 /// the canonical `<algorithm>:<hex>` grammar is named at one site
 /// ([`ContentDigest::parse`]), and every parse surface —
 /// [`std::str::FromStr`], [`TryFrom<&str>`], [`TryFrom<String>`],
@@ -5537,12 +5531,12 @@ impl TryFrom<std::rc::Rc<[u8]>> for ContentDigest {
 /// — that accepts `impl AsRef<str>` inherits the refined slice
 /// automatically with no downstream retyping.
 ///
-/// THEORY.md §III.1 typescape: the borrowed-view UTF-8 read surface
+/// Typescape: the borrowed-view UTF-8 read surface
 /// is a typed-primitive site on [`ContentDigest`] itself (one
 /// [`AsRef<str>`] impl routing through the
 /// [`ContentDigest::as_str`] read oracle), not a per-consumer
 /// `digest.as_str()` restatement at every downstream site that
-/// accepts `impl AsRef<str>`. THEORY.md §VI.1 one-oracle: the
+/// accepts `impl AsRef<str>`. One-oracle: the
 /// validated full-digest slice is named at one site
 /// ([`ContentDigest::as_str`], reading through the
 /// [`ContentDigest::parse`]-guarded backing string), and every
@@ -5628,14 +5622,14 @@ impl AsRef<str> for ContentDigest {
 /// MAC accumulator — that accepts `impl AsRef<[u8]>` inherits the
 /// refined byte slice automatically with no downstream retyping.
 ///
-/// THEORY.md §III.1 typescape: the borrowed-view byte-slice read
+/// Typescape: the borrowed-view byte-slice read
 /// surface is a typed-primitive site on [`ContentDigest`] itself
 /// (one [`AsRef<[u8]>`] impl routing through the [`AsRef<str>`]
 /// and [`ContentDigest::as_str`] read oracle via
 /// [`str::as_bytes`]), not a per-consumer
 /// `digest.as_str().as_bytes()` restatement at every downstream
-/// site that accepts `impl AsRef<[u8]>`. THEORY.md §VI.1
-/// one-oracle: the validated full-digest slice is named at one
+/// site that accepts `impl AsRef<[u8]>`.
+/// One-oracle: the validated full-digest slice is named at one
 /// site ([`ContentDigest::as_str`], reading through the
 /// [`ContentDigest::parse`]-guarded backing string), and every
 /// borrowed-view read surface — the inherent
@@ -5761,13 +5755,13 @@ impl AsRef<[u8]> for ContentDigest {
 /// provably a valid `<algorithm>:<hex>`; a [`String`] key is not),
 /// at the same zero-allocation probe cost.
 ///
-/// THEORY.md §III.1 typescape: the identity-container-lookup
+/// Typescape: the identity-container-lookup
 /// borrowed UTF-8 projection is a typed-primitive site on
 /// [`ContentDigest`] itself (one [`Borrow<str>`] impl routing
 /// through [`ContentDigest::as_str`]), not a per-consumer
 /// `ContentDigest::parse(str_key).ok().and_then(|k| map.get(&k))`
 /// restatement at every downstream identity-container probe site.
-/// THEORY.md §VI.1 one-oracle: the validated full-digest slice is
+/// One-oracle: the validated full-digest slice is
 /// named at one site ([`ContentDigest::as_str`], reading through
 /// the [`ContentDigest::parse`]-guarded backing string), and every
 /// borrowed-view surface — the inherent [`ContentDigest::as_str`]
@@ -5835,13 +5829,13 @@ impl std::borrow::Borrow<str> for ContentDigest {
 /// its own [`PartialEq<str>`] + [`PartialEq<&str>`] receiver-shape
 /// pair.
 ///
-/// THEORY.md §III.1 typescape: the borrowed UTF-8 comparison
+/// Typescape: the borrowed UTF-8 comparison
 /// surface is a typed-primitive site on [`ContentDigest`] itself
 /// (one [`PartialEq<str>`] impl routing through
 /// [`ContentDigest::as_str`]), not a per-consumer
 /// `digest.as_str() == label` restatement at every downstream site
 /// that asks whether a [`ContentDigest`] value names a specific
-/// canonical `<algorithm>:<hex>`. THEORY.md §VI.1 one-oracle: the
+/// canonical `<algorithm>:<hex>`. One-oracle: the
 /// validated full-digest slice is named at one site
 /// ([`ContentDigest::as_str`], reading through the
 /// [`ContentDigest::parse`]-guarded backing string), and every
@@ -5886,14 +5880,14 @@ impl PartialEq<str> for ContentDigest {
 /// UTF-8 comparison pair closes on [`ContentDigest`] alongside its
 /// [`PartialEq<str>`] sibling above.
 ///
-/// THEORY.md §III.1 typescape: the borrowed UTF-8 `&str`-receiver
+/// Typescape: the borrowed UTF-8 `&str`-receiver
 /// comparison surface is a typed-primitive site on [`ContentDigest`]
 /// itself (one [`PartialEq<&str>`] impl routing through
 /// [`ContentDigest::as_str`]), not a per-consumer
 /// `digest.as_str() == label_ref` restatement at every downstream
 /// site that asks whether a [`ContentDigest`] value names a specific
 /// canonical `<algorithm>:<hex>` through an already-borrowed `&str`
-/// handle. THEORY.md §VI.1 one-oracle: the validated full-digest
+/// handle. One-oracle: the validated full-digest
 /// slice is named at one site ([`ContentDigest::as_str`]), and every
 /// borrowed UTF-8 surface — the [`AsRef<str>`] borrowed-view sibling
 /// yielding `&str`, the [`PartialEq<str>`] dereffed-str-receiver
@@ -5943,14 +5937,14 @@ impl PartialEq<&str> for ContentDigest {
 /// [`ContentDigest`] through the [`str`] side of the bound without a
 /// per-consumer `label == digest.as_str()` bridge.
 ///
-/// THEORY.md §III.1 typescape: the reverse-direction borrowed UTF-8
+/// Typescape: the reverse-direction borrowed UTF-8
 /// comparison surface is a typed-primitive site on [`ContentDigest`]
 /// itself (one [`PartialEq<ContentDigest>`] impl on [`str`] routing
 /// through [`ContentDigest::as_str`]), not a per-consumer
 /// `label == digest.as_str()` restatement at every downstream site
 /// that asks whether a borrowed UTF-8 handle names the same canonical
-/// `<algorithm>:<hex>` as a [`ContentDigest`] value. THEORY.md §VI.1
-/// one-oracle: the validated full-digest slice is named at one site
+/// `<algorithm>:<hex>` as a [`ContentDigest`] value.
+/// One-oracle: the validated full-digest slice is named at one site
 /// ([`ContentDigest::as_str`]), and every borrowed UTF-8 comparison
 /// surface — the forward-direction [`PartialEq<str> for
 /// ContentDigest`] + [`PartialEq<&str> for ContentDigest`] pair, this
@@ -5987,14 +5981,14 @@ impl PartialEq<ContentDigest> for str {
 /// == <ContentDigest as PartialEq<&str>>::eq(&digest, &label_ref)`
 /// holds by construction at every `(label_ref, digest)` pair.
 ///
-/// THEORY.md §III.1 typescape: the reverse-direction borrowed UTF-8
+/// Typescape: the reverse-direction borrowed UTF-8
 /// `&str`-receiver comparison surface is a typed-primitive site on
 /// [`ContentDigest`] itself (one [`PartialEq<ContentDigest>`] impl on
 /// [`&str`] routing through [`ContentDigest::as_str`]), not a
 /// per-consumer `label_ref == digest.as_str()` restatement at every
 /// downstream site that asks whether a borrowed `&str` handle names
 /// the same canonical `<algorithm>:<hex>` as a [`ContentDigest`]
-/// value. THEORY.md §VI.1 one-oracle: the validated full-digest slice
+/// value. One-oracle: the validated full-digest slice
 /// is named at one site ([`ContentDigest::as_str`]), and this reverse-
 /// direction `&str`-receiver surface reads through the same
 /// one-oracle discipline the three sibling comparison surfaces
@@ -6059,13 +6053,13 @@ impl PartialEq<ContentDigest> for &str {
 ///     == (b == d.as_str().as_bytes())` holds by construction, with
 /// no multibyte-boundary hazard.
 ///
-/// THEORY.md §III.1 typescape: the borrowed byte-slice comparison
+/// Typescape: the borrowed byte-slice comparison
 /// surface is a typed-primitive site on [`ContentDigest`] itself
 /// (one [`PartialEq<[u8]>`] impl routing through the [`AsRef<[u8]>`]
 /// and [`ContentDigest::as_str`] read oracle), not a per-consumer
 /// `<ContentDigest as AsRef<[u8]>>::as_ref(&d) == label` restatement
-/// at every downstream byte-slice comparison site. THEORY.md §VI.1
-/// one-oracle: the validated full-digest slice is named at one site
+/// at every downstream byte-slice comparison site.
+/// One-oracle: the validated full-digest slice is named at one site
 /// ([`ContentDigest::as_str`]), and every borrowed byte-slice
 /// surface — the [`AsRef<[u8]>`] borrowed-view sibling yielding
 /// `&[u8]`, this [`PartialEq<[u8]>`] answering a boolean equality
@@ -6101,7 +6095,7 @@ impl PartialEq<[u8]> for ContentDigest {
 /// round trip per call — the same zero-cost discipline the
 /// [`PartialEq<[u8]>`] receiver-shape sibling carries.
 ///
-/// THEORY.md §III.1 typescape: the borrowed byte-slice
+/// Typescape: the borrowed byte-slice
 /// `&[u8]`-receiver comparison surface is a typed-primitive site on
 /// [`ContentDigest`] itself (one [`PartialEq<&[u8]>`] impl routing
 /// through [`AsRef<[u8]>`]), not a per-consumer
@@ -6109,7 +6103,7 @@ impl PartialEq<[u8]> for ContentDigest {
 /// restatement at every downstream site that asks whether a
 /// [`ContentDigest`] value names a specific canonical
 /// `<algorithm>:<hex>` through an already-borrowed `&[u8]` handle.
-/// THEORY.md §VI.1 one-oracle: the validated full-digest slice is
+/// One-oracle: the validated full-digest slice is
 /// named at one site ([`ContentDigest::as_str`]), and every borrowed
 /// byte-slice surface — the [`AsRef<[u8]>`] borrowed-view sibling
 /// yielding `&[u8]`, the [`PartialEq<[u8]>`] dereffed-bytes-receiver
@@ -6169,7 +6163,7 @@ impl PartialEq<&[u8]> for ContentDigest {
 /// `label_bytes == <ContentDigest as AsRef<[u8]>>::as_ref(&digest)`
 /// bridge.
 ///
-/// THEORY.md §III.1 typescape: the reverse-direction borrowed
+/// Typescape: the reverse-direction borrowed
 /// byte-slice comparison surface is a typed-primitive site on
 /// [`ContentDigest`] itself (one [`PartialEq<ContentDigest>`] impl
 /// on [`[u8]`] routing through [`AsRef<[u8]>`] and
@@ -6177,8 +6171,7 @@ impl PartialEq<&[u8]> for ContentDigest {
 /// `label_bytes == <ContentDigest as AsRef<[u8]>>::as_ref(&d)`
 /// restatement at every downstream site that asks whether a
 /// borrowed byte-slice handle names the same canonical
-/// `<algorithm>:<hex>` as a [`ContentDigest`] value. THEORY.md
-/// §VI.1 one-oracle: the validated full-digest slice is named at
+/// `<algorithm>:<hex>` as a [`ContentDigest`] value. One-oracle: the validated full-digest slice is named at
 /// one site ([`ContentDigest::as_str`]), and every borrowed
 /// byte-slice comparison surface — the forward-direction
 /// [`PartialEq<[u8]> for ContentDigest`] +
@@ -6222,7 +6215,7 @@ impl PartialEq<ContentDigest> for [u8] {
 /// == <ContentDigest as PartialEq<&[u8]>>::eq(&digest, &bytes_ref)`
 /// holds by construction at every `(bytes_ref, digest)` pair.
 ///
-/// THEORY.md §III.1 typescape: the reverse-direction borrowed
+/// Typescape: the reverse-direction borrowed
 /// byte-slice `&[u8]`-receiver comparison surface is a typed-
 /// primitive site on [`ContentDigest`] itself (one
 /// [`PartialEq<ContentDigest>`] impl on [`&[u8]`] routing through
@@ -6230,8 +6223,7 @@ impl PartialEq<ContentDigest> for [u8] {
 /// `label_bytes_ref == <ContentDigest as AsRef<[u8]>>::as_ref(&d)`
 /// restatement at every downstream site that asks whether a
 /// borrowed `&[u8]` handle names the same canonical
-/// `<algorithm>:<hex>` as a [`ContentDigest`] value. THEORY.md
-/// §VI.1 one-oracle: the validated full-digest slice is named at
+/// `<algorithm>:<hex>` as a [`ContentDigest`] value. One-oracle: the validated full-digest slice is named at
 /// one site ([`ContentDigest::as_str`]), and this reverse-direction
 /// `&[u8]`-receiver surface reads through the same one-oracle
 /// discipline the three sibling byte-slice comparison surfaces
@@ -6285,14 +6277,13 @@ impl PartialEq<ContentDigest> for &[u8] {
 /// with the same zero-cost projection through the primitive's
 /// read-back accessor.
 ///
-/// THEORY.md §III.1 typescape: the owned UTF-8 comparison surface is a
+/// Typescape: the owned UTF-8 comparison surface is a
 /// typed-primitive site on [`ContentDigest`] itself (one
 /// [`PartialEq<String>`] impl routing through [`ContentDigest::as_str`]),
 /// not a per-consumer `digest.as_str() == owned_label.as_str()`
 /// restatement at every downstream site that asks whether a
 /// [`ContentDigest`] value names a specific canonical
-/// `<algorithm>:<hex>` through an owned [`String`] handle. THEORY.md
-/// §VI.1 one-oracle: the validated full-digest slice is named at one
+/// `<algorithm>:<hex>` through an owned [`String`] handle. One-oracle: the validated full-digest slice is named at one
 /// site ([`ContentDigest::as_str`]), and every comparison surface —
 /// the borrowed-UTF-8 pair, the borrowed-byte-slice pair, this owned-
 /// UTF-8 peer — reads through the same one-oracle discipline projected
@@ -6339,14 +6330,14 @@ impl PartialEq<String> for ContentDigest {
 /// [`String`] side of the bound without a per-consumer
 /// `owned_label == digest.as_str()` bridge.
 ///
-/// THEORY.md §III.1 typescape: the reverse-direction owned UTF-8
+/// Typescape: the reverse-direction owned UTF-8
 /// comparison surface is a typed-primitive site on [`ContentDigest`]
 /// itself (one [`PartialEq<ContentDigest>`] impl on [`String`] routing
 /// through [`ContentDigest::as_str`]), not a per-consumer
 /// `owned_label == digest.as_str()` restatement at every downstream
 /// site that asks whether an owned [`String`] handle names the same
 /// canonical `<algorithm>:<hex>` as a [`ContentDigest`] value.
-/// THEORY.md §VI.1 one-oracle: the validated full-digest slice is
+/// One-oracle: the validated full-digest slice is
 /// named at one site ([`ContentDigest::as_str`]), and this reverse-
 /// direction owned-UTF-8 receiver surface reads through the same
 /// one-oracle discipline every sibling comparison surface (borrowed
@@ -6429,7 +6420,7 @@ impl PartialEq<ContentDigest> for String {
 /// itself carries across [`str`] / [`String`] / [`[u8]`] /
 /// [`Vec<u8>`].
 ///
-/// THEORY.md §III.1 typescape: the owned byte-slice comparison
+/// Typescape: the owned byte-slice comparison
 /// surface is a typed-primitive site on [`ContentDigest`] itself
 /// (one [`PartialEq<Vec<u8>>`] impl routing through
 /// [`<ContentDigest as AsRef<[u8]>>::as_ref`]), not a per-consumer
@@ -6437,7 +6428,7 @@ impl PartialEq<ContentDigest> for String {
 /// restatement at every downstream site that asks whether a
 /// [`ContentDigest`] value names a specific canonical
 /// `<algorithm>:<hex>` through an owned [`Vec<u8>`] handle.
-/// THEORY.md §VI.1 one-oracle: the validated full-digest slice is
+/// One-oracle: the validated full-digest slice is
 /// named at one site ([`ContentDigest::as_str`]), and every
 /// comparison surface — the borrowed-UTF-8 pair, the borrowed-
 /// byte-slice pair, the owned-UTF-8 pair, this owned-byte-slice
@@ -6489,7 +6480,7 @@ impl PartialEq<Vec<u8>> for ContentDigest {
 /// `owned_bytes.as_slice() == <ContentDigest as AsRef<[u8]>>::as_ref(&d)`
 /// bridge.
 ///
-/// THEORY.md §III.1 typescape: the reverse-direction owned byte-
+/// Typescape: the reverse-direction owned byte-
 /// slice comparison surface is a typed-primitive site on
 /// [`ContentDigest`] itself (one [`PartialEq<ContentDigest>`] impl
 /// on [`Vec<u8>`] routing through
@@ -6498,7 +6489,7 @@ impl PartialEq<Vec<u8>> for ContentDigest {
 /// restatement at every downstream site that asks whether an owned
 /// [`Vec<u8>`] handle names the same canonical
 /// `<algorithm>:<hex>` as a [`ContentDigest`] value.
-/// THEORY.md §VI.1 one-oracle: the validated full-digest slice is
+/// One-oracle: the validated full-digest slice is
 /// named at one site ([`ContentDigest::as_str`]), and this reverse-
 /// direction owned-byte-slice receiver surface reads through the
 /// same one-oracle discipline every sibling comparison surface
@@ -6562,14 +6553,14 @@ impl PartialEq<ContentDigest> for Vec<u8> {
 /// borrowed &str, owned String, borrowed-or-owned Cow<'_, str>)
 /// is closed on the forward direction.
 ///
-/// THEORY.md §III.1 typescape: the [`Cow<'_, str>`] comparison
+/// Typescape: the [`Cow<'_, str>`] comparison
 /// surface is a typed-primitive site on [`ContentDigest`] itself
 /// (one [`PartialEq<Cow<'_, str>>`] impl routing through
 /// [`ContentDigest::as_str`]), not a per-consumer
 /// `digest.as_str() == cow.as_ref()` restatement at every
 /// downstream site that receives a [`Cow<'_, str>`] and asks
 /// whether it names a specific canonical `<algorithm>:<hex>`.
-/// THEORY.md §VI.1 one-oracle: the validated full-digest slice is
+/// One-oracle: the validated full-digest slice is
 /// named at one site ([`ContentDigest::as_str`], reading through
 /// the [`ContentDigest::parse`]-guarded backing string), and every
 /// comparison surface — the borrowed-str pair, the borrowed-byte
@@ -6617,15 +6608,14 @@ impl PartialEq<std::borrow::Cow<'_, str>> for ContentDigest {
 /// bound without a per-consumer `cow_label.as_ref() == digest.as_str()`
 /// bridge.
 ///
-/// THEORY.md §III.1 typescape: the reverse-direction [`Cow<'_, str>`]
+/// Typescape: the reverse-direction [`Cow<'_, str>`]
 /// comparison surface is a typed-primitive site on
 /// [`ContentDigest`] itself (one [`PartialEq<ContentDigest>`] impl
 /// on [`Cow<'_, str>`] routing through [`ContentDigest::as_str`]),
 /// not a per-consumer `cow_label.as_ref() == digest.as_str()`
 /// restatement at every downstream site that asks whether a
 /// [`Cow<'_, str>`] handle names the same canonical
-/// `<algorithm>:<hex>` as a [`ContentDigest`] value. THEORY.md
-/// §VI.1 one-oracle: the validated full-digest slice is named at
+/// `<algorithm>:<hex>` as a [`ContentDigest`] value. One-oracle: the validated full-digest slice is named at
 /// one site ([`ContentDigest::as_str`]), and this reverse-
 /// direction [`Cow<'_, str>`] receiver reads through the same
 /// one-oracle discipline every sibling comparison surface
@@ -6703,14 +6693,14 @@ impl PartialEq<ContentDigest> for std::borrow::Cow<'_, str> {
 /// direction — the exact mirror of the four-shape UTF-8 receiver
 /// set (str, &str, String, Cow<'_, str>) already carried.
 ///
-/// THEORY.md §III.1 typescape: the [`Cow<'_, [u8]>`] comparison
+/// Typescape: the [`Cow<'_, [u8]>`] comparison
 /// surface is a typed-primitive site on [`ContentDigest`] itself
 /// (one [`PartialEq<Cow<'_, [u8]>>`] impl routing through
 /// [`<ContentDigest as AsRef<[u8]>>::as_ref`]), not a per-consumer
 /// `<ContentDigest as AsRef<[u8]>>::as_ref(&d) == cow.as_ref()`
 /// restatement at every downstream site that receives a
 /// [`Cow<'_, [u8]>`] and asks whether it names a specific
-/// canonical `<algorithm>:<hex>`. THEORY.md §VI.1 one-oracle: the
+/// canonical `<algorithm>:<hex>`. One-oracle: the
 /// validated full-digest slice is named at one site
 /// ([`ContentDigest::as_str`], read as bytes through
 /// [`AsRef<[u8]>`]), and every comparison surface — the borrowed-
@@ -6763,7 +6753,7 @@ impl PartialEq<std::borrow::Cow<'_, [u8]>> for ContentDigest {
 /// `cow_bytes.as_ref() == <ContentDigest as AsRef<[u8]>>::as_ref(&d)`
 /// bridge.
 ///
-/// THEORY.md §III.1 typescape: the reverse-direction
+/// Typescape: the reverse-direction
 /// [`Cow<'_, [u8]>`] comparison surface is a typed-primitive site
 /// on [`ContentDigest`] itself (one [`PartialEq<ContentDigest>`]
 /// impl on [`Cow<'_, [u8]>`] routing through
@@ -6771,8 +6761,7 @@ impl PartialEq<std::borrow::Cow<'_, [u8]>> for ContentDigest {
 /// `cow_bytes.as_ref() == <ContentDigest as AsRef<[u8]>>::as_ref(&d)`
 /// restatement at every downstream site that asks whether a
 /// [`Cow<'_, [u8]>`] handle names the same canonical
-/// `<algorithm>:<hex>` as a [`ContentDigest`] value. THEORY.md
-/// §VI.1 one-oracle: the validated full-digest slice is named at
+/// `<algorithm>:<hex>` as a [`ContentDigest`] value. One-oracle: the validated full-digest slice is named at
 /// one site ([`ContentDigest::as_str`], read as bytes through
 /// [`AsRef<[u8]>`]), and this reverse-direction
 /// [`Cow<'_, [u8]>`] receiver reads through the same one-oracle
@@ -6848,14 +6837,13 @@ impl PartialEq<ContentDigest> for std::borrow::Cow<'_, [u8]> {
 /// receiver family is closed on all three input/output/equality
 /// axes on both directions.
 ///
-/// THEORY.md §III.1 typescape: the [`Box<str>`] comparison surface
+/// Typescape: the [`Box<str>`] comparison surface
 /// is a typed-primitive site on [`ContentDigest`] itself (one
 /// [`PartialEq<Box<str>>`] impl routing through
 /// [`ContentDigest::as_str`]), not a per-consumer
 /// `digest.as_str() == &**boxed_label` restatement at every
 /// downstream site that receives a [`Box<str>`] and asks whether
-/// it names a specific canonical `<algorithm>:<hex>`. THEORY.md
-/// §VI.1 one-oracle: the validated full-digest slice is named at
+/// it names a specific canonical `<algorithm>:<hex>`. One-oracle: the validated full-digest slice is named at
 /// one site ([`ContentDigest::as_str`], reading through the
 /// [`ContentDigest::parse`]-guarded backing string), and every
 /// comparison surface — the borrowed-str pair, the borrowed-byte
@@ -6903,14 +6891,14 @@ impl PartialEq<Box<str>> for ContentDigest {
 /// the bound without a per-consumer `&**boxed_label ==
 /// digest.as_str()` bridge.
 ///
-/// THEORY.md §III.1 typescape: the reverse-direction [`Box<str>`]
+/// Typescape: the reverse-direction [`Box<str>`]
 /// comparison surface is a typed-primitive site on
 /// [`ContentDigest`] itself (one [`PartialEq<ContentDigest>`] impl
 /// on [`Box<str>`] routing through [`ContentDigest::as_str`]), not
 /// a per-consumer `&**boxed_label == digest.as_str()` restatement
 /// at every downstream site that asks whether a [`Box<str>`]
 /// handle names the same canonical `<algorithm>:<hex>` as a
-/// [`ContentDigest`] value. THEORY.md §VI.1 one-oracle: the
+/// [`ContentDigest`] value. One-oracle: the
 /// validated full-digest slice is named at one site
 /// ([`ContentDigest::as_str`]), and this reverse-direction
 /// [`Box<str>`] receiver reads through the same one-oracle
@@ -6997,14 +6985,14 @@ impl PartialEq<ContentDigest> for Box<str> {
 /// equality-axis analog of the same three-receiver family on the
 /// byte-slice side.
 ///
-/// THEORY.md §III.1 typescape: the [`Box<[u8]>`] comparison
+/// Typescape: the [`Box<[u8]>`] comparison
 /// surface is a typed-primitive site on [`ContentDigest`] itself
 /// (one [`PartialEq<Box<[u8]>>`] impl routing through
 /// [`<ContentDigest as AsRef<[u8]>>::as_ref`]), not a per-consumer
 /// `<ContentDigest as AsRef<[u8]>>::as_ref(&d) == &**boxed_bytes`
 /// restatement at every downstream site that receives a
 /// [`Box<[u8]>`] and asks whether it names a specific canonical
-/// `<algorithm>:<hex>`. THEORY.md §VI.1 one-oracle: the validated
+/// `<algorithm>:<hex>`. One-oracle: the validated
 /// full-digest slice is named at one site
 /// ([`ContentDigest::as_str`], read as bytes through
 /// [`AsRef<[u8]>`]), and every comparison surface — the borrowed-
@@ -7055,7 +7043,7 @@ impl PartialEq<Box<[u8]>> for ContentDigest {
 /// `&**boxed_bytes == <ContentDigest as AsRef<[u8]>>::as_ref(&d)`
 /// bridge.
 ///
-/// THEORY.md §III.1 typescape: the reverse-direction
+/// Typescape: the reverse-direction
 /// [`Box<[u8]>`] comparison surface is a typed-primitive site on
 /// [`ContentDigest`] itself (one [`PartialEq<ContentDigest>`] impl
 /// on [`Box<[u8]>`] routing through
@@ -7063,8 +7051,7 @@ impl PartialEq<Box<[u8]>> for ContentDigest {
 /// `&**boxed_bytes == <ContentDigest as AsRef<[u8]>>::as_ref(&d)`
 /// restatement at every downstream site that asks whether a
 /// [`Box<[u8]>`] handle names the same canonical
-/// `<algorithm>:<hex>` as a [`ContentDigest`] value. THEORY.md
-/// §VI.1 one-oracle: the validated full-digest slice is named at
+/// `<algorithm>:<hex>` as a [`ContentDigest`] value. One-oracle: the validated full-digest slice is named at
 /// one site ([`ContentDigest::as_str`], read as bytes through
 /// [`AsRef<[u8]>`]), and this reverse-direction [`Box<[u8]>`]
 /// receiver reads through the same one-oracle discipline every
@@ -7127,14 +7114,13 @@ impl PartialEq<ContentDigest> for Box<[u8]> {
 /// first step in closing the equality-axis analog of the same
 /// shared-owned family on the UTF-8 side.
 ///
-/// THEORY.md §III.1 typescape: the [`Arc<str>`] comparison surface
+/// Typescape: the [`Arc<str>`] comparison surface
 /// is a typed-primitive site on [`ContentDigest`] itself (one
 /// [`PartialEq<Arc<str>>`] impl routing through
 /// [`ContentDigest::as_str`]), not a per-consumer
 /// `digest.as_str() == &**arc_label` restatement at every
 /// downstream site that receives an [`Arc<str>`] and asks whether
-/// it names a specific canonical `<algorithm>:<hex>`. THEORY.md
-/// §VI.1 one-oracle: the validated full-digest slice is named at
+/// it names a specific canonical `<algorithm>:<hex>`. One-oracle: the validated full-digest slice is named at
 /// one site ([`ContentDigest::as_str`]), and every comparison
 /// surface reads through the same one-oracle discipline projected
 /// onto its own receiver shape.
@@ -7167,14 +7153,14 @@ impl PartialEq<std::sync::Arc<str>> for ContentDigest {
 /// == <ContentDigest as PartialEq<Arc<str>>>::eq(&d, arc)` holds by
 /// construction at every `(arc, digest)` pair.
 ///
-/// THEORY.md §III.1 typescape: the reverse-direction [`Arc<str>`]
+/// Typescape: the reverse-direction [`Arc<str>`]
 /// comparison surface is a typed-primitive site on
 /// [`ContentDigest`] itself (one [`PartialEq<ContentDigest>`] impl
 /// on [`Arc<str>`] routing through [`ContentDigest::as_str`]), not
 /// a per-consumer `&**arc_label == digest.as_str()` restatement at
 /// every downstream site that asks whether an [`Arc<str>`] handle
 /// names the same canonical `<algorithm>:<hex>` as a
-/// [`ContentDigest`] value. THEORY.md §VI.1 one-oracle: the
+/// [`ContentDigest`] value. One-oracle: the
 /// validated full-digest slice is named at one site
 /// ([`ContentDigest::as_str`]), and this reverse-direction
 /// [`Arc<str>`] receiver reads through the same one-oracle
@@ -7237,14 +7223,13 @@ impl PartialEq<ContentDigest> for std::sync::Arc<str> {
 /// `digest.as_str() == &**rc_label` restatement of the
 /// canonical-digest oracle name.
 ///
-/// THEORY.md §III.1 typescape: the [`Rc<str>`] comparison surface
+/// Typescape: the [`Rc<str>`] comparison surface
 /// is a typed-primitive site on [`ContentDigest`] itself (one
 /// [`PartialEq<Rc<str>>`] impl routing through
 /// [`ContentDigest::as_str`]), not a per-consumer
 /// `digest.as_str() == &**rc_label` restatement at every
 /// downstream site that receives an [`Rc<str>`] and asks whether
-/// it names a specific canonical `<algorithm>:<hex>`. THEORY.md
-/// §VI.1 one-oracle: the validated full-digest slice is named at
+/// it names a specific canonical `<algorithm>:<hex>`. One-oracle: the validated full-digest slice is named at
 /// one site ([`ContentDigest::as_str`]), and every comparison
 /// surface — the sibling [`Arc<str>`] peer of commit 57fbde1,
 /// this [`Rc<str>`] peer — reads through the same one-oracle
@@ -7290,15 +7275,14 @@ impl PartialEq<std::rc::Rc<str>> for ContentDigest {
 /// to the same three-receiver family on both sides once the
 /// follow-ups land.
 ///
-/// THEORY.md §III.1 typescape: the reverse-direction [`Rc<str>`]
+/// Typescape: the reverse-direction [`Rc<str>`]
 /// comparison surface is a typed-primitive site on
 /// [`ContentDigest`] itself (one [`PartialEq<ContentDigest>`]
 /// impl on [`Rc<str>`] routing through [`ContentDigest::as_str`]),
 /// not a per-consumer `&**rc_label == digest.as_str()`
 /// restatement at every downstream site that asks whether an
 /// [`Rc<str>`] handle names the same canonical
-/// `<algorithm>:<hex>` as a [`ContentDigest`] value. THEORY.md
-/// §VI.1 one-oracle: the validated full-digest slice is named at
+/// `<algorithm>:<hex>` as a [`ContentDigest`] value. One-oracle: the validated full-digest slice is named at
 /// one site ([`ContentDigest::as_str`]), and this reverse-
 /// direction [`Rc<str>`] receiver reads through the same one-
 /// oracle discipline every sibling comparison surface already
@@ -7373,14 +7357,14 @@ impl PartialEq<ContentDigest> for std::rc::Rc<str> {
 /// equality pair closes the trio to match the parse / emit / equality
 /// three-axis closure the UTF-8 side already carries.
 ///
-/// THEORY.md §III.1 typescape: the [`Arc<[u8]>`] comparison surface
+/// Typescape: the [`Arc<[u8]>`] comparison surface
 /// is a typed-primitive site on [`ContentDigest`] itself (one
 /// [`PartialEq<std::sync::Arc<[u8]>>`] impl routing through
 /// [`<ContentDigest as AsRef<[u8]>>::as_ref`]), not a per-consumer
 /// `<ContentDigest as AsRef<[u8]>>::as_ref(&d) == &**arc_bytes`
 /// restatement at every downstream site that receives an
 /// [`Arc<[u8]>`] and asks whether it names a specific canonical
-/// `<algorithm>:<hex>`. THEORY.md §VI.1 one-oracle: the validated
+/// `<algorithm>:<hex>`. One-oracle: the validated
 /// full-digest slice is named at one site
 /// ([`ContentDigest::as_str`], read as bytes through [`AsRef<[u8]>`]),
 /// and every comparison surface reads through the same one-oracle
@@ -7424,7 +7408,7 @@ impl PartialEq<std::sync::Arc<[u8]>> for ContentDigest {
 /// `&**arc_bytes == <ContentDigest as AsRef<[u8]>>::as_ref(&d)`
 /// bridge.
 ///
-/// THEORY.md §III.1 typescape: the reverse-direction [`Arc<[u8]>`]
+/// Typescape: the reverse-direction [`Arc<[u8]>`]
 /// comparison surface is a typed-primitive site on [`ContentDigest`]
 /// itself (one [`PartialEq<ContentDigest>`] impl on [`Arc<[u8]>`]
 /// routing through [`<ContentDigest as AsRef<[u8]>>::as_ref`]), not a
@@ -7432,7 +7416,7 @@ impl PartialEq<std::sync::Arc<[u8]>> for ContentDigest {
 /// `&**arc_bytes == <ContentDigest as AsRef<[u8]>>::as_ref(&d)`
 /// restatement at every downstream site that asks whether an
 /// [`Arc<[u8]>`] handle names the same canonical `<algorithm>:<hex>`
-/// as a [`ContentDigest`] value. THEORY.md §VI.1 one-oracle: the
+/// as a [`ContentDigest`] value. One-oracle: the
 /// validated full-digest slice is named at one site
 /// ([`ContentDigest::as_str`], read as bytes through [`AsRef<[u8]>`]),
 /// and this reverse-direction [`Arc<[u8]>`] receiver reads through
@@ -7513,14 +7497,14 @@ impl PartialEq<ContentDigest> for std::sync::Arc<[u8]> {
 /// (e.g. `PartialEq<PathBuf>`, `PartialEq<OsString>`) as those
 /// receiver families come up on the parse / emit axes.
 ///
-/// THEORY.md §III.1 typescape: the [`Rc<[u8]>`] comparison surface
+/// Typescape: the [`Rc<[u8]>`] comparison surface
 /// is a typed-primitive site on [`ContentDigest`] itself (one
 /// [`PartialEq<std::rc::Rc<[u8]>>`] impl routing through
 /// [`<ContentDigest as AsRef<[u8]>>::as_ref`]), not a per-consumer
 /// `<ContentDigest as AsRef<[u8]>>::as_ref(&d) == &**rc_bytes`
 /// restatement at every downstream site that receives an
 /// [`Rc<[u8]>`] and asks whether it names a specific canonical
-/// `<algorithm>:<hex>`. THEORY.md §VI.1 one-oracle: the validated
+/// `<algorithm>:<hex>`. One-oracle: the validated
 /// full-digest slice is named at one site
 /// ([`ContentDigest::as_str`], read as bytes through [`AsRef<[u8]>`]),
 /// and every comparison surface reads through the same one-oracle
@@ -7571,7 +7555,7 @@ impl PartialEq<std::rc::Rc<[u8]>> for ContentDigest {
 /// `&**rc_bytes == <ContentDigest as AsRef<[u8]>>::as_ref(&d)`
 /// bridge.
 ///
-/// THEORY.md §III.1 typescape: the reverse-direction [`Rc<[u8]>`]
+/// Typescape: the reverse-direction [`Rc<[u8]>`]
 /// comparison surface is a typed-primitive site on [`ContentDigest`]
 /// itself (one [`PartialEq<ContentDigest>`] impl on [`Rc<[u8]>`]
 /// routing through [`<ContentDigest as AsRef<[u8]>>::as_ref`]), not a
@@ -7579,7 +7563,7 @@ impl PartialEq<std::rc::Rc<[u8]>> for ContentDigest {
 /// `&**rc_bytes == <ContentDigest as AsRef<[u8]>>::as_ref(&d)`
 /// restatement at every downstream site that asks whether an
 /// [`Rc<[u8]>`] handle names the same canonical `<algorithm>:<hex>`
-/// as a [`ContentDigest`] value. THEORY.md §VI.1 one-oracle: the
+/// as a [`ContentDigest`] value. One-oracle: the
 /// validated full-digest slice is named at one site
 /// ([`ContentDigest::as_str`], read as bytes through [`AsRef<[u8]>`]),
 /// and this reverse-direction [`Rc<[u8]>`] receiver reads through
@@ -7671,13 +7655,13 @@ impl PartialEq<ContentDigest> for std::rc::Rc<[u8]> {
 /// canonical form off the moved backing string automatically with
 /// no downstream retyping.
 ///
-/// THEORY.md §III.1 typescape: the by-value owned-UTF-8 emit
+/// Typescape: the by-value owned-UTF-8 emit
 /// surface is a typed-primitive site on [`ContentDigest`] itself
 /// (one [`From<ContentDigest>`] impl moving the
 /// [`ContentDigest::parse`]-validated backing string out at
 /// zero-copy), not a per-consumer `digest.as_str().to_owned()` or
 /// `digest.to_string()` restatement at every downstream site that
-/// accepts `impl Into<String>`. THEORY.md §VI.1 one-oracle: the
+/// accepts `impl Into<String>`. One-oracle: the
 /// validated full-digest string is named at one site
 /// ([`ContentDigest::parse`]-guarded [`ContentDigest::full`]
 /// backing), and every emit surface — the borrowed-view read peers
@@ -7771,7 +7755,7 @@ impl From<ContentDigest> for String {
 /// canonical byte buffer off the moved backing storage
 /// automatically with no downstream retyping.
 ///
-/// THEORY.md §III.1 typescape: the by-value owned-byte-slice emit
+/// Typescape: the by-value owned-byte-slice emit
 /// surface is a typed-primitive site on [`ContentDigest`] itself
 /// (one [`From<ContentDigest>`] impl moving the
 /// [`ContentDigest::parse`]-validated backing bytes out at
@@ -7779,7 +7763,7 @@ impl From<ContentDigest> for String {
 /// oracle), not a per-consumer `digest.as_ref().to_vec()` or
 /// `digest.as_str().as_bytes().to_owned()` restatement at every
 /// downstream site that accepts `impl Into<Vec<u8>>`.
-/// THEORY.md §VI.1 one-oracle: the validated full-digest bytes are
+/// One-oracle: the validated full-digest bytes are
 /// named at one site ([`From<ContentDigest> for String`], reading
 /// through the moved [`ContentDigest::full`] backing), and every
 /// emit surface — the by-value owned-UTF-8 peer
@@ -7874,14 +7858,14 @@ impl From<ContentDigest> for Vec<u8> {
 /// shrunk-owned label off the moved backing storage automatically
 /// with no downstream retyping.
 ///
-/// THEORY.md §III.1 typescape: the by-value shrunk-owned UTF-8 emit
+/// Typescape: the by-value shrunk-owned UTF-8 emit
 /// surface is a typed-primitive site on [`ContentDigest`] itself
 /// (one [`From<ContentDigest>`] impl chaining through the
 /// [`From<ContentDigest> for String`] emit oracle via
 /// [`String::into_boxed_str`]), not a per-consumer
 /// `Box::<str>::from(digest.as_str())` restatement at every
 /// downstream site that accepts `impl Into<Box<str>>`.
-/// THEORY.md §VI.1 one-oracle: the validated full-digest bytes are
+/// One-oracle: the validated full-digest bytes are
 /// named at one site ([`From<ContentDigest> for String`], reading
 /// through the moved [`ContentDigest::full`] backing), and every
 /// by-value owned emit surface — the by-value owned-UTF-8 peer
@@ -8007,13 +7991,13 @@ impl From<ContentDigest> for Box<str> {
 /// canonical borrowed/owned-frontier label off the moved backing
 /// storage automatically with no downstream retyping.
 ///
-/// THEORY.md §III.1 typescape: the by-value borrowed/owned-frontier
+/// Typescape: the by-value borrowed/owned-frontier
 /// emit surface is a typed-primitive site on [`ContentDigest`] itself
 /// (one [`From<ContentDigest>`] impl chaining through the
 /// [`From<ContentDigest> for String`] emit oracle via [`Cow::Owned`]),
 /// not a per-consumer `Cow::Owned(digest.to_string())` restatement at
 /// every downstream site that accepts `impl Into<Cow<'static, str>>`.
-/// THEORY.md §VI.1 one-oracle: the validated full-digest bytes are
+/// One-oracle: the validated full-digest bytes are
 /// named at one site ([`From<ContentDigest> for String`], reading
 /// through the moved [`ContentDigest::full`] backing), and every
 /// by-value owned emit surface — the by-value owned-UTF-8 peer
@@ -8135,14 +8119,14 @@ impl From<ContentDigest> for std::borrow::Cow<'static, str> {
 /// shared-owned label off the moved backing storage automatically with no
 /// downstream retyping.
 ///
-/// THEORY.md §III.1 typescape: the by-value shared-owned UTF-8 emit
+/// Typescape: the by-value shared-owned UTF-8 emit
 /// surface is a typed-primitive site on [`ContentDigest`] itself (one
 /// [`From<ContentDigest>`] impl chaining through the
 /// [`From<ContentDigest> for String`] emit oracle via
 /// [`std::sync::Arc::<str>::from`]), not a per-consumer
 /// `Arc::<str>::from(digest.as_str())` restatement at every downstream
-/// site that accepts `impl Into<std::sync::Arc<str>>`. THEORY.md §VI.1
-/// one-oracle: the validated full-digest bytes are named at one site
+/// site that accepts `impl Into<std::sync::Arc<str>>`.
+/// One-oracle: the validated full-digest bytes are named at one site
 /// ([`From<ContentDigest> for String`], reading through the moved
 /// [`ContentDigest::full`] backing), and every by-value owned emit surface
 /// — [`String`], [`Vec<u8>`], [`Box<str>`], [`Cow<'static, str>`], this
@@ -8272,14 +8256,14 @@ impl From<ContentDigest> for std::sync::Arc<str> {
 /// shared-owned label off the moved backing storage automatically with
 /// no downstream retyping.
 ///
-/// THEORY.md §III.1 typescape: the by-value single-thread shared-owned
+/// Typescape: the by-value single-thread shared-owned
 /// UTF-8 emit surface is a typed-primitive site on [`ContentDigest`]
 /// itself (one [`From<ContentDigest>`] impl chaining through the
 /// [`From<ContentDigest> for String`] emit oracle via
 /// [`std::rc::Rc::<str>::from`]), not a per-consumer
 /// `Rc::<str>::from(digest.as_str())` restatement at every downstream
-/// site that accepts `impl Into<std::rc::Rc<str>>`. THEORY.md §VI.1
-/// one-oracle: the validated full-digest bytes are named at one site
+/// site that accepts `impl Into<std::rc::Rc<str>>`.
+/// One-oracle: the validated full-digest bytes are named at one site
 /// ([`From<ContentDigest> for String`], reading through the moved
 /// [`ContentDigest::full`] backing), and every by-value owned emit
 /// surface — [`String`], [`Vec<u8>`], [`Box<str>`], [`Cow<'static, str>`],
@@ -8380,14 +8364,14 @@ impl From<ContentDigest> for std::rc::Rc<str> {
 /// shrunk-owned byte slice off the moved backing storage
 /// automatically with no downstream retyping.
 ///
-/// THEORY.md §III.1 typescape: the by-value shrunk-owned byte-slice
+/// Typescape: the by-value shrunk-owned byte-slice
 /// emit surface is a typed-primitive site on [`ContentDigest`] itself
 /// (one [`From<ContentDigest>`] impl chaining through the
 /// [`From<ContentDigest> for String`] emit oracle via
 /// [`String::into_bytes`] and [`Vec::into_boxed_slice`]), not a
 /// per-consumer `Box::<[u8]>::from(digest.as_ref())` restatement at
 /// every downstream site that accepts `impl Into<Box<[u8]>>`.
-/// THEORY.md §VI.1 one-oracle: the validated full-digest bytes are
+/// One-oracle: the validated full-digest bytes are
 /// named at one site ([`From<ContentDigest> for String`], reading
 /// through the moved [`ContentDigest::full`] backing), and every
 /// by-value owned emit surface — the by-value owned-byte-slice peer
@@ -8493,14 +8477,14 @@ impl From<ContentDigest> for Box<[u8]> {
 /// canonical borrowed/owned-frontier byte slice off the moved backing
 /// storage automatically with no downstream retyping.
 ///
-/// THEORY.md §III.1 typescape: the by-value borrowed/owned-frontier
+/// Typescape: the by-value borrowed/owned-frontier
 /// byte-slice emit surface is a typed-primitive site on
 /// [`ContentDigest`] itself (one [`From<ContentDigest>`] impl chaining
 /// through the [`From<ContentDigest> for String`] emit oracle via
 /// [`String::into_bytes`] and [`Cow::Owned`]), not a per-consumer
 /// `Cow::Owned(digest.as_ref().to_vec())` restatement at every
 /// downstream site that accepts `impl Into<Cow<'static, [u8]>>`.
-/// THEORY.md §VI.1 one-oracle: the validated full-digest bytes are
+/// One-oracle: the validated full-digest bytes are
 /// named at one site ([`From<ContentDigest> for String`], reading
 /// through the moved [`ContentDigest::full`] backing), and every
 /// by-value owned emit surface — the UTF-8 peers
@@ -8635,14 +8619,14 @@ impl From<ContentDigest> for std::borrow::Cow<'static, [u8]> {
 /// cross-thread shared-owned byte slice off the moved backing storage
 /// automatically with no downstream retyping.
 ///
-/// THEORY.md §III.1 typescape: the by-value cross-thread shared-owned
+/// Typescape: the by-value cross-thread shared-owned
 /// byte-slice emit surface is a typed-primitive site on [`ContentDigest`]
 /// itself (one [`From<ContentDigest>`] impl chaining through the
 /// [`From<ContentDigest> for String`] emit oracle via
 /// [`String::into_bytes`] and [`std::sync::Arc::<[u8]>::from`]), not a
 /// per-consumer `Arc::<[u8]>::from(digest.as_ref())` restatement at every
 /// downstream site that accepts `impl Into<std::sync::Arc<[u8]>>`.
-/// THEORY.md §VI.1 one-oracle: the validated full-digest bytes are named
+/// One-oracle: the validated full-digest bytes are named
 /// at one site ([`From<ContentDigest> for String`], reading through the
 /// moved [`ContentDigest::full`] backing), and every by-value owned emit
 /// surface — the UTF-8 peers [`From<ContentDigest> for String`],
@@ -8781,14 +8765,14 @@ impl From<ContentDigest> for std::sync::Arc<[u8]> {
 /// single-thread shared-owned byte slice off the moved backing storage
 /// automatically with no downstream retyping.
 ///
-/// THEORY.md §III.1 typescape: the by-value single-thread shared-owned
+/// Typescape: the by-value single-thread shared-owned
 /// byte-slice emit surface is a typed-primitive site on [`ContentDigest`]
 /// itself (one [`From<ContentDigest>`] impl chaining through the
 /// [`From<ContentDigest> for String`] emit oracle via
 /// [`String::into_bytes`] and [`std::rc::Rc::<[u8]>::from`]), not a
 /// per-consumer `Rc::<[u8]>::from(digest.as_ref())` restatement at every
 /// downstream site that accepts `impl Into<std::rc::Rc<[u8]>>`.
-/// THEORY.md §VI.1 one-oracle: the validated full-digest bytes are named
+/// One-oracle: the validated full-digest bytes are named
 /// at one site ([`From<ContentDigest> for String`], reading through the
 /// moved [`ContentDigest::full`] backing), and every by-value owned emit
 /// surface — the UTF-8 peers [`From<ContentDigest> for String`],
@@ -8833,14 +8817,14 @@ impl From<ContentDigest> for std::rc::Rc<[u8]> {
 /// paying the redundant clone the sibling `From<&ContentDigest> for
 /// String` peer would demand.
 ///
-/// THEORY.md §III.1 typescape: the serde emit surface is a
+/// Typescape: the serde emit surface is a
 /// typed-primitive site on [`ContentDigest`] itself (one
 /// [`serde::Serialize`] impl streaming the [`ContentDigest::parse`]-
 /// validated backing string through [`serde::Serializer::serialize_str`]),
 /// not a per-consumer `serializer.serialize_str(digest.as_str())`
 /// restatement at every downstream site that owns a [`ContentDigest`]
-/// and hands it to a serde-derived container. THEORY.md §VI.1
-/// one-oracle: the validated full-digest string is named at one site
+/// and hands it to a serde-derived container.
+/// One-oracle: the validated full-digest string is named at one site
 /// ([`ContentDigest::parse`]-guarded [`ContentDigest::full`] backing),
 /// and every emit surface — the borrowed-view read peers
 /// [`ContentDigest::as_str`], [`std::fmt::Display`], [`AsRef<str>`],
@@ -8895,18 +8879,18 @@ impl serde::Serialize for ContentDigest {
 /// [`ContentDigest::parse`] / [`TryFrom<Cow<'_, str>>`] on its own
 /// borrowed / owned input at its own frontier.
 ///
-/// THEORY.md §III.1 typescape: the serde parse surface is a
+/// Typescape: the serde parse surface is a
 /// typed-primitive site on [`ContentDigest`] itself (one
 /// [`serde::Deserialize`] impl routing through the [`TryFrom<Cow<'_,
 /// str>>`] peer into the [`ContentDigest::parse`] oracle), not a
 /// per-consumer `#[serde(try_from = "String")]` container attribute at
-/// every downstream schema that wraps a digest field. THEORY.md §VI.1
-/// one-oracle: the canonical `<algorithm>:<hex>` grammar is named at
+/// every downstream schema that wraps a digest field.
+/// One-oracle: the canonical `<algorithm>:<hex>` grammar is named at
 /// one site ([`ContentDigest::parse`]), and every parse surface —
 /// [`std::str::FromStr`], the [`TryFrom<T>`] peer family across
 /// [`&str`] / [`String`] / [`Cow<str>`] / [`Box<str>`] / [`Arc<str>`] /
 /// [`Rc<str>`] and their byte-slice mirrors, this [`serde::Deserialize`]
-/// — reads through it. THEORY.md §V.4 (attestation as cryptographic
+/// — reads through it. (attestation as cryptographic
 /// evidence): a stringly-typed digest field cannot substantiate a
 /// claim it does not validate; strengthening a serde-derived
 /// attestation-record field from `String` to [`ContentDigest`] (now
@@ -9016,9 +9000,8 @@ fn insert_array_digests(
 /// path separator; otherwise returns the borrowed tag slice.
 ///
 /// This is the one-oracle site for reading the tag off an image string
-/// in forge (theory §III.1 typescape: the reference grammar is a typed
-/// primitive on the platform, not a per-call-site restatement; theory
-/// §VI.1 generation over composition: `image.split(':').last()`
+/// in forge (typescape: the reference grammar is a typed
+/// primitive on the platform, not a per-call-site restatement; generation over composition: `image.split(':').last()`
 /// repeated at every consumer is the three-times rule tripped, extract
 /// the primitive). Prior call sites hand-rolled `.split(':').last()`
 /// which had three failure modes the typed primitive fixes at one site:
@@ -9093,7 +9076,7 @@ pub const IMAGE_TAG_UNKNOWN: &str = "unknown";
 /// output frontier — a total function that always returns a non-empty
 /// [`&str`] safe to interpolate into a status line. Prior call sites
 /// hand-rolled `image_tag(image).unwrap_or("unknown")` at five spots
-/// (theory §VI.1 three-times rule tripped by more than a factor of
+/// (three-times rule tripped by more than a factor of
 /// one — a `k8s::get_pod_statuses` `PodStatus.image_tag` build and
 /// four `flux::wait_for_deployment` / `wait_for_pod` status lines),
 /// all baking the literal fallback string into their own scope. Every
@@ -9232,7 +9215,7 @@ pub fn image_repository_and_tag(image: &str) -> (&str, Option<&str>) {
 /// (unsupported algorithm, wrong hex length, non-lowercase-hex byte).
 ///
 /// This is the third peer of the reference-grammar parser family
-/// (theory §III.1 typescape: the reference grammar is a typed primitive
+/// (typescape: the reference grammar is a typed primitive
 /// on the platform, not a per-call-site restatement), alongside
 /// [`image_tag`] (extract the `<tag>` fragment) and
 /// [`image_repository_and_tag`] (split the `<repository>` and `<tag>`
@@ -9295,9 +9278,9 @@ pub fn image_digest(image: &str) -> Option<ContentDigest> {
 /// separator (`format!("{}::{}", …)`, `format!("{}/{}", …)`), of
 /// reordering the halves, or of double-tagging a repository slice that
 /// already carries its own tag. The one-oracle-site route closes the
-/// class of composition drift by construction (theory §III.1 typescape:
+/// class of composition drift by construction (typescape:
 /// the composition of the reference grammar is a typed primitive, not
-/// a per-call-site restatement; §VI.1 generation over composition:
+/// a per-call-site restatement; generation over composition:
 /// hand-rolled `format!` composition repeated at every consumer is the
 /// three-times rule tripped, extract the primitive).
 ///
@@ -18443,7 +18426,7 @@ mod tests {
     /// handles, feeding the halves through [`image_reference`] and
     /// back through the parser recovers the original pair verbatim.
     /// This is the property that makes the composer the honest
-    /// inverse of the parser (theory §III.1 typescape: the compose /
+    /// inverse of the parser (typescape: the compose /
     /// parse pair widens the typed algebra so future canonicalisation
     /// on either half must uphold the roundtrip or fail this test).
     #[test]
@@ -18767,8 +18750,8 @@ mod tests {
     /// hex length, non-lowercase-hex byte, or empty tail — is
     /// discarded at the extraction frontier. The primitive does not
     /// admit an unvalidated digest string into the typed algebra
-    /// (theory §III.1 typescape: the digest is a proof-carrying value,
-    /// not a slice; theory §V.1 knowable platform: a malformed digest
+    /// (typescape: the digest is a proof-carrying value,
+    /// not a slice; knowable platform: a malformed digest
     /// entering `verify_image_digest_matches` at a distant call site
     /// would silently succeed a string compare on garbage — the
     /// validated `ContentDigest` return type closes that class of

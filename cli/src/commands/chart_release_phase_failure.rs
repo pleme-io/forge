@@ -37,7 +37,7 @@
 //! `"workspace prep"` to `"workspace-prep"` for grep-anchoring — lands
 //! at ONE typed body and reaches every consumer by construction.
 //!
-//! THEORY.md §V (Compounding Directive: solve once), §VI.1
+//! (Compounding Directive: solve once),
 //! (three-times-is-a-law — 5 verbatim sibling sites redeemed by
 //! extraction).
 

@@ -400,16 +400,16 @@ mod tests {
     /// async frontier now emits the canonical failure envelope by
     /// construction.
     ///
-    /// # THEORY grounding
+    /// # Grounding
     ///
-    /// THEORY.md §V.1 (construction guarantees): the canonical
+    /// (construction guarantees): the canonical
     /// failure envelope is emitted by construction at the primitive's
     /// ONE body, not asserted after the fact at every site.
-    /// THEORY.md §V.4 (terminating shape): an attestation-record
+    /// (terminating shape): an attestation-record
     /// consumer reading the terminating shape of a failed workspace-
     /// dependency prebuild reads the `(op, exit_code)` structural
     /// tuple the primitive emits, not the ad-hoc pre-lift string.
-    /// THEORY.md §VI.1 (one-oracle discipline): the "what does the
+    /// (one-oracle discipline): the "what does the
     /// operator log line for a failed npm spawn look like" question
     /// is answered at ONE typed-primitive body
     /// (`retry.rs::classify_inherited_status`); a future refinement

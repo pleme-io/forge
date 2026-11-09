@@ -87,17 +87,17 @@
 //!    [`crate::regenerated_lockfile_commit_reminder::write_regenerated_lockfile_commit_reminder`].
 //! 4. A trailing blank line (single `\n`).
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! - THEORY.md §I.5 (duplication budget zero; every recurring shape
+//! - (duplication budget zero; every recurring shape
 //!   becomes a helper before it becomes duplicated code): two byte-
 //!   identical sibling stanzas past the two-occurrence coincidence
 //!   threshold collapse to ONE construction surface.
-//! - THEORY.md §V.2 (typed absorption): the already-typed
+//! - (typed absorption): the already-typed
 //!   [`RegeneratedLockfilePair`] enum absorbs the (banner-file,
 //!   reminder-pair) correlation so a caller cannot silently type one
 //!   half without the other.
-//! - THEORY.md §VI.1 (solve-once-at-the-primitive): a future rewording
+//! - (solve-once-at-the-primitive): a future rewording
 //!   of the `Pangea <X> regenerated successfully!` banner, promotion
 //!   of the banner from `.bright_green()` to a different palette, or
 //!   addition of an OTLP `pangea_regenerate_completed` observability

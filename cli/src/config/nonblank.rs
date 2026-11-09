@@ -8,7 +8,7 @@
 //! required-nonblank predicate + bail shape verbatim. This module is the
 //! single grammar oracle they collapse onto — the string-field peer of
 //! the timeout-layer [`crate::duration::parse_timeout_field`] grammar
-//! oracle. Twelve occurrences past THEORY §VI.1's generation-over-
+//! oracle. Twelve occurrences past the generation-over-
 //! composition threshold ("two occurrences is a coincidence; three is a
 //! law") and the CLAUDE.md PRIME DIRECTIVE (duplication is a bug).
 //!
@@ -32,8 +32,7 @@
 //! what counts as blank (e.g., unicode-whitespace-aware trim, or rejecting
 //! BOM / zero-width characters) would have had to land at twelve sites;
 //! post-lift it lands at this one primitive body and every consumer
-//! inherits the refinement by construction (THEORY §VI.1
-//! generation-over-composition; CLAUDE.md PRIME DIRECTIVE).
+//! inherits the refinement by construction (generation-over-composition; CLAUDE.md PRIME DIRECTIVE).
 
 use anyhow::{bail, Result};
 

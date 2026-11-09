@@ -67,13 +67,13 @@
 //! spawn-time behaviour and this primitive stays the sole owner of
 //! the argv layout.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! - THEORY.md §V.1 (Construction guarantees; Types → Invariants →
+//! - (Construction guarantees; Types → Invariants →
 //!   Proofs → Render Anywhere): the returned `[&'a str; 15]` array
 //!   pins the argv arity at the type level — a caller cannot
 //!   accidentally omit a flag or a value slot and still compile.
-//! - THEORY.md §VI.1 (three-times rule): two sibling occurrences at
+//! - (three-times rule): two sibling occurrences at
 //!   the "two is a coincidence, three is a law" threshold — this
 //!   lift closes the class before a third caller re-inlines it.
 

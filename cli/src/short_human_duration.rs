@@ -25,7 +25,7 @@
 //! only tail and the `format!("{}m{}s", …, … % 60)` minutes-and-
 //! seconds body appear at TWO code lines each. Two sibling sites
 //! restating the same compact-duration grammar is past the fleet's
-//! duplication threshold (PRIME DIRECTIVE; THEORY §VI.1
+//! duplication threshold (PRIME DIRECTIVE;
 //! generation-over-composition).
 //!
 //! # The load-bearing unification — a single ladder oracle

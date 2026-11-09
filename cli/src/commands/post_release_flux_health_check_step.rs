@@ -44,7 +44,7 @@
 //! ```
 //!
 //! Two identically-shaped bodies past the PRIME DIRECTIVE's
-//! duplication-is-a-bug threshold (THEORY §I.3.5, §VI.1 — the
+//! duplication-is-a-bug threshold (the
 //! duplication budget is zero). The lift also normalizes the
 //! skip-message style: the pre-lift `.dimmed()` at site 1 gains
 //! `.bold()` to match site 2 and the sibling

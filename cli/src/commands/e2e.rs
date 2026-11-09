@@ -73,7 +73,7 @@ fn open_bin() -> String {
 /// (79e03a5), and `commands/developer_tools.rs:36` (534ef48) — the
 /// pattern is proven; `commands/e2e.rs` was the outlier still respelling
 /// the two-argument resolve at every consumer. Solve-once at the sigil
-/// (THEORY §I.5 — duplication budget zero; every recurring shape becomes
+/// (duplication budget zero; every recurring shape becomes
 /// a helper before it becomes duplicated code) means a future added
 /// `cargo` spawn in this module cannot silently re-copy the two-argument
 /// resolve and drift away from the `CARGO` override at exactly the tier
@@ -96,7 +96,7 @@ fn cargo_bin() -> String {
 /// initial `commands/frontend_validation.rs::bun_bin` lift (9986f11) —
 /// the pattern is proven; `commands/e2e.rs` was the remaining
 /// bun-spawning outlier still respelling the two-argument resolve at
-/// every consumer. Solve-once at the sigil (THEORY §I.5 — duplication
+/// every consumer. Solve-once at the sigil (duplication
 /// budget zero; every recurring shape becomes a helper before it
 /// becomes duplicated code) means a future added `bun` spawn in this
 /// module cannot silently re-copy the two-argument resolve and drift
@@ -135,7 +135,7 @@ fn bun_bin() -> String {
 /// respelling the two-argument NIX_BIN resolve inline at its single
 /// `nix` spawn.
 ///
-/// Solve-once at the sigil (THEORY §I.5 — duplication budget zero;
+/// Solve-once at the sigil (duplication budget zero;
 /// every recurring shape becomes a helper before it becomes duplicated
 /// code) means a future added `nix` spawn in this module cannot
 /// silently re-copy the two-argument resolve and drift away from the
@@ -413,7 +413,7 @@ pub fn run_test_pyramid(
 /// [`crate::repo::msg_completed_in_secs_1`] dialect for a two-decimal
 /// render, or a promotion of the tail to a themed banner via
 /// [`crate::ui`]) reaches one call site rather than three diverging
-/// arms. THEORY §I.5 — duplication budget zero; every recurring
+/// arms. Duplication budget zero; every recurring
 /// shape becomes a helper before it becomes duplicated code.
 ///
 /// The `op` label is threaded verbatim into
@@ -792,7 +792,7 @@ pub fn cleanup_all() -> Result<()> {
 /// spelled the same discard-error fusion verbatim — one per match arm
 /// on `tokio::time::timeout(cmd.output()).await`'s
 /// `Ok(Ok(_))` / `Ok(Err(_))` / `Err(_)` outcome. Three occurrences
-/// past THEORY.md §VI.1's three-is-a-law threshold. A drifting arm
+/// past the three-is-a-law threshold. A drifting arm
 /// (a fourth stanza silently dropping the `_e2e_images` half, or the
 /// order flipping so images clean up before their consumer containers
 /// exit) would fork one arm at a time from its siblings — the fusion
@@ -935,7 +935,7 @@ fn e2e_image_output_symlink(name: &str) -> Result<(tempfile::TempDir, PathBuf)> 
     // `commands/crossplane.rs::xpkg_output_file` (220b207),
     // `commands/federation_tests.rs::federation_test_job_manifest_file`
     // (76b256e), and `commands/migrations.rs::migration_job_manifest_file`
-    // (950a0e7) all routed onto it (THEORY §I.3 belief 5 / §V.6 —
+    // (950a0e7) all routed onto it (belief 5 /
     // recurring shape becomes a library before it becomes duplicated
     // code).
     crate::hermetic_scratch::hermetic_scratch_file("forge-e2e-image-", &format!("{}-image", name))
@@ -949,7 +949,7 @@ fn e2e_image_output_symlink(name: &str) -> Result<(tempfile::TempDir, PathBuf)> 
 /// (async) and `product_release.rs::push_prebuilt_image`'s inline
 /// image-id fetch. All three pre-lift sites spelled the same
 /// `docker images -q <name>` + trim + `is_empty` body verbatim
-/// (THEORY §VI.1 three-is-a-law); the typed primitive consolidates
+/// (three-is-a-law); the typed primitive consolidates
 /// them onto one shape. Spawn failure now collapses to `Ok(false)`
 /// (matches every caller's `.unwrap_or(false)` immediate-recovery
 /// pattern).
@@ -1525,7 +1525,7 @@ mod docker_bin_routing_tests {
     /// stanza above, and the sibling `commands/prerelease.rs::
     /// print_e2e_diagnostics` block carried three MORE copies past
     /// its own docker-literal shield — six identically-shaped bodies
-    /// past THEORY §VI.1's three-is-a-law threshold (PRIME DIRECTIVE:
+    /// past the three-is-a-law threshold (PRIME DIRECTIVE:
     /// duplication budget is zero). The lift onto
     /// [`crate::retry::probe_stdout_capture_sync`] preserves the exact
     /// pre-lift semantics — spawn `Err` skips the block, spawn `Ok`
@@ -1642,7 +1642,7 @@ mod docker_bin_routing_tests {
     /// Pre-lift the three sites each carried the verbatim one-line
     /// stanza above, and the sibling `commands/local.rs::up` block
     /// carried two MORE copies past its own docker-literal shield —
-    /// five identically-shaped bodies past THEORY §VI.1's
+    /// five identically-shaped bodies past the
     /// three-is-a-law threshold (PRIME DIRECTIVE: duplication budget
     /// is zero). The lift onto [`crate::retry::run_discard_sync`]
     /// preserves the exact pre-lift semantics — spawn `Err` is
@@ -1853,7 +1853,7 @@ mod cargo_env_routing_tests {
         // re-copy the resolve inline and drift away from the sigil's
         // single point of truth. Mirrors the sibling `cargo_bin()` shield
         // pair on `commands/developer_tools.rs::test_developer_tools_routes_cargo_through_cargo_env_not_raw_command`
-        // (534ef48). THEORY §I.5: duplication budget zero.
+        // (534ef48). Duplication budget zero.
         assert!(
             body.contains("fn cargo_bin()"),
             "commands/e2e.rs must define `cargo_bin()` — the sigil \

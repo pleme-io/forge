@@ -29,7 +29,7 @@
 //! the operator declined must NOT fall through to the next step in
 //! the pipeline.
 //!
-//! Both stanzas past THEORY §VI.1's duplication trigger (PRIME
+//! Both stanzas past the duplication trigger (PRIME
 //! DIRECTIVE: duplication budget is zero). A prompt-and-decide drift
 //! at either site — a swap of `y|yes` for a stricter `y`-only test, a
 //! drop of the `to_lowercase()` fold that would silently reject a

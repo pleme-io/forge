@@ -25,7 +25,7 @@
 //!    the compile-time literal `"jobs"` and the selector is built via
 //!    [`crate::k8s_label_selector::format_app_label_selector`].
 //!
-//! Two identically-shaped bodies past THEORY §VI.1's duplication
+//! Two identically-shaped bodies past the duplication
 //! trigger (PRIME DIRECTIVE: duplication budget is zero). An every-
 //! item name-listing argv drift — a rename of the `-n` short form to
 //! `--namespace`, an argv-order shuffle putting `-l <sel>` before

@@ -20,7 +20,7 @@
 //! `Ok(ValidationResult { error: Some(_), … })` field) and per-site
 //! `<bin_name>` selection (five sites hard-code `"extract-schema"`; the
 //! sixth reads a runtime-configured `graphql_config.schema_extractor` off
-//! the deploy config). Six identically-shaped bodies past THEORY §VI.1's
+//! the deploy config). Six identically-shaped bodies past the
 //! three-times threshold (PRIME DIRECTIVE: duplication budget is zero):
 //!
 //! - `commands/codegen.rs::execute`
@@ -44,7 +44,7 @@
 //!    fused into anyhow strings that dropped the exit code (the `bail!`
 //!    said "failed" without saying "exit N"). Post-lift both surface as
 //!    typed [`SchemaExtractionError`] variants carrying the structural
-//!    `(backend_dir, bin_name, exit_code, stderr)` tuple THEORY §V.4
+//!    `(backend_dir, bin_name, exit_code, stderr)` tuple
 //!    Phase 1 attestation records pattern-match on. Empty-stdout gets
 //!    its own variant distinct from a non-zero exit — the schema-drift
 //!    call site in `codegen_validation.rs` already treated the two
@@ -63,10 +63,10 @@
 //!    extractor binary went sideways without regex-parsing the display
 //!    string.
 //!
-//! THEORY.md §V.1 (Types → Invariants → Proofs): the "extract-schema
+//! (Types → Invariants → Proofs): the "extract-schema
 //! ran and produced non-empty bytes" invariant is proved at the extract
 //! frontier and carried by the return type `Vec<u8>`, not re-derived at
-//! four consumer sites. THEORY.md §VI.1 (one-oracle): the extract-schema
+//! four consumer sites. (one-oracle): the extract-schema
 //! invocation shape is named here and every consumer reads through it.
 
 use std::path::{Path, PathBuf};

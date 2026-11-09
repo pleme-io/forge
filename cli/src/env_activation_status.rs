@@ -25,7 +25,7 @@
 //! }
 //! ```
 //!
-//! Two identically-shaped bodies past the point THEORY.md §VI.1
+//! Two identically-shaped bodies past the point
 //! calls duplication a bug. A drift to the three-space indent, the
 //! glyph selection, the glyph-color, the env-color, the parenthesized
 //! label wording, or the trailing-newline had to hit both branches in
@@ -48,16 +48,16 @@
 //! rather than through a third inline `println!` a future edit could
 //! omit.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! - `THEORY.md §V.1` (Construction guarantees; Types → Invariants
+//! - (Construction guarantees; Types → Invariants
 //!   → Proofs → Render Anywhere): the correlated
 //!   glyph / glyph-color / env-color / label quartet lives at ONE
 //!   construction surface — [`EnvActivationStatus`]'s per-arm
 //!   projections — and its byte-oracle tests below pin the four
 //!   projections as `cargo test`-verifiable invariants rather than as
 //!   two-site display conventions.
-//! - `THEORY.md §VI.1` (Generation over composition; recurring shapes
+//! - (Generation over composition; recurring shapes
 //!   past duplication become helpers): two sibling occurrences of the
 //!   five-token `println!` template past the two-sibling threshold,
 //!   so the display body lifts onto ONE typed body and both consumers
@@ -494,7 +494,7 @@ mod tests {
     /// reaches [`writeln!`] at exactly one call — no fallback path,
     /// no double-write, no branching on `status` outside the
     /// projection accessors. Pins the one-oracle discipline
-    /// THEORY §VI.1 requires: a future refactor that introduced a
+    /// requires: a future refactor that introduced a
     /// `match status { Active => writeln!(..); Inactive => writeln!(..); }`
     /// two-arm inline would surface here.
     #[test]

@@ -64,9 +64,9 @@
 //!   directly. This primitive is the fusion specific to the
 //!   `kubectl exec -n <ns> <pod> --` argv shape.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the fused resolve + argv-compose +
+//! Solve-once-at-the-primitive: the fused resolve + argv-compose +
 //! sync-capture body lives at ONE surface. A future refinement (a
 //! `KUBECTL_BIN` fallback that consults a `~/.forge` config, a
 //! per-invocation attempt sigil around the spawn, a promotion of the
@@ -74,7 +74,7 @@
 //! `KubectlExecPodCapturedOutput { stdout, elapsed }` record) lands
 //! here and reaches both consumers by construction.
 //!
-//! §VI.1 recurring-shape-to-helper: two sibling stanzas across two
+//! Recurring-shape-to-helper: two sibling stanzas across two
 //! functions in the same module match the recurring-shape criterion;
 //! the primitive body is the promotion.
 

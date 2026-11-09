@@ -18,7 +18,7 @@
 //! println!();
 //! ```
 //!
-//! Three occurrences of an identical shape past THEORY §VI.1's
+//! Three occurrences of an identical shape past the
 //! three-is-a-law threshold. Peer of
 //! [`crate::commands::cluster_overlay_release_preamble`] on the opening
 //! end of the same three flows — same three-file consumer census, same

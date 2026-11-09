@@ -36,7 +36,7 @@
 //!    a `pub const` so a rename lands in one place.
 //!
 //! Two pre-lift sites past the "two occurrences is a coincidence,
-//! three is a law" floor (THEORY.md §VI.1) — pinning the fusion here
+//! three is a law" floor — pinning the fusion here
 //! forecloses the third-site copy-paste before it lands. A future
 //! `commands/test.rs::run_rust_tests` success-arm addition, a
 //! forthcoming `commands/e2e.rs` unit-count reporter, or a migration
@@ -64,19 +64,19 @@
 //! diagnostic collection. This primitive is that fusion's peer on
 //! the SUCCESS arm.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! - THEORY.md §I.5 (duplication budget zero; every recurring shape
+//! - (duplication budget zero; every recurring shape
 //!   becomes a helper before it becomes duplicated code): two byte-
 //!   close sibling stanzas past the two-occurrence coincidence
 //!   threshold. The primitive collapses the fusion at ONE
 //!   construction surface.
-//! - THEORY.md §II.1 invariant 5 (composition preserves proofs):
+//! - Invariant 5 (composition preserves proofs):
 //!   composing [`crate::ui::print_step_pass`] and
 //!   [`crate::repo::msg_with_count_noun_secs_1`] here inherits each
 //!   peer's contract without repetition — a drift at either lands at
 //!   ONE peer and reaches this fusion by construction.
-//! - THEORY.md §V.2 (typed absorption): the "print-step-pass +
+//! - (typed absorption): the "print-step-pass +
 //!   count-noun-secs render + `test_count.unwrap_or(0)` on `Option<
 //!   usize>`" composition is a single named concept; both callers
 //!   cite it rather than restating the four-argument stanza.

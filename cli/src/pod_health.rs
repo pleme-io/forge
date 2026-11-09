@@ -47,7 +47,7 @@
 //! <ns> -o json` probe RAN and observed one or more pods in `Pending`,
 //! `Failed`, `Unknown`, or `Running`-but-not-`Ready` state (evidence of
 //! a rollout that landed unhealthy workloads — the structural failure
-//! THEORY §V.4 Phase 2 names) is structurally indistinguishable from one
+//! Phase 2 names) is structurally indistinguishable from one
 //! against a namespace whose probe was never spawned (no evidence either
 //! way). A downstream `sekiban` strict-production policy that fails-
 //! closed on evidence of unhealthy pods cannot express that gate against
@@ -109,7 +109,7 @@
 //!   the no-probe-ran world cannot generate), but the observed state
 //!   failed the pod-health invariant. Collapsing `UnhealthyPods` into a
 //!   single boolean would re-introduce the discriminator loss the typed
-//!   primitive exists to prevent (THEORY §V.1: make invalid states
+//!   primitive exists to prevent (make invalid states
 //!   unrepresentable — an `all_healthy: false` value that conflates "no
 //!   kubectl probe ran" with "probe ran and the namespace has
 //!   crashlooping pods" is a flat state where a downstream verifier
@@ -175,7 +175,7 @@
 //!
 //! ## Frontier inspiration
 //!
-//! THEORY §V.4 ("Two-phase signature composition") and §VII.1
+//! ("Two-phase signature composition") and
 //! ("Attestation-gated deployments") name the Phase 2 deployment record
 //! as the post-admission honesty channel: the structural evidence that
 //! the deployment actually landed healthy workloads in the cluster the
@@ -335,12 +335,12 @@ crate::impl_probe_outcome!(PodHealthOutcome, ProbeAbsent);
 ///    [`PodHealthOutcome::ProbeAbsent`] outcome chosen at the shell-
 ///    out call site rather than as a parser arm.
 ///
-/// THEORY §V.2: attestation is cryptographic evidence, not a wish.
+/// Attestation is cryptographic evidence, not a wish.
 /// The parser preserves the structural distinction between "probe ran
 /// and observed one or more pods that are not `Running`-and-`Ready`"
 /// and "no probe ran / no usable evidence" — the pre-typed `false`
 /// hardcode collapsed both into a single negative claim.
-/// THEORY §VI.1: one oracle, not a per-consumer re-derivation. The
+/// One oracle, not a per-consumer re-derivation. The
 /// parser is the one site that walks `items[*].status.phase` and
 /// `items[*].status.conditions[type=Ready]`; downstream consumers
 /// pattern-match the typed three-arm enum.

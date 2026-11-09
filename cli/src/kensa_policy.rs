@@ -32,8 +32,8 @@
 //! compliance baseline was consulted, no OutcomeVerificationReport was
 //! produced. A Phase 1 chart attestation that records `policy_passed:
 //! true` against a chart whose `kensa` was never probed is false by
-//! construction (THEORY §V.2: attestation is cryptographic evidence,
-//! not a wish; THEORY §III.3: compliance is a structural dimension
+//! construction (attestation is cryptographic evidence,
+//! not a wish; compliance is a structural dimension
 //! every renderer carries, never a value asserted at the call site
 //! without evidence).
 //!
@@ -56,7 +56,7 @@
 //! ## The three operational worlds
 //!
 //! `kensa` (the compliance-engine probe — OSCAL/NIST mapping per
-//! THEORY §V.3, pre-deploy gate per THEORY §VII.1) against a chart
+//!, pre-deploy gate) against a chart
 //! source distinguishes three operational worlds the prior `true`
 //! hardcode flattened into a single positive claim:
 //!
@@ -81,7 +81,7 @@
 //!   is a structurally distinct world from `Passed` AND from
 //!   `ProbeAbsent`. Collapsing `Failed` into a single boolean would
 //!   re-introduce the discriminator loss the typed primitive exists
-//!   to prevent (THEORY §V.1: make invalid states unrepresentable —
+//!   to prevent (make invalid states unrepresentable —
 //!   a `policy_passed: false` value that conflates "no probe ran"
 //!   with "probe ran and reported failures" is a flat state where
 //!   a downstream verifier cannot recover the kind-of-claim).
@@ -176,7 +176,7 @@ pub enum KensaPolicyOutcome {
     /// `kensa` ran AND reported at least one failing control against
     /// the declared baseline. The probe ran and reported a negative
     /// result: the chart has compliance violations that fail the
-    /// pre-deploy policy gate (THEORY §VII.1). The prior `true`
+    /// pre-deploy policy gate. The prior `true`
     /// hardcode would have falsely sealed a green-policy claim
     /// against this state.
     ///
@@ -393,7 +393,7 @@ mod tests {
     /// the arm as one tuple and a future regression that hand-
     /// rolled them separately cannot drift them apart at the call
     /// site (the canonical "one source, one record" discipline
-    /// THEORY §VI.1 names).
+    /// names).
     #[test]
     fn test_failed_arm_pairs_counts_as_one_tuple() {
         let narrow = KensaPolicyOutcome::Failed {

@@ -72,16 +72,16 @@
 //!   `for line in stderr.lines().take(5) { print_diagnostic_line(line); }`
 //!   (no filter, no collect, cap = 5) — also OUT OF SCOPE.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! - `THEORY.md §I.5` (duplication budget zero): two byte-identical
+//! - (duplication budget zero): two byte-identical
 //!   7-line stanzas across two failure branches were past the two-
 //!   occurrence coincidence threshold. Post-lift the primitive owns
 //!   the grammar at ONE construction surface.
-//! - `THEORY.md §V.2` (typed absorption): the "walk-cap-filter-print-
+//! - (typed absorption): the "walk-cap-filter-print-
 //!   collect" composition is a single named concept; both callers cite
 //!   it rather than restating its five component steps.
-//! - `THEORY.md §II.1` invariant 4 (closed enums are proofs of case-
+//! - Invariant 4 (closed enums are proofs of case-
 //!   completeness) does NOT bind here — the three keywords are a slice,
 //!   not a closed enum — because the keyword vocabulary is a matter of
 //!   linter output convention (Biome / ESLint each use these three

@@ -98,7 +98,7 @@
 //!    the load-bearing discriminator: a downstream verifier reading the
 //!    typed outcome can distinguish "probe ran and posture is
 //!    zero-pass-rate" (evidence-of-empty-CIS-baseline, a Phase 2 failure
-//!    mode THEORY §V.4 / §VII.1 name as post-admission honesty that the
+//!    mode name as post-admission honesty that the
 //!    cluster admits no CIS control) from "no probe ran" (no evidence),
 //!    where the pre-fix bare `f64` flattened them indistinguishably into
 //!    `0.0`.
@@ -143,7 +143,7 @@
 //!
 //! ## Frontier inspiration
 //!
-//! THEORY §V.4 ("Two-phase signature composition") and §VII.1
+//! ("Two-phase signature composition") and
 //! ("Attestation-gated deployments") name the Phase 2 deployment record
 //! as the post-admission honesty channel: the structural evidence that
 //! the deployment actually landed workloads in a cluster whose
@@ -325,10 +325,10 @@ crate::impl_probe_outcome!(CisK8sPassRateOutcome, ProbeAbsent);
 /// discipline as the sibling parsers' fold of malformed inputs into the
 /// no-usable-evidence arm.
 ///
-/// THEORY §V.1: make invalid states unrepresentable. The two-arm codomain
+/// Make invalid states unrepresentable. The two-arm codomain
 /// `{Probed, ProbeAbsent}` is foreclosed at the type level; a regression
 /// that wanted to introduce a `Malformed` arm would force every consumer
-/// to handle a world the parser does not produce. THEORY §VI.1: one
+/// to handle a world the parser does not produce. One
 /// oracle, not a per-consumer re-derivation. The parser is the one site
 /// that walks the `passed_controls / total_controls` shape for its
 /// ratio; downstream consumers pattern-match the typed two-arm enum.
@@ -416,7 +416,7 @@ mod tests {
     /// `f64` at the surface (`0.0`) but remain structurally distinct at
     /// the enum level — `Probed { ratio: 0.0 }` is the "kensa CIS probe
     /// ran and the cluster fails every control" world (evidence-of-
-    /// zero-pass-rate, a Phase 2 failure mode THEORY §V.4 / §VII.1 name
+    /// zero-pass-rate, a Phase 2 failure mode name
     /// as post-admission honesty that the cluster admits no CIS
     /// control), while `ProbeAbsent` is the "no kensa CIS probe ran
     /// inside certification" world (no evidence either way). Both

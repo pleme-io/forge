@@ -23,7 +23,7 @@
 //!
 //! ## Why a typed enum, not a bool
 //!
-//! THEORY §V.4 Phase 1 attestation pattern-matches on a structural-record
+//! Phase 1 attestation pattern-matches on a structural-record
 //! tuple `(operation, exit_code, stderr)` to recover the probe shape. A
 //! collapsed `bool` discards two of the three discriminators. This module
 //! is the typed peer of [`crate::oci_manifest`] (manifest-identity oracle)

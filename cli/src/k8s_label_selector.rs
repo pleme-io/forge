@@ -68,7 +68,7 @@
 //! thirteen call sites from one edit; the alternative is a
 //! grep-and-edit sweep across eight command modules on every drift.
 //!
-//! Grounded in THEORY.md §V.1 (construction guarantees — the knowable
+//! Grounded (construction guarantees — the knowable
 //! platform): the label key that binds a kubectl probe to its target
 //! workload is a construction detail of the fleet's Kubernetes surface,
 //! and its rendering belongs in one typed primitive rather than in

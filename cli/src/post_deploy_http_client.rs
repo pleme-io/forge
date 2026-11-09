@@ -59,9 +59,9 @@
 //! constructor, one timeout parameter, one place a security-hardening
 //! change lands.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! THEORY.md §V.1 (Construction guarantees): "Define Rust types that
+//! (Construction guarantees): "Define Rust types that
 //! make invalid states unrepresentable." The pre-lift shape allowed a
 //! silent divergence between the three-with-context and one-without-
 //! context callers; the typed primitive makes the divergence

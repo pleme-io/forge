@@ -32,7 +32,7 @@
 //!    auto-fix"`, `<count>` = `unformatted_files.len()`, `<noun>` =
 //!    `"files"`).
 //!
-//! Three sibling occurrences clear THEORY.md §VI.1's "two is a
+//! Three sibling occurrences clear the "two is a
 //! coincidence, three is a law" threshold. Post-lift the three
 //! stanzas route through [`print_step_failure_count_noun`]; a drift
 //! in the (paren shape, count/noun ordering, seconds unit, red `❌`
@@ -58,20 +58,20 @@
 //! [`crate::repo::msg_with_two_counts_and_secs_1`] instead. This
 //! primitive is the single-count peer on the same failure sink.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! - THEORY.md §I.5 (duplication budget zero; every recurring shape
+//! - (duplication budget zero; every recurring shape
 //!   becomes a helper before it becomes duplicated code): three
 //!   byte-identical sibling stanzas past the three-times threshold.
 //!   The primitive collapses the fusion at ONE construction surface.
-//! - THEORY.md §V.1 (Construction guarantees): the "print a red
+//! - (Construction guarantees): the "print a red
 //!   step-failure row whose message body carries a single count and
 //!   noun and a one-decimal-place seconds tag" invariant lives at
 //!   ONE construction surface and its byte-oracle tests pin the paren
 //!   shape, the count/noun ordering, the seconds unit, and the
 //!   fused sink identity as `cargo test`-verifiable invariants
 //!   rather than as consumer-site conventions.
-//! - THEORY.md §VI.1 (Generation over composition; three-times rule):
+//! - (Generation over composition; three-times rule):
 //!   three sibling occurrences past the "two is a coincidence, three
 //!   is a law" threshold, so the fused body lifts onto ONE typed
 //!   body and all three consumers cite it.

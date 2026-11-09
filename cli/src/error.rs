@@ -45,7 +45,7 @@ pub enum DeployError {
 ///
 /// `PushFailed` and `ManifestFailed` keep `exit_code` and `stderr` as
 /// separate fields rather than fused into a single `message` string so
-/// downstream telemetry, retry classifiers (THEORY §V.4 Phase 1
+/// downstream telemetry, retry classifiers (Phase 1
 /// records), and attestation chains can pattern-match on the failure
 /// shape — same arc as `NixBuildError::BuildFailed`,
 /// `AtticError::PushFailed`, `GitError::OpFailed`, and the
@@ -103,7 +103,7 @@ pub enum RegistryError {
     /// `attempts == 0` as the discriminator. That conflated two
     /// structurally distinct conditions — pinning the split into a
     /// typed variant makes the invalid state (a `PushFailed` carrying
-    /// `attempts: 0`) structurally unrepresentable (THEORY §V.1).
+    /// `attempts: 0`) structurally unrepresentable.
     #[error("Multi-arch push to {registry}:{tag_suffix} invoked with no images")]
     NoImagesProvided {
         registry: String,
@@ -120,7 +120,7 @@ pub enum RegistryError {
 /// network-side operations (push / pull on a specific remote+branch),
 /// `RemoteOpFailed` additionally carries the (remote, branch) tuple so
 /// downstream telemetry, retry schedulers, and Phase 1 attestation
-/// records (THEORY §V.4) can recover the exact endpoint that failed
+/// records can recover the exact endpoint that failed
 /// without parsing log output.
 #[derive(Error, Debug)]
 pub enum GitError {
@@ -164,14 +164,14 @@ impl GitError {
     /// (async — working-tree predicate), and `cli/src/infrastructure/git.rs::
     /// GitClient::has_staged_changes` (async — index predicate). Three
     /// identically-shaped blocks past the three-times-rule threshold
-    /// (THEORY §VI.1: "two occurrences is a coincidence; three is a law");
+    /// ("two occurrences is a coincidence; three is a law");
     /// this constructor is the law-redeeming carve-out.
     ///
     /// `op` is the human-readable label attached to either typed variant
     /// — `"rev-parse"`, `"status --porcelain"`, `"diff --cached --name-only"`,
     /// etc. It is what discriminates "git couldn't spawn" (`ExecFailed`)
     /// from "git ran but exited non-zero" (`OpFailed`) at telemetry / Phase 1
-    /// attestation surfaces (THEORY §V.4) without parsing the typed-error
+    /// attestation surfaces without parsing the typed-error
     /// `Display` string.
     ///
     /// On success returns the captured [`std::process::Output`] verbatim —
@@ -224,7 +224,7 @@ impl GitError {
 /// step without parsing log output. `BuildFailed` keeps `exit_code` and
 /// `stderr` as separate fields rather than a fused `message` string so
 /// downstream telemetry, retry, and Phase 1 attestation records can
-/// pattern-match on the failure shape (THEORY §V.4).
+/// pattern-match on the failure shape.
 #[derive(Error, Debug)]
 pub enum NixBuildError {
     #[error("Cargo.nix not found. Run `nix run .#generateCargoNix` first")]
@@ -253,7 +253,7 @@ pub enum NixBuildError {
     /// error or drop the attestation via `.unwrap_or(false)`.
     ///
     /// `raw` preserves the exact (whitespace-trimmed) stdout so telemetry
-    /// / Phase 1 attestation records (THEORY §V.4) can attach the offending
+    /// / Phase 1 attestation records can attach the offending
     /// string to the failure record without re-running the build.
     /// `source` carries the exact grammar clause the input violated
     /// (`MissingStorePrefix` / `HasSubpath` / `TooShort` / `InvalidHash` /
@@ -281,7 +281,7 @@ pub enum NixBuildError {
     /// --recursive` -> one-store-path-per-line stdout, the input to
     /// `AtticClient::push_closure_via_stdin`). `output_link`,
     /// `exit_code`, and `stderr` are kept as separate fields — same
-    /// structural-record tuple THEORY §V.4 Phase 1 attestation records
+    /// structural-record tuple Phase 1 attestation records
     /// pattern-match on — so a downstream telemetry / retry consumer can
     /// tell "the built-artifact symlink is gone" from "nix binary said
     /// no" from "the closure is malformed" at the type level, without
@@ -298,8 +298,7 @@ pub enum NixBuildError {
 ///
 /// `FluxReconcileFailed` and `KustomizationFailed` keep `exit_code` and
 /// `stderr` as separate fields rather than fused into a single `message`
-/// string so downstream telemetry, retry classifiers (THEORY §V.4
-/// Phase 1 records), and attestation chains can pattern-match on the
+/// string so downstream telemetry, retry classifiers (Phase 1 records), and attestation chains can pattern-match on the
 /// failure shape — same arc as `RegistryError::PushFailed`,
 /// `NixBuildError::BuildFailed`, `AtticError::PushFailed`, and
 /// `GitError::OpFailed`. The split between `ExecFailed` ("could not
@@ -388,7 +387,7 @@ pub enum ToolError {
 /// `PushFailed` and `LoginFailed` keep `exit_code` and `stderr` as
 /// separate fields rather than fused into a single message string so
 /// downstream telemetry, retry, and Phase 1 attestation records can
-/// pattern-match on the failure shape (THEORY §V.4). The split between
+/// pattern-match on the failure shape. The split between
 /// `ExecFailed` (could not spawn `attic`) and the operation-specific
 /// failure variants matches the pattern already established for
 /// `NixBuildError` and `RegistryError`.
@@ -415,7 +414,7 @@ pub enum AtticError {
     /// `ClosurePushFailed` carries no per-path field because the input
     /// is a stdin-fed batch of derivations (the canonical `nix path-info
     /// --recursive` output shape). Same structural-record tuple downstream
-    /// telemetry / Phase 1 attestation records (THEORY §V.4) pattern-
+    /// telemetry / Phase 1 attestation records pattern-
     /// match on: cache, exit_code, captured stderr.
     #[error("Attic closure push to cache {cache} failed (exit {exit_code:?}): {stderr}")]
     ClosurePushFailed {
@@ -439,7 +438,7 @@ pub enum AtticError {
     /// server-scoped cache as the current one for subsequent commands.
     /// Both consume `(cache, server, exit_code, stderr)` — the
     /// structural-record tuple Phase 1 attestation records
-    /// (THEORY §V.4) pattern-match on. Keeping `server` and `cache` as
+    /// pattern-match on. Keeping `server` and `cache` as
     /// distinct fields (not fused into a single `{server}:{cache}`
     /// string) lets telemetry group failures by either dimension
     /// without parsing the joined ref.
@@ -477,12 +476,12 @@ impl AtticError {
     /// 3. `AtticClient::login` and `AtticClient::use_cache` on the
     ///    spawn arm of [`crate::retry::classify_capture`].
     ///
-    /// Eight occurrences past THEORY §VI.1's three-is-a-law threshold
+    /// Eight occurrences past the three-is-a-law threshold
     /// (PRIME DIRECTIVE: duplication budget is zero) consolidate onto
     /// this typed constructor. A downstream extension to the variant's
     /// field list — e.g., an `operation: String` context field to
     /// disambiguate "spawn attic push" from "spawn attic login" at
-    /// telemetry / Phase 1 attestation record surfaces (THEORY §V.4)
+    /// telemetry / Phase 1 attestation record surfaces
     /// — lands here once instead of at each of the eight sites.
     ///
     /// Sibling of the existing typed-error factory
@@ -702,7 +701,7 @@ mod tests {
     /// variant makes the invalid state (a `PushFailed` carrying `attempts:
     /// 0`) structurally unrepresentable — same arc as the typed
     /// ExecFailed / OpFailed split established for AtticError, NixBuildError,
-    /// GitError, and KubernetesError (THEORY §V.1).
+    /// GitError, and KubernetesError.
     #[test]
     fn test_registry_error_no_images_provided_carries_target() {
         let err = RegistryError::NoImagesProvided {
@@ -946,7 +945,7 @@ mod tests {
     /// `RemoteOpFailed` must surface the (op, remote, branch) tuple it
     /// was invoked with — never only embed it in stderr — so attestation
     /// records and retry schedulers can recover the failing endpoint
-    /// without log scraping (THEORY §V.4).
+    /// without log scraping.
     #[test]
     fn test_git_error_remote_op_failed_carries_endpoint() {
         let err = GitError::RemoteOpFailed {
@@ -1020,7 +1019,7 @@ mod tests {
     /// `GitError::ExecFailed` carrying the caller-supplied `op` and the
     /// I/O error's `Display`. Pins the spawn-vs-op discriminator at
     /// the typed-error surface — telemetry / Phase 1 attestation
-    /// records (THEORY §V.4) pattern-match on `ExecFailed` to mean
+    /// records pattern-match on `ExecFailed` to mean
     /// "could not run git at all" without parsing strings.
     #[test]
     fn test_git_error_from_capture_spawn_failure_routes_to_exec_failed() {
@@ -1186,7 +1185,7 @@ mod tests {
     /// `MalformedStorePath` must surface the flake_attr, the offending raw
     /// stdout, and preserve the exact `StorePathError` grammar clause via
     /// its `#[source]` chain — so a telemetry consumer / Phase 1 attestation
-    /// record (THEORY §V.4) can attach the failure to the exact input
+    /// record can attach the failure to the exact input
     /// without re-running the build and without parsing the display string
     /// to recover the rejection site.
     #[test]
@@ -1347,7 +1346,7 @@ mod tests {
     /// `KustomizationFailed` must surface (path, exit_code, stderr) as
     /// separate fields so attestation records and retry schedulers can
     /// recover the failing kustomization without log scraping
-    /// (THEORY §V.4).
+    ///.
     #[test]
     fn test_kubernetes_error_kustomization_failed_carries_structured_fields() {
         let err = KubernetesError::KustomizationFailed {
@@ -1640,7 +1639,7 @@ mod tests {
     /// {stderr}"` shape — never fuse them into a single `message: String`
     /// or drop the exit code. Pinning the structural-record tuple at the
     /// Display layer guards every consumer of the typed error (telemetry,
-    /// Phase 1 attestation records per THEORY §V.4) against a future
+    /// Phase 1 attestation records) against a future
     /// regression that re-fused the fields and collapsed the
     /// pattern-matching surface.
     #[test]
@@ -1671,7 +1670,7 @@ mod tests {
     /// is the structural difference from `PushFailed`. Pins the
     /// destructure pattern so a future regression that re-fused the
     /// fields would fail this test rather than silently collapse the
-    /// Phase 1 attestation record shape (THEORY §V.4).
+    /// Phase 1 attestation record shape.
     #[test]
     fn test_attic_error_closure_push_failed_carries_inputs() {
         let err = AtticError::ClosurePushFailed {
@@ -1752,7 +1751,7 @@ mod tests {
     /// RegistryError and NixBuildError. The `ClosurePushFailed` /
     /// `PushFailed` split is structural: the former carries no
     /// `store_path` (stdin-fed batch), the latter does (CLI-arg single
-    /// path) — telemetry / Phase 1 attestation records (THEORY §V.4)
+    /// path) — telemetry / Phase 1 attestation records
     /// destructure the variant they care about without parsing strings.
     #[test]
     fn test_attic_error_failure_split_is_typed() {
@@ -1822,7 +1821,7 @@ mod tests {
     /// `attempts` count it was driven through — never only embed them in
     /// stderr — so attestation records and retry schedulers can recover
     /// the inputs and exhaustion-distance without log scraping
-    /// (THEORY §V.4). The `attempts` field mirrors the structural shape
+    ///. The `attempts` field mirrors the structural shape
     /// already established for `RegistryError::PushFailed`, so a
     /// downstream consumer (telemetry, replay, attestation) can write one
     /// destructure pattern that works across both push surfaces.
@@ -1888,7 +1887,7 @@ mod tests {
     /// cost the sibling `commands/status.rs::tests` and
     /// `commands/helm.rs::capture_tests` shields already close against
     /// their `fn make_output` copies (c8a3f55). PRIME DIRECTIVE:
-    /// duplication budget is zero (THEORY §VI.1). All four sites (this
+    /// duplication budget is zero. All four sites (this
     /// file, `retry::tests`, `commands/status.rs::tests`,
     /// `commands/helm.rs::capture_tests`) now delegate to the ONE
     /// `test_support::synthetic_output` body, so a future reshape

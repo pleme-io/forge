@@ -479,8 +479,7 @@ pub async fn build_rust_service(
         // Delegates the four-line argv+env splice through the canonical
         // wire primitive `crate::nix_hooks::wire_post_build_hook_env` so
         // a future refinement of the hook's env contract lands at ONE
-        // body and reaches every consumer by construction (THEORY §V,
-        // §VI.1).
+        // body and reaches every consumer by construction.
         match crate::nix_hooks::NixHooks::discover().await {
             Ok(hooks) => {
                 if let Some(hook_path) = hooks.attic_push_hook_path() {
@@ -651,7 +650,7 @@ pub async fn build_rust_service(
         // ::new(cache_target.clone()).push_closure_via_stdin(info.stdout)`
         // stanza verbatim, differing only in the arch label and the
         // `result-*` symlink path. Two byte-identical siblings past the
-        // duplication threshold (THEORY §VI.1) — the lift redeems the
+        // duplication threshold — the lift redeems the
         // pair onto ONE body so a future refinement of the per-arch
         // closure-push contract (a `warn_nonfatal!` swap, an attestation
         // sigil on cache-hit telemetry, a switch to a batched
@@ -1027,8 +1026,8 @@ impl DeployYamlLookupPurpose {
 /// resolved env, an OTLP `deploy_yaml_resolve` span wired alongside the
 /// read, a promotion of the miss diagnostic to a typed
 /// `DeployYamlError::NotFound` variant — lands at ONE body and reaches
-/// both consumers by construction (THEORY §V.1 — Types → Invariants →
-/// Proofs; §VI.1 — recurring-shape-to-helper).
+/// both consumers by construction (Types → Invariants →
+/// Proofs; recurring-shape-to-helper).
 fn load_deploy_yaml_and_resolve_env(
     env: &str,
     purpose: DeployYamlLookupPurpose,
@@ -3137,7 +3136,7 @@ mod service_dir_routing_tests {
     /// resolved path, or a swap to a typed
     /// `substrate::ServiceDir(PathBuf)` newtype — lands at ONE body
     /// ([`crate::repo::path_from_env`]) and reaches every consumer by
-    /// construction (THEORY §V — solve-once-at-the-primitive; §VI.1 —
+    /// construction (solve-once-at-the-primitive;
     /// recurring-shape-to-helper).
     ///
     /// The scan bounds on the whole-module boundary (from file start
@@ -3242,7 +3241,7 @@ mod release_git_sha_routing_tests {
     /// to the byte-equivalent copies at
     /// `commands/push.rs::get_git_sha` and
     /// `commands/product_release.rs::execute`. Three consumers past
-    /// THEORY §VI.1's three-is-a-law threshold: the trio had to agree
+    /// the three-is-a-law threshold: the trio had to agree
     /// on both the env-var spelling AND the empty-string-is-miss
     /// semantic (the Nix release wrapper exports the var
     /// unconditionally with an empty value on non-release
@@ -3264,8 +3263,7 @@ mod release_git_sha_routing_tests {
     /// `substrate::ReleaseGitSha(String)` newtype, a telemetry sigil
     /// on the resolved SHA — lands at ONE body
     /// ([`crate::git::release_git_sha_from_env`]) and reaches every
-    /// consumer by construction (THEORY §V —
-    /// solve-once-at-the-primitive; §VI.1 —
+    /// consumer by construction (solve-once-at-the-primitive;
     /// recurring-shape-to-helper).
     ///
     /// The scan bounds on the whole-module boundary (from file start
@@ -3332,10 +3330,9 @@ mod push_arch_closure_lift_tests {
     /// construction surface so a future refinement of the per-arch
     /// closure-push contract (a `warn_nonfatal!` swap for the
     /// `eprint_step_warn` telemetry line, an attestation sigil on
-    /// cache-hit telemetry per THEORY §V.4 Phase 1 attestation records,
+    /// cache-hit telemetry Phase 1 attestation records,
     /// a switch to a batched `push_multi_arch_closure` primitive) lands
-    /// in one place and reaches both arches by construction (THEORY §V
-    /// — solve-once-at-the-primitive; §VI.1 — recurring-shape-to-helper).
+    /// in one place and reaches both arches by construction (solve-once-at-the-primitive; recurring-shape-to-helper).
     ///
     /// # Scan discipline
     ///
@@ -3783,8 +3780,8 @@ mod build_rust_service_stale_symlink_cleanup_lift_tests {
     /// construction. Post-lift the loop iterates over
     /// [`crate::target_arch::TargetArch::ALL`], so every new variant
     /// admitted at the enum surface propagates to the cleanup site by
-    /// construction (THEORY §V.1 — make invalid states unrepresentable;
-    /// §VI.1 — recurring-shape-to-helper).
+    /// construction (make invalid states unrepresentable;
+    /// recurring-shape-to-helper).
     ///
     /// # Scan discipline
     ///
@@ -3896,8 +3893,8 @@ mod build_rust_service_built_arch_symlink_tail_lift_tests {
     /// symlink) would leave the two literals here stale, silently
     /// mislabelling the operator-visible narration for every build.
     /// Post-lift both stanzas derive both slots from the same
-    /// discriminator by construction (THEORY §V.1 — make invalid
-    /// states unrepresentable; §VI.1 — recurring-shape-to-helper).
+    /// discriminator by construction (make invalid
+    /// states unrepresentable; recurring-shape-to-helper).
     ///
     /// # Scan discipline
     ///

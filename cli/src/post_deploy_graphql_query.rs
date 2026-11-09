@@ -81,18 +81,18 @@
 //!    literally-correct claim that misleads about whether the probe
 //!    reached the server or died at the socket layer.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! - `THEORY.md §I.5` (duplication budget zero): two byte-identical
+//! - (duplication budget zero): two byte-identical
 //!   4-line request-construction stanzas across two sibling gates
 //!   crossed the two-occurrence coincidence threshold. Post-lift the
 //!   grammar owns one construction surface.
-//! - `THEORY.md §II.1` invariant 4 (types are theorems): the
+//! - Invariant 4 (types are theorems): the
 //!   `Result<(Response, u64), reqwest::Error>` return type makes the
 //!   "latency is available if and only if the request completed"
 //!   invariant unrepresentable in error, closing the two defects
 //!   above by construction.
-//! - `THEORY.md §V.1` (construction guarantees): every post-deploy
+//! - (construction guarantees): every post-deploy
 //!   GraphQL probe funnels through one body; a security-hardening or
 //!   observability change lands once and reaches every consumer.
 //!

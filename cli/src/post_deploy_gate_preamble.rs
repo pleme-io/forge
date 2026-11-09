@@ -62,9 +62,9 @@
 //! forge's post-deploy verification surface: one gate enum, one
 //! heading accessor, one place a preamble-shape change lands.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! THEORY.md §V.1 (Construction guarantees): "Define Rust types that
+//! (Construction guarantees): "Define Rust types that
 //! make invalid states unrepresentable." The pre-lift shape allowed a
 //! silent divergence between the three sibling gate-entry preambles
 //! — a mis-typed `Gxx` prefix, a heading that named the wrong gate,

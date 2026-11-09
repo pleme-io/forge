@@ -157,8 +157,8 @@ fn cosign_bin() -> String {
 ///
 /// ## Theory grounding
 ///
-/// THEORY.md §VI.1 (one oracle): the field shape is derived at one site,
-/// not retyped per emission. THEORY.md §V.4 / §VII.1: the ten-field
+/// (one oracle): the field shape is derived at one site,
+/// not retyped per emission. The ten-field
 /// shape surfaces the Phase 1 / Phase 2 honesty channel uniformly at every
 /// per-phase telemetry record a downstream `sekiban` admission verifier
 /// reconciliation reads — the float-form `coverage_ratio` and the
@@ -353,7 +353,7 @@ pub async fn compute_source_attestation(
     // from "operator chose not to sign" from "signature failed
     // cryptographic verification" — the load-bearing
     // evidence-of-compromise discriminator `B` carries was lost
-    // (THEORY §V.2: attestation is cryptographic evidence, not a
+    // (attestation is cryptographic evidence, not a
     // wish; a bool that flattens "no evidence" and "evidence of
     // compromise" cannot substantiate either claim). The typed
     // `GitCommitSignatureOutcome` (nine arms over the eight `%G?`
@@ -386,7 +386,7 @@ pub async fn compute_source_attestation(
     //     content-addressed fingerprint (the sorted, deduplicated set
     //     of validated `(mode, type, hash, path)` entries) rather than
     //     the raw bytes, so the tree hash cannot drift on git output
-    //     formatting alone for a byte-identical tree (THEORY §VI.1).
+    //     formatting alone for a byte-identical tree.
     let tree_hash = match run_command_output(repo_root, "git", &["ls-tree", "-r", "HEAD"]).await {
         Ok(listing) => {
             Blake3Hash::digest(crate::tree_listing::canonical_tree_fingerprint(&listing).as_bytes())
@@ -436,7 +436,7 @@ pub async fn compute_source_attestation(
 /// _)`, producing the malformed `"refs/heads/refs/heads/main"` on every
 /// detached HEAD (the GitHub-Actions default checkout state) and on every
 /// tag checkout. Both arms are dishonest twice over: a Phase 1 source
-/// attestation (THEORY §V.4) cannot truthfully claim the build came from
+/// attestation cannot truthfully claim the build came from
 /// `refs/heads/main` when it does not know the ref, and the doubled
 /// prefix is not a parseable refname for any consumer to recover from.
 ///
@@ -563,8 +563,7 @@ pub async fn compute_build_attestation(
     // service))` / `format!("vuln-scan-{}", service)` per-service
     // constants stamped a deterministic-but-name-derived hash into
     // every Phase 1 build record as SBOM / vuln-scan evidence even
-    // when no probe layer existed, false by construction (THEORY §V.2:
-    // attestation is cryptographic evidence, not a wish). When a syft
+    // when no probe layer existed, false by construction (attestation is cryptographic evidence, not a wish). When a syft
     // / grype probe is wired in, only the typed-outcome constructor
     // changes (Absent → Collected { hash, ... }); the call-site shape
     // and the triple-from-one-source discipline survive — mirrors the
@@ -641,7 +640,7 @@ pub async fn compute_build_attestation(
     // coverage events composed at the three load-bearing
     // attestation-composition sites, the per-record evidence-coverage
     // signal is uniform across every attestation record forge
-    // composes. THEORY §V.4 Phase 1 honesty channel; THEORY §VI.1
+    // composes. Phase 1 honesty channel;
     // one-oracle discipline — the three-probe coverage is composed at
     // one site, not per-field-derived by the verifier.
     let coverage =
@@ -687,7 +686,7 @@ pub async fn compute_image_attestation(image_ref: &str, tag: &str) -> Result<Ima
     //     rather than the raw bytes, so the manifest hash cannot drift on
     //     registry-side JSON formatting, key ordering, mutable
     //     `annotations`, or the manifest-format negotiation skopeo may
-    //     have driven via Accept headers (THEORY §VI.1).
+    //     have driven via Accept headers.
     // The same `skopeo inspect --raw` JSON drives two typed primitives:
     // `oci_manifest::canonical_manifest_fingerprint` → manifest_hash, and
     // `oci_architecture::parse_manifest_architectures` → architecture.
@@ -778,7 +777,7 @@ pub async fn compute_image_attestation(image_ref: &str, tag: &str) -> Result<Ima
     // identity recovered from the receipt populates the
     // `ImageAttestation::signer_identity` field, which previously
     // hardcoded `None` because the boolean fold had nowhere to recover
-    // it from (THEORY §V.4 Phase 1: every claim a typed primitive can
+    // it from (Phase 1: every claim a typed primitive can
     // populate must be populated honestly, not stubbed).
     // Compose `<repository>:<tag>` via the typed primitive at
     // `crate::oci_manifest::image_reference` — the compositional
@@ -787,7 +786,7 @@ pub async fn compute_image_attestation(image_ref: &str, tag: &str) -> Result<Ima
     // reproduced the same trivial shape at every consumer and each
     // independently risked drifting to a subtly wrong separator or
     // to a double-tagged repository slice; the one-oracle-site route
-    // closes that class by construction (theory §III.1 / §VI.1).
+    // closes that class by construction (/).
     let cosign_image_ref = crate::oci_manifest::image_reference(image_ref, tag);
     let cosign = cosign_bin();
     let cosign_captured = Command::new(&cosign)
@@ -818,7 +817,7 @@ pub async fn compute_image_attestation(image_ref: &str, tag: &str) -> Result<Ima
     // `format!("vuln-scan-{}", service)` constants commit-this-commit
     // closes at the build-attestation surface; both inflate Phase 1
     // claims with name-keyed deterministic hashes that have no
-    // relationship to a probe response (THEORY §V.2). Two tagged
+    // relationship to a probe response. Two tagged
     // images pointing at the same manifest now yield the same
     // `sbom_hash` (because no probe ran for either) instead of two
     // distinct hashes incidentally derived from the tag string.
@@ -856,7 +855,7 @@ pub async fn compute_image_attestation(image_ref: &str, tag: &str) -> Result<Ima
 ///     `Blake3Hash::digest(format!("chart-{name}", ...))`, which stamped
 ///     a deterministic constant-but-name-derived hash into every Phase 1
 ///     chart record as the chart-content identity even when no chart had
-///     been collected on disk, false by construction (THEORY §V.4).
+///     been collected on disk, false by construction.
 ///   * A successful walk is hashed over the canonical fingerprint
 ///     (boundary-framed by TAB, content-addressed per file, path-aware
 ///     over the full repo-relative path) rather than the prior
@@ -864,7 +863,7 @@ pub async fn compute_image_attestation(image_ref: &str, tag: &str) -> Result<Ima
 ///     could collide on either the path/content boundary (`"ab"+"cd"` vs
 ///     `"abc"+"d"`) or the basename-only path (`templates/NOTES.txt` vs
 ///     `charts/sub/templates/NOTES.txt`) — the structural collisions the
-///     typed canonical form forecloses (THEORY §VI.1).
+///     typed canonical form forecloses.
 ///
 /// The `provenance_verified` bool is computed by
 /// [`crate::helm_provenance::HelmProvenanceOutcome::is_verified`] over
@@ -880,7 +879,7 @@ pub async fn compute_image_attestation(image_ref: &str, tag: &str) -> Result<Ima
 /// cleartext signature framing Helm writes, so the spawn-vs-op-vs-
 /// empty distinction the prior hardcode discarded survives at the type
 /// level rather than being recovered by string-parsing an anyhow
-/// envelope (THEORY §V.4 Phase 1: every claim a typed primitive can
+/// envelope (Phase 1: every claim a typed primitive can
 /// populate must be populated honestly, not stubbed).
 pub async fn compute_chart_attestation(
     chart_name: &str,
@@ -907,7 +906,7 @@ pub async fn compute_chart_attestation(
     // lint claim from inter-function flow control — false by construction
     // whenever `compute_chart_attestation` is called outside the canonical
     // `commands/helm.rs::lint` precondition or whenever that upstream
-    // probe's bail logic was bypassed (THEORY §V.2: attestation is
+    // probe's bail logic was bypassed (attestation is
     // cryptographic evidence, not a wish). The typed `HelmLintOutcome`
     // (`Passed { warning_count, info_count }` /
     // `Failed { failed_chart_count, error_count, warning_count,
@@ -930,13 +929,13 @@ pub async fn compute_chart_attestation(
 
     // `kensa verify chart <chart-path>` is the compliance-engine
     // probe whose pass/fail evaluation against the declared OSCAL /
-    // NIST 800-53 baseline (THEORY §V.3, §VII.1) populates the
+    // NIST 800-53 baseline populates the
     // Phase 1 chart attestation's `policy_passed` claim. The prior
     // `true` literal at this call site (`// Policy: assume passed`)
     // sealed a green-policy claim from nothing — false by
     // construction whenever `compute_chart_attestation` was called
-    // outside any kensa pre-deploy gate (THEORY §V.2: attestation
-    // is cryptographic evidence, not a wish; THEORY §III.3:
+    // outside any kensa pre-deploy gate (attestation
+    // is cryptographic evidence, not a wish;
     // compliance is a structural dimension every renderer carries,
     // never a value asserted without evidence). The typed
     // `KensaPolicyOutcome` (`Passed { evaluated_control_count }` /
@@ -1031,8 +1030,8 @@ pub async fn compute_chart_attestation(
     // `absent: 4`, today's call-site state for the three deferred
     // probes — `chart_dependencies_outcome` already wires a real
     // probe at the call site, so the signal sits at `ran: 1, absent: 3`
-    // for any chart whose Chart.yaml parses). THEORY §V.4 Phase 1
-    // honesty channel; THEORY §VI.1 one-oracle discipline — the
+    // for any chart whose Chart.yaml parses). Phase 1
+    // honesty channel; one-oracle discipline — the
     // four-probe coverage is composed at one site, not per-field-
     // derived by the verifier.
     let coverage = chart_probe_coverage(
@@ -1116,7 +1115,7 @@ async fn probe_chart_provenance(
 /// builds has no provenance to attest (`L0`). The dimension passes iff that
 /// effective level meets `policy.min_slsa_level` — the same floor
 /// `evaluate_build` enforces per build — so the compliance claim cannot
-/// assert a grade the builds do not substantiate (THEORY §V.2: attestation
+/// assert a grade the builds do not substantiate (attestation
 /// is evidence, not a wish).
 fn slsa_compliance_dimension(
     builds: &[BuildAttestation],
@@ -1169,7 +1168,7 @@ pub fn compose_product_certification(
     //
     // FluxCD's source-controller `GitRepository.status.conditions[type=
     // SourceVerified]` is the typed evidence channel for the Phase 2
-    // `source_verified` claim (THEORY §VII.2: FluxCD is the process
+    // `source_verified` claim (FluxCD is the process
     // manager for every cluster; the reconciler emits the condition only
     // after fetching the commit, resolving the bundle, and verifying the
     // signature against the keyring within the reconciliation interval).
@@ -1180,8 +1179,7 @@ pub fn compose_product_certification(
     // condition was walked. A Phase 2 deployment attestation that records
     // `source_verified: true` against a deployment whose FluxCD
     // `GitRepository` was never queried (and may not even carry a
-    // `verify` block on its spec) is false by construction (THEORY §V.2:
-    // attestation is cryptographic evidence, not a wish; THEORY §VII.1:
+    // `verify` block on its spec) is false by construction (attestation is cryptographic evidence, not a wish;
     // attestation-gated deployments are structural, not policy overlays).
     // The typed `FluxSourceVerificationOutcome` (`Verified` /
     // `VerifyFailed` / `ProbeAbsent`) preserves the three operational
@@ -1262,9 +1260,8 @@ pub fn compose_product_certification(
     // tameshi::ci::ANNOTATION_SIGNATURE]` entry that forge's `deploy`
     // step injects (derived from `generate_annotation_map` over the
     // certification's hash), and `sekiban` admission verifies it
-    // before admitting the resource into the cluster (THEORY §V.4
-    // Phase 2: only Phase-2-signed resources are admitted into
-    // production; THEORY §VII.1: the gate is structural, the admission
+    // before admitting the resource into the cluster (Phase 2: only Phase-2-signed resources are admitted into
+    // production; the gate is structural, the admission
     // webhook refuses any resource without a valid signature at the
     // K8s API server itself). The prior `all_releases_signed: false`
     // literal at this call site was honest at the bool surface (a
@@ -1331,7 +1328,7 @@ pub fn compose_product_certification(
     // a namespace whose kubectl probe RAN and observed one or more
     // pods in `Pending`, `Failed`, `Unknown`, or `Running`-but-not-
     // `Ready` state (evidence of a rollout that landed unhealthy
-    // workloads — the structural failure THEORY §V.4 Phase 2 names)
+    // workloads — the structural failure Phase 2 names)
     // is structurally indistinguishable from one against a namespace
     // whose probe was never spawned (no evidence either way). A
     // downstream `sekiban` strict-production policy that fails-closed
@@ -1380,8 +1377,8 @@ pub fn compose_product_certification(
     // downstream `sekiban` strict-production policy that fails-closed
     // on evidence of an empty deployment (probe ran AND running_pods
     // == 0 — the cluster admitted the release but never materialised
-    // any workloads, the post-admission failure mode THEORY §V.4 /
-    // §VII.1 name as the Phase 2 honesty channel) cannot express that
+    // any workloads, the post-admission failure mode /
+    // name as the Phase 2 honesty channel) cannot express that
     // gate against the pre-fix bare usize — every Phase 2 record
     // asserts the same zero regardless of whether `kubectl get pods`
     // substantiated an empty-namespace state or whether it simply
@@ -1416,13 +1413,13 @@ pub fn compose_product_certification(
     // `manifest_hash` claim: the multi-document YAML stream the probe
     // emits, walked into the sorted, deduplicated set of `<apiVersion>|
     // <kind>|<namespace>|<name> TAB <content-hash-hex>` lines a
-    // downstream verifier would itself derive (THEORY §VI.1 content-
+    // downstream verifier would itself derive (content-
     // addressed identity), is the canonical fingerprint the
     // attestation's `manifest_hash` field would BLAKE3 over. The prior
     // `Blake3Hash::digest(b"pending-deployment")` literal at this call
     // site stamped a name-keyed sentinel independent of the rendered
     // manifest stream actually composed into the attestation, defeating
-    // the content-addressed-identity invariant THEORY §VI.1 names twice
+    // the content-addressed-identity invariant names twice
     // over: (a) the same Phase 2 deployment record across every product,
     // every environment, every cluster received the same `manifest_hash`
     // value — a downstream verifier could not distinguish two
@@ -1431,7 +1428,7 @@ pub fn compose_product_certification(
     // distinct operational worlds — `Rendered` (kustomize succeeded
     // and the stream canonicalised), `RenderFailed` (kustomize exited
     // non-zero — evidence of render-time failure, the structural
-    // failure that gates Phase 2 admission under THEORY §V.4), and
+    // failure that gates Phase 2 admission), and
     // `ProbeAbsent` (no render probe ran inside the certification
     // function — no evidence either way) — all collapsed to the same
     // `b"pending-deployment"` hash, routing evidence-of-render-failure
@@ -1557,8 +1554,8 @@ pub fn compose_product_certification(
     // recover "no deployment probes ran inside the certification
     // function" structurally, where the per-field bool / hash / count /
     // ratio shape required the verifier to re-walk the typed-primitive
-    // surface at every field to reach the same conclusion. THEORY §V.4
-    // / §VII.1 Phase 2 honesty channel; THEORY §VI.1 one-oracle
+    // surface at every field to reach the same conclusion.
+    // / Phase 2 honesty channel; one-oracle
     // discipline (the seven-probe coverage is composed at one site
     // rather than per-field-derived by the verifier).
     let deployment_coverage = deployment_probe_coverage(
@@ -1593,10 +1590,9 @@ pub fn compose_product_certification(
     // touched one call and not the other silently forked the two fields
     // and defeated the identity `namespace == kustomization` every
     // consumer downstream reads on. Post-lift the two fields cannot
-    // drift: they are the same binding, cloned into two slots. THEORY
-    // §V.1 — the equality is a type invariant expressed at the
+    // drift: they are the same binding, cloned into two slots. The equality is a type invariant expressed at the
     // construction site, not two independent expressions that happen to
-    // collide today; §VI.1 one-oracle discipline (the namespace formula
+    // collide today; one-oracle discipline (the namespace formula
     // is composed at one code line rather than at two).
     let deployment_namespace =
         crate::product_environment_namespace::product_environment_namespace(product, environment);
@@ -1623,7 +1619,7 @@ pub fn compose_product_certification(
     // literal at this call site stamped a name-keyed sentinel
     // independent of the dimensions vec actually composed into the
     // attestation, defeating the content-addressed-identity invariant
-    // THEORY §VI.1 names twice over: (a) the same dimension set yielded
+    // names twice over: (a) the same dimension set yielded
     // two distinct `compliance_hash` values depending on construction
     // path (forge bare struct vs tameshi builder) — a downstream
     // verifier could not reconcile the two attestations as describing
@@ -1691,8 +1687,7 @@ pub fn compose_product_certification(
 /// ddc789d) walks it linearly without re-deriving the absent-arm
 /// discriminator per implementor.
 ///
-/// THEORY §V.4 / §VII.1: Phase 2 attestation honesty channel. THEORY
-/// §VI.1: one-oracle discipline — the coverage signal is composed at
+/// Phase 2 attestation honesty channel. One-oracle discipline — the coverage signal is composed at
 /// one site, not per-field-derived by the downstream verifier.
 fn deployment_probe_coverage(
     source_verification: &crate::flux_source_verification::FluxSourceVerificationOutcome,
@@ -1738,8 +1733,7 @@ fn deployment_probe_coverage(
 /// ddc789d) walks linearly without re-deriving the absent-arm
 /// discriminator per implementor.
 ///
-/// THEORY §V.4 / §VII.1: Phase 1 attestation honesty channel. THEORY
-/// §VI.1: one-oracle discipline — the coverage signal is composed at
+/// Phase 1 attestation honesty channel. One-oracle discipline — the coverage signal is composed at
 /// one site, not per-field-derived by the downstream verifier.
 fn chart_probe_coverage(
     provenance: &crate::helm_provenance::HelmProvenanceOutcome,
@@ -1776,8 +1770,7 @@ fn chart_probe_coverage(
 /// ddc789d) walks linearly without re-deriving the absent-arm
 /// discriminator per implementor.
 ///
-/// THEORY §V.4 / §VII.1: Phase 1 attestation honesty channel. THEORY
-/// §VI.1: one-oracle discipline — the coverage signal is composed at
+/// Phase 1 attestation honesty channel. One-oracle discipline — the coverage signal is composed at
 /// one site, not per-field-derived by the downstream verifier.
 fn build_probe_coverage(
     sbom: &crate::security_scan::SbomProbeOutcome,
@@ -1862,12 +1855,12 @@ fn select_policy(environment: &str) -> CertificationPolicy {
 /// Pinning summary derived from a parsed `flake.lock`.
 ///
 /// `all_inputs_pinned` is the hermeticity claim that flows into the SLSA
-/// source attestation (THEORY §V.4 Phase 1 source record, §I.1 beat 5):
+/// source attestation (Phase 1 source record, beat 5):
 /// a flake input counts as *pinned* only when its lock node carries a
 /// content-addressed `narHash`. That hash is what makes the input
-/// byte-reproducible (THEORY §VI.1: "regenerating an artifact produces a
+/// byte-reproducible ("regenerating an artifact produces a
 /// byte-identical result given the same inputs") and content-addressable
-/// (THEORY §III.1.7 render state). An unpinned input breaks the
+/// (render state). An unpinned input breaks the
 /// determinism the SLSA L3 build claim rests on, so the attestation must
 /// not assert pinning when it does not hold.
 ///
@@ -2007,7 +2000,7 @@ fn collect_chart_file_paths(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Re
 /// at the typed primitive; this shape-adapter just builds the
 /// `io::Result<Output>` from the async surface (`cwd`-anchored
 /// `tokio::process::Command::output().await`) and delegates. The
-/// `(exit_code, stderr)` tuple THEORY §V.4 Phase 1 attestation
+/// `(exit_code, stderr)` tuple Phase 1 attestation
 /// records pattern-match on is preserved by construction.
 async fn run_command_output(cwd: &Path, cmd: &str, args: &[&str]) -> Result<String> {
     crate::retry::classify_capture_query_anyhow(
@@ -2221,7 +2214,7 @@ mod tests {
     /// (the `bail!("{} {:?} failed: {}", cmd, args, stderr)` body fused
     /// stderr but never carried `(exit N)`), so a future regression
     /// that re-dropped the exit code would fail this test rather than
-    /// silently degrade the THEORY §V.4 Phase 1 attestation-record
+    /// silently degrade the Phase 1 attestation-record
     /// shape the canonical primitive guarantees.
     #[tokio::test]
     async fn test_run_command_output_op_failure_carries_structural_tuple() {
@@ -2251,7 +2244,7 @@ mod tests {
     /// `run_command_output` on a spawn failure (binary not on PATH /
     /// absent absolute path) surfaces the `Failed to spawn` envelope
     /// with the underlying `io::Error::Display` — the spawn-vs-op
-    /// discriminator THEORY §V.4 attestation telemetry pattern-matches
+    /// discriminator attestation telemetry pattern-matches
     /// on at the parse layer (and which a future typed consumer can
     /// recover structurally by dropping the anyhow envelope and going
     /// through `classify_capture_query` directly).
@@ -2314,7 +2307,7 @@ mod tests {
     /// unconditionally), so `all_inputs_pinned` was effectively a
     /// constant `true` whenever the lock had any nodes — silently
     /// inflating the SLSA source attestation's pinning claim
-    /// (THEORY §V.4 Phase 1). With that buggy logic this assertion
+    /// (Phase 1). With that buggy logic this assertion
     /// fails; with the narHash check it passes.
     #[test]
     fn test_summarize_flake_lock_unpinned_node_is_false() {
@@ -3170,7 +3163,7 @@ mod tests {
     /// stripped sigstore receipts, exit 0) thus caused the Phase 1
     /// image attestation to claim `cosign_verified: true` against
     /// zero collected evidence — a false Phase 1 record a Phase 2
-    /// signature composes over (THEORY §V.4). The typed primitive
+    /// signature composes over. The typed primitive
     /// now collapses the empty-bag case to
     /// [`crate::cosign::CosignVerifyOutcome::Unverified`], whose
     /// `is_verified()` returns `false`. The pre-fix `is_ok()` fold
@@ -4411,9 +4404,9 @@ dependencies:
     /// `{product}-{environment}` byte spelling every in-repo
     /// docstring names.
     ///
-    /// THEORY §V.1 — the equality is a type invariant expressed at
+    /// The equality is a type invariant expressed at
     /// the construction site, not two independent expressions that
-    /// happen to collide today; §VI.1 one-oracle discipline (the
+    /// happen to collide today; one-oracle discipline (the
     /// namespace formula is composed at one code line rather than at
     /// two).
     #[test]
@@ -4624,7 +4617,7 @@ dependencies:
     /// the same dimension set produced two distinct `compliance_hash`
     /// values depending on construction path (forge bare struct vs
     /// `tameshi::compliance::dimensions::AttestationBuilder::build`),
-    /// defeating the content-addressed-identity invariant THEORY §VI.1
+    /// defeating the content-addressed-identity invariant
     /// rests on; and (b) two structurally different dimension sets — a
     /// passing slsa-provenance dim vs a failing one — produced the same
     /// `compliance_hash`, since the stamp was constant. The post-fix call
@@ -4685,8 +4678,8 @@ dependencies:
 
         // (b) The post-fix hash IS the BLAKE3 of the canonical
         // fingerprint over the dimensions the attestation actually
-        // carries — the content-addressed-identity invariant THEORY
-        // §VI.1 names. The same algorithm
+        // carries — the content-addressed-identity invariant.
+        // The same algorithm
         // `AttestationBuilder::build` runs internally, so a future
         // consumer of forge that constructs the equivalent attestation
         // through tameshi's builder gets the byte-identical hash.
@@ -4893,7 +4886,7 @@ dependencies:
     /// annotation), `VerifyFailed` (probe ran and one or more
     /// `HelmRelease` resources lack the annotation — evidence of an
     /// unsigned release the prior deploy step failed to seal,
-    /// the structural failure THEORY §V.4 Phase 2 / §VII.1 names),
+    /// the structural failure Phase 2 / names),
     /// and `ProbeAbsent` (no kubectl probe ran inside the
     /// certification function — no evidence either way). The typed
     /// primitive `crate::helm_release_signature::
@@ -5023,7 +5016,7 @@ dependencies:
     /// `Running` and `Ready`), `UnhealthyPods` (probe ran and one or
     /// more `Pod` resources are in `Pending`, `Failed`, `Unknown`, or
     /// `Running`-but-not-`Ready` state — evidence of a rollout that
-    /// landed unhealthy workloads, the structural failure THEORY §V.4
+    /// landed unhealthy workloads, the structural failure
     /// Phase 2 names), and `ProbeAbsent` (no kubectl probe ran inside
     /// the certification function — no evidence either way). The typed
     /// primitive `crate::pod_health::PodHealthOutcome` preserves the
@@ -5146,7 +5139,7 @@ dependencies:
     /// dimensions layers): (a) every Phase 2 deployment record across
     /// every product, environment, and cluster collapsed to the same
     /// `manifest_hash` value, defeating the content-addressed-identity
-    /// invariant THEORY §VI.1 names — a downstream verifier reading two
+    /// invariant names — a downstream verifier reading two
     /// attestations carrying the same `manifest_hash` could not
     /// distinguish them as describing the same rendered cluster state
     /// from describing two different rendered states under the shared
@@ -5154,7 +5147,7 @@ dependencies:
     /// — `Rendered` (kustomize / flux build succeeded and the YAML
     /// stream canonicalised), `RenderFailed` (kustomize exited non-zero
     /// — evidence of render-time failure, the structural failure that
-    /// gates Phase 2 admission under THEORY §V.4), and `ProbeAbsent`
+    /// gates Phase 2 admission), and `ProbeAbsent`
     /// (no render probe ran inside the certification function — no
     /// evidence either way) — all collapsed to the same
     /// `b"pending-deployment"` hash, losing the discriminator a
@@ -5324,7 +5317,7 @@ dependencies:
     /// `Counted { count: 0 }` (probe RAN against an empty namespace and
     /// observed zero pods — evidence of a rollout that admitted the
     /// `HelmRelease` but never materialised any workloads, the
-    /// post-admission failure mode THEORY §V.4 / §VII.1 name as the
+    /// post-admission failure mode name as the
     /// Phase 2 honesty channel) and `ProbeAbsent` (no probe ran inside
     /// the certification function — no evidence either way) — collapsed
     /// to the same `0`, losing the discriminator a downstream `sekiban`
@@ -6217,8 +6210,8 @@ dependencies:
     /// reconciliation gates production deploys on `every probe
     /// substantiated its claim`, which collapses to one bool at the
     /// `forge::attestation::build_probe_coverage` tracing event rather
-    /// than re-derived per call site (THEORY §VI.1 one-oracle discipline,
-    /// THEORY §VII.1 attestation-gated deployments). A future regression
+    /// than re-derived per call site (one-oracle discipline,
+    /// attestation-gated deployments). A future regression
     /// that swapped the predicate at the typed-primitive site (e.g.,
     /// relaxed `ran > 0 && absent == 0` to `absent == 0` alone, silently
     /// flipping the empty case to true) would fail this pin at the
@@ -6434,7 +6427,7 @@ dependencies:
     /// true`, surfaced when the iterator-based
     /// [`crate::probe_outcome::probe_coverage`] composes a fleet-wide
     /// signal over zero records) without re-deriving `total == 0` at
-    /// the verifier (THEORY §VI.1 one-oracle discipline). Also pins
+    /// the verifier (one-oracle discipline). Also pins
     /// the structural mutual-exclusion invariant from the
     /// typed-primitive pin
     /// `test_is_empty_and_is_fully_covered_are_mutually_exclusive`: at

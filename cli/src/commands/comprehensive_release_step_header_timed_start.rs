@@ -59,8 +59,8 @@
 //!
 //! # Duplication signal past the PRIME DIRECTIVE threshold
 //!
-//! Five identically-shaped two-line bodies well past the THEORY
-//! §VI.1 recurring-shape-to-helper cut. Pre-lift a drift to the
+//! Five identically-shaped two-line bodies well past the
+//! recurring-shape-to-helper cut. Pre-lift a drift to the
 //! ordering (a capture-after-announce swap), a promotion of the
 //! `Instant::now()` receiver to a
 //! [`crate::deployment_poll_clock`]-style typed clock, or a swap of
@@ -88,16 +88,16 @@
 //! caller binds the [`Instant`] this primitive returns and hands
 //! its [`Instant::elapsed`] value to the completion primitive.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! - §V solve-once-at-the-primitive: the timer-start + step-header
+//! - Solve-once-at-the-primitive: the timer-start + step-header
 //!   pair lives at ONE construction surface. A future refinement
 //!   (an OTLP `release_step_started` span emitted alongside the
 //!   header, a promotion of the raw [`Instant`] to a typed
 //!   `ReleaseStepClock` wrapper, a swap of the timer clock source)
 //!   lands in one place.
-//! - §VI.1 three-is-a-law is exceeded here at N=5.
-//! - §VII types-as-theorems: the returned [`Instant`] carries the
+//! - Three-is-a-law is exceeded here at N=5.
+//! - Types-as-theorems: the returned [`Instant`] carries the
 //!   step-start invariant by construction. A caller that forgot to
 //!   bind the return trips a `#[must_use]` warning; a caller that
 //!   discarded it and re-called [`Instant::now`] would land on the

@@ -75,11 +75,11 @@
 //!
 //! # Theory grounding
 //!
-//! - THEORY.md §V (typed primitives own their algebra): the phase
+//! - (typed primitives own their algebra): the phase
 //!   axis lives as a closed enum with typed accessors rather than
 //!   parallel `if unit { … } if integration { … }` scaffolding at
 //!   the call site.
-//! - THEORY.md §VI.1 (duplication is a bug — the three-times rule):
+//! - (duplication is a bug — the three-times rule):
 //!   two sibling occurrences hit the compounding-directive threshold,
 //!   and the lift closes them both under one body before a third
 //!   phase copies the stanza a third time.

@@ -110,7 +110,7 @@ fn github_runner_rollout_poll_delay(attempt: u32) -> Duration {
 /// sigil so a future refinement (widening the disable set, canonicalize
 /// hook, typed `substrate::SafeMode(bool)` newtype, telemetry sigil)
 /// lands at the primitive and reaches every consumer by construction
-/// — THEORY §V solve-once-at-the-primitive; §VI.1 recurring-shape-
+/// — solve-once-at-the-primitive; recurring-shape-
 /// to-helper.
 fn is_safe_mode() -> bool {
     crate::repo::safe_mode_from_env()
@@ -154,8 +154,8 @@ pub async fn execute(
     // git repo?" hint tail on the discovery arm, threading the
     // offending [`std::path::PathBuf::display`] on the reject arm)
     // lands at the primitive body and reaches this consumer by
-    // construction — THEORY §V solve-once-at-the-primitive;
-    // §VI.1 recurring-shape-to-helper.
+    // construction — solve-once-at-the-primitive;
+    // recurring-shape-to-helper.
     let repo_root_str = crate::repo_root_utf8::get_repo_root_utf8_string()?;
 
     // Build output symlink
@@ -181,8 +181,8 @@ pub async fn execute(
         // kubectl-secret fallback below rather than passing the empty
         // token forward to the downstream attic operation. A future
         // refinement of the discovery shape lands at the sigil body and
-        // reaches this consumer by construction — THEORY §V
-        // solve-once-at-the-primitive; §VI.1 recurring-shape-to-helper.
+        // reaches this consumer by construction —
+        // solve-once-at-the-primitive; recurring-shape-to-helper.
         let attic_token = crate::infrastructure::attic::AtticClient::discover_token()
             .or_else(|| {
                 debug!("ATTIC_TOKEN not in env, trying kubectl...");
@@ -220,8 +220,8 @@ pub async fn execute(
         // of the alias contract (canonicalize hook, known-aliases
         // enum, telemetry sigil, typed `substrate::AtticServerAlias`
         // newtype) lands at the sigil body and reaches this consumer
-        // by construction — THEORY §V solve-once-at-the-primitive;
-        // §VI.1 recurring-shape-to-helper.
+        // by construction — solve-once-at-the-primitive;
+        // recurring-shape-to-helper.
         let attic_server = crate::infrastructure::attic::attic_server_alias();
 
         crate::info_attic_configure!();
@@ -254,7 +254,7 @@ pub async fn execute(
         //      exit_code, stderr }` (or `AtticError::ExecFailed` on
         //      spawn, or `AtticError::TokenRequired` if the caller
         //      forgot the token) — the structural-record tuple Phase 1
-        //      attestation records (THEORY §V.4) consume. A "bad token"
+        //      attestation records consume. A "bad token"
         //      now surfaces at the type level with the captured stderr
         //      attached, instead of as a fused string on the anyhow
         //      boundary.
@@ -303,7 +303,7 @@ pub async fn execute(
         //      as `AtticError::UseFailed { cache, server, exit_code,
         //      stderr }` (or `AtticError::ExecFailed` on spawn) — the
         //      structural-record tuple Phase 1 attestation records
-        //      (THEORY §V.4) consume. A "wrong server alias" now
+        //      consume. A "wrong server alias" now
         //      surfaces at the type level with the captured stderr
         //      attached, instead of as a mysterious substituter-fetch
         //      failure from the subsequent `nix build` with no
@@ -375,7 +375,7 @@ pub async fn execute(
         // primitive so a non-zero exit surfaces as
         // `AtticError::PushFailed` carrying the (cache, store_path,
         // attempts, exit_code, stderr) structural-record tuple Phase 1
-        // attestation records (THEORY §V.4) consume; a spawn failure
+        // attestation records consume; a spawn failure
         // (attic not on PATH under the CI runner's toolchain) surfaces
         // as `AtticError::ExecFailed` carrying the cache and the
         // spawn-error message. Pre-migration the stringly
@@ -1297,7 +1297,7 @@ mod tests {
     /// than by hand-spelling `std::env::var("ATTIC_SERVER_NAME")
     /// .unwrap_or_else(|_| "default".to_string())` inline. Pre-lift
     /// this file and `commands/build.rs::execute` each carried a
-    /// byte-identical inline stanza; two consumers past THEORY §VI.1's
+    /// byte-identical inline stanza; two consumers past the
     /// three-is-a-law threshold in intent — the pair had to agree on
     /// both the env-var spelling AND the string fallback for their
     /// respective `AtticClient` steps (this file: `login_with_retries`
@@ -1729,8 +1729,7 @@ mod nix_bin_routing_tests {
     /// though `status.code()` was in scope. Post-lift the delegation
     /// call routes through the primitive and the canonical
     /// `"nix build failed (exit {code})"` envelope emerges by
-    /// construction at the primitive's ONE body (THEORY.md §V.4
-    /// terminating shape) — the same shape every migrated sibling on
+    /// construction at the primitive's ONE body (terminating shape) — the same shape every migrated sibling on
     /// the async frontier (`commands/{build, pangea, product_release,
     /// image_release}.rs`, 72a7adf / c5ff1c4 / bf6d836 / b5d9573) and
     /// on the sync frontier (a3d51eb through 6cb9442) now emits.

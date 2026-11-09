@@ -26,7 +26,7 @@
 //! ```
 //!
 //! Three occurrences of an identical twelve-slot argument tuple past
-//! THEORY §VI.1's three-is-a-law threshold, on a downstream API whose
+//! The three-is-a-law threshold, on a downstream API whose
 //! signature has already grown once (the `commit_kustomization` slot
 //! was appended after the initial `update_kustomization_path` boolean);
 //! a further slot appended tomorrow would silently misalign all three
@@ -168,7 +168,7 @@ pub async fn push_release_image_amd64_auto_tag(
 /// .await?;
 /// ```
 ///
-/// Three occurrences of an identical shape past THEORY §VI.1's
+/// Three occurrences of an identical shape past the
 /// three-is-a-law threshold — the SAME three-file consumer census
 /// [`push_release_image_amd64_auto_tag`] already covers on its own,
 /// now one call above it — makes this primitive the law-redeeming

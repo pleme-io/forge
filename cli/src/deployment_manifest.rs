@@ -47,7 +47,7 @@
 //!   * Every Phase 2 deployment attestation across every product, every
 //!     environment, every cluster collapsed to the same `manifest_hash`
 //!     value (`Blake3Hash::digest(b"pending-deployment")`), defeating
-//!     the content-addressed-identity invariant THEORY §VI.1 names — a
+//!     the content-addressed-identity invariant names — a
 //!     downstream verifier reading two attestations carrying the same
 //!     `manifest_hash` could not distinguish them as describing the
 //!     same rendered cluster state from describing two different
@@ -70,7 +70,7 @@
 //!     was captured, its canonical fingerprint is available),
 //!     `RenderFailed` (kustomize/flux build was spawned and exited
 //!     non-zero — evidence of a render-time failure, the structural
-//!     failure that gates Phase 2 admission under THEORY §V.4), and
+//!     failure that gates Phase 2 admission), and
 //!     `ProbeAbsent` (no render probe ran inside the certification
 //!     function — no evidence either way). Collapsing all three into
 //!     the same constant sentinel routed evidence-of-render-failure
@@ -142,7 +142,7 @@
 //!   ran world cannot generate), but the observed state failed the
 //!   manifest-producibility invariant. Collapsing `RenderFailed` into
 //!   the same hash as `ProbeAbsent` would re-introduce the discriminator
-//!   loss the typed primitive exists to prevent (THEORY §V.1: make
+//!   loss the typed primitive exists to prevent (make
 //!   invalid states unrepresentable — a `manifest_hash` value that
 //!   conflates "no render probe ran" with "probe ran and kustomize
 //!   crashed" is a flat hash where a downstream verifier cannot recover
@@ -201,7 +201,7 @@
 //!
 //! ## Frontier inspiration
 //!
-//! THEORY §V.4 ("Two-phase signature composition") and §VII.1
+//! ("Two-phase signature composition") and
 //! ("Attestation-gated deployments") name the Phase 2 deployment record
 //! as the post-admission honesty channel: the structural evidence of
 //! what rendered manifest stream the cluster received against the
@@ -271,7 +271,7 @@ const MANIFEST_RENDER_FAILED_SENTINEL: &[u8] = b"manifest-render-failed";
 /// the prior `Blake3Hash::digest(b"pending-deployment")` constant
 /// conflated all three operational worlds into a single hash that
 /// stamped byte-identically across every deployment, defeating the
-/// content-addressed-identity discriminator THEORY §VI.1 names.
+/// content-addressed-identity discriminator names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeploymentManifestRenderOutcome {
     /// Rendered-manifest probe ran AND the kustomize / flux build
@@ -474,7 +474,7 @@ crate::impl_probe_outcome!(DeploymentManifestRenderOutcome, ProbeAbsent);
 /// `metadata.name` before `metadata.namespace` vs after — every
 /// kustomize version produces a slightly different YAML serialisation
 /// shape) must fingerprint identically: the content-addressed identity
-/// invariant THEORY §VI.1 names rests on the canonical form, not on
+/// invariant names rests on the canonical form, not on
 /// any particular serialiser's output. The parser parses each document
 /// into a `serde_json::Value` (whose `Map` is `BTreeMap`-backed by
 /// default, sorting keys lexically), then `serde_json::to_string` emits
@@ -488,14 +488,14 @@ crate::impl_probe_outcome!(DeploymentManifestRenderOutcome, ProbeAbsent);
 /// `commands/attestation.rs::test_manifest_hash_stable_across_key_order_and_metadata`
 /// pins at the call-site layer.
 ///
-/// THEORY §V.1: make invalid states unrepresentable. The three-arm
+/// Make invalid states unrepresentable. The three-arm
 /// codomain `{Rendered, RenderFailed, ProbeAbsent}` is foreclosed at the
-/// type level. THEORY §VI.1: one oracle, not a per-consumer re-
+/// type level. One oracle, not a per-consumer re-
 /// derivation. The parser is the one site that walks the multi-document
 /// YAML stream into a canonical `<apiVersion>|<kind>|<namespace>|<name>
 /// TAB <content-hash-hex>` fingerprint; downstream consumers pattern-
 /// match the typed three-arm enum and read the canonical fingerprint
-/// bytes from the `Rendered` arm. THEORY §VII.1: attestation-gated
+/// bytes from the `Rendered` arm. Attestation-gated
 /// deployments are structural — a `sekiban` strict-production policy
 /// that fails-closed on evidence of render-time failure can express that
 /// gate against the typed `RenderFailed` arm, where the pre-fix
@@ -678,8 +678,8 @@ mod tests {
              `Blake3Hash::digest(fingerprint)` — the content-addressed \
              identity invariant the positive arm rests on. Any \
              transformation at this layer would defeat the \
-             reproducibility a downstream verifier depends on (THEORY \
-             §VI.1: regenerating an artifact produces a byte-identical \
+             reproducibility a downstream verifier depends on (\
+             regenerating an artifact produces a byte-identical \
              result given the same inputs)"
         );
     }
@@ -1203,8 +1203,8 @@ data: {x: "1"}
     /// `spec` content — the load-bearing post-deployment-change
     /// discriminator a content-addressed `manifest_hash` must capture)
     /// produce distinct fingerprints AND distinct `manifest_hash`
-    /// values. Pins the content-addressed-identity invariant THEORY
-    /// §VI.1 names: a downstream verifier reading two attestations
+    /// values. Pins the content-addressed-identity invariant:
+    /// a downstream verifier reading two attestations
     /// against the same identity tuple but different content recovers
     /// the discriminator at the BLAKE3 surface. Mirrors
     /// `chart_listing::test_canonical_fingerprint_changes_when_content_changes`
@@ -1240,7 +1240,7 @@ spec:
             fp2.manifest_hash().to_hex(),
             "two distinct manifest contents must produce distinct \
              manifest_hash values — the content-addressed-identity \
-             invariant THEORY §VI.1 names",
+             invariant",
         );
     }
 

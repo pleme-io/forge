@@ -311,7 +311,7 @@ pub async fn execute(
 /// `commands/github_runner_ci.rs`) carried the
 /// `run_with_policy + classifier + from_capture` triple verbatim —
 /// three identically-shaped bodies past the three-times threshold
-/// (THEORY §VI.1). The `retries` parameter is preserved as skopeo's
+///. The `retries` parameter is preserved as skopeo's
 /// internal `--retry-times` (per-blob retry inside skopeo); the OUTER
 /// loop is bounded by the typed policy.
 #[cfg(test)]
@@ -486,8 +486,8 @@ mod tests {
     /// `!sha.is_empty()` empty-check inline. Pre-lift this file and
     /// `commands/rust_service.rs::get_tag_suffix` and
     /// `commands/product_release.rs::execute` each carried a
-    /// byte-equivalent inline stanza; three consumers past THEORY
-    /// §VI.1's three-is-a-law threshold — the trio had to agree on
+    /// byte-equivalent inline stanza; three consumers past
+    /// the three-is-a-law threshold — the trio had to agree on
     /// both the env-var spelling AND the empty-string-is-miss
     /// semantic for the pushed image tag, the deployed image tag,
     /// and the product-release-driven downstream tags to all resolve
@@ -607,7 +607,7 @@ pub async fn push_with_retry(
 /// per-tag `"Pushing {registry}:{tag}"` label, invoke
 /// [`push_with_retry`], increment the bar, then close with a
 /// `"Push complete"` `finish_with_message`. Three identically-shaped
-/// bodies past THEORY §VI.1's three-is-a-law threshold — the visual
+/// bodies past the three-is-a-law threshold — the visual
 /// contract for the tag-push loop (label spelling, completion phrasing,
 /// bar-increment vs. failure interleave) now attaches to a type at ONE
 /// code line. A future consumer that pushes a `&[String]` of tags to a

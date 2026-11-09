@@ -89,7 +89,7 @@
 //!   structurally distinct world from both `Reproducible` AND
 //!   `ProbeAbsent`. Collapsing `Drift` into a single boolean
 //!   re-introduces the discriminator loss the typed primitive exists
-//!   to prevent (THEORY §V.1: make invalid states unrepresentable —
+//!   to prevent (make invalid states unrepresentable —
 //!   a `reproducible: false` value that conflates "no re-build
 //!   probe ran" with "re-build ran and bytes differed" is a flat
 //!   state where a downstream verifier cannot recover the
@@ -138,7 +138,7 @@
 //!
 //! Nix's `--check` / `--rebuild` flag is the canonical hermetic-build
 //! determinism probe in the content-addressed build lineage (cited by
-//! THEORY §VI.1: "regenerating an artifact produces a byte-identical
+//! "regenerating an artifact produces a byte-identical
 //! result given the same inputs"). SLSA v1.0 §"Build L3" and the
 //! reproducible-builds.org methodology both treat the two-pass
 //! byte-comparison verdict as the evidence-bearing channel for the

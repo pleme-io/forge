@@ -35,8 +35,8 @@
 //!
 //! ## Why a typed enum, not a string
 //!
-//! THEORY §V.4 Phase 1 attestation: every claim a typed primitive can
-//! populate must be populated honestly, not stubbed. THEORY §V.1: make
+//! Phase 1 attestation: every claim a typed primitive can
+//! populate must be populated honestly, not stubbed. Make
 //! invalid states unrepresentable. A `String` field cannot tell a verifier
 //! whether `"amd64"` came from the manifest, from a config blob the
 //! manifest probe did not fetch, or from a hardcoded constant the build

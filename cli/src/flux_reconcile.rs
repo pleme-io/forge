@@ -9,7 +9,7 @@
 //!   spawn `flux reconcile source git` site in forge). The typed
 //!   [`FluxSourceGitReconcileError`] carries the same
 //!   `(source_name, namespace, exit_code, stderr)` structural record
-//!   [`FluxReconcileError`] does — Phase 1 attestation records (THEORY §V.4)
+//!   [`FluxReconcileError`] does — Phase 1 attestation records
 //!   pattern-match on both without re-parsing the display string.
 //!
 //! Four command-module sites in forge drive the same invocation shape
@@ -22,7 +22,7 @@
 //! ```
 //! carried verbatim modulo per-site failure envelope (best-effort `warn!`
 //! at two sites, fatal `bail!` at a third) and per-site `--with-source`
-//! flag selection. Four identically-shaped bodies past THEORY §VI.1's
+//! flag selection. Four identically-shaped bodies past the
 //! three-times threshold (PRIME DIRECTIVE: duplication budget is zero):
 //!
 //! - `commands/deploy.rs::execute` (best-effort, no `--with-source`)
@@ -48,13 +48,13 @@
 //!    tuple. Post-lift both surface as typed
 //!    [`FluxReconcileError`] variants carrying the structural
 //!    `(kustomization, namespace, with_source, exit_code, stderr)`
-//!    tuple THEORY §V.4 Phase 1 attestation records pattern-match on.
+//!    tuple Phase 1 attestation records pattern-match on.
 //!
-//! THEORY.md §V.1 (Types → Invariants → Proofs): the "flux reconcile
+//! (Types → Invariants → Proofs): the "flux reconcile
 //! ran and returned success" invariant is proved at the reconcile
 //! frontier and carried by the return type `Result<(),
 //! FluxReconcileError>`, not re-derived at four consumer sites.
-//! THEORY.md §VI.1 (one-oracle): the reconcile invocation shape is
+//! (one-oracle): the reconcile invocation shape is
 //! named here and every consumer reads through it.
 
 use thiserror::Error;
@@ -90,8 +90,8 @@ use crate::retry::classify_capture;
 /// surfaces, the `commands/helm.rs::helm_bin()` sigil, and the sibling
 /// `flux_get.rs::flux_bin()` sigil (5ad341e) — the same per-module
 /// single-point-of-truth discipline applied to the FLUX-reconcile
-/// surface here. THEORY §I.5 (Generation over composition, duplication
-/// budget zero) and §VI.1 (three-times rule).
+/// surface here. (Generation over composition, duplication
+/// budget zero) and (three-times rule).
 fn flux_bin() -> String {
     crate::repo::get_tool_path("FLUX_BIN", "flux")
 }
@@ -595,7 +595,7 @@ mod tests {
     /// either from the `#[error(...)]` attribute would silently degrade
     /// the operator prose at every stringly-downstream site AND leave
     /// operators without the exit-code / stderr signal Phase 1
-    /// attestation records depend on (THEORY §V.4).
+    /// attestation records depend on.
     #[test]
     fn failed_display_carries_exit_code_and_stderr() {
         let err = FluxReconcileError::Failed {
@@ -835,7 +835,7 @@ mod tests {
     /// `Failed`'s `Display` must ALSO render `exit_code` and `stderr`
     /// verbatim — the migrated `commands/flux.rs::reconcile_source` site
     /// folds the typed error into an `anyhow::Context` chain via `?`,
-    /// and any Phase 1 attestation record (THEORY §V.4) reading through
+    /// and any Phase 1 attestation record reading through
     /// the display string relies on those fields.
     #[test]
     fn source_git_display_carries_every_field() {

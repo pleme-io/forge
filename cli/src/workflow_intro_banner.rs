@@ -79,9 +79,9 @@
 //! [`crate::ui::BoxedBannerStyle`] lands in ONE place on the peer
 //! primitive and this fusion inherits by composition.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the workflow-entry CyanBold
+//! Solve-once-at-the-primitive: the workflow-entry CyanBold
 //! banner lives at ONE construction surface — a future refinement
 //! (an OTLP `workflow_started` observability span emitted alongside
 //! the print, a promotion of the CyanBold palette to a distinct
@@ -89,7 +89,7 @@
 //! event carrying the workflow name) lands in one place rather
 //! than in every consumer.
 //!
-//! §VI.1 three-is-a-law is intentionally approached from below
+//! Three-is-a-law is intentionally approached from below
 //! here at two sites: the two pre-lift stanzas each carried the
 //! full four-line stanza and diverged only on the title slot.
 //! Lifting at N=2 keeps a third `commands/<workflow>.rs` module (a

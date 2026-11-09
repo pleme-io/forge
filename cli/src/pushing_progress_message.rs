@@ -61,19 +61,19 @@
 //! two verbs distinct at the primitive layer pins each surface's
 //! contract at the byte level rather than by convention.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the `Pushing <ref>` progress-bar
+//! Solve-once-at-the-primitive: the `Pushing <ref>` progress-bar
 //! message shape lives at ONE construction surface — a future
 //! refinement (a `"Pushing "` → `"↑ Pushing "` icon-prefix widening,
 //! a distinct progress-bar namespace for pushes vs. pulls, a
 //! structured `ProgressMessage` enum replacing the free-string
 //! payload) lands in one place rather than in every consumer.
 //!
-//! §VI.1 three-is-a-law: three sites today (`push.rs` per-tag loop,
+//! Three-is-a-law: three sites today (`push.rs` per-tag loop,
 //! `github_runner_ci.rs` `:latest` iteration, `github_runner_ci.rs`
 //! `:<git-sha>` iteration), clearing the duplication threshold at
-//! exactly the point THEORY calls a law.
+//! exactly the point where it becomes a law.
 
 use std::io;
 

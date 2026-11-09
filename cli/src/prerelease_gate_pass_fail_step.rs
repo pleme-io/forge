@@ -60,16 +60,16 @@
 //!   line walks INSIDE the failure arms. This primitive owns the
 //!   step-header ABOVE those walks.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the `<base> passed` / `<base>
+//! Solve-once-at-the-primitive: the `<base> passed` / `<base>
 //! failed` label composition lives at ONE construction surface — a
 //! future refinement (an OTLP `gate_outcome` span, a promotion of
 //! the trailing suffix from ` passed` / ` failed` to a bolder
 //! `✓ Passed` / `✗ Failed`, an added structured-log key naming the
 //! base label) lands in one place rather than in six.
 //!
-//! §VI.1 three-is-a-law: three sibling call pairs (Integration,
+//! Three-is-a-law: three sibling call pairs (Integration,
 //! E2E, Compilation) share the exact grammar. The typed enum below
 //! closes the base-label choice at build time so a future added
 //! variant fails exhaustiveness on

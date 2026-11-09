@@ -739,7 +739,7 @@ async fn fetch_configmap(namespace: &str, name: &str) -> Result<ConfigMapInfo> {
 /// Owns the seven-argument vector shape
 /// `["get", <kind>, <name>, "-n", <namespace>, "-o", "json"]`
 /// every single-object `fetch_*` consumer site in this module drove
-/// verbatim. Five pre-lift call sites past THEORY.md §VI.1's
+/// verbatim. Five pre-lift call sites past the
 /// three-times threshold:
 ///
 /// - [`fetch_deployment`] — `("deployment", <deployment>, <ns>)`; wraps
@@ -810,7 +810,7 @@ async fn kubectl_get_object(
 /// Owns the "spawn `kubectl_command_async().args(argv).output().await?`,
 /// then `kubectl_get_items(&output)?`" two-step composition every
 /// list-shaped `fetch_*` consumer site in this module drove verbatim.
-/// Five pre-lift call sites past THEORY.md §VI.1's three-times
+/// Five pre-lift call sites past the three-times
 /// threshold:
 ///
 /// - [`fetch_pods`] — 9-arg with `-l app=<deployment>` (pod listing
@@ -2451,7 +2451,7 @@ mod tests {
     /// Both shapes reduce to the same lenient-typed i64 read; the
     /// post-lift primitive owns the canonical pointer-based spelling
     /// so any future consumer of a replica-count field lands on the
-    /// same shape. Seven consumer sites past THEORY.md §VI.1's
+    /// same shape. Seven consumer sites past the
     /// three-times threshold. A future regression that re-fused the
     /// pre-lift stanza at one of the seven sites (or at a new eighth
     /// replica-count consumer of the same shape) would silently split
@@ -2636,7 +2636,7 @@ mod tests {
     /// carried a byte-identical `ExitStatusExt::from_raw` builder
     /// verbatim alongside the sibling `commands/helm.rs::capture_tests`
     /// copy — two occurrences past the two-times rule (PRIME
-    /// DIRECTIVE: duplication budget is zero, THEORY §VI.1). Both
+    /// DIRECTIVE: duplication budget is zero,). Both
     /// consumer sites now delegate to the ONE `test_support`
     /// primitive, so a future reshape (adding a captured signal
     /// detail, widening to a cross-platform builder, tracking the
@@ -2691,8 +2691,7 @@ mod tests {
     /// environments, a telemetry sigil on the resolved value, or a
     /// swap to a typed `substrate::Environment(String)` newtype —
     /// lands at that one body and reaches this consumer (and any
-    /// future one) by construction (THEORY §V —
-    /// solve-once-at-the-primitive; §VI.1 —
+    /// future one) by construction (solve-once-at-the-primitive;
     /// recurring-shape-to-helper).
     ///
     /// Slice via [`crate::test_support::module_body_before_tests`]

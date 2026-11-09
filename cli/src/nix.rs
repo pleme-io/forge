@@ -94,9 +94,9 @@ fn nix_bin() -> String {
 /// echo — a `/nix/store/…` with a subpath, an `unknown-*` sentinel, an
 /// empty stdout — past the boundary the parse just proved.
 ///
-/// THEORY.md §V.1 (Types → Invariants → Proofs): the store-path invariant
+/// (Types → Invariants → Proofs): the store-path invariant
 /// is proved at the frontier ([`run_nix_build_typed`]) and carried by the
-/// return type, not re-derived per consumer. THEORY.md §VI.1 (one-oracle):
+/// return type, not re-derived per consumer. (one-oracle):
 /// the canonical view is named at [`StorePath::as_str`] and every
 /// downstream projection (borrow, owned-buffer move, `Path`-slot,
 /// `OsStr`-slot, byte-slot) reads through it.
@@ -190,9 +190,9 @@ pub(crate) async fn run_nix_build_typed(
     // here — typed, with the raw stdout preserved and the exact grammar
     // clause under `#[source]` — turns "cryptic remote attic push error"
     // and "attestation silently dropped via .unwrap_or(false)" into
-    // one legible failure at the boundary. THEORY §V.1 (Types →
+    // one legible failure at the boundary. (Types →
     // Invariants → Proofs): the validated identity is proved at the
-    // frontier, not re-derived per downstream consumer. THEORY §VI.1
+    // frontier, not re-derived per downstream consumer.
     // (one-oracle / three-times rule): the store-path grammar stays
     // defined at `StorePath::parse`; this call is the second consumer
     // (attestation is the first at `commands/attestation.rs::
@@ -262,7 +262,7 @@ pub async fn build_flake_attr(flake_attr: &str) -> Result<NixBuildResult> {
 /// working_dir: `commands/local.rs::up` (no working_dir),
 /// `commands/image_release.rs::build_nix_image` (working_dir = `&str` arg),
 /// `commands/tool.rs::release` (working_dir = `&Path` arg). Three
-/// identically-shaped bodies past the three-times threshold (THEORY §VI.1)
+/// identically-shaped bodies past the three-times threshold
 /// — this function is the law-redeeming consolidation for the "build a
 /// flake attribute, return the store path, fail typed on every failure
 /// shape" surface in forge.
@@ -643,7 +643,7 @@ pub struct NixClosureInfo {
 /// - `commands/rust_service.rs::push_rust_service` (AMD64 arm)
 /// - `commands/rust_service.rs::push_rust_service` (ARM64 arm)
 ///
-/// Three identically-shaped bodies past THEORY §VI.1's three-times
+/// Three identically-shaped bodies past the three-times
 /// threshold (PRIME DIRECTIVE: duplication budget is zero) consolidate
 /// onto this typed primitive. Three load-bearing properties this
 /// primitive owns that the pre-lift raw-spawn stanzas dropped:
@@ -659,7 +659,7 @@ pub struct NixClosureInfo {
 ///    dropped the exit code, the stderr, AND the offending output-link
 ///    entirely. Post-lift both surface as typed
 ///    [`NixBuildError::ExecFailed`] / [`NixBuildError::PathInfoFailed`]
-///    carrying the structural-record tuple THEORY §V.4 Phase 1
+///    carrying the structural-record tuple Phase 1
 ///    attestation records pattern-match on.
 /// 3. **`closure_size` derivation.** Pre-lift each site re-derived the
 ///    line count via `String::from_utf8_lossy(&stdout).lines().count()`;
@@ -684,7 +684,7 @@ pub struct NixClosureInfo {
 ///   (`flake_attr` -> `label`) lands in one place.
 /// - Returns [`NixBuildError::PathInfoFailed`] carrying `(output_link,
 ///   exit_code, stderr)` when `nix path-info --recursive` exits
-///   non-zero — the same structural-record tuple THEORY §V.4 Phase 1
+///   non-zero — the same structural-record tuple Phase 1
 ///   attestation records consume, distinct from `BuildFailed` at the
 ///   type level so telemetry can tell build-step failures from
 ///   closure-enumeration failures without parsing the message.
@@ -731,7 +731,7 @@ async fn path_info_recursive_with_bin(
     // output-link as the `flake_attr` label (uniform with the
     // build-step primitive's field name). Non-zero exit -> the new
     // `PathInfoFailed` variant carrying (output_link, exit_code,
-    // stderr) — the structural-record tuple THEORY §V.4 Phase 1
+    // stderr) — the structural-record tuple Phase 1
     // attestation records consume.
     let output = classify_capture(
         cmd.output().await,
@@ -1257,7 +1257,7 @@ mod tests {
     /// the pre-lift `warn!("⚠️ Failed to get closure info (non-fatal)")`
     /// line that dropped all three fields. The `PathInfoFailed` shape
     /// is distinct from `BuildFailed` at the type level so a downstream
-    /// telemetry / Phase 1 attestation record (THEORY §V.4) can tell a
+    /// telemetry / Phase 1 attestation record can tell a
     /// build-step failure from a closure-enumeration failure without
     /// parsing the message.
     #[tokio::test]

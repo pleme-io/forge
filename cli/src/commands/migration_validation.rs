@@ -170,7 +170,7 @@ impl MigrationValidationResult {
 /// this doc-comment out of the `ui.rs`
 /// `print_validation_issue_line_callers_delegate_through_primitive`
 /// caller-shield's line-scanning needle).
-/// The three-times threshold (THEORY §VI.1: "two occurrences is a
+/// The three-times threshold ("two occurrences is a
 /// coincidence; three is a law") is crossed exactly here, so the loop
 /// shape lifts onto ONE typed body. A future gate — the pending
 /// `check_rollback_compatibility` branch, or a JSON-per-line dialect
@@ -182,9 +182,9 @@ impl MigrationValidationResult {
 ///
 /// # Theory grounding
 ///
-/// THEORY.md §VI.1 (three-times rule): three sibling occurrences past
-/// the "two is a coincidence; three is a law" threshold. THEORY.md
-/// §V.1 (Types → Invariants → Proofs → Render Anywhere): the paired
+/// (three-times rule): three sibling occurrences past
+/// the "two is a coincidence; three is a law" threshold.
+/// (Types → Invariants → Proofs → Render Anywhere): the paired
 /// byte-oracle [`write_migration_issue_report`] is the Render Anywhere
 /// half — pinning the exact rendered bytes as a unit-testable
 /// invariant.
@@ -244,7 +244,7 @@ pub(crate) fn write_migration_issue_report<W: std::io::Write>(
 /// three-line branching stanza verbatim, varying only in the pass
 /// message and the noun spliced into the failure header
 /// (`"issues"` / `"safety issues"` / `"manifest issues"`). The
-/// three-times threshold (THEORY §VI.1: "two occurrences is a
+/// three-times threshold ("two occurrences is a
 /// coincidence; three is a law") is crossed exactly here, so the
 /// verdict-branching shape lifts onto ONE typed body — the pass-branch
 /// glyph, the failure-branch `"Found {} <noun>"` grammar, the ordering
@@ -268,10 +268,10 @@ pub(crate) fn write_migration_issue_report<W: std::io::Write>(
 ///
 /// # Theory grounding
 ///
-/// THEORY.md §VI.1 (three-times rule): three sibling occurrences past
+/// (three-times rule): three sibling occurrences past
 /// the "two is a coincidence; three is a law" threshold; a fourth
 /// gate joining forwards through this primitive by construction.
-/// THEORY.md §V.1 (Types → Invariants → Proofs → Render Anywhere):
+/// (Types → Invariants → Proofs → Render Anywhere):
 /// the writer-form sibling [`write_migration_validation_verdict`] is
 /// the Render Anywhere half — the pass-then-nothing / failure-then-
 /// enumeration byte invariant lives in a `#[test]` bytes-in-bytes-out
@@ -2110,8 +2110,8 @@ migrations:
     /// scratch-dir-consuming test to land on the RAII primitive by
     /// construction, and a regression that silently reintroduced the
     /// three-line pre-clean-then-recreate stanza (leaking the tempdir
-    /// on a mid-body panic per THEORY §V verification-by-construction
-    /// and racing the fixed-name subdir per THEORY §VII operation)
+    /// on a mid-body panic verification-by-construction
+    /// and racing the fixed-name subdir operation)
     /// would drop the primitive-call hit count below the floor and
     /// fail HERE before its consumer flaked on a CI reranner.
     ///
@@ -2151,10 +2151,10 @@ migrations:
             residue.is_empty(),
             "commands/migration_validation.rs must NOT reintroduce the pre-lift \
              fixed-name-under-shared-temp-root shape — a mid-body panic leaves \
-             the subdir on disk (breaking THEORY §V verification-by-construction: \
+             the subdir on disk (breaking verification-by-construction: \
              a failing test now flakes a concurrent second run against its \
              residue), and two parallel `cargo test` runs collide on the same \
-             fixed subdir name (breaking THEORY §VII operation: an operator \
+             fixed subdir name (breaking operation: an operator \
              debugging the flake reads it as \"the test is nondeterministic\"). \
              Route new scratch-dir tests through \
              `crate::test_support::named_scratch_dir` — \

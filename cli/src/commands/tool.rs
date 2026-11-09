@@ -92,7 +92,7 @@ impl std::fmt::Display for ToolLanguage {
 /// `commands/e2e.rs:87` (170ecac), and the sibling `bun_bin()` /
 /// `crossplane_bin()` / `cosign_bin()` / `jsonnet_bin()` sigil
 /// discipline on other command modules (9986f11 / 6b3ac16 / a070a3c /
-/// a826ac0). Solve-once at the sigil (THEORY §I.5 — duplication budget
+/// a826ac0). Solve-once at the sigil (duplication budget
 /// zero; every recurring shape becomes a helper before it becomes
 /// duplicated code) means a future added `cargo` spawn cannot silently
 /// re-copy the two-argument resolve and drift away from the `CARGO`
@@ -117,7 +117,7 @@ fn cargo_bin() -> String {
 /// `commands/e2e.rs:87` per 170ecac, the `bun_bin()` sibling on
 /// `commands/frontend_validation.rs` per 9986f11, and the `nix_bin()`
 /// sibling on `commands/rust_service.rs` per 63d4fe7). Solve-once at
-/// the sigil (THEORY §I.5 — duplication budget zero; every recurring
+/// the sigil (duplication budget zero; every recurring
 /// shape becomes a helper before it becomes duplicated code) means a
 /// future added `crate2nix` spawn cannot silently re-copy the two-
 /// argument resolve and drift away from the `CRATE2NIX` override at
@@ -329,11 +329,11 @@ pub fn bump(name: &str, language: &str, level: &str, working_dir: &str) -> Resul
     // reaches, rather than a silent parse-error surface a stringly consumer
     // would leave unchecked.
     //
-    // THEORY.md §V.4 typed primitives: the `--level` argument surface now
+    // Typed primitives: the `--level` argument surface now
     // carries a typed peer parsed at ONE site (this call), matching the
     // discipline `language.parse::<ToolLanguage>()` established at the same
     // fn's ONE `let lang: ...` site above.
-    // THEORY.md §VI.1 one-oracle discipline: the level grammar (which strings
+    // One-oracle discipline: the level grammar (which strings
     // map to which [`version::BumpLevel`] variant) lives at ONE body
     // ([`version::BumpLevel::from_str`]) that this fn — and every sibling
     // `bump` fn — parses through, rather than at N stringly-wrapper call
@@ -1160,8 +1160,8 @@ mod tests {
         // pairs on `commands/test_ci.rs` (916f1a4),
         // `commands/developer_tools.rs` (534ef48), `commands/e2e.rs`
         // (170ecac), and the `bun_bin()` sibling on
-        // `commands/frontend_validation.rs` (9986f11). THEORY §I.5:
-        // duplication budget zero.
+        // `commands/frontend_validation.rs` (9986f11).
+        // Duplication budget zero.
         assert!(
             body.contains("fn cargo_bin()"),
             "commands/tool.rs must define `cargo_bin()` — the sigil \
@@ -1249,8 +1249,8 @@ mod tests {
         // drift away from the sigil's single point of truth. Mirrors
         // the sibling `cargo_bin()` count-eq-1 shield above and the
         // fleet-wide `<tool>_bin()` shield discipline landed at 9f6046b
-        // / 9986f11 / 170ecac / 534ef48 / 63d4fe7. THEORY §I.5:
-        // duplication budget zero.
+        // / 9986f11 / 170ecac / 534ef48 / 63d4fe7.
+        // Duplication budget zero.
         assert!(
             body.contains("fn crate2nix_bin()"),
             "commands/tool.rs must define `crate2nix_bin()` — the sigil \
@@ -1446,7 +1446,7 @@ mod status_spawn_routing_tests {
     /// `lock`'s two `cargo`/`zig` invocations), so migrating the helper
     /// body once rewrites every one of those seven caller sites'
     /// terminating envelope to the canonical form without touching a
-    /// single caller — the shape THEORY §VI.1's three-times rule
+    /// single caller — the shape the three-times rule
     /// prescribes when the pattern lives at a helper boundary.
     ///
     /// Sibling of the `commands/crossplane.rs` shield

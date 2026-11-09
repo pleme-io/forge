@@ -41,7 +41,7 @@
 //! closed for the image `architecture` field (`"amd64"` literal →
 //! [`crate::oci_architecture::OciArchitectureOutcome`]). The typed
 //! primitive here completes the SBOM / vuln-scan side of the same
-//! Phase 1 attestation-honesty arc (THEORY §V.2: attestation is
+//! Phase 1 attestation-honesty arc (attestation is
 //! cryptographic evidence, not a wish — a hash that has no relationship
 //! to a probe response cannot witness what the probe would have said).
 //!
@@ -167,7 +167,7 @@ crate::impl_probe_outcome!(SbomProbeOutcome, Absent);
 /// hardcoded `0, 0` for the counts AND a name-keyed hash for the
 /// scan; collapsing both into one typed-outcome conversion ensures
 /// the three fields cannot drift apart at the boundary (the
-/// canonical "three claims, one source" discipline THEORY §VI.1
+/// canonical "three claims, one source" discipline
 /// names).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VulnScanProbeOutcome {

@@ -870,7 +870,7 @@ pub async fn replace_symlink_async(target: &Path, link_name: &Path) -> Result<()
 /// every one routes through this one body so the read is spelled
 /// exactly once and the envelope wording is one edit away from every
 /// caller by construction — the "solve once at the primitive" shape
-/// (THEORY §V) also every sibling `crate::repo::*` primitive on the
+/// also every sibling `crate::repo::*` primitive on the
 /// sync-fs surface already carries.
 ///
 /// # Envelope
@@ -987,7 +987,7 @@ pub fn find_repo_root() -> Result<PathBuf> {
 /// sigil separating explicit-value from default-fallback paths, or
 /// a swap to a typed `substrate::EnvVar(String)` newtype) lands at
 /// [`env_var_or_default`] and reaches every sigil by construction
-/// (THEORY §V — solve-once-at-the-primitive; §VI.1 —
+/// (solve-once-at-the-primitive;
 /// recurring-shape-to-helper).
 ///
 /// # Arguments
@@ -1020,7 +1020,7 @@ pub fn get_tool_path(env_var: &str, fallback: &str) -> String {
 /// contract — a canonicalize hook, a must-exist check, a swap to a
 /// typed `substrate::ServiceDir(PathBuf)` newtype, a telemetry sigil
 /// on the resolved path — lands here and reaches every caller by
-/// construction (THEORY §VI.1 — every recurring shape becomes a helper
+/// construction (every recurring shape becomes a helper
 /// before it becomes duplicated code).
 ///
 /// # Arguments
@@ -1103,8 +1103,7 @@ pub fn path_from_env(env_var: &str, miss_context: &'static str) -> Result<PathBu
 /// closes on the `String`-fallback surface, [`path_from_env`] closes
 /// on the `Result<PathBuf>` surface, [`env_var_optional`] closes on
 /// the `Option<String>` surface, and [`safe_mode_from_env`] /
-/// [`truthy_flag_from_env`] close on the `bool` surface (THEORY §V —
-/// solve-once-at-the-primitive; §VI.1 — recurring-shape-to-helper).
+/// [`truthy_flag_from_env`] close on the `bool` surface (solve-once-at-the-primitive; recurring-shape-to-helper).
 pub fn path_from_env_optional(env_var: &str) -> Option<PathBuf> {
     env_var_optional(env_var).map(PathBuf::from)
 }
@@ -1192,8 +1191,7 @@ pub fn verify_directory(dir: &Path, required_files: &[&str]) -> Result<()> {
 /// `let dir = Path::new(working_dir);` idiom. A future refinement of the
 /// shape (canonicalize hook, a must-be-a-directory check that upgrades
 /// the `.exists()` gate to `.is_dir()`, a hermetic-scratch relocation)
-/// lands here and reaches every consumer by construction (THEORY §V —
-/// solve-once-at-the-primitive; §VI.1 — recurring-shape-to-helper).
+/// lands here and reaches every consumer by construction (solve-once-at-the-primitive; recurring-shape-to-helper).
 ///
 /// # Errors
 ///
@@ -1280,8 +1278,7 @@ pub fn require_existing_working_dir(working_dir: &str) -> Result<&Path> {
 /// future refinement of the shape — canonicalize hook, a
 /// must-be-a-file check that upgrades the `.exists()` gate to
 /// `.is_file()`, a symlink-resolution branch — lands here and reaches
-/// every consumer by construction (THEORY §V.1 —
-/// Types → Invariants → Proofs; §VI.1 — three-times rule, extract an
+/// every consumer by construction (Types → Invariants → Proofs; three-times rule, extract an
 /// archetype and generate from it).
 ///
 /// # Type contract
@@ -1499,8 +1496,7 @@ pub fn require_existing_path_at(
 /// resolve, canonicalizing the value against a closed enum, a
 /// telemetry sigil separating explicit-value from default-fallback
 /// paths, or a swap to a typed `substrate::EnvVar(String)` newtype —
-/// lands here and reaches every sigil by construction (THEORY §V —
-/// solve-once-at-the-primitive; §VI.1 — recurring-shape-to-helper).
+/// lands here and reaches every sigil by construction (solve-once-at-the-primitive; recurring-shape-to-helper).
 ///
 /// # Arguments
 ///
@@ -1560,8 +1556,7 @@ pub fn env_var_or_default(env_var: &str, default: &str) -> String {
 /// surface, [`path_from_env`] closes on the `Result<PathBuf>` surface,
 /// [`safe_mode_from_env`] / [`truthy_flag_from_env`] close on the `bool`
 /// surface, and [`crate::git::release_git_sha_from_env`] closes on the
-/// empty-string-is-miss `Option<String>` mirror (THEORY §V —
-/// solve-once-at-the-primitive; §VI.1 — recurring-shape-to-helper).
+/// empty-string-is-miss `Option<String>` mirror (solve-once-at-the-primitive; recurring-shape-to-helper).
 ///
 /// # The empty-string case
 ///
@@ -1594,7 +1589,7 @@ pub fn env_var_optional(env_var: &str) -> Option<String> {
 /// a closed enum of known environments, a telemetry sigil on the
 /// value, or a swap to a typed `substrate::Environment(String)`
 /// newtype) lands at the primitive and reaches every consumer by
-/// construction (THEORY §V — solve-once-at-the-primitive; §VI.1 —
+/// construction (solve-once-at-the-primitive;
 /// recurring-shape-to-helper).
 ///
 /// The `"staging"` default matches the `#[arg(long, env = "FORGE_ENV",
@@ -1649,7 +1644,7 @@ pub fn get_environment() -> String {
 /// [`path_from_env`] closes on the `Result<PathBuf>` surface, and
 /// [`crate::git::release_git_sha_from_env`] closes on the
 /// empty-string-is-miss `Option<String>` surface
-/// (THEORY §V — solve-once-at-the-primitive; §VI.1 —
+/// (solve-once-at-the-primitive;
 /// recurring-shape-to-helper).
 ///
 /// The empty-string parity (`SAFE=""` → `true`) is deliberate: a
@@ -1729,8 +1724,8 @@ pub fn safe_mode_from_env() -> bool {
 /// [`env_var_or_default`] closes on the `String`-fallback surface,
 /// [`path_from_env`] closes on the `Result<PathBuf>` surface, and
 /// [`crate::git::release_git_sha_from_env`] closes on the
-/// empty-string-is-miss `Option<String>` surface (THEORY §V — solve-once-
-/// at-the-primitive; §VI.1 — recurring-shape-to-helper).
+/// empty-string-is-miss `Option<String>` surface (solve-once-
+/// at-the-primitive; recurring-shape-to-helper).
 ///
 /// # The empty-string case
 ///
@@ -1793,8 +1788,7 @@ pub enum ProductDirLayout {
 /// carried a sibling that hand-rolled the shape one function down from
 /// the primitive body. Post-lift only ONE code point across the crate
 /// (the primitive body) spells the `read_to_string.ok()? +
-/// from_str.ok()` silent-probe shell (THEORY §V —
-/// solve-once-at-the-primitive; §VI.1 — every recurring shape becomes
+/// from_str.ok()` silent-probe shell (solve-once-at-the-primitive; every recurring shape becomes
 /// a helper before it becomes duplicated code).
 ///
 /// The `is_some_and` fold on the primitive's `Option<serde_yaml::Value>`
@@ -2013,8 +2007,8 @@ where
 /// failure telemetry that discriminates permission-denied from
 /// not-a-directory, a canonicalize hook on the `dir` argument, a swap to
 /// a typed `WorkingDir(PathBuf)` newtype) lands here and reaches every
-/// consumer by construction (THEORY §V — solve-once-at-the-primitive;
-/// §VI.1 — recurring-shape-to-helper).
+/// consumer by construction (solve-once-at-the-primitive;
+/// recurring-shape-to-helper).
 ///
 /// # Sibling primitives
 ///
@@ -2893,7 +2887,7 @@ pub fn utf8_lossy_streams(
 ///
 /// # Duplication lift (the stderr-first joined-corpus discipline)
 ///
-/// Four sibling consumer sites past THEORY §VI.1's three-times-is-a-
+/// Four sibling consumer sites past the three-times-is-a-
 /// law threshold each spelled the same two-line stanza inline:
 ///
 /// ```text
@@ -2991,7 +2985,7 @@ pub fn utf8_lossy_streams_joined(output: &std::process::Output) -> String {
 /// - `observability.rs::EventMetadata::new` — `timestamp` on every
 ///   [`crate::observability::ReleaseEvent`] envelope emitted to Vector
 ///
-/// Five identically-shaped bodies past THEORY §VI.1's three-times-is-a-
+/// Five identically-shaped bodies past the three-times-is-a-
 /// law threshold (PRIME DIRECTIVE: duplication budget is zero) consolidate
 /// onto this typed primitive. Load-bearing properties this primitive owns
 /// that the pre-lift one-liner dropped:
@@ -3063,7 +3057,7 @@ pub fn now_rfc3339_utc() -> String {
 ///     <duration>.as_secs_f64(),
 /// )
 /// ```
-/// carried by seventeen sibling step-outcome sites (past THEORY §VI.1's
+/// carried by seventeen sibling step-outcome sites (past the
 /// three-times-is-a-law threshold; PRIME DIRECTIVE: duplication budget
 /// is zero):
 ///
@@ -3201,7 +3195,7 @@ pub fn msg_with_secs_1(msg: &str, d: std::time::Duration) -> String {
 /// - `run_backend_integration_tests` — `"Integration tests"`
 /// - `run_e2e_tests` — `"E2E tests"`
 ///
-/// Five sites is past THEORY §VI.1's three-times-is-a-law threshold, and
+/// Five sites is past the three-times-is-a-law threshold, and
 /// the shape is byte-identical modulo the label — the same one-body
 /// discipline that seeded [`msg_with_secs_1`] applies here.
 ///
@@ -3307,7 +3301,7 @@ pub fn msg_completed_in_secs_1(label: &str, d: std::time::Duration) -> String {
 /// - `execute` Step 4/5 push pass — `"✅ Image pushed successfully"`
 /// - `execute` Step 5/5 deploy pass — `"✅ Deployment complete"`
 ///
-/// Five sites is past THEORY §VI.1's three-times-is-a-law threshold, and
+/// Five sites is past the three-times-is-a-law threshold, and
 /// the shape is byte-identical modulo the message — the same one-body
 /// discipline that seeded [`msg_with_secs_1`] and
 /// [`msg_completed_in_secs_1`] applies here.
@@ -3391,7 +3385,7 @@ pub fn msg_took_secs_1<M: std::fmt::Display>(msg: M, d: std::time::Duration) -> 
 /// [`msg_with_secs_1`]'s "Non-goals" section (§2) explicitly deferred
 /// the interleaved-arg
 /// `format!("<msg> ({} <noun>, {:.1}s)", <count>, <duration>.as_secs_f64())`
-/// shape until it crossed THEORY §VI.1's three-times-is-a-law
+/// shape until it crossed the three-times-is-a-law
 /// threshold. Six sibling sites cross it now:
 ///
 /// - `commands/codegen.rs::execute` schema-extraction success —
@@ -3504,7 +3498,7 @@ pub fn msg_with_count_noun_secs_1<M: std::fmt::Display, C: std::fmt::Display>(
 ///
 /// [`msg_with_count_noun_secs_1`]'s "Non-goals" section explicitly
 /// deferred the two-count / two-noun dialect until it crossed
-/// THEORY §VI.1's three-times-is-a-law threshold. Two sibling sites
+/// the three-times-is-a-law threshold. Two sibling sites
 /// past the two-is-a-coincidence line now share the dialect
 /// byte-for-byte modulo the label and the count/noun binding:
 ///
@@ -3599,8 +3593,8 @@ pub fn msg_with_two_counts_and_secs_1<
 ///
 /// All six sites push into the same [`String`] buffer that the
 /// enclosing function returns as a diagnostic message, and every site
-/// spelled the identical `format!("    {}\n", line)` shape. Past THEORY
-/// §VI.1's three-times-is-a-law threshold; PRIME DIRECTIVE: duplication
+/// spelled the identical `format!("    {}\n", line)` shape. Past
+/// the three-times-is-a-law threshold; PRIME DIRECTIVE: duplication
 /// budget is zero.
 ///
 /// # The three grammar invariants this primitive pins at one place
@@ -3710,7 +3704,7 @@ where
 /// All six sites push into the same [`String`] buffer that the
 /// enclosing function returns as a diagnostic message, and every site
 /// spelled the identical two-call fused shape modulo the per-site
-/// heading and iterator. Past THEORY §VI.1's three-times-is-a-law
+/// heading and iterator. Past the three-times-is-a-law
 /// threshold; PRIME DIRECTIVE: duplication budget is zero.
 ///
 /// # The two grammar invariants this primitive pins at one place
@@ -3795,7 +3789,7 @@ where
 ///   sibling `{field_name}: {new_image}` splice against the
 ///   `{agentImage,builderImage}` field of a builder-pool CRD.
 ///
-/// Four occurrences past THEORY §VI.1's three-times-is-a-law threshold;
+/// Four occurrences past the three-times-is-a-law threshold;
 /// PRIME DIRECTIVE duplication budget is zero.
 ///
 /// # Indent preservation contract

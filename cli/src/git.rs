@@ -209,7 +209,7 @@ fn read_repo_root_via_rev_parse() -> Result<PathBuf> {
 /// and `commands/helm.rs::bump` (inline `git_command_sync().args(...)
 /// .output()` with `context()`-wrapped bail). Three occurrences of
 /// the `["rev-parse", "--show-toplevel"]` argv literal is exactly
-/// THEORY.md §VI.1's three-times-is-a-law threshold ("two occurrences
+/// the three-times-is-a-law threshold ("two occurrences
 /// is a coincidence; three is a law"). Post-lift the argv slice, the
 /// stdout-string decode, and the `PathBuf::from` conversion all live
 /// at one body ([`read_repo_root_via_rev_parse`]); each consumer
@@ -239,7 +239,7 @@ pub fn try_repo_root_via_rev_parse() -> Option<PathBuf> {
 /// Pre-this-lift each of `get_full_sha` / `get_short_sha` /
 /// `get_short_sha_async` / `get_short_sha_async_in` spelled the
 /// `rev-parse` argv literal by hand — three of the four also spelled
-/// the load-bearing `"--short=7"` string verbatim, a §VI.1
+/// the load-bearing `"--short=7"` string verbatim, a
 /// three-times-is-a-law violation for a load-bearing invariant the
 /// module's own docstring names: `--short=7` is explicit, not
 /// `core.abbrev`-dependent, so callers that consume the SHA for image
@@ -261,12 +261,12 @@ pub fn try_repo_root_via_rev_parse() -> Option<PathBuf> {
 ///   a supplied `workdir` (sub-repo whose codegen commit is owned by a
 ///   different working directory than the current process's CWD).
 ///
-/// # THEORY grounding
+/// # Grounding
 ///
-/// THEORY.md §II Language — typed primitives own boundary
+/// Language — typed primitives own boundary
 /// classification; the `--short=7` argv literal is a typed variant of
 /// [`HeadShaForm`] rather than a bare `&str` respelled at every
-/// consumer. THEORY.md §VI.1 one-oracle discipline — the `rev-parse`
+/// consumer. One-oracle discipline — the `rev-parse`
 /// argv slice AND the expected SHA hex length live at ONE surface
 /// (this enum's `args` / `expected_len` methods); a future third form
 /// (e.g., `Short12` for a 12-character SHA) extends the enum at one
@@ -424,7 +424,7 @@ pub async fn get_short_sha_async() -> Result<String> {
 /// `env::var("RELEASE_GIT_SHA").unwrap_or_default(); if
 /// git_sha.is_empty() { bail!(...) }` at
 /// `commands/product_release.rs::execute` — lived across the crate.
-/// Three consumers past THEORY §VI.1's three-is-a-law threshold: the
+/// Three consumers past the three-is-a-law threshold: the
 /// trio had to agree on both the env-var spelling AND the
 /// empty-string-is-miss semantic (the Nix wrapper exports the var
 /// unconditionally with an empty value on non-release invocations, so
@@ -448,7 +448,7 @@ pub async fn get_short_sha_async() -> Result<String> {
 /// surface and [`crate::infrastructure::attic::attic_server_alias`]
 /// on the `ATTIC_SERVER_NAME` surface — same
 /// env-var-with-substrate-contract shape lifted to one body per env
-/// var. THEORY §V (solve-once-at-the-primitive); §VI.1
+/// var. (solve-once-at-the-primitive);
 /// (recurring-shape-to-helper).
 pub fn release_git_sha_from_env() -> Option<String> {
     std::env::var("RELEASE_GIT_SHA")
@@ -503,8 +503,8 @@ pub async fn get_short_sha_async_in(workdir: &Path) -> Result<String> {
 /// the exact class of breakage rather than a generic "failed to get git
 /// SHA".
 ///
-/// THEORY.md §V.1 (Types → Invariants → Proofs): the "get short SHA
-/// for image tagging" contract lives as one typed primitive; §VI.1
+/// (Types → Invariants → Proofs): the "get short SHA
+/// for image tagging" contract lives as one typed primitive;
 /// (recurring-shape-to-helper).
 pub async fn get_short_sha_async_for_image_tag() -> Result<String> {
     let hash = get_short_sha_async().await.context(
@@ -551,15 +551,15 @@ pub async fn get_short_sha_async_for_image_tag() -> Result<String> {
 /// canonical `"Failed to <op> {}", path.display()` envelope surfaces the
 /// exact file on every branch by construction.
 ///
-/// # THEORY grounding
+/// # Grounding
 ///
-/// - THEORY.md §V (solve-once-at-the-primitive): the async YAML read-
+/// - (solve-once-at-the-primitive): the async YAML read-
 ///   modify-write shell (including its canonical
 ///   read/parse/serialize/write envelope) now lives at exactly one code
 ///   line across the crate (`yaml_read_modify_write_async` at
 ///   `git.rs`), so every consumer observes the same envelope by
 ///   construction rather than by convention.
-/// - THEORY.md §VI.1 (recurring-shape-to-helper): two byte-similar
+/// - (recurring-shape-to-helper): two byte-similar
 ///   five-line stanzas across two consumer sites in the same module,
 ///   each spelling the same async-fs + serde_yaml round-trip.
 ///
@@ -764,7 +764,7 @@ pub fn tag_exists_in(tag: &str, workdir: Option<&Path>) -> Result<bool> {
 /// typed peer below — and the stringly return here is the boundary
 /// projection: `.map(|t| t.to_string()).unwrap_or_default()`, so `None`
 /// (no matching tag) becomes the empty-string sentinel every existing
-/// caller already handles. Same THEORY.md §V.4 typed-primitive discipline
+/// caller already handles. Same typed-primitive discipline
 /// the version.rs surface established across
 /// `parse_semver` / `parse_semver_typed`,
 /// `bump_semver` / `bump_semver_typed`,
@@ -822,7 +822,7 @@ pub fn max_released_version(prefix: &str, workdir: Option<&Path>) -> Result<Stri
 /// the existing production caller (`commands/gem.rs`), and delegates
 /// through this typed peer, so the prefix-strip, per-tag parse, and
 /// `parsed > b` fold live at ONE body — this one — and both entry points
-/// route through it. Same THEORY.md §VI.1 one-oracle discipline the
+/// route through it. Same one-oracle discipline the
 /// sibling `parse_semver_typed`, `bump_semver_typed`, `bump_seed_typed`,
 /// and `next_free_version_typed` typed peers already established across
 /// the version.rs release-arithmetic surface, here applied to the
@@ -888,14 +888,14 @@ pub fn max_released_version_typed(
 /// return signature and delegates through this joint peer (a
 /// `.iter().next_back().copied()` projection at the boundary), so the
 /// tag-scan lives at ONE body — this one — and both entry points
-/// route through it. Same THEORY.md §VI.1 one-oracle discipline the
+/// route through it. Same one-oracle discipline the
 /// sibling `parse_semver_typed`, `bump_semver_typed`, `bump_seed_typed`,
 /// `next_free_version_all_typed`, and `max_released_version_typed`
 /// typed peers already established across the release-arithmetic
 /// surface, here applied to the git-tag-scan primitive at the source
 /// of the seed AND collision decisions in ONE fetch.
 ///
-/// THEORY.md §V.4 typed primitives: the git-tag-scan surface now
+/// Typed primitives: the git-tag-scan surface now
 /// carries a fully typed peer (typed prefix, typed set of triples out)
 /// — not a `(&str, Option<&Path>) -> Result<String>` shape that a
 /// future consumer would re-scan for both the max AND the membership
@@ -1792,7 +1792,7 @@ mod tests {
     /// Network-side ops must surface `RemoteOpFailed` carrying the
     /// (op, remote, branch) tuple they targeted so attestation records
     /// and retry schedulers recover the exact endpoint from the typed
-    /// record without parsing the bail! string (THEORY §V.4).
+    /// record without parsing the bail! string.
     #[test]
     fn test_git_capture_remote_failed_carries_endpoint() {
         let (_dir, shim) = make_git_shim("#!/bin/sh\necho 'remote: rejected' 1>&2\nexit 1\n");
@@ -1991,7 +1991,7 @@ mod tests {
     /// `git rev-parse --show-toplevel` + trim + `PathBuf::from`
     /// shape was authored verbatim at THREE sites (`get_repo_root`,
     /// `commands/e2e.rs::resolve_repo_root`,
-    /// `commands/helm.rs::bump`) — THEORY.md §VI.1's
+    /// `commands/helm.rs::bump`) — the
     /// three-times-is-a-law threshold.
     #[test]
     fn test_read_repo_root_via_rev_parse_agrees_with_try_variant() {
@@ -2083,7 +2083,7 @@ mod tests {
     /// Async `git_capture_async`: non-zero exit produces `OpFailed`
     /// carrying the op label, the exit code, and the captured stderr —
     /// the structural `(op, exit_code, stderr)` tuple Phase 1
-    /// attestation records (THEORY §V.4) pattern-match on. Hermetic
+    /// attestation records pattern-match on. Hermetic
     /// against the host git via an absolute-path shim.
     #[tokio::test]
     async fn test_git_capture_async_op_failed_carries_structured_fields() {

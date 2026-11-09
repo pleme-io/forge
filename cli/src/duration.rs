@@ -9,7 +9,7 @@
 //! and `commands/rollout.rs::parse_timeout` (string → poll iterations) —
 //! each re-deriving the suffix match. Two copies past the duplication
 //! threshold the forge command-module surface enforces (≥2; PRIME
-//! DIRECTIVE; THEORY §VI.1 generation-over-composition). This module is
+//! DIRECTIVE; generation-over-composition). This module is
 //! the single grammar oracle both collapse onto, so a future unit or
 //! call site cannot drift on what "a valid timeout" means.
 
@@ -111,7 +111,7 @@ pub fn parse_timeout_field(value: &str, field: &str) -> Result<Duration> {
 /// `if d.is_zero()`); a deploy-wait of zero is a misconfiguration
 /// (`deployment_wait_timeout_secs == 0`); a federation test timeout of zero
 /// likewise (`timeout_seconds == 0`). Three guards past the duplication
-/// threshold (THEORY §VI.1) — plus one silent *gap*:
+/// threshold — plus one silent *gap*:
 /// `nix_connect_timeout_secs` had no check, so a zero connect timeout
 /// reached the `nix` invocation. This is the single oracle they collapse
 /// onto: the magnitude-layer peer of [`parse_duration`]'s grammar layer.
@@ -141,7 +141,7 @@ pub fn reject_zero_timeout(d: Duration, label: &str) -> Result<Duration> {
 /// seconds (`deployment_wait_timeout_secs`, `nix_connect_timeout_secs`,
 /// `timeout_seconds`) that a `Duration::from_secs(_)` call at the
 /// validate site then routed through [`reject_zero_timeout`]. Three call
-/// sites past the duplication threshold (THEORY §VI.1) restating the same
+/// sites past the duplication threshold restating the same
 /// `reject_zero_timeout(Duration::from_secs(self.foo), "foo")?` composition
 /// — where the `Duration::from_secs(self.foo)` construction and the
 /// `"foo"` label are always paired. This is the single oracle that pair

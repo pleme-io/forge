@@ -47,9 +47,9 @@
 //! phrase to a `SKIPPED:` prefix for grep-anchoring — lands at ONE
 //! typed body and reaches every consumer by construction.
 //!
-//! THEORY.md §VI.1 (three-times-is-a-law — "two occurrences is a
+//! (three-times-is-a-law — "two occurrences is a
 //! coincidence; three is a law"; 6 verbatim sibling sites redeemed
-//! by extraction), §V.1 (Construction guarantees — an invalid
+//! by extraction), (Construction guarantees — an invalid
 //! reason phrase is refused at compile time by [`Self::label`]'s
 //! exhaustive arms).
 //!

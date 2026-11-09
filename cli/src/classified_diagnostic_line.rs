@@ -82,20 +82,20 @@
 //! Keeping the marker vocabulary as a caller-passed slice preserves
 //! each site's semantic choice at ONE line, with no coupling.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! - `THEORY.md §V.1` (Types → Invariants → Proofs → Render Anywhere):
+//! - (Types → Invariants → Proofs → Render Anywhere):
 //!   the byte-shape invariant lives at ONE construction surface —
 //!   [`write_classified_diagnostic_line`] — and its byte-oracle
 //!   tests pin both the matched-marker (red) and no-marker (plain)
 //!   projections against the exact bytes each `ui::write_*` peer
 //!   emits. A future rotation of the dispatch grammar reaches all
 //!   three consumers in lockstep.
-//! - `THEORY.md §III.1` (typescape as root data structure): the
+//! - (typescape as root data structure): the
 //!   "classify-and-print" composition is a single named concept;
 //!   all three callers cite it rather than restating its two-branch
 //!   dispatch body.
-//! - `THEORY.md §VI.1` (three-times rule): three sibling occurrences
+//! - (three-times rule): three sibling occurrences
 //!   past the "two is a coincidence; three is a law" threshold, so
 //!   the if/else body lifts onto ONE typed dispatch surface.
 //!

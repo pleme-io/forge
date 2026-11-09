@@ -604,7 +604,7 @@ mod tests {
     /// stay in lockstep. A drift on either side would let one arm
     /// spell a stale message while the const still reads the canonical
     /// one — the exact class of measured-claim rot theory calls out
-    /// in `THEORY.md § V` (measured claims rot downward; a copy carries
+    /// (measured claims rot downward; a copy carries
     /// the number without the method).
     #[test]
     fn test_search_sync_success_ack_const_matches_pre_lift_literal() {

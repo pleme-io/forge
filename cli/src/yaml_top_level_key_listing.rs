@@ -22,7 +22,7 @@
 //! Both sites bind `yaml: serde_yaml::Value` from
 //! `load_deploy_yaml_and_resolve_env`, project onto a top-level string
 //! key, and render the miss-diagnostic's "Available <thing>:" tail.
-//! Two identically-shaped bodies past THEORY.md §VI.1's coincidence
+//! Two identically-shaped bodies past the coincidence
 //! threshold; the PRIME DIRECTIVE duplication budget is zero at two
 //! sibling occurrences.
 //!
@@ -78,18 +78,18 @@
 //! renders one diagnostic sub-string. Path resolution and YAML parsing
 //! stay at their canonical surfaces.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the "available top-level mapping
+//! Solve-once-at-the-primitive: the "available top-level mapping
 //! keys" projection lives at ONE construction surface so both miss-
 //! diagnostic sites inherit the same closed-set semantics.
 //!
-//! §VI.1 two-is-a-coincidence, three-is-a-law: two sibling occurrences
+//! Two-is-a-coincidence, three-is-a-law: two sibling occurrences
 //! sit at the coincidence threshold; the negative caller shield forbids
 //! the third-site drift by construction so the PRIME DIRECTIVE
 //! duplication budget stays at zero.
 //!
-//! §III typescape: `{"available top-level string keys of a
+//! Typescape: `{"available top-level string keys of a
 //! serde_yaml::Value's top-level mapping, comma-joined, `none` if the
 //! top key is missing or not a mapping"}` becomes a single named
 //! terminal in the deploy-yaml diagnostic typescape; both consumers

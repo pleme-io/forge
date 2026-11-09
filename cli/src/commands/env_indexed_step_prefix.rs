@@ -18,7 +18,7 @@
 //!    header omits the infix, leaving `env.cyan().bold()` flush
 //!    against ` → `.
 //!
-//! Two identically-shaped bodies past THEORY.md §VI.1's
+//! Two identically-shaped bodies past the
 //! duplication-is-a-bug threshold. A drift to the indent
 //! (`   ` → `  `), the `[{}/{}]` bracket-index prefix, the arrow
 //! glyph (` → ` → ` >> `), the env-styling (`env.cyan().bold()` →

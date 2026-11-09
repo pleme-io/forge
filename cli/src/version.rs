@@ -74,14 +74,14 @@ pub fn parse_semver(version: &str) -> Result<(u64, u64, u64)> {
 /// the parse grammar (three dot-separated `u64` components,
 /// byte-identical bail wording on shape / non-numeric component /
 /// empty input) lives at ONE body — the [`FromStr`] impl below — and
-/// both entry points route through it. Same THEORY.md §VI.1
+/// both entry points route through it. Same
 /// one-oracle discipline the sibling [`bump_semver_typed`] /
 /// [`bump_semver`] and [`next_free_version_typed`] /
 /// [`next_free_version`] typed peers already established at the
 /// bump-arithmetic and seeding-decision surfaces, here applied to
 /// the parse-primitive surface at the bottom of the algebra.
 ///
-/// THEORY.md §V.4 typed primitives: the parse-primitive surface
+/// Typed primitives: the parse-primitive surface
 /// carries a typed struct (one named field per semver component),
 /// not a `(u64, u64, u64)` tuple shape that re-derives the ordering
 /// discipline at every consumer.
@@ -138,7 +138,7 @@ impl SemverTriple {
     /// collision-skip loop in [`next_free_version_typed`] hold the
     /// candidate as a typed triple across iterations, rendering to a
     /// string ONCE per iteration (for the `tag_exists` predicate) and
-    /// never re-parsing what it just rendered. Same THEORY.md §V.4
+    /// never re-parsing what it just rendered. Same
     /// typed-primitive discipline the [`FromStr`] / [`Display`] pair
     /// and the [`bump_semver_typed`] / [`bump_semver`] pair already
     /// established on this module, here applied to the bump-arithmetic
@@ -258,15 +258,15 @@ pub fn parse_semver_typed(version: &str) -> Result<SemverTriple> {
 /// accept an aliased input (`"p"` → `BumpLevel::Patch`, `"prerelease"` →
 /// a future fourth variant) extends the parser at this typed-primitive
 /// site instead of retyping the alias matrix at every caller's
-/// `match level { ... }` cascade. Same THEORY.md §VI.1 one-oracle
+/// `match level { ... }` cascade. Same one-oracle
 /// discipline the prior typed-method lifts established at the
 /// [`crate::retry::RetryPolicy`] / [`crate::probe_outcome::AdmissionTier`]
 /// surfaces, here applied to the version-bump axis.
 ///
-/// THEORY.md §V.4 typed primitives: the level axis carries a typed sum
+/// Typed primitives: the level axis carries a typed sum
 /// surface (one variant per semver component the bump increments), not a
 /// `&str` shape that re-derives the partial function at every consumer.
-/// THEORY.md §VI.1 one-oracle discipline: the level grammar is named at
+/// One-oracle discipline: the level grammar is named at
 /// one site (the [`FromStr`] impl), not retyped at every caller's
 /// `match level { ... }` cascade.
 ///
@@ -286,7 +286,7 @@ pub fn parse_semver_typed(version: &str) -> Result<SemverTriple> {
 /// extension (e.g., a `Prerelease` variant inserted between or beside
 /// these) must consider where in the ladder it sits.
 ///
-/// Same THEORY.md §V.5 total-order discipline the
+/// Same total-order discipline the
 /// [`crate::probe_outcome::AdmissionTier`] surface established at the
 /// `Refused < StagingOnly < Strict` admission ladder, here applied to the
 /// version-bump-magnitude axis. The compiler refuses any future
@@ -342,7 +342,7 @@ impl BumpLevel {
     /// exhaustive `match` against the variant axis to refuse compilation
     /// until the new variant is added to `ALL`), and every property test
     /// that iterates `BumpLevel::ALL` automatically picks up the new
-    /// variant without per-site edits. Same THEORY.md §VI.1
+    /// variant without per-site edits. Same
     /// generation-over-composition / three-times-rule discipline the
     /// prior typed-method-peer lifts established (`is_breaking` /
     /// `is_non_breaking` / `is_fix_only` / `is_minor_only` over the
@@ -365,10 +365,10 @@ impl BumpLevel {
     /// review-stringency order) reads `BumpLevel::ALL` directly without
     /// a per-call-site sort.
     ///
-    /// THEORY.md §V.4 typed primitives: the variant enumeration is a
+    /// Typed primitives: the variant enumeration is a
     /// typed-primitive surface on `BumpLevel` itself (one named const),
     /// not a `&[BumpLevel]` shape restated at every traversal site that
-    /// re-derives the enumeration. THEORY.md §VI.1 generation over
+    /// re-derives the enumeration. Generation over
     /// composition (three-times rule): a structural pattern that recurs
     /// three or more times becomes a named primitive at one site —
     /// here, 17 array-literal restatements collapse to one const.
@@ -458,14 +458,14 @@ impl BumpLevel {
     ///    surfaces at the variant-identity reading, here applied to the
     ///    bounded-lattice anchor surface.
     ///
-    /// THEORY.md §V.4 typed primitives: the bounded-lattice floor is a
+    /// Typed primitives: the bounded-lattice floor is a
     /// typed-primitive surface on [`BumpLevel`] itself (one named const),
     /// not the variant name re-aliased at every join-fold seed site.
-    /// THEORY.md §V.5 total-order discipline: [`BOTTOM`](Self::BOTTOM)
+    /// Total-order discipline: [`BOTTOM`](Self::BOTTOM)
     /// is the global lower bound of the derived [`Ord`] chain, the
     /// structural anchor a downstream `<= BOTTOM` / `>= BOTTOM` reader
     /// consumes through one named oracle rather than the variant name.
-    /// THEORY.md §VI.1 one-oracle / generation-over-composition: the
+    /// One-oracle / generation-over-composition: the
     /// bounded-lattice floor semantic role is named at one site (this
     /// const), so a future ladder refinement that shifts the floor
     /// updates one site, not every join-fold seed / meet-fold absorber
@@ -538,11 +538,11 @@ impl BumpLevel {
     /// closing the bounded-lattice anchor pair symmetry across the two
     /// repo-internal tier ladders.
     ///
-    /// THEORY.md §V.4 typed primitives: the bounded-lattice ceiling is
+    /// Typed primitives: the bounded-lattice ceiling is
     /// a typed-primitive surface on [`BumpLevel`] itself (one named
-    /// const). THEORY.md §V.5 total-order discipline: [`TOP`](Self::TOP)
+    /// const). Total-order discipline: [`TOP`](Self::TOP)
     /// is the global upper bound of the derived [`Ord`] chain.
-    /// THEORY.md §VI.1 one-oracle: the bounded-lattice ceiling semantic
+    /// One-oracle: the bounded-lattice ceiling semantic
     /// role is named at one site, so a future ladder refinement that
     /// shifts the ceiling updates one site.
     #[allow(dead_code)]
@@ -589,10 +589,10 @@ impl BumpLevel {
     /// the new top-of-ladder variant as non-breaking — a structural bug
     /// the `>=` form refuses by construction.
     ///
-    /// THEORY.md §V.5 total-order discipline: the breaking-vs-non-breaking
+    /// Total-order discipline: the breaking-vs-non-breaking
     /// gate reads the derived `Ord` impl through a named typed-method peer
     /// at the typed-primitive surface, not retyped at every consumer's
-    /// match cascade. THEORY.md §VI.1 one-oracle: the semantic role
+    /// match cascade. One-oracle: the semantic role
     /// (breaking ⇔ at-or-above Major) is named at one site (this method's
     /// body), so a future ladder extension (an `Epoch` variant above
     /// `Major`) propagates through every consumer that reads
@@ -635,7 +635,7 @@ impl BumpLevel {
     /// inheriting the same drift class
     /// [`crate::probe_outcome::AdmissionTier::refuses_relaxed`] avoids by
     /// reading `< StagingOnly` rather than `matches!(self, Refused)`. Same
-    /// THEORY.md §V.5 total-order discipline at the version-bump surface as
+    /// total-order discipline at the version-bump surface as
     /// at the admission-gate surface.
     ///
     /// # De Morgan / XOR partition
@@ -655,10 +655,10 @@ impl BumpLevel {
     /// at the admission-gate surface, here at the version-bump-magnitude
     /// surface.
     ///
-    /// THEORY.md §V.5 total-order discipline: the backward-compatibility
+    /// Total-order discipline: the backward-compatibility
     /// gate reads the derived `Ord` impl through a named typed-method peer
     /// at the typed-primitive surface, not retyped at every consumer's
-    /// match cascade. THEORY.md §VI.1 one-oracle: the semantic role
+    /// match cascade. One-oracle: the semantic role
     /// (non-breaking ⇔ strictly below Major) is named at one site (this
     /// method's body), so a future ladder extension (a `Prerelease` variant
     /// below `Patch`) propagates through every consumer that reads
@@ -719,11 +719,11 @@ impl BumpLevel {
     /// variant ladder and against silent misclassification across future
     /// ladder extensions either side of the breaking-change threshold.
     ///
-    /// THEORY.md §V.5 total-order discipline: the version-bump-magnitude
+    /// Total-order discipline: the version-bump-magnitude
     /// ladder is consumed at named typed-method surfaces, not retyped at
     /// every consumer's match cascade — the floor predicate sits at the
     /// typed-primitive surface alongside the threshold and ceiling
-    /// predicates. THEORY.md §VI.1 one-oracle: the fix-only semantic role
+    /// predicates. One-oracle: the fix-only semantic role
     /// (this bump is exactly the patch-level fix variant) is named at one
     /// site (this method's body), so a downstream policy gate that
     /// previously read `matches!(level, BumpLevel::Patch)` reads
@@ -796,11 +796,11 @@ impl BumpLevel {
     /// release-policy gate that admits non-breaking automatically admits
     /// every minor-only bump.
     ///
-    /// THEORY.md §V.5 total-order discipline: the version-bump-magnitude
+    /// Total-order discipline: the version-bump-magnitude
     /// ladder is consumed at named typed-method surfaces, not retyped at
     /// every consumer's match cascade — the middle-band predicate sits at
     /// the typed-primitive surface alongside the floor and threshold
-    /// predicates. THEORY.md §VI.1 one-oracle: the minor-only semantic role
+    /// predicates. One-oracle: the minor-only semantic role
     /// (this bump is exactly the additive-API minor variant) is named at
     /// one site (this method's body), so a downstream policy gate that
     /// previously read `matches!(level, BumpLevel::Minor)` reads
@@ -929,14 +929,14 @@ impl BumpLevel {
     /// [`crate::probe_outcome::AdmissionTier::is_strict`] carries against
     /// `admits_strict` under the three-variant admission-tier ladder.
     ///
-    /// THEORY.md §V.5 total-order discipline: the version-bump magnitude
+    /// Total-order discipline: the version-bump magnitude
     /// ladder is consumed at named typed-method surfaces, not retyped at
     /// every consumer's match cascade — the ceiling-identity predicate
     /// sits at the typed-primitive surface alongside the floor-identity
     /// ([`is_fix_only`](Self::is_fix_only)), the middle-band identity
     /// ([`is_minor_only`](Self::is_minor_only)), and the half-open-ray
     /// predicates ([`is_breaking`](Self::is_breaking),
-    /// [`is_non_breaking`](Self::is_non_breaking)). THEORY.md §VI.1 one-
+    /// [`is_non_breaking`](Self::is_non_breaking)). One-
     /// oracle: the major-ceiling semantic role (this bump is exactly the
     /// canonical breaking-change major variant) is named at one site
     /// (this method's body), so a downstream policy gate that previously
@@ -1024,11 +1024,10 @@ impl BumpLevel {
     /// the `is_breaking` / `is_non_breaking` pair sealed at the upper
     /// threshold, here at the lower threshold of the same ladder.
     ///
-    /// THEORY.md §V.5 total-order discipline: the version-bump-magnitude
+    /// Total-order discipline: the version-bump-magnitude
     /// lower-threshold gate reads the derived `Ord` impl through a named
     /// typed-method peer at the typed-primitive surface, not retyped at
-    /// every consumer's match cascade or De Morgan negation. THEORY.md
-    /// §VI.1 one-oracle: the user-visible-change semantic role
+    /// every consumer's match cascade or De Morgan negation. One-oracle: the user-visible-change semantic role
     /// (feature-or-breaking ⇔ at-or-above Minor) is named at one site
     /// (this method's body), so a downstream policy gate that previously
     /// read `!level.is_fix_only()` reads `level.is_feature_or_breaking()`
@@ -1144,11 +1143,11 @@ impl BumpLevel {
     /// [`tests::test_bump_level_is_feature_or_breaking_equals_negation_of_is_fix_only_under_present_ladder`]
     /// at the complement side of the same threshold.
     ///
-    /// THEORY.md §V.1 make invalid states unrepresentable: the
+    /// Make invalid states unrepresentable: the
     /// no-user-visible-change band reads the derived [`Ord`] impl through
     /// a named typed-method peer at the typed-primitive surface, not
     /// retyped at every consumer's match cascade or De Morgan negation.
-    /// THEORY.md §VI.1 one-oracle / generation-over-composition: the
+    /// One-oracle / generation-over-composition: the
     /// internal-only semantic role (below-feature-threshold ⇔ strictly
     /// below Minor) is named at one site (this method's body), so a
     /// downstream policy gate that previously read
@@ -1208,7 +1207,7 @@ impl BumpLevel {
     ///    two magnitudes" — the `max` form is a general lattice op shared
     ///    with arbitrary comparable types, the `join` form names the
     ///    release-aggregation reading at the typed-primitive surface.
-    ///    Same THEORY.md §V.4 honesty-channel discipline the
+    ///    Same honesty-channel discipline the
     ///    [`crate::probe_outcome::per_axis_admission_tier_ceiling`] lift
     ///    established at the per-axis admission-tier surface: surfacing
     ///    "the best per-axis tier any axis admits at" as the load-bearing
@@ -1223,7 +1222,7 @@ impl BumpLevel {
     ///    pre-release release-bump shape distinct from a stable release?)
     ///    extends this method body once, instead of retyping the release-
     ///    aggregation oracle at every consumer's inline `.max()` call.
-    ///    Same THEORY.md §VI.1 one-oracle discipline the prior
+    ///    Same one-oracle discipline the prior
     ///    typed-method-peer lifts established
     ///    ([`is_breaking`](Self::is_breaking) /
     ///    [`is_non_breaking`](Self::is_non_breaking) /
@@ -1259,11 +1258,11 @@ impl BumpLevel {
     ///   other readback — distinct from a free-lattice join that could
     ///   return a third element.
     ///
-    /// THEORY.md §V.5 total-order discipline: the release-aggregation
+    /// Total-order discipline: the release-aggregation
     /// reading is a lattice operation (`max`) on the derived [`Ord`]
     /// ladder, named at the typed-primitive surface so a downstream
     /// consumer reads `level_a.join(level_b)` once and is automatically
-    /// updated across a future ladder refinement. THEORY.md §VI.1 one-
+    /// updated across a future ladder refinement. One-
     /// oracle / generation-over-composition: the release-aggregation
     /// idiom is named at one site (this method's body), not retyped at
     /// every consumer's inline `.max()` call.
@@ -1334,7 +1333,7 @@ impl BumpLevel {
     ///    the two magnitudes" — the `min` form is a general lattice op
     ///    shared with arbitrary comparable types, the `meet` form names
     ///    the per-commit-floor reading at the typed-primitive surface.
-    ///    Same THEORY.md §V.4 honesty-channel discipline the
+    ///    Same honesty-channel discipline the
     ///    [`crate::probe_outcome::per_axis_admission_tier_floor`] lift
     ///    established at the per-axis admission-tier surface: surfacing
     ///    "the strictest tier every axis admits at" as the load-bearing
@@ -1348,7 +1347,7 @@ impl BumpLevel {
     ///    Prerelease`? does it propagate down to a pre-release floor shape
     ///    distinct from a stable floor?) extends this method body once,
     ///    instead of retyping the per-commit-floor oracle at every
-    ///    consumer's inline `.min()` call. Same THEORY.md §VI.1 one-oracle
+    ///    consumer's inline `.min()` call. Same one-oracle
     ///    discipline the prior typed-method-peer lifts established
     ///    ([`is_breaking`](Self::is_breaking) /
     ///    [`is_non_breaking`](Self::is_non_breaking) /
@@ -1381,11 +1380,11 @@ impl BumpLevel {
     /// `test_per_axis_admission_tier_floor_le_ceiling_across_cross_product`
     /// at the per-axis admission-tier surface.
     ///
-    /// THEORY.md §V.5 total-order discipline: the per-commit-floor
+    /// Total-order discipline: the per-commit-floor
     /// reading is a lattice operation (`min`) on the derived [`Ord`]
     /// ladder, named at the typed-primitive surface so a downstream
     /// consumer reads `level_a.meet(level_b)` once and is automatically
-    /// updated across a future ladder refinement. THEORY.md §VI.1 one-
+    /// updated across a future ladder refinement. One-
     /// oracle / generation-over-composition: the per-commit-floor idiom
     /// is named at one site (this method's body), not retyped at every
     /// consumer's inline `.min()` call. Together with
@@ -1483,13 +1482,13 @@ impl FromStr for BumpLevel {
 /// the [`crate::probe_outcome::AdmissionTier`] serde round-trip pin at
 /// the admission-tier ladder.
 ///
-/// THEORY.md §V.4 typed primitives: the serialisation surface is a
+/// Typed primitives: the serialisation surface is a
 /// typed-primitive site on [`BumpLevel`] itself (one `Serialize` impl
 /// routing through the [`as_str`] canonical-label oracle), not a
 /// per-consumer `#[derive(Serialize)]` + `#[serde(rename_all = "lowercase")]`
 /// retyping that would fragment the label-axis definition across every
-/// downstream consumer's release-manifest struct. THEORY.md §VI.1
-/// one-oracle: the canonical label is named at one site
+/// downstream consumer's release-manifest struct.
+/// One-oracle: the canonical label is named at one site
 /// ([`BumpLevel::as_str`]) and every surface — `as_str`, `Display`,
 /// this `Serialize`, `Deserialize`, `FromStr` — reads through it.
 impl serde::Serialize for BumpLevel {
@@ -1538,11 +1537,11 @@ impl serde::Serialize for BumpLevel {
 /// The strict-parse behaviour on unknown labels is pinned by
 /// [`tests::test_bump_level_deserialize_rejects_unknown_string`].
 ///
-/// THEORY.md §V.4 typed primitives: the deserialisation surface is a
+/// Typed primitives: the deserialisation surface is a
 /// typed-primitive site on [`BumpLevel`] itself (one `Deserialize`
 /// impl routing through the [`std::str::FromStr`] canonical-label
 /// parser), not a per-consumer `#[derive(Deserialize)]` +
-/// `#[serde(rename_all)]` retyping. THEORY.md §VI.1 one-oracle:
+/// `#[serde(rename_all)]` retyping. One-oracle:
 /// canonical-label parsing lives at one site ([`std::str::FromStr`]
 /// for [`BumpLevel`]) and every read surface — `FromStr`, this
 /// `Deserialize`, a future TOML changelog loader, a future MessagePack
@@ -1620,11 +1619,11 @@ impl<'de> serde::Deserialize<'de> for BumpLevel {
 /// every variant is pinned by
 /// [`tests::test_bump_level_as_ref_str_carries_through_generic_consumer`].
 ///
-/// THEORY.md §V.4 typed primitives: the byte-slice-coercion surface
+/// Typed primitives: the byte-slice-coercion surface
 /// is a typed-primitive site on [`BumpLevel`] itself (one `AsRef<str>`
 /// impl routing through [`BumpLevel::as_str`]), not a per-consumer
 /// `.as_str()` restatement at every downstream site that accepts
-/// `impl AsRef<str>`. THEORY.md §VI.1 one-oracle: the canonical label
+/// `impl AsRef<str>`. One-oracle: the canonical label
 /// is named at one site ([`BumpLevel::as_str`]) and every surface —
 /// `as_str`, `Display`, `Serialize`, `FromStr`, `Deserialize`, this
 /// `AsRef<str>` — reads through it.
@@ -1701,12 +1700,12 @@ impl AsRef<str> for BumpLevel {
 /// canonical label at every variant is pinned by
 /// [`tests::test_bump_level_as_ref_bytes_round_trips_through_from_utf8`].
 ///
-/// THEORY.md §V.4 typed primitives: the byte-slice borrowed-view
+/// Typed primitives: the byte-slice borrowed-view
 /// surface is a typed-primitive site on [`BumpLevel`] itself
 /// (one `AsRef<[u8]>` impl routing through [`AsRef<str>`] and
 /// [`str::as_bytes`]), not a per-consumer `level.as_str().as_bytes()`
 /// restatement at every downstream site that accepts
-/// `impl AsRef<[u8]>`. THEORY.md §VI.1 one-oracle: the canonical
+/// `impl AsRef<[u8]>`. One-oracle: the canonical
 /// label is named at one site ([`BumpLevel::as_str`]) and every
 /// borrowed-view surface — [`AsRef<str>`] (yields `&str`), this
 /// [`AsRef<[u8]>`] (yields `&[u8]`) — reads through it.
@@ -1799,13 +1798,12 @@ impl AsRef<[u8]> for BumpLevel {
 /// the canonical label at every variant is pinned by
 /// [`tests::test_bump_level_as_ref_osstr_round_trips_through_to_str`].
 ///
-/// THEORY.md §V.4 typed primitives: the OS-string borrowed-view
+/// Typed primitives: the OS-string borrowed-view
 /// surface is a typed-primitive site on [`BumpLevel`] itself
 /// (one `AsRef<std::ffi::OsStr>` impl routing through
 /// [`AsRef<str>`] and [`std::ffi::OsStr::new`]), not a per-consumer
 /// `OsStr::new(level.as_str())` restatement at every downstream
-/// site that accepts `impl AsRef<std::ffi::OsStr>`. THEORY.md
-/// §VI.1 one-oracle: the canonical label is named at one site
+/// site that accepts `impl AsRef<std::ffi::OsStr>`. One-oracle: the canonical label is named at one site
 /// ([`BumpLevel::as_str`]) and every borrowed-view surface —
 /// [`AsRef<str>`] (yields `&str`), [`AsRef<[u8]>`] (yields
 /// `&[u8]`), this [`AsRef<std::ffi::OsStr>`] (yields `&OsStr`) —
@@ -1920,13 +1918,13 @@ impl AsRef<std::ffi::OsStr> for BumpLevel {
 /// the canonical label at every variant is pinned by
 /// [`tests::test_bump_level_as_ref_path_round_trips_through_to_str`].
 ///
-/// THEORY.md §V.4 typed primitives: the filesystem-path borrowed-
+/// Typed primitives: the filesystem-path borrowed-
 /// view surface is a typed-primitive site on [`BumpLevel`]
 /// itself (one `AsRef<std::path::Path>` impl routing through
 /// [`AsRef<str>`] and [`std::path::Path::new`]), not a
 /// per-consumer `Path::new(level.as_str())` restatement at every
 /// downstream site that accepts `impl AsRef<std::path::Path>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at
+/// One-oracle: the canonical label is named at
 /// one site ([`BumpLevel::as_str`]) and every borrowed-view
 /// surface — [`AsRef<str>`] (yields `&str`), [`AsRef<[u8]>`]
 /// (yields `&[u8]`), [`AsRef<std::ffi::OsStr>`] (yields
@@ -2018,14 +2016,14 @@ impl AsRef<std::path::Path> for BumpLevel {
 /// recovering the canonical label at every variant is pinned by
 /// [`tests::test_bump_level_from_into_osstring_round_trips_through_into_string`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value owned OS-string
+/// Typed primitives: the by-value owned OS-string
 /// emit surface is a typed-primitive site on [`BumpLevel`]
 /// itself (one `From<BumpLevel> for std::ffi::OsString` impl
 /// routing through [`BumpLevel::as_str`] and
 /// [`std::ffi::OsString::from`]), not a per-consumer
 /// `OsString::from(level.as_str())` restatement at every
 /// downstream site that accepts `impl Into<std::ffi::OsString>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at
+/// One-oracle: the canonical label is named at
 /// one site ([`BumpLevel::as_str`]) and every owned-buffer
 /// emit surface — [`From<T> for String`] (yields [`String`]),
 /// [`From<T> for Vec<u8>`] (yields [`Vec<u8>`]), this
@@ -2131,14 +2129,14 @@ impl From<BumpLevel> for std::ffi::OsString {
 /// canonical label at every variant is pinned by
 /// [`tests::test_bump_level_from_into_pathbuf_round_trips_through_into_os_string`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value owned filesystem-
+/// Typed primitives: the by-value owned filesystem-
 /// path emit surface is a typed-primitive site on [`BumpLevel`]
 /// itself (one `From<BumpLevel> for std::path::PathBuf` impl
 /// routing through [`BumpLevel::as_str`] and
 /// [`std::path::PathBuf::from`]), not a per-consumer
 /// `PathBuf::from(level.as_str())` restatement at every
 /// downstream site that accepts `impl Into<std::path::PathBuf>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at
+/// One-oracle: the canonical label is named at
 /// one site ([`BumpLevel::as_str`]) and every owned-buffer
 /// emit surface — [`From<T> for String`] (yields [`String`]),
 /// [`From<T> for Vec<u8>`] (yields [`Vec<u8>`]),
@@ -2228,7 +2226,7 @@ impl From<BumpLevel> for std::path::PathBuf {
 /// the canonical label at every variant is pinned by
 /// [`tests::test_bump_level_from_into_static_os_str_round_trips_through_to_str`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value static-lifetime
+/// Typed primitives: the by-value static-lifetime
 /// OS-string emit surface is a typed-primitive site on
 /// [`BumpLevel`] itself (one
 /// `From<BumpLevel> for &'static std::ffi::OsStr` impl routing
@@ -2236,7 +2234,7 @@ impl From<BumpLevel> for std::path::PathBuf {
 /// not a per-consumer `OsStr::new(level.as_str())` restatement at
 /// every downstream site that accepts
 /// `impl Into<&'static std::ffi::OsStr>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at
+/// One-oracle: the canonical label is named at
 /// one site ([`BumpLevel::as_str`]) and every by-value
 /// static-lifetime emit surface — [`From<T> for &'static str`]
 /// (yields `&'static str`), [`From<T> for &'static [u8]`] (yields
@@ -2327,15 +2325,15 @@ impl From<BumpLevel> for &'static std::ffi::OsStr {
 /// the canonical label at every variant is pinned by
 /// [`tests::test_bump_level_from_into_static_path_round_trips_through_to_str`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value static-lifetime
+/// Typed primitives: the by-value static-lifetime
 /// filesystem-path emit surface is a typed-primitive site on
 /// [`BumpLevel`] itself (one
 /// `From<BumpLevel> for &'static std::path::Path` impl routing
 /// through [`BumpLevel::as_str`] and [`std::path::Path::new`]),
 /// not a per-consumer `Path::new(level.as_str())` restatement at
 /// every downstream site that accepts
-/// `impl Into<&'static std::path::Path>`. THEORY.md §VI.1
-/// one-oracle: the canonical label is named at one site
+/// `impl Into<&'static std::path::Path>`.
+/// One-oracle: the canonical label is named at one site
 /// ([`BumpLevel::as_str`]) and every by-value static-lifetime emit
 /// surface — [`From<T> for &'static str`] (yields `&'static str`),
 /// [`From<T> for &'static [u8]`] (yields `&'static [u8]`),
@@ -2455,7 +2453,7 @@ impl From<BumpLevel> for &'static std::path::Path {
 /// [`std::borrow::Cow::Owned`]) at every variant is pinned by
 /// [`tests::test_bump_level_into_cow_static_os_str_is_borrowed`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value borrowed/owned-
+/// Typed primitives: the by-value borrowed/owned-
 /// frontier OS-string emit surface is a typed-primitive site on
 /// [`BumpLevel`] itself (one
 /// `From<BumpLevel> for Cow<'static, std::ffi::OsStr>` impl routing
@@ -2464,7 +2462,7 @@ impl From<BumpLevel> for &'static std::path::Path {
 /// `Cow::Borrowed(std::ffi::OsStr::new(level.as_str()))` restatement
 /// at every downstream site that accepts
 /// `impl Into<Cow<'static, std::ffi::OsStr>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`BumpLevel::as_str`]) and every by-value borrowed/owned-
 /// frontier emit surface —
 /// [`From<T> for std::borrow::Cow<'static, str>`] (yields
@@ -2593,7 +2591,7 @@ impl From<BumpLevel> for std::borrow::Cow<'static, std::ffi::OsStr> {
 /// [`std::borrow::Cow::Owned`]) at every variant is pinned by
 /// [`tests::test_bump_level_into_cow_static_path_is_borrowed`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value
+/// Typed primitives: the by-value
 /// borrowed/owned-frontier filesystem-path emit surface is a
 /// typed-primitive site on [`BumpLevel`] itself (one
 /// `From<BumpLevel> for Cow<'static, std::path::Path>` impl routing
@@ -2602,7 +2600,7 @@ impl From<BumpLevel> for std::borrow::Cow<'static, std::ffi::OsStr> {
 /// `Cow::Borrowed(std::path::Path::new(level.as_str()))` restatement
 /// at every downstream site that accepts
 /// `impl Into<Cow<'static, std::path::Path>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`BumpLevel::as_str`]) and every by-value
 /// borrowed/owned-frontier emit surface —
 /// [`From<T> for std::borrow::Cow<'static, str>`] (yields
@@ -2716,14 +2714,14 @@ impl From<BumpLevel> for std::borrow::Cow<'static, std::path::Path> {
 /// string constant table) is pinned by
 /// [`tests::test_bump_level_into_box_os_str_is_owned_independent`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shrunk-owned OS-
+/// Typed primitives: the by-value shrunk-owned OS-
 /// string emit surface is a typed-primitive site on [`BumpLevel`]
 /// itself (one `From<BumpLevel> for Box<std::ffi::OsStr>` impl
 /// routing through [`BumpLevel::as_str`], [`std::ffi::OsStr::new`],
 /// and [`Box::<std::ffi::OsStr>::from`]), not a per-consumer
 /// `Box::<std::ffi::OsStr>::from(std::ffi::OsStr::new(level.as_str()))`
 /// restatement at every downstream site that accepts
-/// `impl Into<Box<std::ffi::OsStr>>`. THEORY.md §VI.1 one-oracle: the
+/// `impl Into<Box<std::ffi::OsStr>>`. One-oracle: the
 /// canonical label is named at one site ([`BumpLevel::as_str`]) and
 /// every OS-string emit surface —
 /// [`From<T> for std::ffi::OsString`],
@@ -2833,7 +2831,7 @@ impl From<BumpLevel> for Box<std::ffi::OsStr> {
 /// string constant table) is pinned by
 /// [`tests::test_bump_level_into_box_path_is_owned_independent`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shrunk-owned
+/// Typed primitives: the by-value shrunk-owned
 /// filesystem-path emit surface is a typed-primitive site on
 /// [`BumpLevel`] itself (one
 /// `From<BumpLevel> for Box<std::path::Path>` impl routing through
@@ -2841,7 +2839,7 @@ impl From<BumpLevel> for Box<std::ffi::OsStr> {
 /// [`Box::<std::path::Path>::from`]), not a per-consumer
 /// `Box::<std::path::Path>::from(std::path::Path::new(level.as_str()))`
 /// restatement at every downstream site that accepts
-/// `impl Into<Box<std::path::Path>>`. THEORY.md §VI.1 one-oracle: the
+/// `impl Into<Box<std::path::Path>>`. One-oracle: the
 /// canonical label is named at one site
 /// ([`BumpLevel::as_str`]) and every filesystem-path emit surface —
 /// [`From<T> for std::path::PathBuf`],
@@ -2961,7 +2959,7 @@ impl From<BumpLevel> for Box<std::path::Path> {
 /// least two after the clone — at every variant is pinned by
 /// [`tests::test_bump_level_into_arc_os_str_shares_label_across_clones`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shared-owned OS-
+/// Typed primitives: the by-value shared-owned OS-
 /// string emit surface is a typed-primitive site on [`BumpLevel`]
 /// itself (one `From<BumpLevel> for std::sync::Arc<std::ffi::OsStr>`
 /// impl routing through [`BumpLevel::as_str`],
@@ -2969,7 +2967,7 @@ impl From<BumpLevel> for Box<std::path::Path> {
 /// [`std::sync::Arc::<std::ffi::OsStr>::from`]), not a per-consumer
 /// `Arc::<std::ffi::OsStr>::from(std::ffi::OsStr::new(level.as_str()))`
 /// restatement at every downstream site that accepts
-/// `impl Into<Arc<std::ffi::OsStr>>`. THEORY.md §VI.1 one-oracle: the
+/// `impl Into<Arc<std::ffi::OsStr>>`. One-oracle: the
 /// canonical label is named at one site ([`BumpLevel::as_str`]) and
 /// every OS-string emit surface —
 /// [`From<T> for std::ffi::OsString`],
@@ -3099,7 +3097,7 @@ impl From<BumpLevel> for std::sync::Arc<std::ffi::OsStr> {
 /// least two after the clone — at every variant is pinned by
 /// [`tests::test_bump_level_into_arc_path_shares_label_across_clones`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shared-owned
+/// Typed primitives: the by-value shared-owned
 /// filesystem-path emit surface is a typed-primitive site on
 /// [`BumpLevel`] itself (one
 /// `From<BumpLevel> for std::sync::Arc<std::path::Path>` impl routing
@@ -3107,7 +3105,7 @@ impl From<BumpLevel> for std::sync::Arc<std::ffi::OsStr> {
 /// [`std::sync::Arc::<std::path::Path>::from`]), not a per-consumer
 /// `Arc::<std::path::Path>::from(std::path::Path::new(level.as_str()))`
 /// restatement at every downstream site that accepts
-/// `impl Into<Arc<std::path::Path>>`. THEORY.md §VI.1 one-oracle: the
+/// `impl Into<Arc<std::path::Path>>`. One-oracle: the
 /// canonical label is named at one site ([`BumpLevel::as_str`]) and
 /// every filesystem-path emit surface —
 /// [`From<T> for std::path::PathBuf`],
@@ -3257,7 +3255,7 @@ impl From<BumpLevel> for std::sync::Arc<std::path::Path> {
 /// clone — at every variant is pinned by
 /// [`tests::test_bump_level_into_rc_os_str_shares_label_across_clones`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value thread-local shared-
+/// Typed primitives: the by-value thread-local shared-
 /// owned OS-string emit surface is a typed-primitive site on
 /// [`BumpLevel`] itself (one
 /// `From<BumpLevel> for std::rc::Rc<std::ffi::OsStr>` impl routing
@@ -3265,7 +3263,7 @@ impl From<BumpLevel> for std::sync::Arc<std::path::Path> {
 /// [`std::rc::Rc::<std::ffi::OsStr>::from`]), not a per-consumer
 /// `Rc::<std::ffi::OsStr>::from(std::ffi::OsStr::new(level.as_str()))`
 /// restatement at every downstream site that accepts
-/// `impl Into<Rc<std::ffi::OsStr>>`. THEORY.md §VI.1 one-oracle: the
+/// `impl Into<Rc<std::ffi::OsStr>>`. One-oracle: the
 /// canonical label is named at one site ([`BumpLevel::as_str`]) and
 /// every OS-string emit surface — [`From<T> for std::ffi::OsString`],
 /// [`From<T> for &'static std::ffi::OsStr`],
@@ -3425,7 +3423,7 @@ impl From<BumpLevel> for std::rc::Rc<std::ffi::OsStr> {
 /// clone — at every variant is pinned by
 /// [`tests::test_bump_level_into_rc_path_shares_label_across_clones`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value thread-local
+/// Typed primitives: the by-value thread-local
 /// shared-owned filesystem-path emit surface is a typed-primitive
 /// site on [`BumpLevel`] itself (one
 /// `From<BumpLevel> for std::rc::Rc<std::path::Path>` impl routing
@@ -3433,7 +3431,7 @@ impl From<BumpLevel> for std::rc::Rc<std::ffi::OsStr> {
 /// [`std::rc::Rc::<std::path::Path>::from`]), not a per-consumer
 /// `Rc::<std::path::Path>::from(std::path::Path::new(level.as_str()))`
 /// restatement at every downstream site that accepts
-/// `impl Into<Rc<std::path::Path>>`. THEORY.md §VI.1 one-oracle:
+/// `impl Into<Rc<std::path::Path>>`. One-oracle:
 /// the canonical label is named at one site
 /// ([`BumpLevel::as_str`]) and every filesystem-path emit surface —
 /// [`From<T> for std::path::PathBuf`],
@@ -3517,13 +3515,13 @@ impl From<BumpLevel> for std::rc::Rc<std::path::Path> {
 /// canonical label at every variant is pinned by
 /// [`tests::test_bump_level_as_ref_cstr_round_trips_through_to_str`].
 ///
-/// THEORY.md §V.4 typed primitives: the NUL-terminated C-string
+/// Typed primitives: the NUL-terminated C-string
 /// borrowed-view surface is a typed-primitive site on [`BumpLevel`]
 /// itself (one `AsRef<std::ffi::CStr>` impl routing through the
 /// by-value static-lifetime C-string emit oracle), not a per-consumer
 /// `<&'static CStr>::from(level)` restatement at every downstream
 /// site that accepts `impl AsRef<std::ffi::CStr>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label + trailing-NUL is
+/// One-oracle: the canonical label + trailing-NUL is
 /// named at the [`&'static std::ffi::CStr`] emit oracle (which itself
 /// reads the per-variant `c"..."` literals agreeing with
 /// [`BumpLevel::as_str`] byte-for-byte), and every borrowed-view
@@ -3622,14 +3620,14 @@ impl AsRef<std::ffi::CStr> for BumpLevel {
 /// variant is pinned by
 /// [`tests::test_bump_level_into_cstring_carries_trailing_nul`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value owned NUL-terminated
+/// Typed primitives: the by-value owned NUL-terminated
 /// C-string emit surface is a typed-primitive site on [`BumpLevel`]
 /// itself (one `From<BumpLevel> for std::ffi::CString` impl routing
 /// through [`BumpLevel::as_str`] and [`std::ffi::CString::new`]), not
 /// a per-consumer
 /// `std::ffi::CString::new(level.as_str()).unwrap()` restatement at
 /// every downstream site that accepts
-/// `impl Into<std::ffi::CString>`. THEORY.md §VI.1 one-oracle: the
+/// `impl Into<std::ffi::CString>`. One-oracle: the
 /// canonical label is named at one site ([`BumpLevel::as_str`]) and
 /// every by-value owned emit surface — [`From<T> for String`],
 /// [`From<T> for std::ffi::OsString`], [`From<T> for
@@ -3763,7 +3761,7 @@ impl From<BumpLevel> for std::ffi::CString {
 /// pinned by
 /// [`tests::test_bump_level_into_boxed_cstr_carries_trailing_nul`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shrunk-owned
+/// Typed primitives: the by-value shrunk-owned
 /// NUL-terminated C-string emit surface is a typed-primitive site on
 /// [`BumpLevel`] itself (one
 /// `From<BumpLevel> for Box<std::ffi::CStr>` impl routing through the
@@ -3771,7 +3769,7 @@ impl From<BumpLevel> for std::ffi::CString {
 /// [`std::ffi::CString::into_boxed_c_str`]), not a per-consumer
 /// `std::ffi::CString::new(level.as_str()).unwrap().into_boxed_c_str()`
 /// restatement at every downstream site that accepts
-/// `impl Into<Box<std::ffi::CStr>>`. THEORY.md §VI.1 one-oracle: the
+/// `impl Into<Box<std::ffi::CStr>>`. One-oracle: the
 /// canonical label is named at one site ([`BumpLevel::as_str`]) and
 /// every NUL-terminated C-string emit surface — [`From<T> for
 /// std::ffi::CString`], this [`From<T> for Box<std::ffi::CStr>`] —
@@ -3924,7 +3922,7 @@ impl From<BumpLevel> for Box<std::ffi::CStr> {
 /// clone — at every variant is pinned by
 /// [`tests::test_bump_level_into_arc_cstr_shares_label_across_clones`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shared-owned
+/// Typed primitives: the by-value shared-owned
 /// NUL-terminated C-string emit surface is a typed-primitive site on
 /// [`BumpLevel`] itself (one
 /// `From<BumpLevel> for std::sync::Arc<std::ffi::CStr>` impl routing
@@ -3933,7 +3931,7 @@ impl From<BumpLevel> for Box<std::ffi::CStr> {
 /// `std::sync::Arc::<std::ffi::CStr>::from(std::ffi::CString::new(
 /// level.as_str()).unwrap())` restatement at every downstream site
 /// that accepts `impl Into<std::sync::Arc<std::ffi::CStr>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`BumpLevel::as_str`]) and every NUL-terminated C-string
 /// emit surface — [`From<T> for std::ffi::CString`],
 /// [`From<T> for Box<std::ffi::CStr>`], this
@@ -4099,7 +4097,7 @@ impl From<BumpLevel> for std::sync::Arc<std::ffi::CStr> {
 /// two after the clone — at every variant is pinned by
 /// [`tests::test_bump_level_into_rc_cstr_shares_label_across_clones`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value thread-local
+/// Typed primitives: the by-value thread-local
 /// shared-owned NUL-terminated C-string emit surface is a
 /// typed-primitive site on [`BumpLevel`] itself (one
 /// `From<BumpLevel> for std::rc::Rc<std::ffi::CStr>` impl routing
@@ -4108,7 +4106,7 @@ impl From<BumpLevel> for std::sync::Arc<std::ffi::CStr> {
 /// `std::rc::Rc::<std::ffi::CStr>::from(std::ffi::CString::new(
 /// level.as_str()).unwrap())` restatement at every downstream
 /// site that accepts `impl Into<std::rc::Rc<std::ffi::CStr>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at
+/// One-oracle: the canonical label is named at
 /// one site ([`BumpLevel::as_str`]) and every NUL-terminated
 /// C-string emit surface — [`From<T> for std::ffi::CString`],
 /// [`From<T> for Box<std::ffi::CStr>`],
@@ -4204,7 +4202,7 @@ impl From<BumpLevel> for std::rc::Rc<std::ffi::CStr> {
 /// the canonical label at every variant is pinned by
 /// [`tests::test_bump_level_from_into_static_cstr_round_trips_through_to_str`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value static-lifetime
+/// Typed primitives: the by-value static-lifetime
 /// NUL-terminated C-string emit surface is a typed-primitive site
 /// on [`BumpLevel`] itself (one `From<BumpLevel> for
 /// &'static std::ffi::CStr` impl matching over the variants at
@@ -4212,7 +4210,7 @@ impl From<BumpLevel> for std::rc::Rc<std::ffi::CStr> {
 /// `CStr::from_bytes_with_nul(&{ let mut b = level.as_str().as_bytes()
 /// .to_vec(); b.push(0); b }).unwrap()` restatement at every
 /// downstream site that accepts
-/// `impl Into<&'static std::ffi::CStr>`. THEORY.md §VI.1 one-
+/// `impl Into<&'static std::ffi::CStr>`. One-
 /// oracle: the canonical label is named at one site
 /// ([`BumpLevel::as_str`]) and every by-value static-lifetime
 /// emit surface — [`From<T> for &'static str`],
@@ -4355,7 +4353,7 @@ impl From<BumpLevel> for &'static std::ffi::CStr {
 /// [`std::borrow::Cow::Owned`]) at every variant is pinned by
 /// [`tests::test_bump_level_into_cow_static_cstr_is_borrowed`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value borrowed/owned-
+/// Typed primitives: the by-value borrowed/owned-
 /// frontier NUL-terminated C-string emit surface is a typed-primitive
 /// site on [`BumpLevel`] itself (one
 /// `From<BumpLevel> for Cow<'static, std::ffi::CStr>` impl routing
@@ -4364,7 +4362,7 @@ impl From<BumpLevel> for &'static std::ffi::CStr {
 /// `Cow::Borrowed(<&'static CStr>::from(level))` restatement at every
 /// downstream site that accepts
 /// `impl Into<Cow<'static, std::ffi::CStr>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label + trailing-NUL is
+/// One-oracle: the canonical label + trailing-NUL is
 /// named at the [`&'static std::ffi::CStr`] emit oracle (which itself
 /// reads the per-variant `c"..."` literals agreeing with
 /// [`BumpLevel::as_str`] byte-for-byte, pinned by
@@ -4489,7 +4487,7 @@ impl From<BumpLevel> for std::borrow::Cow<'static, std::ffi::CStr> {
 /// NUL-terminated C-string input is pinned by
 /// [`tests::test_bump_level_try_from_cstr_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-reference NUL-terminated
+/// Typed primitives: the by-reference NUL-terminated
 /// C-string parse surface is a typed-primitive site on [`BumpLevel`]
 /// itself (one `TryFrom<&std::ffi::CStr>` impl routing through
 /// [`std::ffi::CStr::to_str`] and the by-reference [`TryFrom<&str>`]
@@ -4497,7 +4495,7 @@ impl From<BumpLevel> for std::borrow::Cow<'static, std::ffi::CStr> {
 /// `BumpLevel::try_from(c.to_str().map_err(...)?)` restatement at every
 /// downstream site that types its parse contract as
 /// `impl for<'a> TryFrom<&'a std::ffi::CStr>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at
+/// One-oracle: the canonical label grammar is named at
 /// one site ([`BumpLevel::as_str`]), inverted at one site
 /// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
 /// surface — [`std::str::FromStr`], [`serde::Deserialize`],
@@ -4665,7 +4663,7 @@ impl TryFrom<&std::ffi::CStr> for BumpLevel {
 /// NUL-terminated C-string input is pinned by
 /// [`tests::test_bump_level_try_from_cstring_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value owned-buffer
+/// Typed primitives: the by-value owned-buffer
 /// NUL-terminated C-string try-conversion surface is a typed-primitive
 /// site on [`BumpLevel`] itself (one `TryFrom<std::ffi::CString>` impl
 /// routing through the borrowed [`TryFrom<&std::ffi::CStr>`] parse peer
@@ -4673,7 +4671,7 @@ impl TryFrom<&std::ffi::CStr> for BumpLevel {
 /// `BumpLevel::try_from(c.as_c_str())` bridge at every downstream site
 /// that types its parse contract as `impl TryFrom<std::ffi::CString>`
 /// rather than [`TryFrom<&std::ffi::CStr>`] or [`std::str::FromStr`].
-/// THEORY.md §VI.1 generation over composition: the canonical-label
+/// Generation over composition: the canonical-label
 /// grammar is named at one site ([`BumpLevel::as_str`]), inverted at
 /// one site ([`<BumpLevel as std::str::FromStr>::from_str`]), and every
 /// parse surface — [`std::str::FromStr`], [`serde::Deserialize`],
@@ -4786,7 +4784,7 @@ impl TryFrom<std::ffi::CString> for BumpLevel {
 /// shrunk-owned NUL-terminated C-string input is pinned by
 /// [`tests::test_bump_level_try_from_box_cstr_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the shrunk-owned NUL-terminated
+/// Typed primitives: the shrunk-owned NUL-terminated
 /// C-string try-conversion parse surface is a typed-primitive site on
 /// [`BumpLevel`] itself (one `TryFrom<Box<std::ffi::CStr>>` impl
 /// routing through [`std::boxed::Box::<std::ffi::CStr>::as_ref`] and
@@ -4794,7 +4792,7 @@ impl TryFrom<std::ffi::CString> for BumpLevel {
 /// per-consumer `BumpLevel::try_from(boxed.as_ref())` bridge at
 /// every downstream site that types its parse contract as
 /// `impl TryFrom<Box<std::ffi::CStr>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// One-oracle: the canonical label grammar is named
 /// at one site ([`BumpLevel::as_str`]), inverted at one site
 /// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every
 /// parse surface — including this shrunk-owned NUL-terminated
@@ -4920,7 +4918,7 @@ impl TryFrom<Box<std::ffi::CStr>> for BumpLevel {
 /// owned NUL-terminated C-string input is pinned by
 /// [`tests::test_bump_level_try_from_arc_cstr_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the shared-owned NUL-terminated
+/// Typed primitives: the shared-owned NUL-terminated
 /// C-string try-conversion parse surface is a typed-primitive site on
 /// [`BumpLevel`] itself (one
 /// `TryFrom<std::sync::Arc<std::ffi::CStr>>` impl routing through
@@ -4929,7 +4927,7 @@ impl TryFrom<Box<std::ffi::CStr>> for BumpLevel {
 /// `BumpLevel::try_from(shared.as_ref())` bridge at every downstream
 /// site that types its parse contract as
 /// `impl TryFrom<std::sync::Arc<std::ffi::CStr>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// One-oracle: the canonical label grammar is named
 /// at one site ([`BumpLevel::as_str`]), inverted at one site
 /// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
 /// surface — including this shared-owned NUL-terminated C-string
@@ -5072,7 +5070,7 @@ impl TryFrom<std::sync::Arc<std::ffi::CStr>> for BumpLevel {
 /// pinned by
 /// [`tests::test_bump_level_try_from_rc_cstr_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the thread-local shared-owned
+/// Typed primitives: the thread-local shared-owned
 /// NUL-terminated C-string try-conversion parse surface is a
 /// typed-primitive site on [`BumpLevel`] itself (one
 /// `TryFrom<std::rc::Rc<std::ffi::CStr>>` impl routing through
@@ -5081,7 +5079,7 @@ impl TryFrom<std::sync::Arc<std::ffi::CStr>> for BumpLevel {
 /// `BumpLevel::try_from(shared.as_ref())` bridge at every
 /// downstream site that types its parse contract as
 /// `impl TryFrom<std::rc::Rc<std::ffi::CStr>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is
+/// One-oracle: the canonical label grammar is
 /// named at one site ([`BumpLevel::as_str`]), inverted at one site
 /// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every
 /// parse surface — including this thread-local shared-owned
@@ -5210,7 +5208,7 @@ impl TryFrom<std::rc::Rc<std::ffi::CStr>> for BumpLevel {
 /// across both [`Cow`] branches is pinned by
 /// [`tests::test_bump_level_try_from_cow_cstr_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value [`Cow<'_,
+/// Typed primitives: the by-value [`Cow<'_,
 /// std::ffi::CStr>`] try-conversion parse surface is a typed-primitive
 /// site on [`BumpLevel`] itself (one `TryFrom<Cow<'_,
 /// std::ffi::CStr>>` impl routing through the borrowed
@@ -5219,7 +5217,7 @@ impl TryFrom<std::rc::Rc<std::ffi::CStr>> for BumpLevel {
 /// downstream site that types its parse contract as `impl for<'a>
 /// TryFrom<Cow<'a, std::ffi::CStr>>` rather than
 /// [`TryFrom<&std::ffi::CStr>`] or [`TryFrom<std::ffi::CString>`].
-/// THEORY.md §VI.1 one-oracle: the canonical-label grammar is named at
+/// One-oracle: the canonical-label grammar is named at
 /// one site ([`BumpLevel::as_str`]), inverted at one site
 /// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every
 /// parse surface — including this borrowed/owned-frontier
@@ -5322,7 +5320,7 @@ impl<'a> TryFrom<std::borrow::Cow<'a, std::ffi::CStr>> for BumpLevel {
 /// OS-string input is pinned by
 /// [`tests::test_bump_level_try_from_os_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-reference OS-string parse
+/// Typed primitives: the by-reference OS-string parse
 /// surface is a typed-primitive site on [`BumpLevel`] itself (one
 /// `TryFrom<&std::ffi::OsStr>` impl routing through
 /// [`std::ffi::OsStr::to_str`] and the by-reference [`TryFrom<&str>`]
@@ -5330,7 +5328,7 @@ impl<'a> TryFrom<std::borrow::Cow<'a, std::ffi::CStr>> for BumpLevel {
 /// `BumpLevel::try_from(os_str.to_str().ok_or(...)?)` restatement at
 /// every downstream site that types its parse contract as
 /// `impl for<'a> TryFrom<&'a std::ffi::OsStr>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// One-oracle: the canonical label grammar is named
 /// at one site ([`BumpLevel::as_str`]), inverted at one site
 /// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
 /// surface — [`std::str::FromStr`], [`serde::Deserialize`],
@@ -5457,7 +5455,7 @@ impl TryFrom<&std::ffi::OsStr> for BumpLevel {
 /// owned-buffer input is pinned by
 /// [`tests::test_bump_level_try_from_os_string_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.1 typed primitives: the by-value owned-buffer OS-string
+/// Typed primitives: the by-value owned-buffer OS-string
 /// try-conversion surface is a typed-primitive site on [`BumpLevel`]
 /// itself (one `TryFrom<std::ffi::OsString>` impl routing through the
 /// borrowed [`TryFrom<&std::ffi::OsStr>`] parse peer on
@@ -5465,8 +5463,7 @@ impl TryFrom<&std::ffi::OsStr> for BumpLevel {
 /// `BumpLevel::try_from(buf.as_os_str())` bridge at every downstream
 /// site that types its parse contract as
 /// `impl TryFrom<std::ffi::OsString>` rather than
-/// [`TryFrom<&std::ffi::OsStr>`] or [`std::str::FromStr`]. THEORY.md
-/// §VI.1 one-oracle discipline: the canonical label grammar is named
+/// [`TryFrom<&std::ffi::OsStr>`] or [`std::str::FromStr`]. One-oracle discipline: the canonical label grammar is named
 /// at one site ([`BumpLevel::as_str`]), inverted at one site
 /// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
 /// surface — [`std::str::FromStr`], [`serde::Deserialize`],
@@ -5570,7 +5567,7 @@ impl TryFrom<std::ffi::OsString> for BumpLevel {
 /// filesystem-path input is pinned by
 /// [`tests::test_bump_level_try_from_path_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-reference filesystem-path
+/// Typed primitives: the by-reference filesystem-path
 /// try-conversion surface is a typed-primitive site on [`BumpLevel`]
 /// itself (one `TryFrom<&std::path::Path>` impl routing through
 /// [`std::path::Path::as_os_str`] and the by-reference
@@ -5579,7 +5576,7 @@ impl TryFrom<std::ffi::OsString> for BumpLevel {
 /// site that types its parse contract as
 /// `impl for<'a> TryFrom<&'a std::path::Path>` rather than
 /// [`TryFrom<&std::ffi::OsStr>`] or [`std::str::FromStr`].
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// One-oracle: the canonical label grammar is named
 /// at one site ([`BumpLevel::as_str`]), inverted at one site
 /// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
 /// surface — [`std::str::FromStr`], [`serde::Deserialize`],
@@ -5708,7 +5705,7 @@ impl TryFrom<&std::path::Path> for BumpLevel {
 /// owned filesystem-path input is pinned by
 /// [`tests::test_bump_level_try_from_path_buf_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value owned-buffer
+/// Typed primitives: the by-value owned-buffer
 /// filesystem-path try-conversion surface is a typed-primitive site on
 /// [`BumpLevel`] itself (one `TryFrom<std::path::PathBuf>` impl routing
 /// through [`std::path::PathBuf::as_path`] and the by-reference
@@ -5716,7 +5713,7 @@ impl TryFrom<&std::path::Path> for BumpLevel {
 /// `BumpLevel::try_from(path_buf.as_path())` bridge at every downstream
 /// site that types its parse contract as
 /// `impl TryFrom<std::path::PathBuf>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at
+/// One-oracle: the canonical label grammar is named at
 /// one site ([`BumpLevel::as_str`]), inverted at one site
 /// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
 /// surface — including this by-value owned-buffer filesystem-path peer
@@ -5864,7 +5861,7 @@ impl TryFrom<std::path::PathBuf> for BumpLevel {
 /// borrowed/owned OS-string input is pinned by
 /// [`tests::test_bump_level_try_from_cow_os_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the borrowed/owned-frontier OS-
+/// Typed primitives: the borrowed/owned-frontier OS-
 /// string try-conversion parse surface is a typed-primitive site on
 /// [`BumpLevel`] itself (one `TryFrom<Cow<'_, std::ffi::OsStr>>` impl
 /// routing through [`std::borrow::Cow::as_ref`] and the by-reference
@@ -5872,7 +5869,7 @@ impl TryFrom<std::path::PathBuf> for BumpLevel {
 /// `BumpLevel::try_from(cow.as_ref())` bridge at every downstream site
 /// that types its parse contract as
 /// `impl for<'a> TryFrom<Cow<'a, std::ffi::OsStr>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at
+/// One-oracle: the canonical label grammar is named at
 /// one site ([`BumpLevel::as_str`]), inverted at one site
 /// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
 /// surface — including this borrowed/owned-frontier OS-string peer —
@@ -6029,7 +6026,7 @@ impl<'a> TryFrom<std::borrow::Cow<'a, std::ffi::OsStr>> for BumpLevel {
 /// borrowed/owned filesystem-path input is pinned by
 /// [`tests::test_bump_level_try_from_cow_path_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the borrowed/owned-frontier
+/// Typed primitives: the borrowed/owned-frontier
 /// filesystem-path try-conversion parse surface is a typed-primitive site
 /// on [`BumpLevel`] itself (one `TryFrom<Cow<'_, std::path::Path>>` impl
 /// routing through [`std::borrow::Cow::as_ref`] and the by-reference
@@ -6037,7 +6034,7 @@ impl<'a> TryFrom<std::borrow::Cow<'a, std::ffi::OsStr>> for BumpLevel {
 /// `BumpLevel::try_from(cow.as_ref())` bridge at every downstream site
 /// that types its parse contract as
 /// `impl for<'a> TryFrom<Cow<'a, std::path::Path>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at
+/// One-oracle: the canonical label grammar is named at
 /// one site ([`BumpLevel::as_str`]), inverted at one site
 /// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
 /// surface — including this borrowed/owned-frontier filesystem-path peer
@@ -6119,7 +6116,7 @@ impl<'a> TryFrom<std::borrow::Cow<'a, std::path::Path>> for BumpLevel {
 /// above) the shrunk-owned filesystem-path parse closing order
 /// (315c145 → 657434c → 336e453).
 ///
-/// THEORY.md §V.4 typed primitives: the shrunk-owned OS-string
+/// Typed primitives: the shrunk-owned OS-string
 /// try-conversion parse surface is a typed-primitive site on
 /// [`BumpLevel`] itself (one `TryFrom<Box<std::ffi::OsStr>>` impl
 /// routing through [`std::boxed::Box::<std::ffi::OsStr>::as_ref`]
@@ -6127,7 +6124,7 @@ impl<'a> TryFrom<std::borrow::Cow<'a, std::path::Path>> for BumpLevel {
 /// per-consumer `BumpLevel::try_from(boxed.as_ref())` bridge at
 /// every downstream site that types its parse contract as
 /// `impl TryFrom<Box<std::ffi::OsStr>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// One-oracle: the canonical label grammar is named
 /// at one site ([`BumpLevel::as_str`]), inverted at one site
 /// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
 /// surface — including this shrunk-owned OS-string peer — reads
@@ -6212,7 +6209,7 @@ impl TryFrom<Box<std::ffi::OsStr>> for BumpLevel {
 /// closing order (33e4e48 → 2855792 → b1945f4) at neighboring
 /// OsStr/Path frontiers.
 ///
-/// THEORY.md §V.4 typed primitives: the shrunk-owned filesystem-path
+/// Typed primitives: the shrunk-owned filesystem-path
 /// try-conversion parse surface is a typed-primitive site on
 /// [`BumpLevel`] itself (one `TryFrom<Box<std::path::Path>>` impl
 /// routing through [`std::boxed::Box::<std::path::Path>::as_ref`]
@@ -6220,7 +6217,7 @@ impl TryFrom<Box<std::ffi::OsStr>> for BumpLevel {
 /// per-consumer `BumpLevel::try_from(boxed.as_ref())` bridge at
 /// every downstream site that types its parse contract as
 /// `impl TryFrom<Box<std::path::Path>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// One-oracle: the canonical label grammar is named
 /// at one site ([`BumpLevel::as_str`]), inverted at one site
 /// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
 /// surface — including this shrunk-owned filesystem-path peer —
@@ -6352,14 +6349,14 @@ impl TryFrom<Box<std::path::Path>> for BumpLevel {
 /// canonical shared-owned OS-string input is pinned by
 /// [`tests::test_bump_level_try_from_arc_os_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the shared-owned OS-string
+/// Typed primitives: the shared-owned OS-string
 /// try-conversion parse surface is a typed-primitive site on
 /// [`BumpLevel`] itself (one `TryFrom<Arc<std::ffi::OsStr>>` impl
 /// routing through [`std::sync::Arc::<std::ffi::OsStr>::as_ref`]
 /// and the by-reference [`TryFrom<&std::ffi::OsStr>`] peer), not a
 /// per-consumer `BumpLevel::try_from(arc.as_ref())` bridge at every
 /// downstream site that types its parse contract as
-/// `impl TryFrom<Arc<std::ffi::OsStr>>`. THEORY.md §VI.1 one-oracle:
+/// `impl TryFrom<Arc<std::ffi::OsStr>>`. One-oracle:
 /// the canonical label grammar is named at one site
 /// ([`BumpLevel::as_str`]), inverted at one site
 /// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
@@ -6463,14 +6460,14 @@ impl TryFrom<std::sync::Arc<std::ffi::OsStr>> for BumpLevel {
 /// canonical shared-owned filesystem-path input is pinned by
 /// [`tests::test_bump_level_try_from_arc_path_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the shared-owned filesystem-path
+/// Typed primitives: the shared-owned filesystem-path
 /// parse surface is a typed-primitive site on [`BumpLevel`] itself
 /// (one [`TryFrom<Arc<std::path::Path>>`] impl routing through
 /// [`std::sync::Arc::<std::path::Path>::as_ref`] and
 /// [`TryFrom<&std::path::Path>`]), not a per-consumer
 /// `.as_ref().as_os_str().to_str().parse()` composition at every
 /// downstream site that types its parse contract as
-/// `impl TryFrom<Arc<std::path::Path>>`. THEORY.md §VI.1 one-oracle:
+/// `impl TryFrom<Arc<std::path::Path>>`. One-oracle:
 /// the canonical label grammar is named at one site
 /// ([`BumpLevel::as_str`]), inverted at one site
 /// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
@@ -6600,14 +6597,14 @@ impl TryFrom<std::sync::Arc<std::path::Path>> for BumpLevel {
 /// canonical thread-local shared-owned OS-string input is pinned by
 /// [`tests::test_bump_level_try_from_rc_os_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the thread-local shared-owned
+/// Typed primitives: the thread-local shared-owned
 /// OS-string try-conversion parse surface is a typed-primitive site
 /// on [`BumpLevel`] itself (one `TryFrom<Rc<std::ffi::OsStr>>` impl
 /// routing through [`std::rc::Rc::<std::ffi::OsStr>::as_ref`] and the
 /// by-reference [`TryFrom<&std::ffi::OsStr>`] peer), not a per-
 /// consumer `BumpLevel::try_from(rc.as_ref())` bridge at every
 /// downstream site that types its parse contract as
-/// `impl TryFrom<Rc<std::ffi::OsStr>>`. THEORY.md §VI.1 one-oracle:
+/// `impl TryFrom<Rc<std::ffi::OsStr>>`. One-oracle:
 /// the canonical label grammar is named at one site
 /// ([`BumpLevel::as_str`]), inverted at one site
 /// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
@@ -6735,7 +6732,7 @@ impl TryFrom<std::rc::Rc<std::ffi::OsStr>> for BumpLevel {
 /// by
 /// [`tests::test_bump_level_try_from_rc_path_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the thread-local shared-owned
+/// Typed primitives: the thread-local shared-owned
 /// filesystem-path try-conversion parse surface is a typed-primitive
 /// site on [`BumpLevel`] itself (one
 /// [`TryFrom<std::rc::Rc<std::path::Path>>`] impl routing through
@@ -6743,7 +6740,7 @@ impl TryFrom<std::rc::Rc<std::ffi::OsStr>> for BumpLevel {
 /// [`TryFrom<&std::path::Path>`] peer), not a per-consumer
 /// `.as_ref().as_os_str().to_str().parse()` composition at every
 /// downstream site that types its parse contract as
-/// `impl TryFrom<Rc<std::path::Path>>`. THEORY.md §VI.1 one-oracle:
+/// `impl TryFrom<Rc<std::path::Path>>`. One-oracle:
 /// the canonical label grammar is named at one site
 /// ([`BumpLevel::as_str`]), inverted at one site
 /// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
@@ -6836,12 +6833,12 @@ impl TryFrom<std::rc::Rc<std::path::Path>> for BumpLevel {
 /// `impl Into<&'static str>` consumer at every variant is pinned by
 /// [`tests::test_bump_level_into_static_str_carries_through_generic_consumer`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value static-lifetime
+/// Typed primitives: the by-value static-lifetime
 /// conversion surface is a typed-primitive site on [`BumpLevel`]
 /// itself (one `From<BumpLevel> for &'static str` impl routing
 /// through [`BumpLevel::as_str`]), not a per-consumer `.as_str()`
 /// restatement at every downstream site that accepts
-/// `impl Into<&'static str>`. THEORY.md §VI.1 one-oracle: the
+/// `impl Into<&'static str>`. One-oracle: the
 /// canonical label is named at one site ([`BumpLevel::as_str`]) and
 /// every surface — `as_str`, `Display`, `Serialize`, `AsRef<str>`,
 /// this `From<T> for &'static str` — reads through it.
@@ -6914,13 +6911,13 @@ impl From<BumpLevel> for &'static str {
 /// canonical label at every variant is pinned by
 /// [`tests::test_bump_level_from_into_static_bytes_round_trips_through_from_utf8`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value static-lifetime
+/// Typed primitives: the by-value static-lifetime
 /// byte-slice-emit surface is a typed-primitive site on [`BumpLevel`]
 /// itself (one `From<BumpLevel> for &'static [u8]` impl routing
 /// through [`BumpLevel::as_str`] and [`str::as_bytes`]), not a
 /// per-consumer `.as_str().as_bytes()` restatement at every
 /// downstream site that accepts `impl Into<&'static [u8]>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`BumpLevel::as_str`]) and every surface — `as_str`,
 /// `Display`, `Serialize`, `AsRef<str>`, `AsRef<[u8]>`,
 /// `From<T> for &'static str`, this `From<T> for &'static [u8]` —
@@ -7032,13 +7029,12 @@ impl From<BumpLevel> for &'static [u8] {
 /// [`TryFrom<Vec<u8>>`] at every variant is pinned by
 /// [`tests::test_bump_level_from_into_owned_bytes_round_trips_through_try_from`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value owned-buffer byte-
+/// Typed primitives: the by-value owned-buffer byte-
 /// slice emit surface is a typed-primitive site on [`BumpLevel`]
 /// itself (one `From<BumpLevel> for Vec<u8>` impl routing through
 /// [`BumpLevel::as_str`] + [`str::as_bytes`] + [`slice::to_vec`]), not
 /// a per-consumer `level.as_str().as_bytes().to_vec()` restatement at
-/// every downstream site that accepts `impl Into<Vec<u8>>`. THEORY.md
-/// §VI.1 one-oracle: the canonical label is named at one site
+/// every downstream site that accepts `impl Into<Vec<u8>>`. One-oracle: the canonical label is named at one site
 /// ([`BumpLevel::as_str`]) and every emit surface — `as_str`,
 /// [`std::fmt::Display`], [`serde::Serialize`], [`AsRef<str>`],
 /// [`AsRef<[u8]>`], `From<T> for &'static str`, `From<T> for &'static
@@ -7114,14 +7110,14 @@ impl From<BumpLevel> for Vec<u8> {
 /// zero-allocation branch choice at every variant is pinned by
 /// [`tests::test_bump_level_into_cow_static_bytes_is_borrowed`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value borrowed/owned-
+/// Typed primitives: the by-value borrowed/owned-
 /// frontier byte-slice-emit surface is a typed-primitive site on
 /// [`BumpLevel`] itself (one `From<BumpLevel> for Cow<'static, [u8]>`
 /// impl routing through [`BumpLevel::as_str`] composed with
 /// [`str::as_bytes`] at the [`std::borrow::Cow::Borrowed`] branch),
 /// not a per-consumer `Cow::Borrowed(level.as_str().as_bytes())`
 /// restatement at every downstream site that accepts
-/// `impl Into<Cow<'static, [u8]>>`. THEORY.md §VI.1 one-oracle: the
+/// `impl Into<Cow<'static, [u8]>>`. One-oracle: the
 /// canonical label is named at one site ([`BumpLevel::as_str`]) and
 /// every emit surface — `as_str`, [`std::fmt::Display`],
 /// [`serde::Serialize`], [`AsRef<str>`], [`AsRef<[u8]>`],
@@ -7213,14 +7209,14 @@ impl From<BumpLevel> for std::borrow::Cow<'static, [u8]> {
 /// [`BumpLevel::as_str`] at every variant is pinned by
 /// [`tests::test_bump_level_from_into_boxed_bytes_round_trips_through_from_utf8`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shrunk-owned
+/// Typed primitives: the by-value shrunk-owned
 /// [`Box<[u8]>`] emit surface is a typed-primitive site on
 /// [`BumpLevel`] itself (one `From<BumpLevel> for Box<[u8]>` impl
 /// routing through [`as_str`] + [`str::as_bytes`] composed with
 /// [`<Box<[u8]> as From<&[u8]>>::from`]), not a per-consumer
 /// `Box::<[u8]>::from(level.as_str().as_bytes())` restatement at
 /// every downstream site that accepts `impl Into<Box<[u8]>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`BumpLevel::as_str`]) and every byte-slice emit surface —
 /// [`AsRef<[u8]>`], [`From<T> for &'static [u8]`],
 /// [`From<T> for Vec<u8>`], [`From<T> for Cow<'static, [u8]>`], this
@@ -7327,14 +7323,14 @@ impl From<BumpLevel> for Box<[u8]> {
 /// surface
 /// ([`tests::test_bump_level_into_arc_str_shares_label_across_clones`]).
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shared-owned
+/// Typed primitives: the by-value shared-owned
 /// [`Arc<[u8]>`] emit surface is a typed-primitive site on
 /// [`BumpLevel`] itself (one `From<BumpLevel> for Arc<[u8]>` impl
 /// routing through [`as_str`] + [`str::as_bytes`] composed with
 /// [`std::sync::Arc::<[u8]>::from`]), not a per-consumer
 /// `Arc::<[u8]>::from(level.as_str().as_bytes())` restatement at every
 /// downstream site that accepts `impl Into<Arc<[u8]>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one site
+/// One-oracle: the canonical label is named at one site
 /// ([`BumpLevel::as_str`]) and every byte-slice emit surface —
 /// [`AsRef<[u8]>`], [`From<T> for &'static [u8]`],
 /// [`From<T> for Vec<u8>`], [`From<T> for Cow<'static, [u8]>`],
@@ -7450,14 +7446,14 @@ impl From<BumpLevel> for std::sync::Arc<[u8]> {
 /// surface
 /// ([`tests::test_bump_level_into_rc_str_shares_label_across_clones`]).
 ///
-/// THEORY.md §V.4 typed primitives: the by-value thread-local
+/// Typed primitives: the by-value thread-local
 /// shared-owned [`Rc<[u8]>`] emit surface is a typed-primitive site
 /// on [`BumpLevel`] itself (one `From<BumpLevel> for Rc<[u8]>` impl
 /// routing through [`as_str`] + [`str::as_bytes`] composed with
 /// [`std::rc::Rc::<[u8]>::from`]), not a per-consumer
 /// `Rc::<[u8]>::from(level.as_str().as_bytes())` restatement at
 /// every downstream site that accepts `impl Into<Rc<[u8]>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`BumpLevel::as_str`]) and every byte-slice emit surface —
 /// [`AsRef<[u8]>`], [`From<T> for &'static [u8]`],
 /// [`From<T> for Vec<u8>`], [`From<T> for Cow<'static, [u8]>`],
@@ -7588,13 +7584,13 @@ impl From<BumpLevel> for std::rc::Rc<[u8]> {
 /// is pinned by
 /// [`tests::test_bump_level_try_from_bytes_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-reference byte-slice
+/// Typed primitives: the by-reference byte-slice
 /// try-conversion surface is a typed-primitive site on [`BumpLevel`]
 /// itself (one `TryFrom<&[u8]>` impl routing through
 /// [`std::str::from_utf8`] + [`FromStr`]), not a per-consumer
 /// `std::str::from_utf8(bytes).and_then(|s| s.parse::<BumpLevel>())`
 /// restatement at every downstream site that receives canonical-
-/// label byte sequences. THEORY.md §VI.1 one-oracle: the canonical-
+/// label byte sequences. One-oracle: the canonical-
 /// label grammar is named at one site ([`BumpLevel::as_str`]),
 /// inverted at one site
 /// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every
@@ -7718,13 +7714,13 @@ impl TryFrom<&[u8]> for BumpLevel {
 /// input is pinned by
 /// [`tests::test_bump_level_try_from_vec_bytes_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value owned-buffer byte-slice
+/// Typed primitives: the by-value owned-buffer byte-slice
 /// try-conversion surface is a typed-primitive site on [`BumpLevel`]
 /// itself (one `TryFrom<Vec<u8>>` impl routing through the borrowed
 /// [`TryFrom<&[u8]>`] parse peer), not a per-consumer
 /// `BumpLevel::try_from(buf.as_slice())` bridge at every downstream site
 /// that types its parse contract as `impl TryFrom<Vec<u8>>` rather than
-/// [`TryFrom<&[u8]>`] or [`std::str::FromStr`]. THEORY.md §VI.1 one-oracle:
+/// [`TryFrom<&[u8]>`] or [`std::str::FromStr`]. One-oracle:
 /// the canonical-label grammar is named at one site
 /// ([`BumpLevel::as_str`]), inverted at one site
 /// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
@@ -7827,14 +7823,14 @@ impl TryFrom<Vec<u8>> for BumpLevel {
 /// owned-frontier input is pinned by
 /// [`tests::test_bump_level_try_from_cow_bytes_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value borrowed/owned-frontier
+/// Typed primitives: the by-value borrowed/owned-frontier
 /// byte-slice try-conversion surface is a typed-primitive site on
 /// [`BumpLevel`] itself (one `TryFrom<Cow<'_, [u8]>>` impl routing through
 /// the borrowed [`TryFrom<&[u8]>`] parse peer), not a per-consumer
 /// `BumpLevel::try_from(buf.as_ref())` bridge at every downstream site
 /// that types its parse contract as `impl TryFrom<Cow<'_, [u8]>>` rather
-/// than [`TryFrom<&[u8]>`] or [`TryFrom<Vec<u8>>`]. THEORY.md §VI.1
-/// one-oracle: the canonical-label grammar is named at one site
+/// than [`TryFrom<&[u8]>`] or [`TryFrom<Vec<u8>>`].
+/// One-oracle: the canonical-label grammar is named at one site
 /// ([`BumpLevel::as_str`]), inverted at one site
 /// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
 /// surface — [`std::str::FromStr`], [`serde::Deserialize`],
@@ -7911,13 +7907,13 @@ impl<'a> TryFrom<std::borrow::Cow<'a, [u8]>> for BumpLevel {
 /// the strict-rejection contract on non-canonical input is pinned by
 /// [`tests::test_bump_level_try_from_box_bytes_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shrunk-owned
+/// Typed primitives: the by-value shrunk-owned
 /// byte-slice-parse surface is a typed-primitive site on [`BumpLevel`]
 /// itself (one `TryFrom<Box<[u8]>>` impl routing through the
 /// by-reference [`TryFrom<&[u8]>`] parse oracle), not a per-consumer
 /// `BumpLevel::try_from(std::str::from_utf8(&bytes)?.trim())` restatement
 /// at every downstream site.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at one
+/// One-oracle: the canonical label grammar is named at one
 /// site ([`BumpLevel::as_str`]), inverted at one site
 /// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
 /// surface — [`std::str::FromStr`], [`serde::Deserialize`],
@@ -7998,14 +7994,14 @@ impl TryFrom<Box<[u8]>> for BumpLevel {
 /// the strict-rejection contract on non-canonical input is pinned by
 /// [`tests::test_bump_level_try_from_arc_bytes_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shared-owned
+/// Typed primitives: the by-value shared-owned
 /// byte-slice-parse surface is a typed-primitive site on [`BumpLevel`]
 /// itself (one `TryFrom<Arc<[u8]>>` impl routing through the
 /// by-reference [`TryFrom<&[u8]>`] parse oracle), not a per-consumer
 /// `BumpLevel::try_from(std::str::from_utf8(&bytes)?.trim())`
 /// restatement at every downstream site that types its parse contract
 /// as `impl TryFrom<Arc<[u8]>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at
+/// One-oracle: the canonical label grammar is named at
 /// one site ([`BumpLevel::as_str`]), inverted at one site
 /// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
 /// surface — [`std::str::FromStr`], [`serde::Deserialize`],
@@ -8095,14 +8091,14 @@ impl TryFrom<std::sync::Arc<[u8]>> for BumpLevel {
 /// the strict-rejection contract on non-canonical input is pinned by
 /// [`tests::test_bump_level_try_from_rc_bytes_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value thread-local
+/// Typed primitives: the by-value thread-local
 /// shared-owned byte-slice-parse surface is a typed-primitive site on
 /// [`BumpLevel`] itself (one `TryFrom<Rc<[u8]>>` impl routing through
 /// the by-reference [`TryFrom<&[u8]>`] parse oracle), not a per-
 /// consumer `BumpLevel::try_from(std::str::from_utf8(&bytes)?.trim())`
 /// restatement at every downstream site that types its parse contract
 /// as `impl TryFrom<Rc<[u8]>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at
+/// One-oracle: the canonical label grammar is named at
 /// one site ([`BumpLevel::as_str`]), inverted at one site
 /// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
 /// surface — [`std::str::FromStr`], [`serde::Deserialize`],
@@ -8207,13 +8203,12 @@ impl TryFrom<std::rc::Rc<[u8]>> for BumpLevel {
 /// the strict-rejection contract on non-canonical input is pinned by
 /// [`tests::test_bump_level_try_from_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-reference try-conversion
+/// Typed primitives: the by-reference try-conversion
 /// surface is a typed-primitive site on [`BumpLevel`] itself (one
 /// `TryFrom<&str>` impl routing through the [`std::str::FromStr`]
 /// parse oracle), not a per-consumer `.parse::<BumpLevel>()` bridge at
 /// every downstream site that types its parse contract as
-/// `impl TryFrom<&str>` rather than [`std::str::FromStr`]. THEORY.md
-/// §VI.1 one-oracle: the canonical-label grammar is named at one site
+/// `impl TryFrom<&str>` rather than [`std::str::FromStr`]. One-oracle: the canonical-label grammar is named at one site
 /// ([`BumpLevel::as_str`]), inverted at one site
 /// ([`<BumpLevel as std::str::FromStr>::from_str`]), and every parse
 /// surface — [`std::str::FromStr`], [`serde::Deserialize`], this
@@ -8297,7 +8292,7 @@ impl TryFrom<&str> for BumpLevel {
 /// every variant is pinned by
 /// [`tests::test_bump_level_into_string_carries_through_generic_consumer`].
 ///
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one site
+/// One-oracle: the canonical label is named at one site
 /// ([`BumpLevel::as_str`]) and every emit surface —
 /// [`BumpLevel::as_str`], [`std::fmt::Display`], [`serde::Serialize`],
 /// [`AsRef<str>`], [`From<BumpLevel> for &'static str`], this
@@ -8413,7 +8408,7 @@ impl From<BumpLevel> for String {
 /// by
 /// [`tests::test_bump_level_try_from_string_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.1 knowable platform: the by-value owned-string
+/// Knowable platform: the by-value owned-string
 /// try-conversion surface is a typed-primitive site on [`BumpLevel`]
 /// itself (one `TryFrom<String>` impl routing through the
 /// [`std::str::FromStr`] parse oracle), not a per-consumer
@@ -8421,7 +8416,7 @@ impl From<BumpLevel> for String {
 /// its parse contract as `impl TryFrom<String>` rather than
 /// [`std::str::FromStr`] or [`TryFrom<&str>`] — invalid states remain
 /// unrepresentable at the owned-string parse layer by construction.
-/// THEORY.md §VI.1 generation over composition: the canonical-label
+/// Generation over composition: the canonical-label
 /// grammar is named at one site ([`BumpLevel::as_str`]), inverted at
 /// one site ([`<BumpLevel as std::str::FromStr>::from_str`]), and every
 /// parse surface — [`std::str::FromStr`], [`serde::Deserialize`],
@@ -8529,13 +8524,13 @@ impl TryFrom<String> for BumpLevel {
 /// the emit boundary is pinned by
 /// [`tests::test_bump_level_into_cow_static_str_is_borrowed`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value `Cow<'static, str>`
+/// Typed primitives: the by-value `Cow<'static, str>`
 /// emit surface is a typed-primitive site on [`BumpLevel`] itself (one
 /// `From<BumpLevel> for Cow<'static, str>` impl routing through
 /// [`as_str`] at the [`Cow::Borrowed`] branch), not a per-consumer
 /// `Cow::Borrowed(level.as_str())` restatement at every downstream
-/// site that accepts `impl Into<Cow<'static, str>>`. THEORY.md §VI.1
-/// one-oracle: the canonical label is named at one site
+/// site that accepts `impl Into<Cow<'static, str>>`.
+/// One-oracle: the canonical label is named at one site
 /// ([`BumpLevel::as_str`]) and every emit surface — [`BumpLevel::as_str`],
 /// [`std::fmt::Display`], [`serde::Serialize`], [`AsRef<str>`],
 /// [`From<BumpLevel> for &'static str`], [`From<BumpLevel> for String`],
@@ -8650,14 +8645,14 @@ impl From<BumpLevel> for std::borrow::Cow<'static, str> {
 /// [`Cow`] branches is pinned by
 /// [`tests::test_bump_level_try_from_cow_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value [`Cow<'_, str>`] parse
+/// Typed primitives: the by-value [`Cow<'_, str>`] parse
 /// surface is a typed-primitive site on [`BumpLevel`] itself (one
 /// `TryFrom<Cow<'_, str>>` impl routing through
 /// [`<Self as std::str::FromStr>::from_str`] on
 /// [`Cow::as_ref`]), not a per-consumer
 /// `level_str.parse::<BumpLevel>()` restatement at every downstream
 /// site that receives a `Cow<'_, str>` label.
-/// THEORY.md §VI.1 one-oracle: the canonical grammar is named at one
+/// One-oracle: the canonical grammar is named at one
 /// site ([`<BumpLevel as std::str::FromStr>::from_str`]) and every
 /// parse surface — [`FromStr`], [`serde::Deserialize`],
 /// [`TryFrom<&str>`], [`TryFrom<String>`], this [`TryFrom<Cow<'_,
@@ -8748,13 +8743,13 @@ impl<'a> TryFrom<std::borrow::Cow<'a, str>> for BumpLevel {
 /// the version-bump-magnitude ladder against the shared
 /// [`BumpLevel::as_str`] canonical-label oracle.
 ///
-/// THEORY.md §V.4 typed primitives: the by-value [`Box<str>`] emit
+/// Typed primitives: the by-value [`Box<str>`] emit
 /// surface is a typed-primitive site on [`BumpLevel`] itself (one
 /// `From<BumpLevel> for Box<str>` impl routing through [`as_str`] at
 /// the [`Box::<str>::from`] boundary), not a per-consumer
 /// `Box::<str>::from(level.as_str())` restatement at every downstream
 /// site that receives an [`Into<Box<str>>`] label sink.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one site
+/// One-oracle: the canonical label is named at one site
 /// ([`BumpLevel::as_str`]) and every emit surface — [`as_str`],
 /// [`Display`], [`serde::Serialize`], [`AsRef<str>`],
 /// [`From<BumpLevel> for &'static str`],
@@ -8867,14 +8862,14 @@ impl From<BumpLevel> for Box<str> {
 /// the strict-rejection contract at non-canonical input is pinned by
 /// [`tests::test_bump_level_try_from_box_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value [`Box<str>`] parse
+/// Typed primitives: the by-value [`Box<str>`] parse
 /// surface is a typed-primitive site on [`BumpLevel`] itself (one
 /// `TryFrom<Box<str>>` impl routing through
 /// [`<Self as std::str::FromStr>::from_str`] on
 /// [`<Box<str> as AsRef<str>>::as_ref`]), not a per-consumer
 /// `boxed.parse::<BumpLevel>()` restatement at every downstream site
 /// that receives a [`Box<str>`] label.
-/// THEORY.md §VI.1 one-oracle: the canonical grammar is named at one
+/// One-oracle: the canonical grammar is named at one
 /// site ([`<BumpLevel as std::str::FromStr>::from_str`]) and every
 /// parse surface — [`FromStr`], [`serde::Deserialize`],
 /// [`TryFrom<&str>`], [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`],
@@ -8984,13 +8979,13 @@ impl TryFrom<Box<str>> for BumpLevel {
 /// version-bump-magnitude ladder against the shared
 /// [`BumpLevel::as_str`] canonical-label oracle.
 ///
-/// THEORY.md §V.4 typed primitives: the by-value [`Arc<str>`] emit
+/// Typed primitives: the by-value [`Arc<str>`] emit
 /// surface is a typed-primitive site on [`BumpLevel`] itself (one
 /// `From<BumpLevel> for Arc<str>` impl routing through [`as_str`] at
 /// the [`std::sync::Arc::<str>::from`] boundary), not a per-consumer
 /// `Arc::<str>::from(level.as_str())` restatement at every downstream
 /// site that receives an [`Into<Arc<str>>`] label sink.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one site
+/// One-oracle: the canonical label is named at one site
 /// ([`BumpLevel::as_str`]) and every emit surface — [`as_str`],
 /// [`Display`], [`serde::Serialize`], [`AsRef<str>`],
 /// [`From<BumpLevel> for &'static str`],
@@ -9117,14 +9112,14 @@ impl From<BumpLevel> for std::sync::Arc<str> {
 /// the strict-rejection contract at non-canonical input is pinned by
 /// [`tests::test_bump_level_try_from_arc_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value [`Arc<str>`] parse
+/// Typed primitives: the by-value [`Arc<str>`] parse
 /// surface is a typed-primitive site on [`BumpLevel`] itself (one
 /// `TryFrom<Arc<str>>` impl routing through
 /// [`<Self as std::str::FromStr>::from_str`] on
 /// [`<std::sync::Arc<str> as AsRef<str>>::as_ref`]), not a per-consumer
 /// `shared.parse::<BumpLevel>()` restatement at every downstream site
 /// that receives an [`Arc<str>`] label.
-/// THEORY.md §VI.1 one-oracle: the canonical grammar is named at one
+/// One-oracle: the canonical grammar is named at one
 /// site ([`<BumpLevel as std::str::FromStr>::from_str`]) and every parse
 /// surface — [`FromStr`], [`serde::Deserialize`], [`TryFrom<&str>`],
 /// [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`], [`TryFrom<Box<str>>`],
@@ -9242,13 +9237,13 @@ impl TryFrom<std::sync::Arc<str>> for BumpLevel {
 /// trio in a follow-up commit, sibling of the closed [`Arc<str>`] emit +
 /// parse trio directly above.
 ///
-/// THEORY.md §V.4 typed primitives: the by-value [`Rc<str>`] emit
+/// Typed primitives: the by-value [`Rc<str>`] emit
 /// surface is a typed-primitive site on [`BumpLevel`] itself (one
 /// `From<BumpLevel> for Rc<str>` impl routing through [`as_str`] at the
 /// [`std::rc::Rc::<str>::from`] boundary), not a per-consumer
 /// `Rc::<str>::from(level.as_str())` restatement at every downstream
 /// site that receives an [`Into<Rc<str>>`] label sink.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one site
+/// One-oracle: the canonical label is named at one site
 /// ([`BumpLevel::as_str`]) and every emit surface — [`as_str`],
 /// [`Display`], [`serde::Serialize`], [`AsRef<str>`],
 /// [`From<BumpLevel> for &'static str`],
@@ -9350,14 +9345,14 @@ impl From<BumpLevel> for std::rc::Rc<str> {
 /// the strict-rejection contract at non-canonical input is pinned by
 /// [`tests::test_bump_level_try_from_rc_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value [`Rc<str>`] parse
+/// Typed primitives: the by-value [`Rc<str>`] parse
 /// surface is a typed-primitive site on [`BumpLevel`] itself (one
 /// `TryFrom<Rc<str>>` impl routing through
 /// [`<Self as std::str::FromStr>::from_str`] on
 /// [`<std::rc::Rc<str> as AsRef<str>>::as_ref`]), not a per-consumer
 /// `shared.parse::<BumpLevel>()` restatement at every downstream site
 /// that receives an [`Rc<str>`] label.
-/// THEORY.md §VI.1 one-oracle: the canonical grammar is named at one
+/// One-oracle: the canonical grammar is named at one
 /// site ([`<BumpLevel as std::str::FromStr>::from_str`]) and every parse
 /// surface — [`FromStr`], [`serde::Deserialize`], [`TryFrom<&str>`],
 /// [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`], [`TryFrom<Box<str>>`],
@@ -9446,12 +9441,12 @@ impl TryFrom<std::rc::Rc<str>> for BumpLevel {
 /// pair is pinned by
 /// [`tests::test_bump_level_partial_eq_str_rejects_non_canonical_labels`].
 ///
-/// THEORY.md §V.4 typed primitives: the borrowed UTF-8 comparison
+/// Typed primitives: the borrowed UTF-8 comparison
 /// surface is a typed-primitive site on [`BumpLevel`] itself (one
 /// [`PartialEq<str>`] impl routing through [`BumpLevel::as_str`]),
 /// not a per-consumer `level.as_str() == label` restatement at
 /// every downstream site that asks whether a [`BumpLevel`] value
-/// names a specific canonical label. THEORY.md §VI.1 one-oracle:
+/// names a specific canonical label. One-oracle:
 /// the canonical label is named at one site ([`BumpLevel::as_str`]),
 /// and every borrowed UTF-8 surface — the [`AsRef<str>`] borrowed-
 /// view sibling yielding `&str`, this [`PartialEq<str>`] answering
@@ -9538,14 +9533,14 @@ impl PartialEq<str> for BumpLevel {
 /// pair is pinned by
 /// [`tests::test_bump_level_partial_eq_str_ref_rejects_non_canonical_labels`].
 ///
-/// THEORY.md §V.4 typed primitives: the borrowed UTF-8 `&str`-
+/// Typed primitives: the borrowed UTF-8 `&str`-
 /// receiver comparison surface is a typed-primitive site on
 /// [`BumpLevel`] itself (one [`PartialEq<&str>`] impl routing
 /// through [`BumpLevel::as_str`]), not a per-consumer
 /// `level.as_str() == label_ref` restatement at every downstream
 /// site that asks whether a [`BumpLevel`] value names a specific
 /// canonical label through an already-borrowed `&str` handle.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`BumpLevel::as_str`]), and every borrowed UTF-8 surface —
 /// the [`AsRef<str>`] borrowed-view sibling yielding `&str`, the
 /// [`PartialEq<str>`] dereffed-str-receiver sibling answering
@@ -9618,12 +9613,12 @@ impl PartialEq<&str> for BumpLevel {
 /// (variant, label) pair is pinned by
 /// [`tests::test_partial_eq_bump_level_symmetric_with_forward_direction`].
 ///
-/// THEORY.md §III typed primitives: the reverse-direction borrowed
+/// Typed primitives: the reverse-direction borrowed
 /// UTF-8 comparison surface is a typed-primitive site on [`BumpLevel`]
 /// itself (one [`PartialEq<BumpLevel>`] impl on [`str`] routing
 /// through [`BumpLevel::as_str`]), not a per-consumer
 /// `label == level.as_str()` restatement at every downstream site.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`BumpLevel::as_str`]), and every borrowed UTF-8 comparison
 /// surface — the forward-direction [`PartialEq<str> for BumpLevel`] +
 /// [`PartialEq<&str> for BumpLevel`] pair, this reverse-direction
@@ -9660,12 +9655,12 @@ impl PartialEq<BumpLevel> for str {
 /// == <BumpLevel as PartialEq<&str>>::eq(&level, &label_ref)` holds by
 /// construction at every `(label_ref, level)` pair.
 ///
-/// THEORY.md §III typed primitives: the reverse-direction borrowed
+/// Typed primitives: the reverse-direction borrowed
 /// UTF-8 `&str`-receiver comparison surface is a typed-primitive site
 /// on [`BumpLevel`] itself (one [`PartialEq<BumpLevel>`] impl on
 /// [`&str`] routing through [`BumpLevel::as_str`]), not a per-consumer
 /// `label_ref == level.as_str()` restatement at every downstream site.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`BumpLevel::as_str`]), and this reverse-direction `&str`-
 /// receiver surface reads through the same one-oracle discipline the
 /// three sibling comparison surfaces (forward-str, forward-&str,
@@ -9734,13 +9729,13 @@ impl PartialEq<BumpLevel> for &str {
 /// variant is pinned by
 /// [`tests::test_bump_level_partial_eq_bytes_reflexive_at_own_label`].
 ///
-/// THEORY.md §III typed primitives: the borrowed byte-slice comparison
+/// Typed primitives: the borrowed byte-slice comparison
 /// surface is a typed-primitive site on [`BumpLevel`] itself (one
 /// [`PartialEq<[u8]>`] impl routing through
 /// [`<BumpLevel as AsRef<[u8]>>::as_ref`]), not a per-consumer
 /// restatement at every downstream site that asks whether a
 /// [`BumpLevel`] value names a specific canonical label through an
-/// already-dereffed `[u8]` handle. THEORY.md §VI.1 one-oracle: the
+/// already-dereffed `[u8]` handle. One-oracle: the
 /// canonical label is named at one site ([`BumpLevel::as_str`],
 /// projected onto bytes through [`str::as_bytes`] at the
 /// [`AsRef<[u8]>`] surface), and this [`PartialEq<[u8]>`] surface
@@ -9780,14 +9775,14 @@ impl PartialEq<[u8]> for BumpLevel {
 /// as the sibling receiver-shape peer at zero allocation and zero
 /// intermediate buffer.
 ///
-/// THEORY.md §III typed primitives: the borrowed byte-slice
+/// Typed primitives: the borrowed byte-slice
 /// `&[u8]`-receiver comparison surface is a typed-primitive site on
 /// [`BumpLevel`] itself (one [`PartialEq<&[u8]>`] impl routing through
 /// [`<BumpLevel as AsRef<[u8]>>::as_ref`]), not a per-consumer
 /// restatement at every downstream site that asks whether a
 /// [`BumpLevel`] value names a specific canonical label through an
 /// already-borrowed `&[u8]` handle without an explicit `*` deref.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`BumpLevel::as_str`], projected onto bytes through
 /// [`str::as_bytes`] at the [`AsRef<[u8]>`] surface), and this
 /// [`PartialEq<&[u8]>`] receiver-shape surface reads through the same
@@ -9837,13 +9832,13 @@ impl PartialEq<&[u8]> for BumpLevel {
 /// `cli/src/oci_manifest.rs::3738` / `::3809` (forward pair) /
 /// `::3889` / `::3938` (reverse pair).
 ///
-/// THEORY.md §III typed primitives: the reverse-direction borrowed
+/// Typed primitives: the reverse-direction borrowed
 /// byte-slice `[u8]`-receiver comparison surface is a typed-primitive
 /// site on [`BumpLevel`] itself (one [`PartialEq<BumpLevel>`] impl on
 /// [`[u8]`] routing through [`<BumpLevel as AsRef<[u8]>>::as_ref`]),
 /// not a per-consumer restatement at every downstream site that holds
 /// an already-dereffed `[u8]` handle on the left of an equality
-/// operator. THEORY.md §VI.1 one-oracle: the canonical label is named
+/// operator. One-oracle: the canonical label is named
 /// at one site ([`BumpLevel::as_str`], projected onto bytes through
 /// [`str::as_bytes`] at the [`AsRef<[u8]>`] surface at line 1508), and
 /// every borrowed byte-slice comparison surface — the forward-
@@ -9890,14 +9885,14 @@ impl PartialEq<BumpLevel> for [u8] {
 /// == <BumpLevel as PartialEq<&[u8]>>::eq(&level, &bytes_ref)` holds by
 /// construction at every `(bytes_ref, level)` pair.
 ///
-/// THEORY.md §III typed primitives: the reverse-direction borrowed
+/// Typed primitives: the reverse-direction borrowed
 /// byte-slice `&[u8]`-receiver comparison surface is a typed-primitive
 /// site on [`BumpLevel`] itself (one [`PartialEq<BumpLevel>`] impl on
 /// [`&[u8]`] routing through [`<BumpLevel as AsRef<[u8]>>::as_ref`]),
 /// not a per-consumer restatement at every downstream site that asks
 /// whether an already-borrowed `&[u8]` handle names the same canonical
-/// bump-magnitude label as a [`BumpLevel`] value. THEORY.md §VI.1
-/// one-oracle: the canonical label is named at one site
+/// bump-magnitude label as a [`BumpLevel`] value.
+/// One-oracle: the canonical label is named at one site
 /// ([`BumpLevel::as_str`]), and this reverse-direction `&[u8]`-receiver
 /// surface reads through the same one-oracle discipline the three
 /// sibling byte-slice comparison surfaces (forward-`[u8]`,
@@ -10008,11 +10003,11 @@ pub fn bump_seed<'a>(manifest_version: &'a str, max_released: &'a str) -> Result
 /// form — so downstream string-surface consumers observe the same
 /// `MAJOR.MINOR.PATCH` byte sequence on the tie.
 ///
-/// THEORY.md §V.4 typed primitives: the seed-selection surface carries a
+/// Typed primitives: the seed-selection surface carries a
 /// typed function (typed triples in, typed triple out), not a
 /// `(&str, &str) -> &str` shape that re-derives the shape check and the
 /// ordering discipline at every consumer boundary.
-/// THEORY.md §VI.1 one-oracle discipline: the `max(manifest,
+/// One-oracle discipline: the `max(manifest,
 /// max_released)` decision lives at ONE body (this typed peer), which
 /// the stringly [`bump_seed`] and the typed-inside [`next_free_version_typed`]
 /// both route through — no forked comparison living at two sites.
@@ -10081,7 +10076,7 @@ pub fn next_free_version(
 /// is already available. The typed peer takes [`BumpLevel`] at the
 /// signature and delegates to [`bump_semver_typed`] at both bump sites, so
 /// the runtime FromStr dispatch never fires inside the loop — the typed
-/// primitive discipline the module opens with (THEORY §V.4 typed
+/// primitive discipline the module opens with (typed
 /// primitives; every named typed sum has both a `_typed` and a stringly
 /// entry point sharing ONE body) extended one function outward.
 ///
@@ -10181,7 +10176,7 @@ pub fn next_free_version_typed(
 /// membership as strings from clap and [`crate::git::tag_exists_in`]),
 /// and both delegate through this fully-typed peer at the same body,
 /// so the seeding-and-collision arithmetic lives at ONE site —
-/// THEORY.md §VI.1 one-oracle discipline — and every future consumer
+/// one-oracle discipline — and every future consumer
 /// that holds typed values reaches it directly without a `to_string()`
 /// round-trip at the boundary.
 ///
@@ -10198,12 +10193,12 @@ pub fn next_free_version_typed(
 /// against a future refactor that quietly forked one of the two
 /// message renderings.
 ///
-/// THEORY.md §V.4 typed primitives: the seeding-and-collision surface
+/// Typed primitives: the seeding-and-collision surface
 /// now carries a fully typed function (typed triples in, typed level,
 /// typed max-released, typed predicate, typed triple out) — not a
 /// `(&str, BumpLevel, &str, &dyn Fn(&str) -> bool) -> Result<String>`
 /// shape that re-derives the parse discipline at every consumer.
-/// THEORY.md §VI.1 one-oracle discipline: the loop body lives at ONE
+/// One-oracle discipline: the loop body lives at ONE
 /// site — this typed peer — which the stringly [`next_free_version`]
 /// and the typed-level [`next_free_version_typed`] both delegate
 /// through, no forked bail message or off-by-one loop bound at two
@@ -11972,9 +11967,9 @@ mod tests {
     /// [`dep_planners_route_through_plan_optional_dep_by_span`], and
     /// [`planners_route_semver_guard_through_ensure_writable_semver`]
     /// (the last one owning the `\n{\n` where-clause branch inline).
-    /// Six replicas is twice over THEORY.md §VI.1's three-times-is-a-law
+    /// Six replicas is twice over the three-times-is-a-law
     /// threshold; the helper is the "generator before pattern, pattern
-    /// before duplication" §I.5 names. A seventh shield (a future
+    /// before duplication" names. A seventh shield (a future
     /// writer/reader family member's routing assertion) inherits the
     /// extraction by one line of delegation rather than a copy of the
     /// pre-lift six-line shape, AND inherits where-clause support for
@@ -12029,7 +12024,7 @@ mod tests {
     /// each used to spell this same six-line stripped-tally body inline
     /// (one as a `count_live` local closure, two as inline `let
     /// live_hits: usize = src.lines()…` blocks). Three replicas is
-    /// THEORY.md §VI.1's three-times-is-a-law threshold. Post-lift each
+    /// the three-times-is-a-law threshold. Post-lift each
     /// shield takes the tally by one line of delegation, and any drift
     /// in what "executable" means (a fourth line-filter shape a future
     /// edit needs — say block comments, `#[cfg(test)]`-gated blocks, or
@@ -15228,7 +15223,7 @@ mod tests {
     /// bump-output overlapped the `Patch` semver-triple) would light up
     /// here at exactly the offending pair.
     ///
-    /// THEORY.md §III.3 lattice algebra: the level axis carries a
+    /// Lattice algebra: the level axis carries a
     /// chain-derived bounded distributive lattice (pinned by
     /// `test_bump_level_meet_distributes_over_join_at_every_triple` and
     /// `test_bump_level_join_distributes_over_meet_at_every_triple`), and
@@ -15237,7 +15232,7 @@ mod tests {
     /// structural witness that the [`BumpLevel`] lattice operations
     /// (`meet` / `join`) propagate downstream onto the rendered version
     /// string without retyping the order discipline at every consumer.
-    /// THEORY.md §V.1 construction guarantees: the property test sweeps
+    /// Construction guarantees: the property test sweeps
     /// the full 27-case cross product so the order-isomorphism axiom is
     /// proven by construction at every reachable (version, level_a,
     /// level_b) triple at the typed-primitive site, not approximated by
@@ -16698,8 +16693,7 @@ mod tests {
     /// a non-distributive lattice like the diamond `M3` or the pentagon
     /// `N5`) would light up here, surfacing the structural distinction
     /// at the lattice-pair site rather than at every downstream consumer
-    /// that silently relied on the distributive identity. THEORY.md
-    /// §V.5: distributivity is the load-bearing axiom that distinguishes
+    /// that silently relied on the distributive identity. Distributivity is the load-bearing axiom that distinguishes
     /// a chain-derived lattice from a general bounded lattice, and the
     /// structural witness the meet/join pair carries beyond mere absorption.
     #[test]
@@ -27003,7 +26997,7 @@ mod seeding_tests {
     /// future edit does not silently reinstate the loop-in-two-places
     /// duplication (one body in `_typed`, one in `_all_typed`) that
     /// this lift closed — the pre-lift bug this shield forecloses is
-    /// exactly the shape THEORY §VI.1 one-oracle discipline is
+    /// exactly the shape one-oracle discipline is
     /// written to catch, where the same bail bound or the same
     /// per-iteration increment lives at two sites and drifts silently
     /// under a future edit.

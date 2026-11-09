@@ -1622,12 +1622,12 @@ pub fn write_numbered_step_heading<W: std::io::Write>(
 /// fractional labels like `"2.5/9"`). This primitive is its numbered-
 /// CHECK sibling: an ENTIRE-line `.blue()` palette (the pre-lift
 /// `println!("{}", "Check <N>: <title>".blue())` wraps the whole
-/// composed string, not just the title, per THEORY §V.1 knowable
+/// composed string, not just the title, knowable
 /// construction — the check-heading is a distinct semantic scope
 /// warranting its own palette), a `u32` index because a rebac
 /// validation check is enumerated as a plain positive ordinal and a
 /// typed `u32` locks that invariant in (a caller reaching for `"2.5"`
-/// would fail to compile, per THEORY §V.1 unrepresentability), and a
+/// would fail to compile, unrepresentability), and a
 /// literal `Check <index>: ` prefix baked into the format string so
 /// the "Check" keyword is one edit away from a locale swap or a
 /// grammar tightening. [`print_step_check`] is the `.green()` in-body
@@ -5066,7 +5066,7 @@ pub fn write_next_steps_heading<W: std::io::Write>(w: &mut W) -> std::io::Result
 /// to the sibling [`print_numbered_step_heading`], which composes
 /// pipeline-step labels like `"2.5/9"` and takes a `&str`). A `u32`
 /// index locks the "positive ordinal" invariant at the type boundary
-/// per THEORY §V.1 unrepresentability: a caller reaching for `-1` or
+/// unrepresentability: a caller reaching for `-1` or
 /// `"2.5"` would fail to compile rather than silently emit a garbled
 /// row.
 ///
@@ -6172,7 +6172,7 @@ pub const USAGE_HEADING_TEXT: &str = "Usage:";
 /// A caller reaching for a `HashSet<&str>` argument would drop the
 /// declared order and re-emit the rows in hash-order; the `&[&str]`
 /// slice type at the boundary locks the "preserve the call-site row
-/// order" invariant per THEORY §V.1 unrepresentability.
+/// order" invariant unrepresentability.
 ///
 /// # No coloring on the heading, no framing blank BEFORE the heading
 ///

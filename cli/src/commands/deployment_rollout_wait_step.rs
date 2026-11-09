@@ -41,7 +41,7 @@
 //! ```
 //!
 //! Two identically-shaped bodies past the PRIME DIRECTIVE's
-//! duplication-is-a-bug threshold (THEORY §VI.1). A drift to the
+//! duplication-is-a-bug threshold. A drift to the
 //! skip-message copy, the running-branch title, the `wait_for_deployment`
 //! argument order, or the timeout-source projection had to hit both
 //! sites in lockstep pre-lift; post-lift the drift hits ONE typed body

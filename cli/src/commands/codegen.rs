@@ -23,7 +23,7 @@ use crate::repo::get_tool_path;
 /// respelling the two-argument `BUN_BIN` resolve inline at its bun
 /// spawns.
 ///
-/// Solve-once at the sigil (THEORY §I.5 — duplication budget zero;
+/// Solve-once at the sigil (duplication budget zero;
 /// every recurring shape becomes a helper before it becomes duplicated
 /// code) means a future added `bun` spawn in this module cannot
 /// silently re-copy the two-argument resolve and drift away from the
@@ -80,7 +80,7 @@ pub async fn execute(backend_dir: &Path, web_dir: &Path) -> Result<CodegenResult
     // Route through the canonical `extract_graphql_schema` primitive —
     // the one-oracle owner of the "run cargo run --bin extract-schema
     // --quiet in a backend dir, expect non-empty stdout bytes, fail typed
-    // on every failure shape" surface (THEORY §V.1, §VI.1). The typed
+    // on every failure shape" surface. The typed
     // `SchemaExtractionError` is preserved across the anyhow boundary and
     // can be recovered with `err.downcast_ref::<SchemaExtractionError>()`.
     let schema_bytes = crate::graphql_schema::extract_graphql_schema(backend_dir).await?;
@@ -96,8 +96,7 @@ pub async fn execute(backend_dir: &Path, web_dir: &Path) -> Result<CodegenResult
     // canonical `crate::graphql_schema_write::write_graphql_schema_bytes`
     // primitive so the `"Failed to write schema to <path>"` envelope,
     // the async `tokio::fs::write` body, and any future atomic-write /
-    // OTLP-span refinement land at one construction surface (THEORY
-    // §V.1, §VI.1). Fanned in with the sibling stanzas at
+    // OTLP-span refinement land at one construction surface. Fanned in with the sibling stanzas at
     // `commands/codegen.rs::export_schema_only` and
     // `commands/codegen_validation.rs::execute`.
     let schema_path = web_dir.join("schema.graphql");
@@ -182,7 +181,7 @@ pub async fn export_schema_only(backend_dir: &Path, output_path: &Path) -> Resul
     // One-oracle read-through: same typed primitive `execute` above uses,
     // so a future refinement of the extract-schema invocation shape
     // (CARGO env override, typed error variants, byte-preservation)
-    // lands at one site (THEORY §VI.1).
+    // lands at one site.
     let schema_bytes = crate::graphql_schema::extract_graphql_schema(backend_dir).await?;
     let schema_size = schema_bytes.len();
 

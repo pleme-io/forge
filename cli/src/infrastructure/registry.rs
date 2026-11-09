@@ -27,7 +27,7 @@ use crate::retry::{
 /// resolve, one inside the `retry_command` closure of
 /// [`RegistryClient::push_with_retries`] and one inside
 /// [`RegistryClient::verify_tag_exists`]. That was 2 occurrences —
-/// THEORY §VI.1's coincidence tier — and the second respell silently
+/// the coincidence tier — and the second respell silently
 /// bypassed the module's own single-point-of-truth for tool
 /// resolution: a future edit to the resolve contract at the push site
 /// would have left the verify site stranded at the pre-edit form. The
@@ -51,8 +51,8 @@ use crate::retry::{
 /// "tidy-up" to the deriving form cannot silently re-open the
 /// silent-PATH-fallback bug on both `push` and `verify`.
 ///
-/// THEORY §I.5 (Generation over composition, duplication budget
-/// zero); THEORY §VI.1 (three-times rule at the sigil-pattern level).
+/// (Generation over composition, duplication budget
+/// zero); (three-times rule at the sigil-pattern level).
 fn doca_bin() -> String {
     get_tool_path("DOCA_BIN", "oci-push")
 }
@@ -63,7 +63,7 @@ fn doca_bin() -> String {
 /// carrying the operation label and the spawn-error message; non-zero
 /// exit routes to `PushFailed` carrying `(registry, tag, attempts,
 /// exit_code, stderr)` — the structural-record tuple the canonical retry
-/// classifier and Phase 1 attestation records (THEORY §V.4) consume.
+/// classifier and Phase 1 attestation records consume.
 ///
 /// Drives the canonical [`classify_attempt_failure`] primitive — sibling
 /// of [`classify_capture`] for the post-retry shape. The dispatch (which
@@ -434,7 +434,7 @@ impl RegistryClient {
             // discriminator. The typed `NoImagesProvided` variant
             // (cli/src/error.rs) makes that invalid state — a
             // `PushFailed` with `attempts: 0` — structurally
-            // unrepresentable (THEORY §V.1).
+            // unrepresentable.
             return Err(RegistryError::NoImagesProvided {
                 registry: registry.to_string(),
                 tag_suffix: tag_suffix.to_string(),
@@ -854,12 +854,12 @@ pub fn doca_creds_env_pairs<'a>(
 ///
 /// # Theory grounding
 ///
-/// - THEORY.md §V.1 (Types → Invariants → Proofs → Render Anywhere):
+/// - (Types → Invariants → Proofs → Render Anywhere):
 ///   the paired byte-oracle test pins both env-var names as
 ///   `cargo test`-verifiable invariants, so a fusion that renamed a
 ///   key or crossed the slot order fails at test time rather than as
 ///   a downstream 401 on the shared runner.
-/// - THEORY.md §VI.1 (three-times rule threshold): two sibling
+/// - (three-times rule threshold): two sibling
 ///   occurrences past the coincidence tier, matched to a directly
 ///   analogous already-lifted destination-side pair, so the
 ///   `.env("INPUT_USER", …).env("INPUT_PASS", …)` stanza lifts onto
@@ -931,12 +931,12 @@ pub fn doca_source_creds_env_pairs<'a>(
 ///
 /// # Theory grounding
 ///
-/// - THEORY.md §V.1 (Types → Invariants → Proofs → Render Anywhere):
+/// - (Types → Invariants → Proofs → Render Anywhere):
 ///   the stdio posture + argv + env-pair triple is pinned by one
 ///   typed body so a future stdio-posture drift surfaces as a
 ///   compile error at the primitive rather than as a diverging
 ///   pair of retry-classify sites.
-/// - THEORY.md §VI.1 (three-times rule threshold): two sibling
+/// - (three-times rule threshold): two sibling
 ///   occurrences of an 8-line fused chain, matched to already-lifted
 ///   `doca_push_argv` / `doca_creds_env_pairs` sub-shapes, so the
 ///   full spawn stanza lifts onto ONE typed body.
@@ -1016,7 +1016,7 @@ mod tests {
     /// distinct from `PushFailed` (a real push attempt the registry
     /// rejected); pinning the typed variant makes the invalid state — a
     /// `PushFailed` carrying `attempts: 0` — structurally unrepresentable
-    /// (THEORY §V.1). Same arc as the typed ExecFailed / OpFailed split
+    ///. Same arc as the typed ExecFailed / OpFailed split
     /// established for AtticError, NixBuildError, GitError, and
     /// KubernetesError.
     #[test]

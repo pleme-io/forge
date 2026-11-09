@@ -66,9 +66,9 @@
 //! numeric `Check N:` to a fraction `Check N/7:` progress cue —
 //! lands at ONE typed body and reaches every consumer by construction.
 //!
-//! THEORY.md §VI.1 (three-times-is-a-law — "two occurrences is a
+//! (three-times-is-a-law — "two occurrences is a
 //! coincidence; three is a law"; 6 verbatim sibling sites redeemed
-//! by extraction), §V.1 (Construction guarantees — a fused
+//! by extraction), (Construction guarantees — a fused
 //! blank+heading stanza is emitted by ONE typed body; a caller
 //! cannot drift the framing blank away from the heading it belongs
 //! to).

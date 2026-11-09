@@ -98,9 +98,9 @@
 //! caller carried any of them); post-lift each has ONE canonical home
 //! the moment a future edit needs to introduce it.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! - `THEORY.md §V.1` (Construction guarantees; Types → Invariants →
+//! - (Construction guarantees; Types → Invariants →
 //!   Proofs → Render Anywhere): the "read one SQL migration file into
 //!   a `String` under a canonical operator-facing envelope" invariant
 //!   lives at ONE construction surface — [`read_migration_file`] —
@@ -108,7 +108,7 @@
 //!   file-path interpolation, and the propagation shape as
 //!   `cargo test`-verifiable invariants rather than as consumer-site
 //!   conventions.
-//! - `THEORY.md §VI.1` (Generation over composition; two-is-a-
+//! - (Generation over composition; two-is-a-
 //!   coincidence, three-is-a-law): two sibling occurrences sit at the
 //!   coincidence threshold; combined with the three near-neighbor
 //!   sites in the same file that spell a similar body with a less
@@ -116,7 +116,7 @@
 //!   The compounding-directive corollary — "every recurring shape
 //!   becomes a helper before it becomes duplicated code" — is
 //!   discharged at both consumers by construction.
-//! - `THEORY.md §III` (Structure): the "SQL migration file at
+//! - (Structure): the "SQL migration file at
 //!   `<path>`" concept is a single named terminal in the migration-
 //!   validation typescape; both consumers cite [`read_migration_file`]
 //!   rather than restating the two-line body, so the terminal reads
@@ -323,7 +323,7 @@ mod tests {
     /// Delegation shield (positive half): each primitive body reaches
     /// [`tokio::fs::read_to_string`] at exactly one call — no fallback
     /// path, no double-read, no branching on `file_path`. Pins the
-    /// one-oracle discipline THEORY §VI.1 requires: a future refactor
+    /// one-oracle discipline requires: a future refactor
     /// that introduced a `#[cfg(target_os = "...")]` gate or a
     /// try-then-retry read body would surface here. The module carries
     /// TWO primitive bodies ([`read_migration_file`] and

@@ -121,7 +121,7 @@ fn migration_job_manifest_file(
     // `commands/crossplane.rs::xpkg_output_file` (220b207),
     // `commands/e2e.rs::e2e_image_output_symlink` (ab88937), and
     // `commands/federation_tests.rs::federation_test_job_manifest_file`
-    // (76b256e) all routed onto it (THEORY §I.3 belief 5 / §V.6 —
+    // (76b256e) all routed onto it (belief 5 /
     // recurring shape becomes a library before it becomes duplicated
     // code).
     crate::hermetic_scratch::hermetic_scratch_file(

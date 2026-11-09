@@ -34,14 +34,14 @@ use std::path::Path;
 ///
 /// # Theory grounding
 ///
-/// - THEORY.md §V.1 (Construction guarantees; Types → Invariants →
+/// - (Construction guarantees; Types → Invariants →
 ///   Proofs → Render Anywhere): the paired byte-oracle sibling
 ///   [`write_scaffold_path_action`] is the Render Anywhere half —
 ///   pinning the exact `<Verb> <path>` rendered bytes as a
 ///   `cargo test`-verifiable invariant, so a fusion that swapped the
 ///   space for a colon or dropped the display projection fails at
 ///   `cargo test` time rather than at operator readout.
-/// - THEORY.md §VI.1 (three-times rule): four sibling occurrences
+/// - (three-times rule): four sibling occurrences
 ///   past the "two is a coincidence; three is a law" threshold, so
 ///   the `format!(...)` stanza lifts onto ONE typed body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

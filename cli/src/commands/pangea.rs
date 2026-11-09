@@ -930,8 +930,8 @@ mod status_spawn_routing_tests {
     /// scan-of-the-log-line surface. Post-lift the two worlds
     /// separate at construction: `"bundle lock --update failed (exit
     /// 1)"` vs `"bundle lock --update failed (signal 11)"`, the same
-    /// `(op, exit_code, stderr)` structural-record tuple THEORY.md
-    /// §V.4 Phase 1 attestation-record consumers pattern-match on.
+    /// `(op, exit_code, stderr)` structural-record tuple
+    /// Phase 1 attestation-record consumers pattern-match on.
     ///
     /// Negative side: no `.status().await` builder terminator may
     /// reappear at any code line in the module body — a re-inlined
@@ -979,7 +979,7 @@ mod status_spawn_routing_tests {
     /// not set")`, sibling of `commands/gem.rs::push`'s two consumer
     /// sites (test_gem_home_env_routes_through_path_from_env above) —
     /// the third and final `env::var("HOME")` consumer in the crate,
-    /// closing the three-times-is-a-law recurrence THEORY §VI.1
+    /// closing the three-times-is-a-law recurrence
     /// admits.
     ///
     /// Scan bounds at the whole-module boundary via

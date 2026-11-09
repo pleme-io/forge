@@ -43,7 +43,7 @@
 //! ```
 //!
 //! Two 30-line bodies past the PRIME DIRECTIVE's duplication-is-a-bug
-//! threshold (THEORY §VI.1 — construction over composition; every
+//! threshold (construction over composition; every
 //! recurring shape becomes a library before it becomes duplicated
 //! code). A drift to any of the shape's five moving parts — the
 //! skip-reason grammar (`"<env>=true"` vs. `"skipped via <env>"`),

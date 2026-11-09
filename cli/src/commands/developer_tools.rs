@@ -18,7 +18,7 @@ use crate::repo::get_tool_path;
 /// `commands/prerelease.rs:109` (79e03a5), and the sibling
 /// `crossplane_bin()` / `cosign_bin()` / `jsonnet_bin()` sigil
 /// discipline on other command modules (6b3ac16 / a070a3c / a826ac0).
-/// Solve-once at the sigil (THEORY §I.5 — duplication budget zero;
+/// Solve-once at the sigil (duplication budget zero;
 /// every recurring shape becomes a helper before it becomes duplicated
 /// code) means a future added `cargo` spawn cannot silently re-copy
 /// the two-argument resolve and drift away from the `CARGO` override
@@ -43,7 +43,7 @@ fn cargo_bin() -> String {
 /// (63d4fe7) and the sibling `cargo_bin()` sigil above (534ef48),
 /// converging every substrate-declared `<TOOL>_BIN` resolve on this
 /// module onto the fleet-wide `<tool>_bin()` idiom. Solve-once at the
-/// sigil (THEORY §I.5 — duplication budget zero; every recurring shape
+/// sigil (duplication budget zero; every recurring shape
 /// becomes a helper before it becomes duplicated code) means a future
 /// added `nix` spawn cannot silently re-copy the two-argument resolve
 /// and drift away from the `NIX_BIN` override at exactly the tier the
@@ -68,7 +68,7 @@ fn nix_bin() -> String {
 /// across the CARGO / NIX_BIN / ATTIC_BIN / BUN_BIN / CRATE2NIX /
 /// DOCA_BIN / FLUX_BIN / NC_BIN surfaces (559adae / 6b2ea15 /
 /// 9986f11 / 7561329 / 868b2ad / ba3e615 / b5e632a). Solve-once at
-/// the sigil (THEORY §I.5 — duplication budget zero; every
+/// the sigil (duplication budget zero; every
 /// recurring shape becomes a helper before it becomes duplicated
 /// code) means a future added `docker-compose` spawn cannot
 /// silently re-copy the two-argument resolve and drift away from
@@ -95,7 +95,7 @@ fn docker_compose_bin() -> String {
 /// EXACTLY one body — mirrors the sibling `cargo_bin()` / `nix_bin()`
 /// / `docker_compose_bin()` sigils above, all four converging every
 /// substrate-declared environment contract in this module onto the
-/// solve-once-at-the-sigil idiom (THEORY §I.5 — duplication budget
+/// solve-once-at-the-sigil idiom (duplication budget
 /// zero; every recurring shape becomes a helper before it becomes
 /// duplicated code). Pre-lift the four consumer sites
 /// (`rust_regenerate`, `rust_cargo_update`, `rust_dev`, `rust_dev_down`)
@@ -152,8 +152,7 @@ fn service_path_from_env() -> Result<PathBuf> {
 /// telemetry span, a swap to a typed
 /// `substrate::WorkspaceRoot(PathBuf)` newtype, or an OTLP
 /// `workspace_resolve` span wired alongside the chdir — lands at ONE
-/// body and reaches both consumers by construction (THEORY §V.1 —
-/// Types → Invariants → Proofs; §VI.1 — recurring-shape-to-helper).
+/// body and reaches both consumers by construction (Types → Invariants → Proofs; recurring-shape-to-helper).
 fn read_service_env_and_chdir_to_workspace() -> Result<PathBuf> {
     let service_path = service_path_from_env()?;
     let workspace_root = service_path
@@ -890,7 +889,7 @@ mod tests {
         // so this assertion pair cannot false-match its own source text on
         // either needle, and both hits route through
         // `test_support::code_line_hits` for anti-docstring-self-match
-        // discipline. THEORY §I.5: duplication budget zero.
+        // discipline. Duplication budget zero.
         let sigil_needle =
             crate::test_support::sigil_bin_fn_definition_needle("docker_compose_bin");
         let sigil_hits = crate::test_support::code_line_hits(body, &sigil_needle);
@@ -935,7 +934,7 @@ mod tests {
     /// spelled the primitive's five-line body verbatim — the third and
     /// fourth copies of the same shape after `nix::run_cargo_update`
     /// (nix.rs:435) and its `commands/bootstrap.rs::rebuild_bootstrap_cargo_nix`
-    /// consumer (bootstrap.rs:645). Four occurrences past THEORY §VI.1's
+    /// consumer (bootstrap.rs:645). Four occurrences past the
     /// three-times-is-a-law threshold; the primitive is the archetype
     /// the pillar demands, and post-lift every `cargo update` spawn in
     /// forge routes through it. A future refinement — the info!
@@ -1051,7 +1050,7 @@ mod tests {
     ///
     /// Pre-lift `rust_update_cargo_nix`, `rust_regenerate`, and
     /// `rust_cargo_update` each spelled the eight-element argv literal
-    /// verbatim — three occurrences past THEORY §VI.1's
+    /// verbatim — three occurrences past the
     /// three-times-is-a-law threshold, extracted onto ONE archetype.
     /// A future refinement — the info! telemetry line grows a
     /// structured `flake_registry` field, the retry policy for
@@ -1144,7 +1143,7 @@ mod tests {
     /// `rust_cargo_update`, `rust_dev`, `rust_dev_down`) each spelled
     /// the same two-line stanza verbatim — a byte-identical
     /// operator-facing miss wording that had drifted only by
-    /// convention. Four occurrences past THEORY §VI.1's
+    /// convention. Four occurrences past the
     /// three-times-is-a-law threshold; the sigil is the archetype the
     /// pillar demands, and post-lift every `SERVICE_DIR` read in this
     /// module routes through it. Post-e9e0c5b the twin

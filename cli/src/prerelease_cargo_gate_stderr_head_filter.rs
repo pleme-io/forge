@@ -67,16 +67,16 @@
 //! diagnostic window, a config-derived cap) lands at ONE body, and
 //! the pin test flags any drift from the pre-lift literal.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! THEORY.md §II Language — typed primitives own boundary
+//! Language — typed primitives own boundary
 //! classification; the "cargo gate failure stderr-head keyword-filter
 //! block" grammar is named at ONE typed primitive instead of restated
-//! at each gate's failure arm. THEORY.md §V.4 Phase 1 attestation —
+//! at each gate's failure arm. Phase 1 attestation —
 //! the closed [`PrereleaseCargoGateStderrHeadVariant`] enum forces
 //! every consumer's exhaustive `match` to extend when a new gate joins
 //! the diagnostic surface, so the (keyword, sink-style) pair stays
-//! pinned at one body across the family. THEORY.md §VI.1 one-oracle
+//! pinned at one body across the family. One-oracle
 //! — the writer sibling and the [`byte-oracle`](tests) tests pin the
 //! rendered byte-shape (the three-space indent, the trailing `'\n'`,
 //! the ANSI red envelope on `CargoCheckErrors`, its absence on

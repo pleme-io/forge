@@ -103,7 +103,7 @@
 //!   the no-probe-ran world cannot generate), but the observed state
 //!   failed the network-segmentation invariant. Collapsing `VerifyFailed`
 //!   into a single boolean would re-introduce the discriminator loss
-//!   the typed primitive exists to prevent (THEORY §V.1: make invalid
+//!   the typed primitive exists to prevent (make invalid
 //!   states unrepresentable — a `network_policies_verified: false`
 //!   value that conflates "no kubectl probe ran" with "probe ran and
 //!   the namespace has no covering NetworkPolicy" is a flat state where
@@ -172,7 +172,7 @@
 //!
 //! CIS Kubernetes Benchmark §5.3.2 ("Ensure that all Namespaces have
 //! Network Policies defined") is the canonical strict-baseline
-//! reference cited by THEORY §V.3 / §VII.1 for in-cluster network-
+//! reference cited for in-cluster network-
 //! segmentation evidence. The `networking.k8s.io/v1` `NetworkPolicy`
 //! resource is the typed evidence channel — a `kubectl get
 //! networkpolicy -n <ns>` response (or its typed `kube-rs`
@@ -323,13 +323,13 @@ crate::impl_verified_outcome!(NetworkPolicyAdmissionOutcome);
 ///    surfaces upstream as a [`Self::ProbeAbsent`] outcome chosen at
 ///    the shell-out call site rather than as a parser arm.
 ///
-/// THEORY §V.2: attestation is cryptographic evidence, not a wish. The
+/// Attestation is cryptographic evidence, not a wish. The
 /// parser preserves the structural distinction between "probe ran and
 /// observed a namespace with zero or structurally malformed
 /// NetworkPolicy resources" and "no probe ran / no usable evidence" —
 /// the pre-typed `false` hardcode collapsed both into a single negative
 /// claim.
-/// THEORY §VI.1: one oracle, not a per-consumer re-derivation. The
+/// One oracle, not a per-consumer re-derivation. The
 /// parser is the one site that walks `items[*].spec.podSelector`;
 /// downstream consumers pattern-match the typed three-arm enum.
 #[allow(dead_code)]

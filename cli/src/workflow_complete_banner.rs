@@ -88,9 +88,9 @@
 //! lands in ONE place on the peer primitive and this fusion inherits
 //! by composition.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the terminal-milestone
+//! Solve-once-at-the-primitive: the terminal-milestone
 //! banner+image-ref pair lives at ONE construction surface — a
 //! future refinement (an OTLP `workflow_completed` observability
 //! span emitted alongside the print, a promotion of `✅` to
@@ -98,7 +98,7 @@
 //! attestation-chain footer beneath the image ref) lands in one
 //! place rather than in every consumer.
 //!
-//! §VI.1 three-is-a-law is intentionally approached from below
+//! Three-is-a-law is intentionally approached from below
 //! here at two sites: the two pre-lift stanzas each carried the
 //! full five-line fusion and diverged only on the workflow name
 //! slot. Lifting at N=2 keeps a third `commands/<workflow>.rs`

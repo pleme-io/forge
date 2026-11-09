@@ -33,7 +33,7 @@ use crate::tools::{get_tool_path as get_tool_path_derived, tools};
 /// still respelling the two-argument `BUN_BIN` resolve inline at its
 /// bun spawns.
 ///
-/// Solve-once at the sigil (THEORY §I.5 — duplication budget zero;
+/// Solve-once at the sigil (duplication budget zero;
 /// every recurring shape becomes a helper before it becomes duplicated
 /// code) means a future added `bun` spawn in this module cannot
 /// silently re-copy the two-argument resolve and drift away from the
@@ -99,7 +99,7 @@ pub async fn validate_codegen_with_autocommit(
     println!("   Exporting schema from backend...");
 
     // Route through the canonical `extract_graphql_schema` primitive
-    // (THEORY §V.1, §VI.1). The typed `SchemaExtractionError` variants
+    //. The typed `SchemaExtractionError` variants
     // (`SpawnFailed` / `Failed` / `EmptyOutput`) are collapsed into the
     // `error: Some(String)` field this ValidationResult surfaces — same
     // three failure shapes the pre-lift stanza carried, now discriminable
@@ -125,7 +125,7 @@ pub async fn validate_codegen_with_autocommit(
     // `crate::graphql_schema_write::write_graphql_schema_bytes` primitive
     // so the shared `"Failed to write schema to <path>"` envelope + the
     // `tokio::fs::write` async body land at one construction surface
-    // (THEORY §V.1, §VI.1). Fanned in with the sibling stanzas at
+    //. Fanned in with the sibling stanzas at
     // `commands/codegen.rs::{execute, export_schema_only}`.
     let schema_path = web_dir.join("schema.graphql");
     crate::graphql_schema_write::write_graphql_schema_bytes(&schema_bytes, &schema_path).await?;
@@ -226,7 +226,7 @@ pub async fn validate_schema_export(backend_dir: &Path) -> Result<bool> {
     crate::ui::print_step_heading("Validating schema export...");
 
     // One-oracle read-through of the canonical `extract_graphql_schema`
-    // primitive (THEORY §V.1, §VI.1). The typed
+    // primitive. The typed
     // `SchemaExtractionError::{SpawnFailed, Failed, EmptyOutput}` variants
     // both surface as a `Ok(false)` return here — same pre-lift shape —
     // but the failure display text now carries the offending backend_dir

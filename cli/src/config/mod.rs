@@ -1575,7 +1575,7 @@ mod tests {
     /// `substrate::ServiceDir(PathBuf)` newtype — lands at ONE body
     /// ([`crate::repo::path_from_env`]) and reaches every consumer
     /// (this call + the three sibling shields' delegating call sites)
-    /// by construction (THEORY §V — solve-once-at-the-primitive; §VI.1
+    /// by construction (solve-once-at-the-primitive;
     /// — recurring-shape-to-helper).
     ///
     /// Slice via [`crate::test_support::module_body_before_tests`]

@@ -92,23 +92,23 @@
 //! caller carried any of them); post-lift each has ONE canonical
 //! home the moment a future edit needs to introduce it.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! - `THEORY.md §V.1` (Construction guarantees; Types → Invariants →
+//! - (Construction guarantees; Types → Invariants →
 //!   Proofs → Render Anywhere): the "schema-bytes → schema.graphql
 //!   on disk under a canonical envelope" invariant lives at ONE
 //!   construction surface — [`write_graphql_schema_bytes`] — and its
 //!   byte-oracle tests below pin the envelope wording, the destination
 //!   binding, and the propagation shape as `cargo test`-verifiable
 //!   invariants rather than as consumer-site conventions.
-//! - `THEORY.md §VI.1` (Generation over composition; three-times
+//! - (Generation over composition; three-times
 //!   rule): three sibling occurrences past the "two is a coincidence;
 //!   three is a law" threshold, so the write-then-context body lifts
 //!   onto ONE typed body and all three consumers cite it. The
 //!   compounding-directive corollary — "every recurring shape becomes
 //!   a helper before it becomes duplicated code" — is discharged at
 //!   the three consumers by construction.
-//! - `THEORY.md §III.1` (typescape as root data structure): the
+//! - (typescape as root data structure): the
 //!   destination-path terminal of the SDL byte buffer is a single
 //!   named concept; all three consumers cite [`write_graphql_schema_bytes`]
 //!   rather than each restating the two-line body.
@@ -269,7 +269,7 @@ mod tests {
     /// Delegation shield (positive half): the primitive body reaches
     /// `tokio::fs::write(` at exactly one call — no fallback path, no
     /// double-write, no branching on `dest`. Pins the one-oracle
-    /// discipline THEORY §VI.1 requires: a future refactor that
+    /// discipline requires: a future refactor that
     /// introduced a `#[cfg(target_os = "...")]` gate or a
     /// try-then-retry write body would surface here.
     ///

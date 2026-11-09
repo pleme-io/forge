@@ -12,14 +12,14 @@
 //!   (`commands/build.rs::execute`,
 //!   `commands/github_runner_ci.rs` AMD64 + fallback-namespace pair,
 //!   `infrastructure/registry.rs::RegistryCredentials::try_kubectl_secret`)
-//!   past THEORY §VI.1's three-is-a-law threshold.
+//!   past the three-is-a-law threshold.
 //! - [`find_first_pod_name_async`] — the canonical "fetch the name
 //!   of the first pod matching a label selector" primitive. Three
 //!   pre-lift async sites carried verbatim copies of this shape
 //!   (`commands/search_sync.rs::run_novasearch_sync`,
 //!   `commands/migrations.rs` job-name pod lookup,
 //!   `commands/supergraph_verification.rs::verify_hive_router_*`)
-//!   past THEORY §VI.1's three-is-a-law threshold.
+//!   past the three-is-a-law threshold.
 //!   `commands/seed.rs::find_primary_pod` carries the same shape
 //!   on a sync spawn surface but already routes through the
 //!   structural-error-tuple-preserving
@@ -364,7 +364,7 @@ pub(crate) async fn find_first_pod_name_async_with_bin(
 /// block (replicas jsonpath, conditions jsonpath, `-o wide` pod
 /// listing, container-state jsonpath, waiting/terminated-reason
 /// jsonpath, deployment-scoped events, namespace-wide pod events).
-/// Seven identically-shaped bodies past THEORY §VI.1's three-is-a-law
+/// Seven identically-shaped bodies past the three-is-a-law
 /// threshold (PRIME DIRECTIVE: duplication budget is zero); this
 /// primitive is the law-redeeming consolidation for the async
 /// best-effort-captured-stdout surface on the `kubectl_command_async()`
@@ -441,7 +441,7 @@ pub async fn kubectl_probe_stdout_capture(args: &[&str]) -> Option<String> {
 /// verbatim modulo the per-site argv and heading literal — the
 /// **Deployment Conditions** jsonpath at section 2, the **All Pods**
 /// `-o wide` listing at section 3, and the **Container States**
-/// jsonpath at section 4. Three occurrences at THEORY §VI.1's
+/// jsonpath at section 4. Three occurrences at the
 /// three-is-a-law threshold (PRIME DIRECTIVE: duplication budget is
 /// zero); this primitive is the law-redeeming consolidation on the
 /// `kubectl_probe_stdout_capture` + `push_section_indented_lines_4sp`
@@ -540,7 +540,7 @@ pub async fn kubectl_probe_push_nonempty_section_4sp(
 /// [`crate::commands::integration_tests::fetch_secret`] (secret-data
 /// base64 pull that resolves an environment variable before the
 /// integration-test suite runs). Two occurrences already past
-/// THEORY §VI.1's three-times threshold in intent — a duplicate would
+/// the three-times threshold in intent — a duplicate would
 /// drift the `(op, exit_code, stderr)` envelope discipline silently
 /// between the two production consumers; this lift is the
 /// law-anticipating consolidation on the `kubectl_command_async()`
@@ -636,7 +636,7 @@ pub async fn kubectl_capture_anyhow(
 ///   `"✅ Deleted job: {job}"` only on non-zero exit, so bailing
 ///   would drop the loop's progress on the first stale job.
 ///
-/// Five occurrences past THEORY §VI.1's three-is-a-law threshold. Each
+/// Five occurrences past the three-is-a-law threshold. Each
 /// pre-lift site was one place a future consumer could drift the spawn
 /// envelope: forget the `.context(...)` and lose the operator's ability
 /// to tell WHICH kubectl invocation failed, or spell the context string
@@ -974,7 +974,7 @@ mod tests {
     /// the set-then-restore contract — mutate on construction, restore
     /// on Drop (panic-safe by RAII, not by a `.restore()` call the
     /// caller has to remember) — lives at exactly ONE body across the
-    /// crate. THEORY §V (solve-once-at-the-primitive); §VI.1
+    /// crate. (solve-once-at-the-primitive);
     /// (recurring-shape-to-helper).
     struct KubectlBinScope;
 

@@ -60,7 +60,7 @@ pub enum StorePathError {
     /// before any grammar clause is evaluated. Carries the offending byte
     /// buffer and the [`std::str::Utf8Error`] the decode gate produced so a
     /// caller can attach both to a Phase 1 attestation / telemetry record
-    /// (THEORY §V.4) without re-decoding to recover the invalid-sequence
+    /// without re-decoding to recover the invalid-sequence
     /// offset. Distinct from the six grammar-clause variants above —
     /// UTF-8 rejection precedes every clause the grammar names, so a
     /// caller pattern-matching on the rejection site can discriminate
@@ -285,10 +285,10 @@ impl std::fmt::Display for StorePath {
 /// automatically. A derived `#[derive(Hash)]` would ossify the two-field
 /// hash shape into the surface.
 ///
-/// THEORY.md §III typed primitives — the hash surface is a typed-
+/// Typed primitives — the hash surface is a typed-
 /// primitive peer on [`StorePath`], not a per-consumer
 /// `<StorePath as AsRef<str>>::as_ref(&sp).hash(state)` restatement.
-/// THEORY.md §VI.1 one-oracle — the canonical view is named at
+/// One-oracle — the canonical view is named at
 /// [`StorePath::as_str`], and every read-back peer (borrow, byte-slice,
 /// filesystem-path, OS-string, and now hash) reads through the same
 /// one-oracle discipline projected onto its own downstream shape.
@@ -324,7 +324,7 @@ impl std::hash::Hash for StorePath {
 ///   ordered-set / ordered-map shapes for a closure fingerprint, a
 ///   sorted derivation manifest, or a range-lookup by hash-prefix.
 /// - `Vec<StorePath>::sort()` — produces a stable, reproducible closure
-///   listing that a downstream reproducibility check (THEORY §VI.1)
+///   listing that a downstream reproducibility check
 ///   can compare byte-for-byte across runs. Pre-derive the sort had to
 ///   route through `paths.sort_by_key(|p| p.as_str().to_string())`
 ///   (allocates a fresh [`String`] per comparison) or
@@ -343,8 +343,8 @@ impl std::hash::Hash for StorePath {
 /// [`std::collections::BTreeSet<StorePath>`] instead now compiles at
 /// the trait bound.
 ///
-/// THEORY.md §III typed primitives — the total-order surface is a
-/// typed-primitive peer on [`StorePath`]. THEORY.md §VI.1 one-oracle —
+/// Typed primitives — the total-order surface is a
+/// typed-primitive peer on [`StorePath`]. One-oracle —
 /// the canonical view is named at [`StorePath::as_str`] and the
 /// ordering reads through the same view every other peer projects
 /// onto.
@@ -397,7 +397,7 @@ impl std::cmp::Ord for StorePath {
 /// clause the input violated — `MissingStorePrefix` / `HasSubpath` /
 /// `TooShort` / `InvalidHash` / `MissingSeparator` / `EmptyName` — and
 /// carries the offending input in each variant, so a caller can attach
-/// the failure to a structural record (THEORY §V.4 Phase 1 attestation)
+/// the failure to a structural record (Phase 1 attestation)
 /// without re-parsing the error string.
 impl std::str::FromStr for StorePath {
     type Err = StorePathError;
@@ -832,7 +832,7 @@ impl TryFrom<std::rc::Rc<str>> for StorePath {
 ///   `impl TryFrom<&[u8]> for AdmissionTier` at `probe_outcome.rs:6720`,
 ///   `impl TryFrom<&[u8]> for DigestAlgorithm` at `oci_manifest.rs:1060`;
 ///   the byte-slice parse frontier is a four-fold pattern past the
-///   three-times-rule threshold (THEORY §VI.1) and [`StorePath`] is the
+///   three-times-rule threshold and [`StorePath`] is the
 ///   store-path primitive counterpart at the same try-conversion frontier.
 ///
 /// # Two-stage strictness
@@ -897,7 +897,7 @@ impl TryFrom<&[u8]> for StorePath {
 /// [`std::string::FromUtf8Error::into_bytes`] and threaded into the
 /// [`StorePathError::NonUtf8Bytes`] variant verbatim alongside the
 /// [`std::str::Utf8Error`] the decode gate produced — a Phase 1
-/// attestation / telemetry record (THEORY §V.4) receives both the
+/// attestation / telemetry record receives both the
 /// offending byte buffer and the underlying [`std::str::Utf8Error`]
 /// under [`std::error::Error::source`] without a re-decoding to recover
 /// the invalid-sequence offset, and without an intermediate
@@ -946,7 +946,7 @@ impl TryFrom<&[u8]> for StorePath {
 ///   [`crate::probe_outcome::AdmissionTier`], and for
 ///   [`DigestAlgorithm`] at `oci_manifest.rs`. The owned-byte-slice
 ///   parse frontier is a four-fold pattern past the three-times-rule
-///   threshold (THEORY §VI.1); [`StorePath`] is the store-path
+///   threshold; [`StorePath`] is the store-path
 ///   primitive counterpart at the same try-conversion frontier.
 ///
 /// # Two-stage strictness
@@ -1750,13 +1750,13 @@ impl AsRef<str> for StorePath {
 /// re-validation, no formatter round-trip. A container probe reads
 /// directly into the [`StorePath`]'s owned buffer.
 ///
-/// THEORY.md §III typed primitives — the identity-container-lookup
+/// Typed primitives — the identity-container-lookup
 /// borrowed UTF-8 projection is a typed-primitive peer on
 /// [`StorePath`] itself (one [`Borrow<str>`] impl routing through
 /// [`StorePath::as_str`]), not a per-consumer
 /// `StorePath::parse(str_key).ok().and_then(|sp| map.get(&sp))`
 /// restatement at every downstream identity-container probe site.
-/// THEORY.md §VI.1 one-oracle — the canonical view is named at one
+/// One-oracle — the canonical view is named at one
 /// site ([`StorePath::as_str`]), and every borrowed-view surface —
 /// [`std::fmt::Display`], [`AsRef<str>`] / [`AsRef<[u8]>`] /
 /// [`AsRef<std::path::Path>`] / [`AsRef<std::ffi::OsStr>`], the
@@ -2147,13 +2147,13 @@ impl PartialEq<&str> for StorePath {
 /// at
 /// [`tests::test_partial_eq_store_path_symmetric_with_forward_direction`].
 ///
-/// THEORY.md §III typed primitives: the reverse-direction borrowed UTF-8
+/// Typed primitives: the reverse-direction borrowed UTF-8
 /// comparison surface is a typed-primitive site on [`StorePath`] itself
 /// (one [`PartialEq<StorePath>`] impl on [`str`] routing through
 /// [`StorePath::as_str`]), not a per-consumer
 /// `label == sp.as_str()` restatement at every downstream site that
 /// asks whether a borrowed UTF-8 handle names the same canonical store-
-/// path bytes as a [`StorePath`] value. THEORY.md §VI.1 one-oracle: the
+/// path bytes as a [`StorePath`] value. One-oracle: the
 /// canonical view is named at one site ([`StorePath::as_str`]), and
 /// every borrowed UTF-8 comparison surface — the forward-direction
 /// pair above and this reverse-direction pair — reads through the same
@@ -2222,11 +2222,11 @@ impl PartialEq<StorePath> for &str {
 /// [`PartialEq<String> for &str`] + [`PartialEq<str> for String`] +
 /// [`PartialEq<&str> for String`] closure.
 ///
-/// THEORY.md §III typed primitives: the owned UTF-8 comparison surface is
+/// Typed primitives: the owned UTF-8 comparison surface is
 /// a typed-primitive site on [`StorePath`] itself, not a per-consumer
 /// `sp.as_str() == owned.as_str()` restatement at every downstream site
 /// that asks whether a [`StorePath`] value names the same canonical bytes
-/// as a heap-owned [`String`]. THEORY.md §VI.1 one-oracle: the canonical
+/// as a heap-owned [`String`]. One-oracle: the canonical
 /// view is named at one site ([`StorePath::as_str`]) and every comparison
 /// receiver × direction × ownership reads through it.
 impl PartialEq<String> for StorePath {
@@ -2264,12 +2264,12 @@ impl PartialEq<String> for StorePath {
 /// [`crate::oci_manifest::ContentDigest`]) do not yet carry — a natural
 /// candidate to replicate at those ladders in a follow-on commit.
 ///
-/// THEORY.md §III typed primitives: the reverse-direction owned UTF-8
+/// Typed primitives: the reverse-direction owned UTF-8
 /// comparison surface is a typed-primitive site on [`StorePath`] (one
 /// [`PartialEq<StorePath>`] impl on [`String`] routing through
 /// [`String::as_str`] and [`StorePath::as_str`]), not a per-consumer
 /// `owned.as_str() == sp.as_str()` restatement at every downstream
-/// comparison site. THEORY.md §VI.1 one-oracle: the canonical view is
+/// comparison site. One-oracle: the canonical view is
 /// named at one site ([`StorePath::as_str`]) and every UTF-8 comparison
 /// surface — borrowed-str-forward, borrowed-&str-forward,
 /// borrowed-str-reverse, borrowed-&str-reverse, owned-String-forward, and
@@ -2346,14 +2346,14 @@ impl PartialEq<StorePath> for String {
 /// accessor already carries; no per-site
 /// `sp.as_str().trim().as_bytes() == …` restatement.
 ///
-/// THEORY.md §III typed primitives: the borrowed byte-slice comparison
+/// Typed primitives: the borrowed byte-slice comparison
 /// surface is a typed-primitive site on [`StorePath`] itself (one
 /// [`PartialEq<[u8]>`] impl on [`StorePath`] routing through
 /// [`<StorePath as AsRef<[u8]>>::as_ref`]), not a per-consumer
 /// `<StorePath as AsRef<[u8]>>::as_ref(&sp) == raw_bytes` restatement at
 /// every downstream site that asks whether a [`StorePath`] value names
 /// the same canonical bytes as an already-borrowed `[u8]` handle.
-/// THEORY.md §VI.1 one-oracle: the canonical view is named at one site
+/// One-oracle: the canonical view is named at one site
 /// ([`StorePath::as_str`], projected onto bytes through
 /// [`str::as_bytes`] at the [`AsRef<[u8]>`] surface), and every borrowed
 /// byte-slice surface — the [`AsRef<[u8]>`] borrowed-view sibling, this
@@ -2445,14 +2445,14 @@ impl PartialEq<&[u8]> for StorePath {
 /// standard-library [`<[u8] as PartialEq<[u8]>>::eq`] comparison. Pinned at
 /// [`tests::test_partial_eq_store_path_bytes_symmetric_with_forward_direction`].
 ///
-/// THEORY.md §III typed primitives: the reverse-direction borrowed byte-slice
+/// Typed primitives: the reverse-direction borrowed byte-slice
 /// comparison surface is a typed-primitive site on [`StorePath`] itself (one
 /// [`PartialEq<StorePath>`] impl on `[u8]` routing through
 /// [`<StorePath as AsRef<[u8]>>::as_ref`]), not a per-consumer
 /// `raw_bytes == <StorePath as AsRef<[u8]>>::as_ref(&sp)` restatement at
 /// every downstream site that asks whether an already-borrowed `[u8]` handle
 /// names the same canonical store-path bytes as a [`StorePath`] value.
-/// THEORY.md §VI.1 one-oracle: the canonical view is named at one site
+/// One-oracle: the canonical view is named at one site
 /// ([`StorePath::as_str`], projected onto bytes through [`str::as_bytes`] at
 /// the [`AsRef<[u8]>`] surface), and every borrowed byte-slice comparison
 /// surface — the forward-direction pair above and this reverse-direction
@@ -2535,14 +2535,14 @@ impl PartialEq<StorePath> for &[u8] {
 /// now match the six corners the UTF-8 frontier carries when the &str
 /// receiver-shape sibling is counted.
 ///
-/// THEORY.md §III typed primitives: the forward-direction owned byte-vec
+/// Typed primitives: the forward-direction owned byte-vec
 /// comparison surface is a typed-primitive site on [`StorePath`] itself
 /// (one [`PartialEq<Vec<u8>>`] impl on [`StorePath`] routing through
 /// [`<StorePath as AsRef<[u8]>>::as_ref`] and [`Vec::as_slice`]), not a
 /// per-consumer `<StorePath as AsRef<[u8]>>::as_ref(&sp) ==
 /// owned_bytes.as_slice()` restatement at every downstream site that
 /// asks whether a [`StorePath`] value names the same canonical bytes as
-/// a heap-owned [`Vec<u8>`]. THEORY.md §VI.1 one-oracle: the canonical
+/// a heap-owned [`Vec<u8>`]. One-oracle: the canonical
 /// view is named at one site ([`StorePath::as_str`], projected onto
 /// bytes through [`str::as_bytes`] at the [`AsRef<[u8]>`] surface), and
 /// every byte-slice comparison surface — borrowed forward × receiver,
@@ -2582,13 +2582,13 @@ impl PartialEq<Vec<u8>> for StorePath {
 /// axis, mirroring the owned-UTF-8 extension the [`impl PartialEq<StorePath>
 /// for String`] peer at line 1840 opened onto the UTF-8 frontier.
 ///
-/// THEORY.md §III typed primitives: the reverse-direction owned byte-vec
+/// Typed primitives: the reverse-direction owned byte-vec
 /// comparison surface is a typed-primitive site on [`StorePath`] (one
 /// [`PartialEq<StorePath>`] impl on [`Vec<u8>`] routing through
 /// [`Vec::as_slice`] and [`<StorePath as AsRef<[u8]>>::as_ref`]), not a
 /// per-consumer `owned_bytes.as_slice() == <StorePath as
 /// AsRef<[u8]>>::as_ref(&sp)` restatement at every downstream comparison
-/// site. THEORY.md §VI.1 one-oracle: the canonical view is named at one
+/// site. One-oracle: the canonical view is named at one
 /// site ([`StorePath::as_str`], projected onto bytes at the
 /// [`AsRef<[u8]>`] surface), and every byte-slice comparison surface —
 /// borrowed forward × receiver, borrowed reverse × receiver, owned
@@ -2689,14 +2689,14 @@ impl PartialEq<StorePath> for Vec<u8> {
 /// accessor already carries; no per-site `OsStr::new(sp.as_str().trim())`
 /// restatement.
 ///
-/// THEORY.md §III typed primitives: the borrowed OS-string comparison
+/// Typed primitives: the borrowed OS-string comparison
 /// surface is a typed-primitive site on [`StorePath`] itself (one
 /// [`PartialEq<std::ffi::OsStr>`] impl on [`StorePath`] routing through
 /// [`<StorePath as AsRef<std::ffi::OsStr>>::as_ref`]), not a per-consumer
 /// `<StorePath as AsRef<std::ffi::OsStr>>::as_ref(&sp) == raw_os_str`
 /// restatement at every downstream site that asks whether a
 /// [`StorePath`] value names the same canonical OS-string as an already-
-/// borrowed [`std::ffi::OsStr`] handle. THEORY.md §VI.1 one-oracle: the
+/// borrowed [`std::ffi::OsStr`] handle. One-oracle: the
 /// canonical view is named at one site ([`StorePath::as_str`], projected
 /// onto [`std::ffi::OsStr`] at the [`AsRef<std::ffi::OsStr>`] surface),
 /// and every borrowed OS-string surface — the [`AsRef<OsStr>`] read-back
@@ -2788,14 +2788,14 @@ impl PartialEq<&std::ffi::OsStr> for StorePath {
 /// is the same discipline the borrowed-str / borrowed-bytes reverse
 /// pairs already carry through their respective one-oracle projections.
 ///
-/// THEORY.md §III typed primitives: the reverse-direction borrowed
+/// Typed primitives: the reverse-direction borrowed
 /// OS-string comparison surface is a typed-primitive site on
 /// [`StorePath`] (one [`PartialEq<StorePath>`] impl on
 /// [`std::ffi::OsStr`] routing through
 /// [`<StorePath as AsRef<std::ffi::OsStr>>::as_ref`]), not a per-consumer
 /// `raw_os_str == <StorePath as AsRef<std::ffi::OsStr>>::as_ref(&sp)`
-/// restatement at every downstream comparison site. THEORY.md §VI.1
-/// one-oracle: the canonical view is named at one site
+/// restatement at every downstream comparison site.
+/// One-oracle: the canonical view is named at one site
 /// ([`StorePath::as_str`], projected onto [`std::ffi::OsStr`] via
 /// [`std::ffi::OsStr::new`] at the [`AsRef<std::ffi::OsStr>`] surface),
 /// and every borrowed OS-string surface — forward × receiver-shape and
@@ -2888,7 +2888,7 @@ impl PartialEq<StorePath> for &std::ffi::OsStr {
 /// projected onto [`std::ffi::OsStr`] and the canonical view projected
 /// onto [`str`] are byte-identical on ASCII.
 ///
-/// THEORY.md §III typed primitives: the owned OS-string comparison
+/// Typed primitives: the owned OS-string comparison
 /// surface is a typed-primitive site on [`StorePath`] itself (one
 /// [`PartialEq<std::ffi::OsString>`] impl on [`StorePath`] routing
 /// through [`<StorePath as AsRef<std::ffi::OsStr>>::as_ref`] and
@@ -2896,8 +2896,8 @@ impl PartialEq<StorePath> for &std::ffi::OsStr {
 /// `<StorePath as AsRef<std::ffi::OsStr>>::as_ref(&sp) ==
 /// owned_os.as_os_str()` restatement at every downstream site that
 /// asks whether a [`StorePath`] value names the same canonical
-/// OS-string as a heap-owned [`std::ffi::OsString`]. THEORY.md §VI.1
-/// one-oracle: the canonical view is named at one site
+/// OS-string as a heap-owned [`std::ffi::OsString`].
+/// One-oracle: the canonical view is named at one site
 /// ([`StorePath::as_str`], projected onto [`std::ffi::OsStr`] at the
 /// [`AsRef<std::ffi::OsStr>`] surface), and every OS-string comparison
 /// surface — borrowed forward × receiver, borrowed reverse × receiver,
@@ -2950,7 +2950,7 @@ impl PartialEq<std::ffi::OsString> for StorePath {
 /// [`impl PartialEq<StorePath> for Vec<u8>`] peer opened onto the byte
 /// frontier.
 ///
-/// THEORY.md §III typed primitives: the reverse-direction owned
+/// Typed primitives: the reverse-direction owned
 /// OS-string comparison surface is a typed-primitive site on
 /// [`StorePath`] (one [`PartialEq<StorePath>`] impl on
 /// [`std::ffi::OsString`] routing through
@@ -2958,7 +2958,7 @@ impl PartialEq<std::ffi::OsString> for StorePath {
 /// [`<StorePath as AsRef<std::ffi::OsStr>>::as_ref`]), not a per-
 /// consumer `owned_os.as_os_str() == <StorePath as
 /// AsRef<std::ffi::OsStr>>::as_ref(&sp)` restatement at every
-/// downstream comparison site. THEORY.md §VI.1 one-oracle: the
+/// downstream comparison site. One-oracle: the
 /// canonical view is named at one site ([`StorePath::as_str`],
 /// projected onto [`std::ffi::OsStr`] at the
 /// [`AsRef<std::ffi::OsStr>`] surface), and every OS-string comparison
@@ -3042,14 +3042,14 @@ impl PartialEq<StorePath> for std::ffi::OsString {
 /// accessor already carries; no per-site
 /// `Path::new(sp.as_str().trim())` restatement.
 ///
-/// THEORY.md §III typed primitives: the borrowed filesystem-path
+/// Typed primitives: the borrowed filesystem-path
 /// comparison surface is a typed-primitive site on [`StorePath`] itself
 /// (one [`PartialEq<std::path::Path>`] impl on [`StorePath`] routing
 /// through [`<StorePath as AsRef<std::path::Path>>::as_ref`]), not a per-
 /// consumer `<StorePath as AsRef<std::path::Path>>::as_ref(&sp) ==
 /// raw_path` restatement at every downstream site that asks whether a
 /// [`StorePath`] value names the same canonical filesystem path as an
-/// already-borrowed [`std::path::Path`] handle. THEORY.md §VI.1 one-oracle:
+/// already-borrowed [`std::path::Path`] handle. One-oracle:
 /// the canonical view is named at one site ([`StorePath::as_str`],
 /// projected onto [`std::path::Path`] at the [`AsRef<std::path::Path>`]
 /// surface), and every borrowed filesystem-path surface — the
@@ -3147,14 +3147,14 @@ impl PartialEq<&std::path::Path> for StorePath {
 /// borrowed-bytes / borrowed-OsStr reverse pairs already carry through
 /// their respective one-oracle projections.
 ///
-/// THEORY.md §III typed primitives: the reverse-direction borrowed
+/// Typed primitives: the reverse-direction borrowed
 /// filesystem-path comparison surface is a typed-primitive site on
 /// [`StorePath`] (one [`PartialEq<StorePath>`] impl on
 /// [`std::path::Path`] routing through
 /// [`<StorePath as AsRef<std::path::Path>>::as_ref`]), not a per-consumer
 /// `raw_path == <StorePath as AsRef<std::path::Path>>::as_ref(&sp)`
-/// restatement at every downstream comparison site. THEORY.md §VI.1
-/// one-oracle: the canonical view is named at one site
+/// restatement at every downstream comparison site.
+/// One-oracle: the canonical view is named at one site
 /// ([`StorePath::as_str`], projected onto [`std::path::Path`] via
 /// [`std::path::Path::new`] at the [`AsRef<std::path::Path>`] surface),
 /// and every borrowed filesystem-path surface — forward × receiver-shape
@@ -3246,7 +3246,7 @@ impl PartialEq<StorePath> for &std::path::Path {
 /// same boolean the owned UTF-8 peer answers at every valid
 /// [`StorePath`] value with an ASCII candidate.
 ///
-/// THEORY.md §III typed primitives: the owned filesystem-path comparison
+/// Typed primitives: the owned filesystem-path comparison
 /// surface is a typed-primitive site on [`StorePath`] itself (one
 /// [`PartialEq<std::path::PathBuf>`] impl on [`StorePath`] routing
 /// through [`<StorePath as AsRef<std::path::Path>>::as_ref`] and
@@ -3254,8 +3254,8 @@ impl PartialEq<StorePath> for &std::path::Path {
 /// `<StorePath as AsRef<std::path::Path>>::as_ref(&sp) ==
 /// owned_path.as_path()` restatement at every downstream site that asks
 /// whether a [`StorePath`] value names the same canonical filesystem
-/// path as a heap-owned [`std::path::PathBuf`]. THEORY.md §VI.1
-/// one-oracle: the canonical view is named at one site
+/// path as a heap-owned [`std::path::PathBuf`].
+/// One-oracle: the canonical view is named at one site
 /// ([`StorePath::as_str`], projected onto [`std::path::Path`] at the
 /// [`AsRef<std::path::Path>`] surface), and every filesystem-path
 /// comparison surface — borrowed forward × receiver, borrowed reverse ×
@@ -3313,7 +3313,7 @@ impl PartialEq<std::path::PathBuf> for StorePath {
 /// [`impl PartialEq<StorePath> for std::ffi::OsString`] peer opened onto
 /// the OS-string frontier.
 ///
-/// THEORY.md §III typed primitives: the reverse-direction owned
+/// Typed primitives: the reverse-direction owned
 /// filesystem-path comparison surface is a typed-primitive site on
 /// [`StorePath`] (one [`PartialEq<StorePath>`] impl on
 /// [`std::path::PathBuf`] routing through
@@ -3321,7 +3321,7 @@ impl PartialEq<std::path::PathBuf> for StorePath {
 /// [`<StorePath as AsRef<std::path::Path>>::as_ref`]), not a per-
 /// consumer `owned_path.as_path() ==
 /// <StorePath as AsRef<std::path::Path>>::as_ref(&sp)` restatement at
-/// every downstream comparison site. THEORY.md §VI.1 one-oracle: the
+/// every downstream comparison site. One-oracle: the
 /// canonical view is named at one site ([`StorePath::as_str`], projected
 /// onto [`std::path::Path`] at the [`AsRef<std::path::Path>`] surface),
 /// and every filesystem-path comparison surface — borrowed forward ×
@@ -3439,13 +3439,13 @@ impl PartialEq<StorePath> for std::path::PathBuf {
 /// canonical form off the moved backing string automatically with no
 /// downstream retyping.
 ///
-/// THEORY.md §III typed primitives: the by-value owned-UTF-8 emit
+/// Typed primitives: the by-value owned-UTF-8 emit
 /// surface is a typed-primitive site on [`StorePath`] itself (one
 /// [`From<StorePath>`] impl delegating to [`StorePath::into_string`]
 /// which moves the [`StorePath::parse`]-validated backing string out
 /// at zero-copy), not a per-consumer `sp.as_str().to_owned()` or
 /// `sp.to_string()` restatement at every downstream site that
-/// accepts `impl Into<String>`. THEORY.md §VI.1 one-oracle: the
+/// accepts `impl Into<String>`. One-oracle: the
 /// validated full-path string is named at one site
 /// ([`StorePath::parse`]-guarded [`StorePath::full`] backing,
 /// projected through the [`StorePath::into_string`] owned-projection
@@ -3523,7 +3523,7 @@ impl From<StorePath> for String {
 ///   consumer at zero per-site bridge cost.
 ///
 /// The chain-through-`From<StorePath> for String` design is the one-
-/// oracle discipline THEORY §VI.1 demands: the moved-out canonical bytes
+/// oracle discipline demands: the moved-out canonical bytes
 /// travel through the same [`StorePath::into_string`] projection the
 /// [`String`] emit already routes through, so a future refinement to the
 /// canonical form (a tighter trim, a `SmartString` handle, a
@@ -3573,11 +3573,11 @@ impl From<StorePath> for String {
 ///   [`TryFrom<PathBuf>`] to the same [`StorePath`] — pinned by
 ///   [`tests::test_from_store_path_pathbuf_parse_round_trip`].
 ///
-/// THEORY.md §III typed primitives: the by-value owned-filesystem-path
+/// Typed primitives: the by-value owned-filesystem-path
 /// emit surface is a typed-primitive peer on [`StorePath`], not a
 /// per-consumer `PathBuf::from(sp.as_str())` or
 /// `sp.as_ref::<Path>().to_path_buf()` restatement at every downstream
-/// site that accepts `impl Into<PathBuf>`. THEORY.md §VI.1 one-oracle:
+/// site that accepts `impl Into<PathBuf>`. One-oracle:
 /// the validated full-path string is named at one site
 /// ([`StorePath::parse`]-guarded [`StorePath::full`] backing, projected
 /// through the [`StorePath::into_string`] owned-projection accessor,
@@ -3657,7 +3657,7 @@ impl From<StorePath> for std::path::PathBuf {
 ///   cost.
 ///
 /// The chain-through-`From<StorePath> for String` design is the one-oracle
-/// discipline THEORY §VI.1 demands: the moved-out canonical bytes travel
+/// discipline demands: the moved-out canonical bytes travel
 /// through the same [`StorePath::into_string`] projection the [`String`]
 /// and [`std::path::PathBuf`] emit peers already route through, so a
 /// future refinement to the canonical form (a tighter trim, a
@@ -3689,12 +3689,12 @@ impl From<StorePath> for std::path::PathBuf {
 ///   `std::ffi::OsString::from(sp.into_string())` would — pinned by
 ///   [`tests::test_from_store_path_os_string_carries_through_generic_consumer`].
 ///
-/// THEORY.md §III typed primitives: the by-value owned-OS-string emit
+/// Typed primitives: the by-value owned-OS-string emit
 /// surface is a typed-primitive peer on [`StorePath`], not a per-consumer
 /// `std::ffi::OsString::from(sp.as_str())` or
 /// `sp.as_ref::<std::ffi::OsStr>().to_os_string()` restatement at every
 /// downstream site that accepts `impl Into<std::ffi::OsString>`.
-/// THEORY.md §VI.1 one-oracle: the validated full-path string is named at
+/// One-oracle: the validated full-path string is named at
 /// one site ([`StorePath::parse`]-guarded [`StorePath::full`] backing,
 /// projected through the [`StorePath::into_string`] owned-projection
 /// accessor, exposed as an owned [`String`] via
@@ -3774,7 +3774,7 @@ impl From<StorePath> for std::ffi::OsString {
 ///   cost.
 ///
 /// The chain-through-`From<StorePath> for String` design is the one-oracle
-/// discipline THEORY §VI.1 demands: the moved-out canonical bytes travel
+/// discipline demands: the moved-out canonical bytes travel
 /// through the same [`StorePath::into_string`] projection the [`String`],
 /// [`std::path::PathBuf`], and [`std::ffi::OsString`] emit peers already
 /// route through, so a future refinement to the canonical form (a tighter
@@ -3825,12 +3825,12 @@ impl From<StorePath> for std::ffi::OsString {
 ///   [`TryFrom<Vec<u8>>`] to the same [`StorePath`] — pinned by
 ///   [`tests::test_from_store_path_vec_bytes_parse_round_trip`].
 ///
-/// THEORY.md §III typed primitives: the by-value owned-byte-vector emit
+/// Typed primitives: the by-value owned-byte-vector emit
 /// surface is a typed-primitive peer on [`StorePath`], not a per-consumer
 /// `Vec::from(sp.as_str().as_bytes())` or
 /// `<StorePath as AsRef<[u8]>>::as_ref(&sp).to_vec()` restatement at
 /// every downstream site that accepts `impl Into<Vec<u8>>`.
-/// THEORY.md §VI.1 one-oracle: the validated full-path string is named
+/// One-oracle: the validated full-path string is named
 /// at one site ([`StorePath::parse`]-guarded [`StorePath::full`]
 /// backing, projected through the [`StorePath::into_string`]
 /// owned-projection accessor, exposed as an owned [`String`] via
@@ -3908,7 +3908,7 @@ impl From<StorePath> for Vec<u8> {
 ///   zero per-site bridge cost.
 ///
 /// The chain-through-`From<StorePath> for String` design is the one-oracle
-/// discipline THEORY §VI.1 demands: the moved-out canonical bytes travel
+/// discipline demands: the moved-out canonical bytes travel
 /// through the same [`StorePath::into_string`] projection the [`String`],
 /// [`std::path::PathBuf`], [`std::ffi::OsString`], and [`Vec<u8>`] emit
 /// peers already route through, so a future refinement to the canonical
@@ -3954,12 +3954,12 @@ impl From<StorePath> for Vec<u8> {
 ///   [`TryFrom<Box<str>>`] to the same [`StorePath`] — pinned by
 ///   [`tests::test_from_store_path_box_str_parse_round_trip`].
 ///
-/// THEORY.md §III typed primitives: the by-value shrunk-owned-UTF-8 emit
+/// Typed primitives: the by-value shrunk-owned-UTF-8 emit
 /// surface is a typed-primitive peer on [`StorePath`], not a per-consumer
 /// `sp.into_string().into_boxed_str()` or
 /// `<StorePath as AsRef<str>>::as_ref(&sp).into()` restatement at every
 /// downstream site that accepts `impl Into<Box<str>>`.
-/// THEORY.md §VI.1 one-oracle: the validated full-path string is named at
+/// One-oracle: the validated full-path string is named at
 /// one site ([`StorePath::parse`]-guarded [`StorePath::full`] backing,
 /// projected through the [`StorePath::into_string`] owned-projection
 /// accessor, exposed as an owned [`String`] via
@@ -4035,7 +4035,7 @@ impl From<StorePath> for Box<str> {
 ///   per-site bridge cost.
 ///
 /// The chain-through-`From<StorePath> for String` design is the one-oracle
-/// discipline THEORY §VI.1 demands: the moved-out canonical bytes travel
+/// discipline demands: the moved-out canonical bytes travel
 /// through the same [`StorePath::into_string`] projection the [`String`],
 /// [`std::path::PathBuf`], [`std::ffi::OsString`], [`Vec<u8>`], and
 /// [`Box<str>`] emit peers already route through, so a future refinement
@@ -4089,13 +4089,13 @@ impl From<StorePath> for Box<str> {
 ///   through [`TryFrom<Cow<'_, str>>`] to the same [`StorePath`] — pinned
 ///   by [`tests::test_from_store_path_cow_str_parse_round_trip`].
 ///
-/// THEORY.md §III typed primitives: the by-value borrowed-or-owned-UTF-8
+/// Typed primitives: the by-value borrowed-or-owned-UTF-8
 /// emit surface is a typed-primitive peer on [`StorePath`], not a
 /// per-consumer `Cow::Owned(sp.into_string())` or
 /// `Cow::Owned(<StorePath as AsRef<str>>::as_ref(&sp).to_owned())`
 /// restatement at every downstream site that accepts
 /// `impl Into<Cow<'static, str>>`.
-/// THEORY.md §VI.1 one-oracle: the validated full-path string is named at
+/// One-oracle: the validated full-path string is named at
 /// one site ([`StorePath::parse`]-guarded [`StorePath::full`] backing,
 /// projected through the [`StorePath::into_string`] owned-projection
 /// accessor, exposed as an owned [`String`] via
@@ -4193,7 +4193,7 @@ impl From<StorePath> for std::borrow::Cow<'static, str> {
 ///   `impl Into<Arc<str>>` consumer at zero per-site bridge cost.
 ///
 /// The chain-through-`From<StorePath> for String` design is the one-oracle
-/// discipline THEORY §VI.1 demands: the moved-out canonical bytes travel
+/// discipline demands: the moved-out canonical bytes travel
 /// through the same [`StorePath::into_string`] projection the [`String`],
 /// [`std::path::PathBuf`], [`std::ffi::OsString`], [`Vec<u8>`], [`Box<str>`],
 /// and [`Cow<'static, str>`] emit peers already route through, so a future
@@ -4242,14 +4242,14 @@ impl From<StorePath> for std::borrow::Cow<'static, str> {
 ///   [`TryFrom<Arc<str>>`] to the same [`StorePath`] — pinned by
 ///   [`tests::test_from_store_path_arc_str_parse_round_trip`].
 ///
-/// THEORY.md §III typed primitives: the by-value cross-thread
+/// Typed primitives: the by-value cross-thread
 /// shared-owned-UTF-8 emit surface is a typed-primitive peer on
 /// [`StorePath`], not a per-consumer
 /// `std::sync::Arc::<str>::from(sp.into_string())` or
 /// `std::sync::Arc::<str>::from(<StorePath as AsRef<str>>::as_ref(&sp))`
 /// restatement at every downstream site that accepts
 /// `impl Into<Arc<str>>`.
-/// THEORY.md §VI.1 one-oracle: the validated full-path string is named at
+/// One-oracle: the validated full-path string is named at
 /// one site ([`StorePath::parse`]-guarded [`StorePath::full`] backing,
 /// projected through the [`StorePath::into_string`] owned-projection
 /// accessor, exposed as an owned [`String`] via
@@ -4359,7 +4359,7 @@ impl From<StorePath> for std::sync::Arc<str> {
 ///   every `impl Into<Rc<str>>` consumer at zero per-site bridge cost.
 ///
 /// The chain-through-`From<StorePath> for String` design is the one-oracle
-/// discipline THEORY §VI.1 demands: the moved-out canonical bytes travel
+/// discipline demands: the moved-out canonical bytes travel
 /// through the same [`StorePath::into_string`] projection the [`String`],
 /// [`std::path::PathBuf`], [`std::ffi::OsString`], [`Vec<u8>`], [`Box<str>`],
 /// [`Cow<'static, str>`], and [`Arc<str>`] emit peers already route through,
@@ -4408,14 +4408,14 @@ impl From<StorePath> for std::sync::Arc<str> {
 ///   [`TryFrom<Rc<str>>`] to the same [`StorePath`] — pinned by
 ///   [`tests::test_from_store_path_rc_str_parse_round_trip`].
 ///
-/// THEORY.md §III typed primitives: the by-value thread-local
+/// Typed primitives: the by-value thread-local
 /// shared-owned-UTF-8 emit surface is a typed-primitive peer on
 /// [`StorePath`], not a per-consumer
 /// `std::rc::Rc::<str>::from(sp.into_string())` or
 /// `std::rc::Rc::<str>::from(<StorePath as AsRef<str>>::as_ref(&sp))`
 /// restatement at every downstream site that accepts
 /// `impl Into<Rc<str>>`.
-/// THEORY.md §VI.1 one-oracle: the validated full-path string is named at
+/// One-oracle: the validated full-path string is named at
 /// one site ([`StorePath::parse`]-guarded [`StorePath::full`] backing,
 /// projected through the [`StorePath::into_string`] owned-projection
 /// accessor, exposed as an owned [`String`] via
@@ -4510,7 +4510,7 @@ impl From<StorePath> for std::rc::Rc<str> {
 ///   at zero per-site bridge cost.
 ///
 /// The chain-through-[`From<StorePath> for Vec<u8>`] design is the
-/// one-oracle discipline THEORY §VI.1 demands: the moved-out canonical
+/// one-oracle discipline demands: the moved-out canonical
 /// bytes travel through the same [`StorePath::into_string`] projection
 /// every owned-emit peer routes through — [`Vec<u8>`] moves the
 /// backing buffer out of the [`String`] wrapper, this
@@ -4578,12 +4578,12 @@ impl From<StorePath> for std::rc::Rc<str> {
 ///   through [`TryFrom<Box<[u8]>>`] to the same [`StorePath`] — pinned
 ///   by [`tests::test_from_store_path_box_bytes_parse_round_trip`].
 ///
-/// THEORY.md §III typed primitives: the by-value shrunk-owned-byte-slice
+/// Typed primitives: the by-value shrunk-owned-byte-slice
 /// emit surface is a typed-primitive peer on [`StorePath`], not a
 /// per-consumer `sp.into_string().into_bytes().into_boxed_slice()` or
 /// `<StorePath as AsRef<[u8]>>::as_ref(&sp).into()` restatement at
 /// every downstream site that accepts `impl Into<Box<[u8]>>`.
-/// THEORY.md §VI.1 one-oracle: the validated full-path string is named
+/// One-oracle: the validated full-path string is named
 /// at one site ([`StorePath::parse`]-guarded [`StorePath::full`]
 /// backing, projected through the [`StorePath::into_string`]
 /// owned-projection accessor, exposed as an owned [`String`] via
@@ -4700,7 +4700,7 @@ impl From<StorePath> for Box<[u8]> {
 ///   `impl Into<Arc<[u8]>>` consumer at zero per-site bridge cost.
 ///
 /// The chain-through-[`From<StorePath> for Vec<u8>`] design is the
-/// one-oracle discipline THEORY §VI.1 demands: the moved-out canonical
+/// one-oracle discipline demands: the moved-out canonical
 /// bytes travel through the same [`StorePath::into_string`] projection
 /// every owned-emit peer routes through — [`Vec<u8>`] moves the backing
 /// buffer out of the [`String`] wrapper, this [`Arc<[u8]>`] peer then
@@ -4769,14 +4769,14 @@ impl From<StorePath> for Box<[u8]> {
 ///   [`TryFrom<Arc<[u8]>>`] to the same [`StorePath`] — pinned by
 ///   [`tests::test_from_store_path_arc_bytes_parse_round_trip`].
 ///
-/// THEORY.md §III typed primitives: the by-value cross-thread
+/// Typed primitives: the by-value cross-thread
 /// shared-owned-byte-slice emit surface is a typed-primitive peer on
 /// [`StorePath`], not a per-consumer
 /// `std::sync::Arc::<[u8]>::from(sp.into_string().into_bytes())` or
 /// `std::sync::Arc::<[u8]>::from(<StorePath as AsRef<[u8]>>::as_ref(&sp))`
 /// restatement at every downstream site that accepts
 /// `impl Into<Arc<[u8]>>`.
-/// THEORY.md §VI.1 one-oracle: the validated full-path string is named
+/// One-oracle: the validated full-path string is named
 /// at one site ([`StorePath::parse`]-guarded [`StorePath::full`]
 /// backing, projected through the [`StorePath::into_string`]
 /// owned-projection accessor, exposed as an owned [`String`] via
@@ -4903,7 +4903,7 @@ impl From<StorePath> for std::sync::Arc<[u8]> {
 ///   bridge cost.
 ///
 /// The chain-through-[`From<StorePath> for Vec<u8>`] design is the
-/// one-oracle discipline THEORY §VI.1 demands: the moved-out canonical
+/// one-oracle discipline demands: the moved-out canonical
 /// bytes travel through the same [`StorePath::into_string`] projection
 /// every owned-emit peer routes through — [`Vec<u8>`] moves the backing
 /// buffer out of the [`String`] wrapper, this [`Rc<[u8]>`] peer then
@@ -4971,14 +4971,14 @@ impl From<StorePath> for std::sync::Arc<[u8]> {
 ///   [`TryFrom<Rc<[u8]>>`] to the same [`StorePath`] — pinned by
 ///   [`tests::test_from_store_path_rc_bytes_parse_round_trip`].
 ///
-/// THEORY.md §III typed primitives: the by-value thread-local
+/// Typed primitives: the by-value thread-local
 /// shared-owned-byte-slice emit surface is a typed-primitive peer on
 /// [`StorePath`], not a per-consumer
 /// `std::rc::Rc::<[u8]>::from(sp.into_string().into_bytes())` or
 /// `std::rc::Rc::<[u8]>::from(<StorePath as AsRef<[u8]>>::as_ref(&sp))`
 /// restatement at every downstream site that accepts
 /// `impl Into<Rc<[u8]>>`.
-/// THEORY.md §VI.1 one-oracle: the validated full-path string is named
+/// One-oracle: the validated full-path string is named
 /// at one site ([`StorePath::parse`]-guarded [`StorePath::full`]
 /// backing, projected through the [`StorePath::into_string`]
 /// owned-projection accessor, exposed as an owned [`String`] via
@@ -5089,7 +5089,7 @@ impl From<StorePath> for std::rc::Rc<[u8]> {
 ///   per-site bridge cost.
 ///
 /// The chain-through-[`From<StorePath> for Vec<u8>`] design is the
-/// one-oracle discipline THEORY §VI.1 demands: the moved-out canonical
+/// one-oracle discipline demands: the moved-out canonical
 /// bytes travel through the same [`StorePath::into_string`] projection
 /// every owned-emit peer routes through — [`Vec<u8>`] moves the backing
 /// buffer out of the [`String`] wrapper, this [`Cow<'static, [u8]>`]
@@ -5165,14 +5165,14 @@ impl From<StorePath> for std::rc::Rc<[u8]> {
 ///   pinned by
 ///   [`tests::test_from_store_path_cow_bytes_parse_round_trip`].
 ///
-/// THEORY.md §III typed primitives: the by-value borrowed-or-owned
+/// Typed primitives: the by-value borrowed-or-owned
 /// byte-slice emit surface is a typed-primitive peer on [`StorePath`],
 /// not a per-consumer
 /// `Cow::Owned(sp.into_string().into_bytes())` or
 /// `Cow::Owned(<StorePath as AsRef<[u8]>>::as_ref(&sp).to_vec())`
 /// restatement at every downstream site that accepts
 /// `impl Into<Cow<'static, [u8]>>`.
-/// THEORY.md §VI.1 one-oracle: the validated full-path string is named
+/// One-oracle: the validated full-path string is named
 /// at one site ([`StorePath::parse`]-guarded [`StorePath::full`]
 /// backing, projected through the [`StorePath::into_string`]
 /// owned-projection accessor, exposed as an owned [`String`] via
@@ -5246,7 +5246,7 @@ impl From<StorePath> for std::borrow::Cow<'static, [u8]> {
 /// at the read surface) lands at one site (the [`AsRef<str>`] impl) and
 /// every by-reference owned-emit peer in the family — [`String`], and
 /// every future by-reference peer chained through it — inherits it
-/// automatically. THEORY §VI.1 one-oracle discipline.
+/// automatically. One-oracle discipline.
 ///
 /// # Identity invariants pinned
 ///
@@ -5353,7 +5353,7 @@ impl From<&StorePath> for String {
 ///   HMAC-input capture accessor typed on `impl Into<Vec<u8>>`).
 ///
 /// The chain-through-`AsRef<[u8]>` design is the one-oracle discipline
-/// THEORY §VI.1 demands: the emitted canonical bytes travel through the
+/// demands: the emitted canonical bytes travel through the
 /// same borrowed-view byte-slice read peer every borrowed-view byte-slice
 /// consumer already reads through, so a future canonical-form refinement
 /// to the backing string (a tighter trim, a `SmartString` handle, a
@@ -5463,7 +5463,7 @@ impl From<&StorePath> for Vec<u8> {
 ///   `impl Into<Box<str>>`).
 ///
 /// The chain-through-`From<&StorePath> for String` design is the one-oracle
-/// discipline THEORY §VI.1 demands: the emitted canonical bytes travel
+/// discipline demands: the emitted canonical bytes travel
 /// through the same by-reference [`String::from`] projection every
 /// by-reference string-side emit peer routes through (and, transitively,
 /// the same borrowed-view [`AsRef<str>`] peer the by-value emit peers'
@@ -5581,7 +5581,7 @@ impl From<&StorePath> for Box<str> {
 ///   a borrowed [`StorePath`] iteration).
 ///
 /// The chain-through-`From<&StorePath> for String` design is the one-oracle
-/// discipline THEORY §VI.1 demands: the emitted canonical bytes travel
+/// discipline demands: the emitted canonical bytes travel
 /// through the same by-reference [`String::from`] projection every
 /// by-reference string-side emit peer routes through (and, transitively,
 /// the same borrowed-view [`AsRef<str>`] peer the by-value emit peers'
@@ -5712,7 +5712,7 @@ impl From<&StorePath> for std::borrow::Cow<'static, str> {
 ///   `impl Into<Arc<str>>`).
 ///
 /// The chain-through-`From<&StorePath> for String` design is the
-/// one-oracle discipline THEORY §VI.1 demands: the emitted canonical bytes
+/// one-oracle discipline demands: the emitted canonical bytes
 /// travel through the same by-reference [`String::from`] projection every
 /// by-reference string-side emit peer routes through (and, transitively,
 /// the same borrowed-view [`AsRef<str>`] peer the by-value emit peers'
@@ -5850,7 +5850,7 @@ impl From<&StorePath> for std::sync::Arc<str> {
 /// frontier.
 ///
 /// The chain-through-`From<&StorePath> for String` design is the one-oracle
-/// discipline THEORY §VI.1 demands: the emitted canonical bytes travel
+/// discipline demands: the emitted canonical bytes travel
 /// through the same by-reference [`String::from`] projection every
 /// by-reference string-side emit peer routes through (and, transitively,
 /// the same borrowed-view [`AsRef<str>`] peer the by-value emit peers'
@@ -5990,7 +5990,7 @@ impl From<&StorePath> for std::rc::Rc<str> {
 /// that shape at the by-reference frontier.
 ///
 /// The chain-through-`From<&StorePath> for Vec<u8>` design is the
-/// one-oracle discipline THEORY §VI.1 demands: the emitted canonical bytes
+/// one-oracle discipline demands: the emitted canonical bytes
 /// travel through the same by-reference [`Vec::<u8>::from`] projection the
 /// by-reference byte-side sub-family will route through (and, transitively,
 /// the same borrowed-view [`AsRef<[u8]>`] peer the by-reference [`Vec<u8>`]
@@ -6142,7 +6142,7 @@ impl From<&StorePath> for Box<[u8]> {
 /// by-reference frontier.
 ///
 /// The chain-through-`From<&StorePath> for Vec<u8>` design is the
-/// one-oracle discipline THEORY §VI.1 demands: the emitted canonical bytes
+/// one-oracle discipline demands: the emitted canonical bytes
 /// travel through the same by-reference [`Vec::<u8>::from`] projection the
 /// by-reference byte-side sub-family routes through (and, transitively,
 /// the same borrowed-view [`AsRef<[u8]>`] peer the by-reference
@@ -6294,7 +6294,7 @@ impl From<&StorePath> for std::sync::Arc<[u8]> {
 /// shape at the by-reference frontier.
 ///
 /// The chain-through-`From<&StorePath> for Vec<u8>` design is the
-/// one-oracle discipline THEORY §VI.1 demands: the emitted canonical bytes
+/// one-oracle discipline demands: the emitted canonical bytes
 /// travel through the same by-reference [`Vec::<u8>::from`] projection the
 /// by-reference byte-side sub-family routes through (and, transitively,
 /// the same borrowed-view [`AsRef<[u8]>`] peer the by-reference
@@ -6432,7 +6432,7 @@ impl From<&StorePath> for std::rc::Rc<[u8]> {
 ///   `impl Into<Cow<'static, [u8]>>` from a borrowed iteration).
 ///
 /// The chain-through-`From<&StorePath> for Vec<u8>` design is the
-/// one-oracle discipline THEORY §VI.1 demands: the emitted canonical bytes
+/// one-oracle discipline demands: the emitted canonical bytes
 /// travel through the same by-reference [`Vec<u8>`] projection every
 /// by-reference byte-side emit peer routes through (and, transitively, the
 /// same borrowed-view [`AsRef<[u8]>`] peer the by-value emit peers'
@@ -6525,8 +6525,7 @@ pub fn parse_closure_paths(closure_info: &str) -> Vec<StorePath> {
 /// ordering that is not guaranteed stable across nix versions. Hashing the
 /// raw document therefore yields a closure fingerprint that drifts run to
 /// run even when the closure is byte-identical, defeating the very
-/// reproducibility the closure hash exists to attest (THEORY §VI.1:
-/// regenerating an artifact from the same inputs must produce a
+/// reproducibility the closure hash exists to attest (regenerating an artifact from the same inputs must produce a
 /// byte-identical result). This reduces the closure to the *set* of its
 /// 32-char base-32 content hashes — the hermetic fingerprints
 /// [`StorePath::hash`] exposes — deduplicated and lexically sorted, joined
@@ -7647,7 +7646,7 @@ mod tests {
     /// clause is evaluated. The variant must preserve the offending bytes
     /// and the underlying [`std::str::Utf8Error`] under
     /// [`std::error::Error::source`], so a Phase 1 attestation record
-    /// (THEORY §V.4) can attach both to the failure without re-decoding to
+    /// can attach both to the failure without re-decoding to
     /// recover the invalid-sequence offset.
     #[test]
     fn test_try_from_bytes_rejects_non_utf8_input() {
@@ -7804,7 +7803,7 @@ mod tests {
     /// `bytes.to_vec()` would otherwise force on the owned arm) and the
     /// underlying [`std::str::Utf8Error`] under
     /// [`std::error::Error::source`], so a Phase 1 attestation record
-    /// (THEORY §V.4) can attach both to the failure without re-decoding
+    /// can attach both to the failure without re-decoding
     /// to recover the invalid-sequence offset.
     #[test]
     fn test_try_from_vec_bytes_rejects_non_utf8_input() {
@@ -11130,7 +11129,7 @@ mod tests {
     /// `Vec<StorePath>::sort()` must produce the same order the
     /// underlying byte-string comparison produces. Pinned so a caller
     /// building a canonical closure listing (a sorted, reproducible
-    /// derivation manifest — THEORY §VI.1) can rely on the
+    /// derivation manifest —) can rely on the
     /// [`Ord`]-derived order matching the lexicographic order every
     /// downstream `.eq`-based reproducibility check assumes.
     #[test]

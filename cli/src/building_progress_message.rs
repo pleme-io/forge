@@ -46,9 +46,9 @@
 //! `Pushing` for the registry-upload phase — at the byte level rather
 //! than by convention.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the `Building <name>`
+//! Solve-once-at-the-primitive: the `Building <name>`
 //! progress-bar message shape lives at ONE construction surface — a
 //! future refinement (a `"Building "` → `"🔨 Building "` icon-prefix
 //! widening, a distinct progress-bar namespace for builds vs. tests,

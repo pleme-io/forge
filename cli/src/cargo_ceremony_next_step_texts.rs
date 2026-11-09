@@ -37,9 +37,9 @@
 //! (say a `"Push to registry: cargo publish"` step-4 tail) has an
 //! obvious home without widening the step-1-opener primitive.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! - THEORY.md §V.1 (Construction guarantees; Types → Invariants →
+//! - (Construction guarantees; Types → Invariants →
 //!   Proofs → Render Anywhere): the print helpers delegate to
 //!   [`crate::ui::print_next_step`], which is the single source of
 //!   truth for the `  <N>. <text>\n` numbered-row grammar. The
@@ -47,7 +47,7 @@
 //!   `cargo test`-verifiable invariant so a typo, a rename, or a
 //!   drift in the argv-shell composition fails at build time rather
 //!   than at operator readout.
-//! - THEORY.md §VI.1 (three-times rule): two byte-identical siblings
+//! - (three-times rule): two byte-identical siblings
 //!   per string sit at the floor of the duplication class; pinning
 //!   them here forecloses the third-site copy-paste before it lands.
 

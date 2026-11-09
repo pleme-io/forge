@@ -65,18 +65,18 @@
 //! the fixed layout; they just route the three-segment prefix through
 //! one body.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the `pkgs/products` prefix lives at
+//! Solve-once-at-the-primitive: the `pkgs/products` prefix lives at
 //! ONE construction surface so a future refinement (a rename of
 //! `pkgs/products` to `products/`, a promotion to
 //! `PathBuf::from(env!("PRODUCTS_DIR"))` for hermetic
 //! Nix-derivation-pinned paths, a swap to a `<product>.pkgset`
 //! namespace) lands in one place rather than at every consumer.
-//! §VI.1 duplication-is-a-bug (PRIME DIRECTIVE): four identical
+//! Duplication-is-a-bug (PRIME DIRECTIVE): four identical
 //! `.join("pkgs").join("products").join(...)` bodies past the
 //! zero-duplication threshold, closed at the shared accessor.
-//! §II.1 typed-entry: the `product` slot is a run-time `&str`, but the
+//! Typed-entry: the `product` slot is a run-time `&str`, but the
 //! `pkgs/products` slot pair is compile-time; a consumer cannot
 //! silently rename `products` to `product` at one site and drift.
 

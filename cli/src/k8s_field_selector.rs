@@ -23,7 +23,7 @@
 //! `involvedObject.name=` field-key + the interpolated Display value + the
 //! exact byte shape of the emitted selector are decided once here.
 //!
-//! Grounded in THEORY.md §VI.1's three-times rule: two sibling call sites
+//! Grounded in the three-times rule: two sibling call sites
 //! is a coincidence, three is a law and the shape belongs in a typed
 //! primitive rather than in three inline `format!` stanzas whose drift is
 //! a grep away.
@@ -65,7 +65,7 @@
 //! override, flows to all three call sites from one edit; the alternative
 //! is a grep-and-edit sweep across three modules on every drift.
 //!
-//! Grounded in THEORY.md §V.1 (construction guarantees — the knowable
+//! Grounded (construction guarantees — the knowable
 //! platform): the field-selector value that binds a kubectl event probe
 //! to its target workload is a construction detail of the fleet's
 //! Kubernetes surface, and its rendering belongs in one typed primitive

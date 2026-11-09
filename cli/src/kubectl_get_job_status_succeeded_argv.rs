@@ -20,7 +20,7 @@
 //!    shape, parsing the trimmed stdout as `i32` and classifying
 //!    `n > 0`).
 //!
-//! Two identically-shaped bodies past THEORY §VI.1's duplication
+//! Two identically-shaped bodies past the duplication
 //! trigger (PRIME DIRECTIVE: duplication budget is zero). A Job-
 //! success-count argv drift — a rename of the `-n` short form to
 //! `--namespace`, an argv-order shuffle putting `-n <ns>` before the

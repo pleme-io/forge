@@ -57,9 +57,9 @@
 //! solve-once purpose — a rename of either label would still hit two
 //! sites in lockstep).
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the `Backend:` / `Frontend:`
+//! Solve-once-at-the-primitive: the `Backend:` / `Frontend:`
 //! preamble grammar lives at ONE construction surface so a future
 //! refinement (a colored label palette matching the section header,
 //! a `.display()` -> `.to_string_lossy()` swap for non-UTF-8 path

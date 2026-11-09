@@ -32,7 +32,7 @@
 //! `verify_image_digest_matches(&registry, <tag>, &pushed_digest).await?`
 //! guard downstream (execute :1427; deploy_and_verify :2411). Two
 //! identically-shaped bodies past the PRIME DIRECTIVE's
-//! duplication-is-a-bug threshold (THEORY §VI.1). A drift to the
+//! duplication-is-a-bug threshold. A drift to the
 //! title copy (a rename to `"Verifying image digest..."`, dropping
 //! the ellipsis, promoting it to U+2026), to the captured-digest ack
 //! prefix (a swap for `"   🔒 Captured digest: "`, dropping the

@@ -65,16 +65,16 @@
 //! `print_step_info` (not `print_info`), and `print_step_info` emits
 //! a plain uncolored line.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the monitor-hint message shape
+//! Solve-once-at-the-primitive: the monitor-hint message shape
 //! lives at ONE construction surface so a future refinement — a
 //! rename of the sub-command, a swap to a label-selector form
 //! (`-l app=<product>-<service>`), an operator-friendly reflow that
 //! splits the hint across two lines — lands in one place rather
 //! than in every consumer of the `ℹ️  <hint>` idiom.
 //!
-//! §VI.1 three-is-a-law prospectively: two sites today, and every
+//! Three-is-a-law prospectively: two sites today, and every
 //! future GitOps-trigger command that hands off to Flux (`chart
 //! deploy`, `kustomization sync`, etc.) will reach for the same
 //! monitor hint on first grep.

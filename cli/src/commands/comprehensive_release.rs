@@ -115,8 +115,7 @@ fn services_healthy_poll_delay(attempt: u32) -> Duration {
 /// (170ecac), and the sibling `bun_bin()` / `crate2nix_bin()` /
 /// `nix_bin()` sigil discipline every substrate-`<TOOL>` /
 /// `<TOOL>_BIN`-routed spawn surface in forge with more than one
-/// consumer site honors. Solve-once at the sigil (THEORY §I.5 —
-/// duplication budget zero; every recurring shape becomes a helper
+/// consumer site honors. Solve-once at the sigil (duplication budget zero; every recurring shape becomes a helper
 /// before it becomes duplicated code) means a future added `cargo`
 /// spawn cannot silently re-copy the two-argument resolve and drift
 /// away from the `CARGO` override at exactly the tier the
@@ -143,8 +142,7 @@ fn cargo_bin() -> String {
 /// appears in exactly ONE place (this sigil body) — mirrors the
 /// sibling `docker_bin()` sigils at `commands/local.rs:31`,
 /// `commands/infra.rs:33`, `commands/e2e.rs:36`, and
-/// `commands/prerelease.rs:77`. Solve-once at the sigil (THEORY
-/// §I.5 — duplication budget zero) means a future added `docker`
+/// `commands/prerelease.rs:77`. Solve-once at the sigil (duplication budget zero) means a future added `docker`
 /// spawn cannot silently re-copy the resolve inline and drift from
 /// the `DOCKER_BIN` override at exactly the tier the hermetic-runner
 /// contract binds. The two-argument resolve string is spelled only
@@ -331,7 +329,7 @@ pub async fn execute(
         // spawn error). Sibling of `commands/build.rs::execute` (72a7adf)
         // and `commands/github_runner_ci.rs::execute` (4510026) —
         // three `spinner + status-only cargo/nix spawn` sites past
-        // THEORY §VI.1's three-times-is-a-law threshold.
+        // the three-times-is-a-law threshold.
         use crate::rust_test_diagnostic_env::RustTestDiagnosticEnv;
         let mut test_cmd = Command::new(&cargo);
         test_cmd
@@ -1433,7 +1431,7 @@ mod tests {
     ///
     /// Pre-lift the four sites carried this stanza verbatim modulo
     /// the per-site argv slice — four identically-shaped bodies past
-    /// THEORY §VI.1's three-is-a-law threshold (PRIME DIRECTIVE:
+    /// the three-is-a-law threshold (PRIME DIRECTIVE:
     /// duplication budget is zero). The lift onto
     /// [`crate::retry::run_status_discard_in_async`] preserves the
     /// exact pre-lift semantics — spawn `Err` is swallowed, spawn

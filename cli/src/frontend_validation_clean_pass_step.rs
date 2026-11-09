@@ -52,20 +52,20 @@
 //!   DIFFERENT arm of the same function whose success verify branch
 //!   this primitive closes.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! - THEORY.md §I.5 (duplication budget zero; every recurring shape
+//! - (duplication budget zero; every recurring shape
 //!   becomes a helper before it becomes duplicated code): two byte-
 //!   close sibling stanzas past the two-occurrence coincidence
 //!   threshold. The three-invariant fusion — sink + return-tuple +
 //!   label-shape — collapses to ONE construction surface.
-//! - THEORY.md §II.1 invariant 5 (composition preserves proofs): the
+//! - Invariant 5 (composition preserves proofs): the
 //!   composition of [`crate::ui::print_step_pass_timed`] (the elapsed-
 //!   time step-pass sink) and the `Ok((true, Vec::new()))` return
 //!   tuple carries each peer's contract without repetition — a drift
 //!   at either lands at ONE peer and reaches this fusion by
 //!   construction.
-//! - THEORY.md §V.2 (typed absorption): the closed
+//! - (typed absorption): the closed
 //!   [`FrontendValidationCleanPassStep`] enum forecloses free-form
 //!   label spelling — a future added frontend-validation step whose
 //!   success arm shares the same three invariants extends the enum

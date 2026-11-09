@@ -14,7 +14,7 @@
 //!
 //! stanza verbatim before spawning the `nix build` command and
 //! finishing the spinner with `.finish_and_clear()` on every
-//! outcome path. Two occurrences past THEORY §VI.1's "two
+//! outcome path. Two occurrences past the "two
 //! occurrences is a coincidence" threshold, but the shape is a
 //! distinctive palette-and-message fusion — a
 //! [`crate::ui::SpinnerStyle::Green`] palette choice + the

@@ -56,11 +56,11 @@
 //! independently regresses a test rather than shipping a
 //! self-inconsistent batch-prologue.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! - THEORY.md §V (Compounding Directive: solve once, load-bearing
+//! - (Compounding Directive: solve once, load-bearing
 //!   fixes only).
-//! - THEORY.md §VI.1 (three-times-is-a-law — 2 verbatim sibling sites
+//! - (three-times-is-a-law — 2 verbatim sibling sites
 //!   redeemed by extraction under the two-strict-siblings ≥2 threshold
 //!   the fleet applies for high-coupling prologues like this one, where
 //!   both flows compose the same discovery + gate + announcement

@@ -353,7 +353,7 @@ mod tests {
     /// [`DatabaseType::run_mode`] call — no `RUN_MODE` string is
     /// meaningful without a Job to run — and the `Option`-typed
     /// return closes the "invalid states unrepresentable" surface
-    /// (THEORY §V.1) so no caller can pass a `None`-backend `RUN_MODE`
+    /// so no caller can pass a `None`-backend `RUN_MODE`
     /// slot through the fusion primitive by construction.
     #[test]
     fn database_type_run_mode_matches_pre_lift_bytes() {

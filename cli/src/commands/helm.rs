@@ -263,7 +263,7 @@ fn format_failure_summary(failed: &[(String, String)]) -> String {
 /// stdout, &x_output.stderr)); }` sites at [`lint`] (both the `helm
 /// lint` post-check and the `helm template` post-check), [`package`],
 /// and [`push`] collapse onto — four consumers past the ≥3
-/// three-times-rule threshold ([THEORY §VI.1](): "two occurrences is
+/// three-times-rule threshold ("two occurrences is
 /// a coincidence; three is a law"), so the shape is a law-redeeming
 /// consolidation rather than a coincidence.
 ///
@@ -314,8 +314,7 @@ fn ensure_helm_success(output: &std::process::Output, context: &str) -> Result<(
 /// `print_captured_output(&out.stdout, &out.stderr)` +
 /// `ensure_helm_success(&out, ctx)?` — collapses onto ONE primitive.
 ///
-/// Three consumer sites past the ≥3 three-times-rule threshold ([THEORY
-/// §VI.1](): "two occurrences is a coincidence; three is a law")
+/// Three consumer sites past the ≥3 three-times-rule threshold ("two occurrences is a coincidence; three is a law")
 /// converge here: [`lint`]'s `helm lint` post-check (with the pre-lift
 /// `Failed to run helm lint` outer anyhow context), [`package`]'s `helm
 /// package` post-check (`Failed to run helm package`), and [`push`]'s
@@ -550,7 +549,7 @@ mod capture_tests {
     /// this module carried a byte-identical `ExitStatusExt::from_raw`
     /// builder verbatim alongside the sibling `commands/status.rs::
     /// tests` copy — two occurrences past the two-times rule (PRIME
-    /// DIRECTIVE: duplication budget is zero, THEORY §VI.1). Both
+    /// DIRECTIVE: duplication budget is zero,). Both
     /// consumer sites now delegate to the ONE `test_support`
     /// primitive, so a future reshape (adding a captured signal
     /// detail, widening to a cross-platform builder, tracking the
@@ -953,7 +952,7 @@ pub fn lint(chart_dir: &str) -> Result<()> {
 /// sibling `_with_lib` sites read one line where they used to
 /// read eleven.
 ///
-/// THEORY.md §VI.1 one-oracle discipline: the workspace-
+/// One-oracle discipline: the workspace-
 /// resolution shape is composed at ONE site (here), not re-
 /// inlined per `_with_lib` sibling body.
 fn resolve_chart_workspace(
@@ -1646,11 +1645,11 @@ pub fn bump(
     // with the byte-identical wording [`version::BumpLevel::from_str`]
     // emits), it only moves the parse forward in the fn.
     //
-    // THEORY.md §V.4 typed primitives: the `--level` argument surface at
+    // Typed primitives: the `--level` argument surface at
     // `commands/helm.rs::bump` now carries a typed peer parsed at ONE
     // site (this call), matching the sibling `commands/tool.rs::bump`
     // top-of-fn boundary parse.
-    // THEORY.md §VI.1 one-oracle discipline: the level grammar (which
+    // One-oracle discipline: the level grammar (which
     // strings map to which [`version::BumpLevel`] variant) lives at ONE
     // body ([`version::BumpLevel::from_str`]) that this fn — and every
     // sibling `bump` fn — parses through, rather than at N stringly-
@@ -2061,7 +2060,7 @@ pub(super) fn discover_charts(charts_dir: &str, exclude_name: &str) -> Result<Ve
 /// `.filter(|s| !s.trim().is_empty())` semantics on the read arm) lands
 /// at the primitive body and reaches THIS caller (called once per
 /// chart-directory in `release_all`/`lint_all`'s discovery filter) by
-/// construction (THEORY §V — solve-once-at-the-primitive; §VI.1 —
+/// construction (solve-once-at-the-primitive;
 /// recurring-shape-to-helper).
 fn chart_oci_auto_release_disabled(chart_dir: &Path) -> bool {
     #[derive(serde::Deserialize)]
@@ -4224,7 +4223,7 @@ mod template_status_spawn_routing_tests {
     /// the canonical `"helm template for {chart_dir} failed (exit
     /// {code})"` envelope emerges by construction at the primitive's
     /// ONE body — the same `(op, exit_code, stderr)` structural-record
-    /// tuple THEORY.md §V.4 Phase 1 attestation-record consumers
+    /// tuple Phase 1 attestation-record consumers
     /// pattern-match on, the shape every sync-frontier sibling
     /// (`commands/{crossplane, pangea_infra, gem, infra, tool,
     /// test_ci, local, e2e, rust_service, image_release}.rs`, 6cb9442

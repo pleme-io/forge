@@ -69,16 +69,16 @@
 //! `release:<scope>`) would flow through this ONE constructor rather
 //! than four inline `format!` bodies.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the `.#release:<scope>` shape lives
+//! Solve-once-at-the-primitive: the `.#release:<scope>` shape lives
 //! at ONE construction surface so a future refinement — the scheme
 //! swap (`.#release:` → `.#release/`), a v2 flake schema that flips
 //! the product/service separator (`:` → `.`), a future
 //! per-target-arch suffix (`.#release:<scope>-<arch>`) — lands in one
 //! place rather than in every consumer.
 //!
-//! §VI.1 three-is-a-law: three standalone-shape sites plus one
+//! Three-is-a-law: three standalone-shape sites plus one
 //! monorepo-shape site today; four total consumers clear the
 //! duplication threshold well past the three-is-a-law floor.
 

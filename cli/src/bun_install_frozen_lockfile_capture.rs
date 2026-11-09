@@ -110,14 +110,14 @@
 //! spawn in the same function) continues to feed both spawn sites
 //! from the same one resolution.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the `bun install --frozen-lockfile`
+//! Solve-once-at-the-primitive: the `bun install --frozen-lockfile`
 //! captured-output spawn composition lives at ONE construction
 //! surface so a future refinement lands in one place rather than at
 //! every consumer.
 //!
-//! §VI.1 one-oracle typed contract: the tokio-`Command` builder
+//! One-oracle typed contract: the tokio-`Command` builder
 //! chain is a construction surface with one owner; every consumer
 //! reaches for [`build_bun_install_frozen_lockfile_capture_command`]
 //! (or its `.output().await` runner sibling) on first grep, not by

@@ -71,16 +71,16 @@
 //!   different separator (`?health`, `#health`) lands at ONE body
 //!   post-lift rather than three.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the `<base>/health` and
+//! Solve-once-at-the-primitive: the `<base>/health` and
 //! `<base>/graphql` composition lives at ONE surface so a future
 //! refinement — swapping the suffix to `/livez` and `/readyz`, adding
 //! a version-prefix `/v1/health`, promoting the pair to a
 //! `HealthGraphqlEndpointPair` struct with named fields — lands in one
 //! place rather than in every consumer.
 //!
-//! §VI.1 three-is-a-law: three sites today (two arms of the
+//! Three-is-a-law: three sites today (two arms of the
 //! `get_product_endpoints` match + the `--domain`-missing fallback in
 //! `main.rs`), so the lift clears the duplication threshold three
 //! times over.

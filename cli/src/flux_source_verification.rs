@@ -45,8 +45,7 @@
 //! Phase 2 record regardless. A Phase 2 deployment attestation that
 //! records `source_verified: true` against a build whose FluxCD
 //! `GitRepository` was never queried — and which may not even carry a
-//! `verify` block on its spec — is false by construction (THEORY §V.2:
-//! attestation is cryptographic evidence, not a wish; THEORY §VII.1:
+//! `verify` block on its spec — is false by construction (attestation is cryptographic evidence, not a wish;
 //! attestation-gated deployments are structural, not policy overlays —
 //! `sekiban` admission rejects Phase 1 in production namespaces and
 //! Phase 2 in production-tier policies requires `require_source_
@@ -111,7 +110,7 @@
 //!   a `VerifyFailed` outcome is a structurally distinct world from
 //!   both `Verified` AND `ProbeAbsent`. Collapsing `VerifyFailed` into
 //!   a single boolean would re-introduce the discriminator loss the
-//!   typed primitive exists to prevent (THEORY §V.1: make invalid
+//!   typed primitive exists to prevent (make invalid
 //!   states unrepresentable — a `source_verified: false` value that
 //!   conflates "no kubectl probe ran" with "probe ran and the
 //!   GitRepository's SourceVerified condition was False" is a flat
@@ -170,8 +169,7 @@
 //!
 //! FluxCD's source-controller (`source.toolkit.fluxcd.io/v1`
 //! `GitRepository.spec.verify`) is the canonical pull-side signature-
-//! verification surface in the GitOps lineage (cited by THEORY §VII.2:
-//! FluxCD is the process manager for every cluster). Its `Status.
+//! verification surface in the GitOps lineage (FluxCD is the process manager for every cluster). Its `Status.
 //! Conditions[type=SourceVerified]` condition is the typed evidence
 //! channel — emitted only after the reconciler has fetched the commit,
 //! resolved the bundle, and verified the signature against the keyring
@@ -300,7 +298,7 @@ crate::impl_verified_outcome!(FluxSourceVerificationOutcome);
 ///    [`Self::ProbeAbsent`] outcome chosen at the shell-out call site
 ///    rather than as a parser arm.
 ///
-/// THEORY §V.2: attestation is cryptographic evidence, not a wish. The
+/// Attestation is cryptographic evidence, not a wish. The
 /// parser preserves the structural distinction between "probe ran and
 /// reported negative" and "no probe ran / no usable evidence" — the
 /// pre-typed `true` hardcode collapsed both into a single positive

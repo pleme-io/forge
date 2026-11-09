@@ -216,7 +216,7 @@ impl VersionLiteralForm {
     /// in `crate::version`) already holds its pattern in a module-scope
     /// `LazyLock<Regex>`; this method closes the last outlier that
     /// still re-parsed at every call — the exact class of duplication
-    /// THEORY.md §VI.1's "regenerating an artifact produces a
+    /// the "regenerating an artifact produces a
     /// byte-identical result given the same inputs" hoists to one site.
     fn regex(self) -> &'static regex::Regex {
         match self {
@@ -332,13 +332,13 @@ pub fn bump(
     // [`version::BumpLevel::from_str`], so hoisting the parse above the
     // match does not refuse any prior-accepted invocation.
     //
-    // THEORY.md §V.4 typed primitives: the `--level` argument surface
+    // Typed primitives: the `--level` argument surface
     // now carries a typed peer parsed at ONE site (this call), matching
     // the discipline the sibling seed_from_tags arm below already
     // carried at its own inner `let level_typed: version::BumpLevel = ...`
     // (now hoisted here), and matching commit fa0c6d9's
     // `commands/tool.rs::bump` top-of-fn boundary parse.
-    // THEORY.md §VI.1 one-oracle discipline: the level grammar (which
+    // One-oracle discipline: the level grammar (which
     // strings map to which [`version::BumpLevel`] variant) lives at ONE
     // body ([`version::BumpLevel::from_str`]) that this fn — and every
     // sibling `bump` fn — parses through, rather than at N
@@ -414,10 +414,10 @@ pub fn bump(
             // !max_released.is_empty()` gate had to redeem at every
             // consumer.
             //
-            // THEORY.md §V.4 typed primitives: the seeding-decision
+            // Typed primitives: the seeding-decision
             // arm at the last remaining stringly boundary in the
             // release-arithmetic surface routes through the
-            // fully-typed peers end-to-end. THEORY.md §VI.1 one-oracle
+            // fully-typed peers end-to-end. One-oracle
             // discipline: the seeding-and-collision loop still lives
             // at ONE body (`next_free_version_all_typed` in
             // `version.rs`) that both this typed caller and the
@@ -459,12 +459,12 @@ pub fn bump(
             //     `released_semver_tags_typed` fetch site rather than being
             //     silently redeemed at every loop iteration.
             //
-            // THEORY.md §V.4 typed primitives: the tag-scan surface now
+            // Typed primitives: the tag-scan surface now
             // carries typed values end-to-end (typed prefix, typed set of
             // triples, typed predicate over the set, typed winner) — not a
             // stringly `tag_exists_in(&format!("v{t}"), ...).unwrap_or(false)`
             // bridge that fell back to `false` on error.
-            // THEORY.md §VI.1 one-oracle discipline: the tag-scan lives at
+            // One-oracle discipline: the tag-scan lives at
             // ONE body (`released_semver_tags_typed`) that both the seed and
             // the collision predicate consume — no forked fetch, no
             // double-scan, no error-swallowing bridge.
@@ -914,7 +914,7 @@ mod tests {
         // regex per call (`regex::Regex::new(form.pattern())` inline,
         // or a `pattern()` accessor re-introduced above the seal)
         // breaks pointer identity across calls and this shield fires.
-        // THEORY.md §VI.1 — "regenerating an artifact produces a
+        // "regenerating an artifact produces a
         // byte-identical result given the same inputs" — hoisted from
         // per-call re-derivation to a one-time module-load derivation.
         let a = super::VersionLiteralForm::PercentFreeze.regex();
@@ -1189,10 +1189,10 @@ mod tests {
     /// production caller in the crate — reaches the typed peers
     /// directly.
     ///
-    /// THEORY.md §V.4 typed primitives: the seeding-decision arm at
+    /// Typed primitives: the seeding-decision arm at
     /// the last remaining stringly boundary in the release-
     /// arithmetic surface routes through the fully-typed peers
-    /// end-to-end. THEORY.md §VI.1 one-oracle discipline: the
+    /// end-to-end. One-oracle discipline: the
     /// seeding-and-collision loop still lives at ONE body
     /// (`next_free_version_all_typed`) that both this typed caller
     /// and the stringly wrappers delegate through, so the migration

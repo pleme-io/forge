@@ -43,8 +43,8 @@ use crate::tokio_command_piped_stdio::PipedChildStdio;
 /// `commands/{build,developer_tools,rust_service,nix_builder,e2e,
 /// tool}.rs`, and the DOCKER_BIN / BUN_BIN / CRATE2NIX surfaces —
 /// the same per-module single-point-of-truth discipline applied to
-/// the ATTIC surface here. THEORY §I.5 (Generation over composition,
-/// duplication budget zero) and §VI.1 (three-times rule).
+/// the ATTIC surface here. (Generation over composition,
+/// duplication budget zero) and (three-times rule).
 fn attic_bin() -> String {
     get_tool_path("ATTIC_BIN", "attic")
 }
@@ -64,7 +64,7 @@ fn attic_bin() -> String {
 /// "default".to_string())` — lived at
 /// `commands/build.rs::execute` and
 /// `commands/github_runner_ci.rs::execute`. Two occurrences past
-/// THEORY §VI.1's three-is-a-law threshold in intent — the pair had
+/// the three-is-a-law threshold in intent — the pair had
 /// to agree on both the env-var spelling AND the string fallback for
 /// the two consumers to compose their `AtticClient` steps against
 /// the same server alias. A drift at one site (e.g., a typo
@@ -83,7 +83,7 @@ fn attic_bin() -> String {
 /// server-alias resolve instead of the binary resolve. Sibling of
 /// [`crate::repo::get_environment`] on the `FORGE_ENV` surface —
 /// same env-var-with-string-fallback shape lifted to one body.
-/// THEORY §V (solve-once-at-the-primitive); §VI.1 (recurring-shape-
+/// (solve-once-at-the-primitive); (recurring-shape-
 /// to-helper).
 pub fn attic_server_alias() -> String {
     crate::repo::env_var_or_default("ATTIC_SERVER_NAME", "default")
@@ -95,7 +95,7 @@ pub fn attic_server_alias() -> String {
 /// carrying the cache name and the spawn-error message; non-zero exit
 /// routes to `PushFailed` carrying `(cache, store_path, attempts,
 /// exit_code, stderr)` — the structural-record tuple Phase 1
-/// attestation records (THEORY §V.4) consume.
+/// attestation records consume.
 ///
 /// Drives the canonical [`classify_attempt_failure`] primitive — same
 /// helper `infrastructure/registry.rs::classify_push_failure` consumes,
@@ -130,7 +130,7 @@ fn classify_attic_push_failure(
 /// spawn-error message; non-zero exit routes to
 /// [`AtticError::LoginFailed`] carrying `(cache, server_url,
 /// exit_code, stderr)` — the structural-record tuple Phase 1
-/// attestation records (THEORY §V.4) consume on the login step,
+/// attestation records consume on the login step,
 /// symmetric to the push-step tuple `PushFailed` carries.
 ///
 /// Drives the canonical [`classify_attempt_failure`] primitive —
@@ -224,7 +224,7 @@ impl AtticClient {
     /// let mut cmd = Command::new(&attic_bin);
     /// ```
     ///
-    /// Three occurrences is THEORY §VI.1's three-is-a-law threshold
+    /// Three occurrences is the three-is-a-law threshold
     /// ("two occurrences is a coincidence; three is a law"); this
     /// primitive is the law-redeeming consolidation, symmetric to the
     /// just-landed [`crate::infrastructure::git::GitClient::command`]
@@ -473,7 +473,7 @@ impl AtticClient {
     /// `.stdin(Stdio::piped()).spawn().context(...)` /
     /// `stdin.take().write_all(...).await? + drop(stdin)` / `wait()` /
     /// `if !status.success() { warn! } else { info! }` body. Three
-    /// occurrences past THEORY §VI.1's three-is-a-law threshold
+    /// occurrences past the three-is-a-law threshold
     /// (PRIME DIRECTIVE: duplication budget is zero) consolidate onto
     /// this typed primitive.
     ///
@@ -498,7 +498,7 @@ impl AtticClient {
     /// - [`AtticError::ClosurePushFailed`] when `attic` exits non-zero,
     ///   carrying the cache name, exit code, and trimmed UTF-8-lossy
     ///   stderr — the structural-record tuple Phase 1 attestation
-    ///   records (THEORY §V.4) consume.
+    ///   records consume.
     pub async fn push_closure_via_stdin(&self, closure_bytes: &[u8]) -> Result<(), AtticError> {
         let mut cmd = self.command();
         cmd.args(["push", &self.cache_name, "--stdin"])
@@ -670,7 +670,7 @@ impl AtticClient {
     ///   budget or fails terminally, carrying the offending cache,
     ///   server URL, final attempt count's exit code, and captured
     ///   stderr — the structural-record tuple Phase 1 attestation
-    ///   records (THEORY §V.4) consume.
+    ///   records consume.
     pub async fn login_with_retries(
         &self,
         server_url: &str,
@@ -735,7 +735,7 @@ impl AtticClient {
     /// [`Self::login`], with the op-failure closure producing
     /// [`AtticError::UseFailed`] carrying `(cache, server, exit_code,
     /// stderr)` — the structural-record tuple Phase 1 attestation
-    /// records (THEORY §V.4) consume. The `attic use` subcommand does
+    /// records consume. The `attic use` subcommand does
     /// not consume a token (auth is already seeded by the prior
     /// `login`), so no `ATTIC_TOKEN` env injection happens here —
     /// mirroring the token-passing discipline `login` established.
@@ -846,7 +846,7 @@ mod tests {
     /// `commands/github_runner_ci.rs` (`test_execute_routes_attic_*_through_attic_client_not_helper`)
     /// — same `include_str!`-plus-slice-boundary technique, applied
     /// on the typed-error construction surface here instead of the
-    /// stringly-helper call surface there. THEORY §VI.1 (three-times
+    /// stringly-helper call surface there. (three-times
     /// rule / duplication budget) redeemed by the factory; this
     /// shield keeps it redeemed.
     #[test]
@@ -1053,7 +1053,7 @@ mod tests {
     /// `push_closure_via_stdin` on a non-zero exit must surface
     /// [`AtticError::ClosurePushFailed`] carrying (cache, exit_code,
     /// captured stderr) — the structural-record tuple Phase 1
-    /// attestation records (THEORY §V.4) consume. Pre-lift each of
+    /// attestation records consume. Pre-lift each of
     /// the three call sites (`commands/build.rs::execute` and
     /// `commands/rust_service.rs::push_rust_service` AMD64/ARM64
     /// arms) collapsed the op-failure path into a `warn!("⚠️  Failed
@@ -1906,7 +1906,7 @@ mod tests {
     /// never a fused `bail!("Attic use failed")`. Mirror of
     /// `test_login_returns_login_failed_with_structured_fields` on the
     /// cache-selection surface; guarantees the structural-record tuple
-    /// Phase 1 attestation records (THEORY §V.4) destructure.
+    /// Phase 1 attestation records destructure.
     #[tokio::test]
     async fn test_use_cache_returns_use_failed_with_structured_fields() {
         let (_dir, shim) = make_attic_shim("#!/bin/sh\necho 'unknown cache' 1>&2\nexit 7\n");
@@ -2353,7 +2353,7 @@ mod tests {
     /// only in their downstream `.or_else(kubectl_fallback)`
     /// namespace-policy specialization. The two inline sites +
     /// [`AtticClient::discover_token`] primitive body sum to three
-    /// occurrences past THEORY §VI.1's three-times-is-a-law threshold
+    /// occurrences past the three-times-is-a-law threshold
     /// ("two occurrences is a coincidence; three is a law"), and each
     /// site had to agree on the env-var-name spelling verbatim AND on
     /// the semantic (`.ok()` vs `.ok().filter(|s| !s.is_empty())` —

@@ -46,7 +46,7 @@
 //!    branch is `anyhow::bail!("Migration job failed")` (not
 //!    `return Ok(())`).
 //!
-//! Two identically-shaped bodies past THEORY §VI.1's duplication
+//! Two identically-shaped bodies past the duplication
 //! trigger (PRIME DIRECTIVE: duplication budget is zero). A shared
 //! drift — a rename of the `utf8_lossy_borrow` projection to
 //! `utf8_lossy_owned` (allocating twice per poll tick), a tightening
@@ -102,9 +102,9 @@
 //! `NotReached`; a `bool` matches the `if …await? { … }` shape
 //! both sites want without a per-caller unwrap.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the fused spawn+parse+classify
+//! Solve-once-at-the-primitive: the fused spawn+parse+classify
 //! body lives at ONE construction surface so a future rewrite (an
 //! `utf8_lossy_borrow` → `utf8_lossy_owned` migration, a
 //! `.trim() == "True"` → `.eq_ignore_ascii_case("true")` broadening,
@@ -112,7 +112,7 @@
 //! spawn helper) reaches both migration-Job-wait sites by
 //! construction rather than through a per-caller edit.
 //!
-//! §VI.1 three-is-a-law: two sibling stanzas past the duplication
+//! Three-is-a-law: two sibling stanzas past the duplication
 //! trigger, one primitive.
 
 use anyhow::Result;

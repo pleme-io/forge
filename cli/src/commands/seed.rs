@@ -133,9 +133,9 @@ fn exec_psql(namespace: &str, pod: &str, db_name: &str, sql: &str) -> Result<Str
 /// site delegated through a private `run_command_output` wrapper in
 /// this module; that wrapper was one of three identically-shaped
 /// shape-adapters (`sessions.rs::kubectl`, `local.rs::run_command_output`)
-/// past THEORY §VI.1's three-is-a-law threshold, all collapsed onto
+/// past the three-is-a-law threshold, all collapsed onto
 /// `run_query_capture_sync` in one commit. The structural-record
-/// tuple `(cmd, args, exit_code, stderr)` THEORY §V.4 Phase 1
+/// tuple `(cmd, args, exit_code, stderr)` Phase 1
 /// attestation telemetry pattern-matches on is preserved by
 /// construction.
 ///

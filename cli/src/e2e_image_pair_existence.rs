@@ -49,14 +49,14 @@
 //!
 //! # Theory grounding
 //!
-//! - THEORY.md §III.1 (typescape as root data structure): the pair
+//! - (typescape as root data structure): the pair
 //!   `{"backend", "web"}` becomes a typed dimension of the E2E
 //!   convergence surface rather than two loose call-site literals.
 //!   A future addition (a third image, a rename at the image side)
 //!   is a change to this dimension's construction and every
 //!   projection through it — every caller — inherits by
 //!   construction, per the typescape discipline.
-//! - THEORY.md §V.1 (Construction guarantees; Types → Invariants →
+//! - (Construction guarantees; Types → Invariants →
 //!   Proofs → Render Anywhere): the [`E2eImagePairExistence`] type
 //!   makes "both halves present" and "any half missing" typed
 //!   predicates (`both_present`, `any_missing`) rather than inline
@@ -64,7 +64,7 @@
 //!   that composes the wrong polarity (`!backend && !web` instead of
 //!   `!backend || !web`) reads as a defect on its face against the
 //!   typed predicate.
-//! - THEORY.md §VI.1 (three-times rule; two-is-a-coincidence
+//! - (three-times rule; two-is-a-coincidence
 //!   threshold): the pre-lift FOUR occurrences sit past the
 //!   three-times threshold and past the pair-drift threshold (three
 //!   sites named the second half `frontend_exists`, one named it

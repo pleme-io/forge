@@ -32,7 +32,7 @@
 //!
 //! # Theory grounding
 //!
-//! - THEORY.md §V.1 (Construction guarantees; Types → Invariants →
+//! - (Construction guarantees; Types → Invariants →
 //!   Proofs → Render Anywhere): the paired byte-oracle sibling
 //!   [`write_skip_build_image_path_required_message`] is the Render
 //!   Anywhere half — pinning the exact rendered bytes of the operator-
@@ -40,11 +40,11 @@
 //!   a fusion that drops a `\n`, swaps two-space indent for a tab, or
 //!   quietly reflows the wording fails at `cargo test` time rather
 //!   than at operator readout.
-//! - THEORY.md §VI.1 (three-times rule; two-is-a-coincidence
+//! - (three-times rule; two-is-a-coincidence
 //!   threshold): the pre-lift TWO sibling occurrences sit at the
 //!   threshold-crossing tier — the pair are byte-identical past the
 //!   quoted string boundary, so lifting them onto ONE construction
-//!   surface pre-empts the third-site drift THEORY §VI.1 warns
+//!   surface pre-empts the third-site drift warns
 //!   against.
 
 use anyhow::Result;
@@ -99,7 +99,7 @@ pub(crate) fn resolve_skip_build_image_path(image_path: Option<String>) -> Resul
 ///
 /// The primitive body forwards `write_all` on the const bytes; the
 /// pinned equality between this sibling's captured output and a
-/// hand-spelled expected string in the tests below is THEORY §V.1's
+/// hand-spelled expected string in the tests below is the
 /// Render Anywhere half — an invariant on the rendered message bytes
 /// that a `cargo test` invocation checks, not a soft comment. The
 /// oracle is `#[cfg(test)]` because the runtime resolution path does
@@ -151,7 +151,7 @@ mod tests {
 
     /// The byte-oracle sibling [`write_skip_build_image_path_required_message`]
     /// writes the same bytes as the runtime resolution primitive's
-    /// `anyhow::anyhow!` payload. THEORY §V.1 Render Anywhere pin.
+    /// `anyhow::anyhow!` payload. Render Anywhere pin.
     #[test]
     fn write_message_bytes_match_runtime_error_render() {
         let mut buf = Vec::new();

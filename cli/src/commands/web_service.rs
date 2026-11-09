@@ -27,7 +27,7 @@ use crate::repo::get_tool_path;
 /// `commands/frontend_validation.rs` per 9986f11, the `nix_bin()`
 /// sibling on `commands/rust_service.rs` per 63d4fe7, and the
 /// `nix_bin()` sibling on `commands/developer_tools.rs` per a12c172).
-/// Solve-once at the sigil (THEORY §I.5 — duplication budget zero;
+/// Solve-once at the sigil (duplication budget zero;
 /// every recurring shape becomes a helper before it becomes duplicated
 /// code) means a future added `crate2nix` spawn cannot silently re-copy
 /// the two-argument resolve and drift away from the `CRATE2NIX`
@@ -337,7 +337,7 @@ mod tests {
         // count-eq-1 shield on `commands/tool.rs` (7561329) and the
         // fleet-wide `<tool>_bin()` shield discipline landed at
         // 9f6046b / 9986f11 / 170ecac / 534ef48 / 63d4fe7 / 7561329 /
-        // a12c172. THEORY §I.5: duplication budget zero.
+        // a12c172. Duplication budget zero.
         crate::test_support::assert_source_defines_sigil_bin_fn_code_line(
             SOURCE,
             "commands/web_service.rs",

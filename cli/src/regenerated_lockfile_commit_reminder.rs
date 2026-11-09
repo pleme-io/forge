@@ -72,9 +72,9 @@
 //! bare `println!` (not one of the `colored` palette wrappers), so
 //! the emitted line carries zero `\x1b` bytes.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the reminder shape lives at ONE
+//! Solve-once-at-the-primitive: the reminder shape lives at ONE
 //! construction surface so a future refinement — a rewording of
 //! "Don't forget to commit" to a shorter "Remember to commit" imperative,
 //! a promotion of the three-space indent to a bullet glyph, an OTLP
@@ -82,7 +82,7 @@
 //! alongside the print — lands in one place rather than at every
 //! consumer of the `Don't forget to commit ...` idiom.
 //!
-//! §VI.1 three-is-a-law: three sites today (two Cargo + one Ruby),
+//! Three-is-a-law: three sites today (two Cargo + one Ruby),
 //! and the archetype closes on the (lockfile, generated file) coupling
 //! so a future `poetry2nix` / `mix2nix` / `cabal2nix` regenerate
 //! command reaches for the same primitive on first grep rather than

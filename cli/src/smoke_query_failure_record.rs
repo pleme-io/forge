@@ -42,9 +42,9 @@
 //! construction and the flag flip — is the shape that recurs
 //! verbatim.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the "record one smoke-query
+//! Solve-once-at-the-primitive: the "record one smoke-query
 //! failure" composition (push a `passed: false` result, flip the
 //! aggregate `all_passed` flag) lives at ONE surface, so a future
 //! refinement (an OTLP `post_deploy_smoke_query_failure` counter wired
@@ -56,7 +56,7 @@
 //! aggregate `all_passed` flag intrinsically) lands here and reaches
 //! all four consumers by construction.
 //!
-//! §VI.1 recurring-shape-to-helper: four sibling stanzas across ONE
+//! Recurring-shape-to-helper: four sibling stanzas across ONE
 //! function body materially exceed the recurring-shape criterion; the
 //! primitive body is the promotion. The `all_passed` flag and the
 //! `results` accumulator are linked by an invariant — a `passed:

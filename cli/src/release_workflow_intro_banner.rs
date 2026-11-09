@@ -87,9 +87,9 @@
 //! `ui.rs` `write_ascii_title_underline` body) and both banner
 //! primitives inherit by composition.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the `🚀 <service> <label>
+//! Solve-once-at-the-primitive: the `🚀 <service> <label>
 //! <detail>` release-workflow intro shape lives at ONE construction
 //! surface — a future refinement (a `🚀` → `🚢` verb-glyph swap
 //! under a fleet-wide release-vocabulary re-branding, an added
@@ -99,10 +99,10 @@
 //! projection replaces the raw `usize` parameter) lands in one
 //! place rather than in every consumer.
 //!
-//! §VI.1 three-is-a-law: four sites today
+//! Three-is-a-law: four sites today
 //! (`orchestrate_release`, `orchestrate_standalone_release`,
 //! `release_rust_service`, `rust_dev`), clearing the duplication
-//! threshold at exactly the point THEORY calls a law.
+//! threshold at exactly the point where it becomes a law.
 
 use std::io;
 

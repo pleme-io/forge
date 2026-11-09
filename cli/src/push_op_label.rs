@@ -51,18 +51,18 @@
 //! `set_message_pushing_message` primitive walks through the same
 //! `image_reference` tail identically.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the `push <ref>` op-label shape
+//! Solve-once-at-the-primitive: the `push <ref>` op-label shape
 //! lives at ONE construction surface — a future refinement (a
 //! `"push "` → `"push image "` verb widening, a distinct retry-log
 //! namespace for pushes vs. inspects, a structured
 //! `RetryOperation` enum replacing the free-string label) lands in
 //! one place rather than in every consumer.
 //!
-//! §VI.1 three-is-a-law: three sites today (`registry.rs`,
+//! Three-is-a-law: three sites today (`registry.rs`,
 //! `github_runner_ci.rs`, `push.rs`), clearing the duplication
-//! threshold at exactly the point THEORY calls a law.
+//! threshold at exactly the point where it becomes a law.
 
 use std::io;
 

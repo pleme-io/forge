@@ -37,7 +37,7 @@
 //!    with an advisory warn on any spawn / non-success / parse
 //!    failure).
 //!
-//! Four identically-shaped bodies past THEORY §VI.1's duplication
+//! Four identically-shaped bodies past the duplication
 //! trigger (PRIME DIRECTIVE: duplication budget is zero). A pod
 //! label-selected fetch-argv drift — a rename of the `-n` short form
 //! to `--namespace`, an argv-order shuffle putting `-l <selector>`
@@ -117,7 +117,7 @@
 //! call sites from one edit; the alternative is a grep-and-edit sweep
 //! across three command modules on every drift.
 //!
-//! Grounded in THEORY.md §V.1 (construction guarantees — the knowable
+//! Grounded (construction guarantees — the knowable
 //! platform): the argv shape that binds a kubectl pod-listing to its
 //! kubectl surface is a construction detail of the fleet's Kubernetes
 //! surface, and its rendering belongs in one typed primitive rather

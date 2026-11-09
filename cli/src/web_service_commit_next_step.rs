@@ -50,9 +50,9 @@
 //! `chore: <phrase>` commit row) has an obvious home without widening
 //! the cargo-ceremony primitive.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! - THEORY.md §V.1 (Construction guarantees; Types → Invariants →
+//! - (Construction guarantees; Types → Invariants →
 //!   Proofs → Render Anywhere): the print helper delegates through
 //!   [`crate::ui::print_next_step`], which is the single source of
 //!   truth for the `  <N>. <text>\n` numbered-row grammar. The
@@ -60,7 +60,7 @@
 //!   projection as a `cargo test`-verifiable invariant so a typo,
 //!   a rename, or a drift in the frame composition fails at build
 //!   time rather than at operator readout.
-//! - THEORY.md §VI.1 (three-times rule): two byte-close siblings per
+//! - (three-times rule): two byte-close siblings per
 //!   frame sit at the floor of the duplication class; pinning them
 //!   here forecloses the third-site copy-paste before it lands.
 

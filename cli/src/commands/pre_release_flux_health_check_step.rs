@@ -39,7 +39,7 @@
 //! ```
 //!
 //! Two identically-shaped bodies past the PRIME DIRECTIVE's
-//! duplication-is-a-bug threshold (THEORY §VI.1). A drift to the
+//! duplication-is-a-bug threshold. A drift to the
 //! skip-message copy (a rename to `"Skipping FluxCD pre-release
 //! probe"`, a switch from `.bold().dimmed()` to plain `.dimmed()`),
 //! to the running-branch title (`"Pre-release FluxCD health

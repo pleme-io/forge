@@ -30,7 +30,7 @@
 //! ```
 //!
 //! Duplication is a bug (PRIME DIRECTIVE — `pleme-io/CLAUDE.md` §★★★ /
-//! THEORY §VI.1 three-times threshold), and two literal copies past the
+//! Three-times threshold), and two literal copies past the
 //! two-times floor. This module is the law-redeeming consolidation.
 //!
 //! # Two load-bearing properties this primitive owns
@@ -51,7 +51,7 @@
 //!    signal all collapsed into a stringly-typed vec of one. Post-lift
 //!    both surface as typed [`FluxGetKustomizationsError`] variants
 //!    carrying the `(exit_code, stderr)` structural record the
-//!    Phase 1 attestation surface (THEORY §V.4) pattern-matches on
+//!    Phase 1 attestation surface pattern-matches on
 //!    without re-parsing the display string.
 //!
 //! # The typed record
@@ -67,12 +67,12 @@
 //!   `"  • {name} - Status: {ready} - {message}"` format string both
 //!   sites emitted verbatim into their per-site failure vectors.
 //!
-//! THEORY §V.1 (Types → Invariants → Proofs): the "flux CLI ran, its
+//! (Types → Invariants → Proofs): the "flux CLI ran, its
 //! stdout parses to a well-formed table, and each row is a typed record"
 //! invariant is proved once at the frontier of this module and carried
 //! by the return type `Result<Vec<KustomizationRow>,
 //! FluxGetKustomizationsError>`, not re-derived at two consumer sites.
-//! THEORY §VI.1 (three-times rule / duplication budget zero): the
+//! (three-times rule / duplication budget zero): the
 //! invocation-plus-parse shape is named here and every consumer reads
 //! through it.
 
@@ -109,8 +109,8 @@ use crate::retry::classify_capture;
 /// tool}.rs`, the DOCKER_BIN / BUN_BIN / CRATE2NIX / ATTIC_BIN
 /// surfaces, and the `commands/helm.rs::helm_bin()` sigil — the same
 /// per-module single-point-of-truth discipline applied to the FLUX
-/// surface here. THEORY §I.5 (Generation over composition, duplication
-/// budget zero) and §VI.1 (three-times rule).
+/// surface here. (Generation over composition, duplication
+/// budget zero) and (three-times rule).
 fn flux_bin() -> String {
     crate::repo::get_tool_path("FLUX_BIN", "flux")
 }
@@ -1401,7 +1401,7 @@ exit 0\n",
     /// `anyhow_boundary_preserves_typed_downcast` test) so a future
     /// consumer wrapping the error with `anyhow::Context` still
     /// exposes the structural tuple to Phase 1 attestation records
-    /// (THEORY §V.4) without regex-parsing the display string.
+    /// without regex-parsing the display string.
     #[test]
     fn scoped_anyhow_boundary_preserves_typed_downcast() {
         let typed = FluxGetKustomizationError::SpawnFailed {

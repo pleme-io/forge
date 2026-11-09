@@ -43,16 +43,16 @@
 //! `"   ARM64: result-arm64\n"`) is pinnable by fail-before-pass
 //! byte-oracle tests below without capturing stdout.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! - `THEORY.md §V.1` (Construction guarantees; make invalid states
+//! - (Construction guarantees; make invalid states
 //!   unrepresentable): the correlated `(upper_label, result_symlink)`
 //!   pair lives at ONE construction surface — the closed
 //!   [`crate::target_arch::TargetArch`] enum — and the build-complete
 //!   narration tail now derives both slots from the same
 //!   discriminator, so the drift bug class the enum was landed to
 //!   close cannot re-open through a hard-coded literal here.
-//! - `THEORY.md §VI.1` (Generation over composition; recurring shapes
+//! - (Generation over composition; recurring shapes
 //!   past duplication become helpers): two sibling `println!` stanzas
 //!   at the build-complete tail past the two-times threshold, so the
 //!   display body lifts onto ONE typed body and both consumers cite
@@ -175,7 +175,7 @@ mod tests {
     /// Delegation shield (positive half): the primitive's writer body
     /// reaches [`writeln!`] at exactly one call — no fallback path,
     /// no double-write, no branching on `arch` outside the projection
-    /// accessors. Pins the one-oracle discipline THEORY §VI.1
+    /// accessors. Pins the one-oracle discipline
     /// requires: a future refactor that introduced a `match arch {
     /// Amd64 => writeln!(..); Arm64 => writeln!(..); }` two-arm
     /// inline would surface here.

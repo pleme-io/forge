@@ -36,9 +36,9 @@
 //! triad at ONE typed body and projects the per-site verb-phrase
 //! through the closed [`ArtifactJsonWriteAck`] enum.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the artifact-json write + push +
+//! Solve-once-at-the-primitive: the artifact-json write + push +
 //! step-ok triad — the `"deploy/"` path prefix, the `".artifact.json"`
 //! path suffix, the `" in "` connective between verb-phrase and path,
 //! and the pairing of a `write_artifact_info` call with a
@@ -50,7 +50,7 @@
 //! "` for `" → "`, an OTLP `artifact_json_write` event wired next to
 //! the step-ok) lands here and reaches both consumers by construction.
 //!
-//! §VI.1 recurring-shape-to-helper: two sibling stanzas across two
+//! Recurring-shape-to-helper: two sibling stanzas across two
 //! command modules meet the recurring-shape criterion for a helper;
 //! the fused triad forecloses the drift class the pre-lift split
 //! stanzas were open to — a forgotten `modified_files.push`, an

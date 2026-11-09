@@ -571,8 +571,8 @@ async fn main() -> Result<()> {
             // A future refinement of the contract (widen the disable set,
             // canonicalize hook, typed `substrate::SafeMode(bool)` newtype,
             // telemetry sigil) lands at the sigil body and reaches this
-            // consumer by construction — THEORY §V solve-once-at-the-
-            // primitive; §VI.1 recurring-shape-to-helper.
+            // consumer by construction — solve-once-at-the-
+            // primitive; recurring-shape-to-helper.
             let safe_mode = crate::repo::safe_mode_from_env();
 
             rollout::execute(namespace, name, interval, timeout, rollback, safe_mode).await?;

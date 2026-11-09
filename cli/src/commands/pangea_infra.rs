@@ -154,7 +154,7 @@ pub fn test(working_dir: &str, architecture: &str) -> Result<()> {
 /// ).env("TF_WORKSPACE", workspace)`, `run_inherited_status_sync(cmd,
 /// &format!("terraform <sub> for workspace {}", workspace))`. Four
 /// occurrences past the ≥2 duplication threshold the forge command-
-/// module surface enforces (THEORY §VI.1 generation-over-composition;
+/// module surface enforces (generation-over-composition;
 /// the Compounding Directive PRIME rule). Post-lift, adding a fifth
 /// terraform subcommand (`terraform state list`, `terraform import`, …)
 /// is one call, and the `TF_WORKSPACE` env-var contract lives at ONE

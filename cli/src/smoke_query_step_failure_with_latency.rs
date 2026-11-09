@@ -38,9 +38,9 @@
 //! `<name>: <err>` grammar is the shared step-failure-with-error
 //! shape), so it is intentionally out of scope here.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the "smoke-query step-failure with
+//! Solve-once-at-the-primitive: the "smoke-query step-failure with
 //! latency" envelope grammar — the `":"` connective between name and
 //! detail, the `" ("` parenthesized-latency opener, the decimal
 //! projection of the `u64` latency, and the `"ms)"` closer — lives at
@@ -51,7 +51,7 @@
 //! wired alongside the print, a nanosecond-precision refinement) lands
 //! here and reaches all three consumers by construction.
 //!
-//! §VI.1 recurring-shape-to-helper: three sibling stanzas across ONE
+//! Recurring-shape-to-helper: three sibling stanzas across ONE
 //! function body materially exceed the recurring-shape criterion; the
 //! primitive body is the promotion. A future fourth smoke-query
 //! failure classification (e.g. a schema-mismatch arm) that reaches for

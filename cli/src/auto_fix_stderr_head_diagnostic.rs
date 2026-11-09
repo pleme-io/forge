@@ -80,16 +80,16 @@
 //! caller-side drift (a call with `cap = 3` producing a report
 //! shorter than its sibling's for the same underlying tool output).
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! - `THEORY.md §V.1` (Types → Invariants → Proofs → Render Anywhere):
+//! - (Types → Invariants → Proofs → Render Anywhere):
 //!   the byte-shape invariant lives at ONE construction surface —
 //!   [`write_auto_fix_stderr_head_diagnostic_lines`] — and its
 //!   byte-oracle test pins the exact `"   <line>\n"` rendering of
 //!   every walked row. Both stdout adapters project through the
 //!   same writer, so a future rotation of the per-line grammar
 //!   reaches both consumers in lockstep.
-//! - `THEORY.md §III.1` (typescape as root data structure): the
+//! - (typescape as root data structure): the
 //!   "walk-cap-print-collect" composition is a single named concept;
 //!   both callers cite it rather than restating its four component
 //!   steps.

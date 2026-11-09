@@ -12,7 +12,7 @@
 //! 3. `match outcome { Pushed => info!("   ✅ Changes committed and pushed"),
 //!     NoChangesStaged => info!("   No changes to commit (already at this version)") }`
 //!
-//! Three occurrences of an identical shape past THEORY §VI.1's
+//! Three occurrences of an identical shape past the
 //! three-is-a-law threshold; this module is the law-redeeming extraction.
 //! Post-lift each flow calls
 //! [`commit_cluster_overlay_release`] with `(component, new_tag, files)`
@@ -23,7 +23,7 @@
 //! same `workdir: Option<&str>` test-discipline shape (production passes
 //! `None`; hermetic tests pass `Some(temp_dir)`), same typed
 //! [`CommitPushOutcome`] return so callers / future Phase 1 attestation
-//! consumers (THEORY §V.4) compose on a single typed surface across
+//! consumers compose on a single typed surface across
 //! every release-commit path in forge.
 
 use anyhow::Result;
@@ -161,7 +161,7 @@ pub fn write_commit_and_push_step_preamble<W: io::Write>(
 /// commit_cluster_overlay_release(None, "<component>", &new_tag, &<files>).await?;
 /// ```
 ///
-/// Three occurrences of an identical shape past THEORY §VI.1's
+/// Three occurrences of an identical shape past the
 /// three-is-a-law threshold; this primitive is the law-redeeming
 /// extraction. Post-lift each flow calls
 /// [`announce_and_commit_cluster_overlay_release_step`] with

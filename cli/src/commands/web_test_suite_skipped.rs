@@ -21,7 +21,7 @@
 //! only per-site axis is the `<Suite>` label; every other byte of the
 //! stanza is invariant.
 //!
-//! Three identically-shaped bodies past THEORY §VI.1's three-is-a-law
+//! Three identically-shaped bodies past the three-is-a-law
 //! threshold — the visual contract for the disabled-suite skip line
 //! (indent width, skip-glyph choice, glyph palette, suite-label
 //! position, `"skipped"` palette, `deploy.yaml` mention wording) now

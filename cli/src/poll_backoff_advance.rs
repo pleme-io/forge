@@ -29,7 +29,7 @@
 //!
 //! - `commands/e2e.rs::verify_docker_running` (`docker_startup_poll_delay`)
 //!
-//! Nine occurrences past THEORY.md §VI.1's three-times threshold
+//! Nine occurrences past the three-times threshold
 //! ("two occurrences is a coincidence; three is a law"). The
 //! sleep-then-bump shape lifts onto ONE typed body per sleep flavour.
 //!
@@ -66,10 +66,10 @@
 //!
 //! # Theory grounding
 //!
-//! THEORY.md §VI.1 (three-times rule): nine sibling occurrences past
+//! (three-times rule): nine sibling occurrences past
 //! the "two is a coincidence; three is a law" threshold — the
 //! sleep-then-bump shape lifts onto one typed body per sleep flavour.
-//! THEORY.md §V.1 (Types → Invariants → Proofs → Render Anywhere):
+//! (Types → Invariants → Proofs → Render Anywhere):
 //! the pre-bump-delay-then-saturating-bump ordering invariant lives in
 //! `#[test]` fail-before-pass proofs against a recording schedule
 //! rather than as an unwritten convention each call site restates.

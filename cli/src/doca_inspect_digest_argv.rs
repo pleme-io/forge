@@ -121,7 +121,7 @@
 //!   remote `<registry>:<tag>` reference, so no credentials env pair
 //!   applies and no `--digest-only` toggle is meaningful.
 //!
-//! Both are single-site argv shapes past their own THEORY §VI.1
+//! Both are single-site argv shapes past their own
 //! three-times threshold; either one graduating to a lift target would
 //! reach for its own sibling primitive in this module (a
 //! `doca_inspect_manifest_argv(ref)` for the JSON-consumer, a

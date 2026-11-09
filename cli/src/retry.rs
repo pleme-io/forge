@@ -15,7 +15,7 @@
 //! about every external CLI's stderr dialect. Pre-existing typed errors
 //! — `RegistryError`, `AtticError`, `GitError`, `NixBuildError` — already
 //! carry the structured (op, exit_code, stderr) tuple a real classifier
-//! needs (THEORY §V.4 Phase 1 attestation records).
+//! needs (Phase 1 attestation records).
 //!
 //! # Why exponential
 //!
@@ -48,7 +48,7 @@ use std::time::Duration;
 /// shape" reading a one-line `assert_eq!` or `==` against the
 /// reference factory at the consumer site, rather than a four-field
 /// cascade against each struct field independently — exactly the
-/// `THEORY §VI.1` one-oracle discipline lift the prior factory-
+/// one-oracle discipline lift the prior factory-
 /// constructor commits (75d495e / 85ccff4) applied at the
 /// construction surface, here applied at the comparison surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,12 +121,12 @@ pub struct RetryPolicy {
 ///   | OverBudget)` at ONE site instead of two independent boolean
 ///   readings.
 ///
-/// # THEORY grounding
+/// # Grounding
 ///
-/// THEORY.md §II Language — typed primitives own boundary classification;
+/// Language — typed primitives own boundary classification;
 /// the per-attempt-axis 3×2 boolean grid closure is projected here as ONE
 /// typed sum instead of read as six boolean peers at every downstream
-/// consumer. THEORY.md §VI.1 one-oracle discipline — the FLOOR-then-CEILING
+/// consumer. One-oracle discipline — the FLOOR-then-CEILING
 /// boolean cascade is named at ONE typed-primitive site
 /// ([`RetryPolicy::per_attempt_region`]); downstream consumers of the
 /// per-attempt classification read the sum instead of restating the
@@ -268,14 +268,14 @@ impl PerAttemptRegion {
     /// closes the CEILING half-open ray at ONE named surface at the sum
     /// level.
     ///
-    /// # THEORY grounding
+    /// # Grounding
     ///
-    /// THEORY.md §II Language — typed primitives own boundary
+    /// Language — typed primitives own boundary
     /// classification; the CEILING half-open ray at the projected sum
     /// surface is named at ONE typed method (`is_terminal`) rather than
     /// restated as the two-variant `matches!` disjunction or as the
     /// two-peer boolean-ladder disjunction at every downstream consumer.
-    /// THEORY.md §VI.1 one-oracle — the "retry loop short-circuits after
+    /// One-oracle — the "retry loop short-circuits after
     /// this attempt" semantic role is named at one site (this method's
     /// body), so a downstream retry-loop exit condition, a fail-terminal
     /// telemetry emitter, or a budget-exhausted diagnostic classifier
@@ -364,14 +364,14 @@ impl PerAttemptRegion {
     /// [`tests::test_retry_policy_per_attempt_region_is_pre_terminal_iff_lt_effective_max`]
     /// across the canonical policy grid × attempt-index grid.
     ///
-    /// # THEORY grounding
+    /// # Grounding
     ///
-    /// THEORY.md §II Language — typed primitives own boundary
+    /// Language — typed primitives own boundary
     /// classification; the FLOOR half-open ray at the projected sum
     /// surface is named at ONE typed method (`is_pre_terminal`) rather
     /// than restated as the three-variant `matches!` disjunction or as
     /// the negated CEILING peer at every downstream consumer.
-    /// THEORY.md §VI.1 one-oracle — the "retry loop MAY dispatch a
+    /// One-oracle — the "retry loop MAY dispatch a
     /// follow-up after this attempt" semantic role is named at one site
     /// (this method's body), so a downstream pre-attempt guard, a
     /// "may-retry" telemetry discriminator, or an in-schedule attestation
@@ -478,14 +478,14 @@ impl PerAttemptRegion {
     /// silent axis-collapse a downstream consumer might infer from the
     /// shared `OverBudget` variant.
     ///
-    /// # THEORY grounding
+    /// # Grounding
     ///
-    /// THEORY.md §II Language — typed primitives own boundary
+    /// Language — typed primitives own boundary
     /// classification; the STRICT-boundary disjunction at the projected
     /// sum surface is named at ONE typed method (`is_out_of_schedule`)
     /// rather than restated as the two-variant `matches!` disjunction or
     /// as the two-peer strict-boundary boolean disjunction at every
-    /// downstream consumer. THEORY.md §VI.1 one-oracle — the "attempt
+    /// downstream consumer. One-oracle — the "attempt
     /// index is a bug/replay diagnostic class distinct from any live
     /// in-schedule invocation" semantic role is named at one site (this
     /// method's body), so a downstream defensive pre-invocation guard, a
@@ -583,15 +583,15 @@ impl PerAttemptRegion {
     /// [`RetryPolicy::is_over_budget`] eb0d5d1 /
     /// [`RetryPolicy::is_before_first_attempt`] b3aeb92).
     ///
-    /// # THEORY grounding
+    /// # Grounding
     ///
-    /// THEORY.md §II Language — typed primitives own boundary
+    /// Language — typed primitives own boundary
     /// classification; the closed-inclusive-range disjunction at the
     /// projected sum surface is named at ONE typed method
     /// (`is_in_schedule`) rather than restated as the three-variant
     /// `matches!` disjunction, the negated OUT-OF-SCHEDULE peer, or the
     /// negated STRICT-boundary boolean disjunction at every downstream
-    /// consumer. THEORY.md §VI.1 one-oracle — the "attempt index is a
+    /// consumer. One-oracle — the "attempt index is a
     /// legal live in-schedule invocation of the retry loop" semantic
     /// role is named at ONE typed-primitive site (this method's body),
     /// so a downstream pre-invocation guard admitting live attempts, a
@@ -663,15 +663,15 @@ impl PerAttemptRegion {
     /// established at their respective ladders, here applied to the
     /// per-attempt-axis projection surface.
     ///
-    /// THEORY.md §II Language — typed primitives own boundary
+    /// Language — typed primitives own boundary
     /// classification; the per-attempt-axis floor anchor is a
     /// typed-primitive surface on [`PerAttemptRegion`] itself (one
     /// named const), not the variant name re-aliased at every min-fold
-    /// seed / lower-bound reader consumer site. THEORY.md §V.5
-    /// total-order discipline — [`BOTTOM`](Self::BOTTOM) is the global
+    /// seed / lower-bound reader consumer site.
+    /// Total-order discipline — [`BOTTOM`](Self::BOTTOM) is the global
     /// lower bound of the derived [`Ord`] chain, the structural anchor
     /// a downstream `<= BOTTOM` / `>= BOTTOM` reader consumes through
-    /// one named oracle. THEORY.md §VI.1 one-oracle — the per-attempt-
+    /// one named oracle. One-oracle — the per-attempt-
     /// axis floor semantic role is named at one site (this const), so
     /// a future ladder refinement that shifts the floor updates one
     /// site, not every min-fold seed / lower-bound reader consumer.
@@ -734,12 +734,12 @@ impl PerAttemptRegion {
     /// named oracle pair, rather than restating the variant names at
     /// every consumer site.
     ///
-    /// THEORY.md §II Language — typed primitives own boundary
+    /// Language — typed primitives own boundary
     /// classification; the per-attempt-axis ceiling anchor is a
     /// typed-primitive surface on [`PerAttemptRegion`] itself (one
-    /// named const). THEORY.md §V.5 total-order discipline —
+    /// named const). Total-order discipline —
     /// [`TOP`](Self::TOP) is the global upper bound of the derived
-    /// [`Ord`] chain. THEORY.md §VI.1 one-oracle — the per-attempt-
+    /// [`Ord`] chain. One-oracle — the per-attempt-
     /// axis ceiling semantic role is named at one site (this const),
     /// so a future ladder refinement that shifts the ceiling updates
     /// one site, not every max-fold seed / upper-bound reader
@@ -830,11 +830,11 @@ impl PerAttemptRegion {
     /// FIRST_LABEL: &str = PerAttemptRegion::First.as_str();` table
     /// at a future telemetry-label site) is admissible.
     ///
-    /// THEORY.md §II Language — typed primitives own boundary
+    /// Language — typed primitives own boundary
     /// classification; the variant→label mapping is a typed-primitive
     /// surface on [`PerAttemptRegion`] itself (one named method), not
     /// the variant name re-aliased at every telemetry/log consumer
-    /// site. THEORY.md §VI.1 one-oracle / generation-over-composition:
+    /// site. One-oracle / generation-over-composition:
     /// the label-axis oracle is named at one site (this method's body),
     /// so a downstream telemetry / attestation / CLI consumer reads
     /// `region.as_str()` once and is automatically updated across a
@@ -922,12 +922,12 @@ impl PerAttemptRegion {
     ///   other readback — distinct from a free-lattice join that could
     ///   return a third element.
     ///
-    /// THEORY.md §V.5 total-order discipline: the most-advanced-region
+    /// Total-order discipline: the most-advanced-region
     /// reading is a lattice operation (`max`) on the derived [`Ord`]
     /// ladder, named at the typed-primitive surface so a downstream
     /// consumer reads `region_a.join(region_b)` once and is automatically
-    /// updated across a future ladder refinement. THEORY.md §VI.1
-    /// one-oracle / generation-over-composition: the most-advanced-
+    /// updated across a future ladder refinement.
+    /// One-oracle / generation-over-composition: the most-advanced-
     /// region idiom is named at one site (this method's body), not
     /// retyped at every consumer's inline `.max()` call.
     #[allow(dead_code)]
@@ -1023,12 +1023,12 @@ impl PerAttemptRegion {
     ///   identity-or-other readback — distinct from a free-lattice
     ///   meet that could return a third element.
     ///
-    /// THEORY.md §V.5 total-order discipline: the least-advanced-
+    /// Total-order discipline: the least-advanced-
     /// region reading is a lattice operation (`min`) on the derived
     /// [`Ord`] ladder, named at the typed-primitive surface so a
     /// downstream consumer reads `region_a.meet(region_b)` once and
     /// is automatically updated across a future ladder refinement.
-    /// THEORY.md §VI.1 one-oracle / generation-over-composition: the
+    /// One-oracle / generation-over-composition: the
     /// least-advanced-region idiom is named at one site (this
     /// method's body), not retyped at every consumer's inline `.min()`
     /// call. Together with [`join`](Self::join), this closes the
@@ -1072,12 +1072,12 @@ impl PerAttemptRegion {
 /// discipline (canonical labels + snake_case + injectivity) pinned at
 /// each typed-primitive site.
 ///
-/// THEORY.md §V.4 typed primitives: the per-variant string rendering is a
+/// Typed primitives: the per-variant string rendering is a
 /// typed-primitive surface on [`PerAttemptRegion`] itself (one `Display`
 /// impl routing through one `as_str` match body), not a per-call-site
 /// cascade restated at every `format!("{:?}", region)` site that would
 /// otherwise emit `BeforeFirst` / `OverBudget` UpperCamel labels via the
-/// derived `Debug` rendering. THEORY.md §VI.1 one-oracle discipline: the
+/// derived `Debug` rendering. One-oracle discipline: the
 /// canonical label is named at one site ([`PerAttemptRegion::as_str`])
 /// and every surface — `as_str`, `Display`, future `Serialize`,
 /// future `FromStr` — reads through it.
@@ -1126,10 +1126,10 @@ impl std::fmt::Display for PerAttemptRegion {
 /// retry-loop telemetry surface reads the same layout the admission-tier
 /// and bump-level traps at the sibling ladders emit.
 ///
-/// THEORY.md §V.4 typed primitives: the label-axis parser is a typed-
+/// Typed primitives: the label-axis parser is a typed-
 /// primitive surface on [`PerAttemptRegion`] itself (one match body over
 /// the closed variant grammar) rather than a per-consumer inline
-/// cascade. THEORY.md §VI.1 one-oracle / generation-over-composition:
+/// cascade. One-oracle / generation-over-composition:
 /// the canonical-label grammar is named at one site
 /// ([`PerAttemptRegion::as_str`]), the [`std::fmt::Display`] impl and
 /// this [`std::str::FromStr`] impl are the two derived read/write
@@ -1179,12 +1179,12 @@ impl std::str::FromStr for PerAttemptRegion {
 /// [`as_str`], canonical-label parsing through [`std::str::FromStr`])
 /// across the full serde read/write surface.
 ///
-/// THEORY.md §V.4 typed primitives: the serialisation surface is a
+/// Typed primitives: the serialisation surface is a
 /// typed-primitive site on [`PerAttemptRegion`] itself (one `Serialize`
 /// impl routing through the [`as_str`] canonical-label oracle), not a
 /// per-consumer `#[derive(Serialize)]` + `#[serde(rename_all)]` retyping
 /// that would fragment the label-axis definition across every downstream
-/// consumer's struct. THEORY.md §VI.1 one-oracle: the canonical label is
+/// consumer's struct. One-oracle: the canonical label is
 /// named at one site ([`PerAttemptRegion::as_str`]) and every surface —
 /// `as_str`, `Display`, this `Serialize`, `Deserialize`, `FromStr` —
 /// reads through it.
@@ -1224,11 +1224,11 @@ impl serde::Serialize for PerAttemptRegion {
 /// The strict-parse behaviour on unknown labels is pinned by
 /// [`tests::test_per_attempt_region_deserialize_rejects_unknown_string`].
 ///
-/// THEORY.md §V.4 typed primitives: the deserialisation surface is a
+/// Typed primitives: the deserialisation surface is a
 /// typed-primitive site on [`PerAttemptRegion`] itself (one `Deserialize`
 /// impl routing through the [`std::str::FromStr`] canonical-label parser),
 /// not a per-consumer `#[derive(Deserialize)]` + `#[serde(rename_all)]`
-/// retyping. THEORY.md §VI.1 one-oracle: canonical-label parsing lives at
+/// retyping. One-oracle: canonical-label parsing lives at
 /// one site ([`std::str::FromStr`] for [`PerAttemptRegion`]) and every
 /// read surface — `FromStr`, this `Deserialize`, a future TOML config
 /// loader, a future MessagePack telemetry replay — reads through it.
@@ -1276,11 +1276,11 @@ impl<'de> serde::Deserialize<'de> for PerAttemptRegion {
 /// every variant is pinned by
 /// [`tests::test_per_attempt_region_as_ref_str_carries_through_generic_consumer`].
 ///
-/// THEORY.md §V.4 typed primitives: the byte-slice-coercion surface is
+/// Typed primitives: the byte-slice-coercion surface is
 /// a typed-primitive site on [`PerAttemptRegion`] itself (one
 /// `AsRef<str>` impl routing through [`as_str`]), not a per-consumer
 /// `.as_str()` restatement at every downstream site that accepts
-/// `impl AsRef<str>`. THEORY.md §VI.1 one-oracle: the canonical label
+/// `impl AsRef<str>`. One-oracle: the canonical label
 /// is named at one site ([`PerAttemptRegion::as_str`]) and every
 /// surface — `as_str`, `Display`, `Serialize`, this `AsRef<str>` —
 /// reads through it.
@@ -1339,12 +1339,12 @@ impl AsRef<str> for PerAttemptRegion {
 /// `impl Into<&'static str>` consumer at every variant is pinned by
 /// [`tests::test_per_attempt_region_into_static_str_carries_through_generic_consumer`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value static-lifetime
+/// Typed primitives: the by-value static-lifetime
 /// conversion surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one `From<PerAttemptRegion> for
 /// &'static str` impl routing through [`as_str`]), not a per-consumer
 /// `.as_str()` restatement at every downstream site that accepts
-/// `impl Into<&'static str>`. THEORY.md §VI.1 one-oracle: the
+/// `impl Into<&'static str>`. One-oracle: the
 /// canonical label is named at one site
 /// ([`PerAttemptRegion::as_str`]) and every surface — `as_str`,
 /// `Display`, `Serialize`, `AsRef<str>`, this `From<T> for
@@ -1417,13 +1417,12 @@ impl From<PerAttemptRegion> for &'static str {
 /// the strict-rejection contract on non-canonical input is pinned by
 /// [`tests::test_per_attempt_region_try_from_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-reference try-conversion
+/// Typed primitives: the by-reference try-conversion
 /// surface is a typed-primitive site on [`PerAttemptRegion`] itself
 /// (one `TryFrom<&str>` impl routing through the [`FromStr`] parse
 /// oracle), not a per-consumer `.parse::<PerAttemptRegion>()` bridge at
 /// every downstream site that types its parse contract as
-/// `impl TryFrom<&str>` rather than [`std::str::FromStr`]. THEORY.md
-/// §VI.1 one-oracle: the canonical-label grammar is named at one site
+/// `impl TryFrom<&str>` rather than [`std::str::FromStr`]. One-oracle: the canonical-label grammar is named at one site
 /// ([`PerAttemptRegion::as_str`]), inverted at one site
 /// ([`PerAttemptRegion::from_str`]), and every parse surface —
 /// [`std::str::FromStr`], [`serde::Deserialize`], this `TryFrom<&str>`
@@ -1492,12 +1491,12 @@ impl TryFrom<&str> for PerAttemptRegion {
 /// `impl Into<String>` consumer at every variant is pinned by
 /// [`tests::test_per_attempt_region_into_string_carries_through_generic_consumer`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value owned-string emit
+/// Typed primitives: the by-value owned-string emit
 /// surface is a typed-primitive site on [`PerAttemptRegion`] itself
 /// (one `From<PerAttemptRegion> for String` impl routing through
 /// [`as_str`]), not a per-consumer `.as_str().to_owned()` restatement
 /// at every downstream site that accepts `impl Into<String>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`PerAttemptRegion::as_str`]) and every emit surface —
 /// [`as_str`], [`std::fmt::Display`], [`serde::Serialize`],
 /// [`AsRef<str>`], [`From<PerAttemptRegion> for &'static str`], this
@@ -1574,14 +1573,14 @@ impl From<PerAttemptRegion> for String {
 /// by
 /// [`tests::test_per_attempt_region_try_from_string_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value owned-string
+/// Typed primitives: the by-value owned-string
 /// try-conversion surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one `TryFrom<String>` impl routing
 /// through the [`FromStr`] parse oracle), not a per-consumer
 /// `.parse::<PerAttemptRegion>()` bridge at every downstream site that
 /// types its parse contract as `impl TryFrom<String>` rather than
-/// [`std::str::FromStr`] or [`TryFrom<&str>`]. THEORY.md §VI.1
-/// one-oracle: the canonical-label grammar is named at one site
+/// [`std::str::FromStr`] or [`TryFrom<&str>`].
+/// One-oracle: the canonical-label grammar is named at one site
 /// ([`PerAttemptRegion::as_str`]), inverted at one site
 /// ([`PerAttemptRegion::from_str`]), and every parse surface —
 /// [`std::str::FromStr`], [`serde::Deserialize`], [`TryFrom<&str>`],
@@ -1668,13 +1667,13 @@ impl TryFrom<String> for PerAttemptRegion {
 /// the emit boundary is pinned by
 /// [`tests::test_per_attempt_region_into_cow_static_str_is_borrowed`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value `Cow<'static, str>`
+/// Typed primitives: the by-value `Cow<'static, str>`
 /// emit surface is a typed-primitive site on [`PerAttemptRegion`]
 /// itself (one `From<PerAttemptRegion> for Cow<'static, str>` impl
 /// routing through [`as_str`] at the [`Cow::Borrowed`] branch), not a
 /// per-consumer `Cow::Borrowed(region.as_str())` restatement at every
 /// downstream site that accepts `impl Into<Cow<'static, str>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one site
+/// One-oracle: the canonical label is named at one site
 /// ([`PerAttemptRegion::as_str`]) and every emit surface — [`as_str`],
 /// [`std::fmt::Display`], [`serde::Serialize`], [`AsRef<str>`],
 /// [`From<PerAttemptRegion> for &'static str`],
@@ -1773,14 +1772,14 @@ impl From<PerAttemptRegion> for std::borrow::Cow<'static, str> {
 /// [`Cow`] branches is pinned by
 /// [`tests::test_per_attempt_region_try_from_cow_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value [`Cow<'_, str>`]
+/// Typed primitives: the by-value [`Cow<'_, str>`]
 /// parse surface is a typed-primitive site on [`PerAttemptRegion`]
 /// itself (one `TryFrom<Cow<'_, str>>` impl routing through
 /// [`<Self as std::str::FromStr>::from_str`] on
 /// [`Cow::as_ref`]), not a per-consumer
 /// `region_str.parse::<PerAttemptRegion>()` restatement at every
 /// downstream site that receives a `Cow<'_, str>` label.
-/// THEORY.md §VI.1 one-oracle: the canonical grammar is named at one
+/// One-oracle: the canonical grammar is named at one
 /// site ([`<PerAttemptRegion as std::str::FromStr>::from_str`]) and
 /// every parse surface — [`FromStr`], [`serde::Deserialize`],
 /// [`TryFrom<&str>`], [`TryFrom<String>`], this [`TryFrom<Cow<'_,
@@ -1863,13 +1862,13 @@ impl<'a> TryFrom<std::borrow::Cow<'a, str>> for PerAttemptRegion {
 /// the per-attempt-region ladder against the shared
 /// [`PerAttemptRegion::as_str`] canonical-label oracle.
 ///
-/// THEORY.md §V.4 typed primitives: the by-value [`Box<str>`] emit
+/// Typed primitives: the by-value [`Box<str>`] emit
 /// surface is a typed-primitive site on [`PerAttemptRegion`] itself (one
 /// `From<PerAttemptRegion> for Box<str>` impl routing through [`as_str`]
 /// at the [`Box::<str>::from`] boundary), not a per-consumer
 /// `Box::<str>::from(region.as_str())` restatement at every downstream
 /// site that receives an [`Into<Box<str>>`] label sink.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one site
+/// One-oracle: the canonical label is named at one site
 /// ([`PerAttemptRegion::as_str`]) and every emit surface —
 /// [`as_str`], [`Display`], [`serde::Serialize`], [`AsRef<str>`],
 /// [`From<PerAttemptRegion> for &'static str`],
@@ -1971,14 +1970,14 @@ impl From<PerAttemptRegion> for Box<str> {
 /// the strict-rejection contract at non-canonical input is pinned by
 /// [`tests::test_per_attempt_region_try_from_box_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value [`Box<str>`] parse
+/// Typed primitives: the by-value [`Box<str>`] parse
 /// surface is a typed-primitive site on [`PerAttemptRegion`] itself
 /// (one `TryFrom<Box<str>>` impl routing through
 /// [`<Self as std::str::FromStr>::from_str`] on
 /// [`<Box<str> as AsRef<str>>::as_ref`]), not a per-consumer
 /// `boxed.parse::<PerAttemptRegion>()` restatement at every downstream
 /// site that receives a [`Box<str>`] label.
-/// THEORY.md §VI.1 one-oracle: the canonical grammar is named at one
+/// One-oracle: the canonical grammar is named at one
 /// site ([`<PerAttemptRegion as std::str::FromStr>::from_str`]) and
 /// every parse surface — [`FromStr`], [`serde::Deserialize`],
 /// [`TryFrom<&str>`], [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`],
@@ -2078,14 +2077,14 @@ impl TryFrom<Box<str>> for PerAttemptRegion {
 /// per-attempt-region ladder against the shared
 /// [`PerAttemptRegion::as_str`] canonical-label oracle.
 ///
-/// THEORY.md §V.4 typed primitives: the by-value [`Arc<str>`] emit
+/// Typed primitives: the by-value [`Arc<str>`] emit
 /// surface is a typed-primitive site on [`PerAttemptRegion`] itself
 /// (one `From<PerAttemptRegion> for Arc<str>` impl routing through
 /// [`as_str`] at the [`std::sync::Arc::<str>::from`] boundary), not a
 /// per-consumer `Arc::<str>::from(region.as_str())` restatement at
 /// every downstream site that receives an [`Into<Arc<str>>`] label
 /// sink.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`PerAttemptRegion::as_str`]) and every emit surface —
 /// [`as_str`], [`Display`], [`serde::Serialize`], [`AsRef<str>`],
 /// [`From<PerAttemptRegion> for &'static str`],
@@ -2215,14 +2214,14 @@ impl From<PerAttemptRegion> for std::sync::Arc<str> {
 /// by
 /// [`tests::test_per_attempt_region_try_from_arc_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value [`Arc<str>`] parse
+/// Typed primitives: the by-value [`Arc<str>`] parse
 /// surface is a typed-primitive site on [`PerAttemptRegion`] itself
 /// (one `TryFrom<Arc<str>>` impl routing through
 /// [`<Self as std::str::FromStr>::from_str`] on
 /// [`<std::sync::Arc<str> as AsRef<str>>::as_ref`]), not a
 /// per-consumer `shared.parse::<PerAttemptRegion>()` restatement at
 /// every downstream site that receives an [`Arc<str>`] label.
-/// THEORY.md §VI.1 one-oracle: the canonical grammar is named at
+/// One-oracle: the canonical grammar is named at
 /// one site
 /// ([`<PerAttemptRegion as std::str::FromStr>::from_str`]) and every
 /// parse surface — [`FromStr`], [`serde::Deserialize`],
@@ -2334,13 +2333,13 @@ impl TryFrom<std::sync::Arc<str>> for PerAttemptRegion {
 /// commit, sibling of the closed [`Arc<str>`] emit + parse trio
 /// (c3a722d / a9c007a) directly above.
 ///
-/// THEORY.md §V.4 typed primitives: the by-value [`Rc<str>`] emit
+/// Typed primitives: the by-value [`Rc<str>`] emit
 /// surface is a typed-primitive site on [`PerAttemptRegion`] itself
 /// (one `From<PerAttemptRegion> for Rc<str>` impl routing through
 /// [`as_str`] at the [`std::rc::Rc::<str>::from`] boundary), not a
 /// per-consumer `Rc::<str>::from(region.as_str())` restatement at every
 /// downstream site that receives an [`Into<Rc<str>>`] label sink.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one site
+/// One-oracle: the canonical label is named at one site
 /// ([`PerAttemptRegion::as_str`]) and every emit surface — [`as_str`],
 /// [`Display`], [`serde::Serialize`], [`AsRef<str>`],
 /// [`From<PerAttemptRegion> for &'static str`],
@@ -2478,14 +2477,14 @@ impl From<PerAttemptRegion> for std::rc::Rc<str> {
 /// the strict-rejection contract at non-canonical input is pinned by
 /// [`tests::test_per_attempt_region_try_from_rc_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value [`Rc<str>`] parse
+/// Typed primitives: the by-value [`Rc<str>`] parse
 /// surface is a typed-primitive site on [`PerAttemptRegion`] itself
 /// (one `TryFrom<Rc<str>>` impl routing through
 /// [`<Self as std::str::FromStr>::from_str`] on
 /// [`<std::rc::Rc<str> as AsRef<str>>::as_ref`]), not a per-consumer
 /// `shared.parse::<PerAttemptRegion>()` restatement at every
 /// downstream site that receives an [`Rc<str>`] label.
-/// THEORY.md §VI.1 one-oracle: the canonical grammar is named at one
+/// One-oracle: the canonical grammar is named at one
 /// site ([`<PerAttemptRegion as std::str::FromStr>::from_str`]) and
 /// every parse surface — [`FromStr`], [`serde::Deserialize`],
 /// [`TryFrom<&str>`], [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`],
@@ -2561,13 +2560,13 @@ impl TryFrom<std::rc::Rc<str>> for PerAttemptRegion {
 /// canonical label at every variant is pinned by
 /// [`tests::test_per_attempt_region_as_ref_bytes_round_trips_through_from_utf8`].
 ///
-/// THEORY.md §V.4 typed primitives: the byte-slice borrowed-view
+/// Typed primitives: the byte-slice borrowed-view
 /// surface is a typed-primitive site on [`PerAttemptRegion`] itself
 /// (one `AsRef<[u8]>` impl routing through [`AsRef<str>`] and
 /// [`str::as_bytes`]), not a per-consumer
 /// `region.as_str().as_bytes()` restatement at every downstream
-/// site that accepts `impl AsRef<[u8]>`. THEORY.md §VI.1
-/// one-oracle: the canonical label is named at one site
+/// site that accepts `impl AsRef<[u8]>`.
+/// One-oracle: the canonical label is named at one site
 /// ([`PerAttemptRegion::as_str`]) and every borrowed-view surface —
 /// [`AsRef<str>`] (yields `&str`), this [`AsRef<[u8]>`] (yields
 /// `&[u8]`) — reads through it.
@@ -2651,14 +2650,14 @@ impl AsRef<[u8]> for PerAttemptRegion {
 /// canonical label at every variant is pinned by
 /// [`tests::test_per_attempt_region_from_into_static_bytes_round_trips_through_from_utf8`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value static-lifetime
+/// Typed primitives: the by-value static-lifetime
 /// byte-slice-emit surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one `From<PerAttemptRegion> for
 /// &'static [u8]` impl routing through [`as_str`] and
 /// [`str::as_bytes`]), not a per-consumer
 /// `.as_str().as_bytes()` restatement at every downstream site
-/// that accepts `impl Into<&'static [u8]>`. THEORY.md §VI.1
-/// one-oracle: the canonical label is named at one site
+/// that accepts `impl Into<&'static [u8]>`.
+/// One-oracle: the canonical label is named at one site
 /// ([`PerAttemptRegion::as_str`]) and every surface — `as_str`,
 /// `Display`, `Serialize`, `AsRef<str>`, `AsRef<[u8]>`,
 /// `From<T> for &'static str`, this `From<T> for &'static [u8]` —
@@ -2771,14 +2770,14 @@ impl From<PerAttemptRegion> for &'static [u8] {
 /// [`TryFrom<Vec<u8>>`] at every variant is pinned by
 /// [`tests::test_per_attempt_region_from_into_owned_bytes_round_trips_through_try_from`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value owned-buffer byte-
+/// Typed primitives: the by-value owned-buffer byte-
 /// slice emit surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one `From<PerAttemptRegion> for
 /// Vec<u8>` impl routing through [`as_str`] + [`str::as_bytes`] +
 /// [`slice::to_vec`]), not a per-consumer
 /// `region.as_str().as_bytes().to_vec()` restatement at every
 /// downstream site that accepts `impl Into<Vec<u8>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`PerAttemptRegion::as_str`]) and every emit surface —
 /// `as_str`, `Display`, `Serialize`, `AsRef<str>`, `AsRef<[u8]>`,
 /// `From<T> for &'static str`, `From<T> for &'static [u8]`,
@@ -2867,14 +2866,14 @@ impl From<PerAttemptRegion> for Vec<u8> {
 /// contract at the emit boundary is pinned by
 /// [`tests::test_per_attempt_region_into_cow_static_bytes_is_borrowed`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value
+/// Typed primitives: the by-value
 /// `Cow<'static, [u8]>`-emit surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one `From<PerAttemptRegion> for
 /// Cow<'static, [u8]>` impl routing through [`as_str`] +
 /// [`str::as_bytes`] at the [`Cow::Borrowed`] branch), not a per-
 /// consumer `Cow::Borrowed(region.as_str().as_bytes())`
 /// restatement at every downstream site that accepts
-/// `impl Into<Cow<'static, [u8]>>`. THEORY.md §VI.1 one-oracle:
+/// `impl Into<Cow<'static, [u8]>>`. One-oracle:
 /// the canonical label is named at one site
 /// ([`PerAttemptRegion::as_str`]) and every emit surface —
 /// `as_str`, `Display`, `Serialize`, `AsRef<str>`, `AsRef<[u8]>`,
@@ -2969,7 +2968,7 @@ impl From<PerAttemptRegion> for std::borrow::Cow<'static, [u8]> {
 /// [`PerAttemptRegion::as_str`] at every variant is pinned by
 /// [`tests::test_per_attempt_region_from_into_boxed_bytes_round_trips_through_from_utf8`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shrunk-owned
+/// Typed primitives: the by-value shrunk-owned
 /// [`Box<[u8]>`] emit surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one `From<PerAttemptRegion> for
 /// Box<[u8]>` impl routing through [`as_str`] + [`str::as_bytes`]
@@ -2977,7 +2976,7 @@ impl From<PerAttemptRegion> for std::borrow::Cow<'static, [u8]> {
 /// consumer `Box::<[u8]>::from(region.as_str().as_bytes())`
 /// restatement at every downstream site that accepts
 /// `impl Into<Box<[u8]>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`PerAttemptRegion::as_str`]) and every byte-slice emit
 /// surface — [`AsRef<[u8]>`], [`From<T> for &'static [u8]`],
 /// [`From<T> for Vec<u8>`], [`From<T> for Cow<'static, [u8]>`],
@@ -3088,7 +3087,7 @@ impl From<PerAttemptRegion> for Box<[u8]> {
 /// [`Arc<str>`] surface
 /// ([`tests::test_per_attempt_region_into_arc_str_shares_label_across_clones`]).
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shared-owned
+/// Typed primitives: the by-value shared-owned
 /// [`Arc<[u8]>`] emit surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one `From<PerAttemptRegion> for
 /// Arc<[u8]>` impl routing through [`as_str`] + [`str::as_bytes`]
@@ -3096,7 +3095,7 @@ impl From<PerAttemptRegion> for Box<[u8]> {
 /// consumer `Arc::<[u8]>::from(region.as_str().as_bytes())`
 /// restatement at every downstream site that accepts
 /// `impl Into<Arc<[u8]>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`PerAttemptRegion::as_str`]) and every byte-slice emit
 /// surface — [`AsRef<[u8]>`], [`From<T> for &'static [u8]`],
 /// [`From<T> for Vec<u8>`], [`From<T> for Cow<'static, [u8]>`],
@@ -3210,14 +3209,14 @@ impl From<PerAttemptRegion> for std::sync::Arc<[u8]> {
 /// [`Rc<str>`] surface
 /// ([`tests::test_per_attempt_region_into_rc_str_shares_label_across_clones`]).
 ///
-/// THEORY.md §V.4 typed primitives: the by-value thread-local
+/// Typed primitives: the by-value thread-local
 /// shared-owned [`Rc<[u8]>`] emit surface is a typed-primitive site
 /// on [`PerAttemptRegion`] itself (one `From<PerAttemptRegion> for
 /// Rc<[u8]>` impl routing through [`as_str`] + [`str::as_bytes`]
 /// composed with [`std::rc::Rc::<[u8]>::from`]), not a per-consumer
 /// `Rc::<[u8]>::from(region.as_str().as_bytes())` restatement at
 /// every downstream site that accepts `impl Into<Rc<[u8]>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`PerAttemptRegion::as_str`]) and every byte-slice emit
 /// surface — [`AsRef<[u8]>`], [`From<T> for &'static [u8]`],
 /// [`From<T> for Vec<u8>`], [`From<T> for Cow<'static, [u8]>`],
@@ -3335,14 +3334,13 @@ impl From<PerAttemptRegion> for std::rc::Rc<[u8]> {
 /// input is pinned by
 /// [`tests::test_per_attempt_region_try_from_bytes_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-reference byte-slice
+/// Typed primitives: the by-reference byte-slice
 /// try-conversion surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one `TryFrom<&[u8]>` impl routing
 /// through [`std::str::from_utf8`] + [`FromStr`]), not a per-
 /// consumer `std::str::from_utf8(bytes).and_then(|s|
 /// s.parse::<PerAttemptRegion>())` restatement at every downstream
-/// site that receives canonical-label byte sequences. THEORY.md
-/// §VI.1 one-oracle: the canonical-label grammar is named at one
+/// site that receives canonical-label byte sequences. One-oracle: the canonical-label grammar is named at one
 /// site ([`PerAttemptRegion::as_str`]), inverted at one site
 /// ([`PerAttemptRegion::from_str`]), and every parse surface —
 /// [`std::str::FromStr`], [`serde::Deserialize`], [`TryFrom<&str>`],
@@ -3461,14 +3459,14 @@ impl TryFrom<&[u8]> for PerAttemptRegion {
 /// input is pinned by
 /// [`tests::test_per_attempt_region_try_from_vec_bytes_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value owned-buffer byte-slice
+/// Typed primitives: the by-value owned-buffer byte-slice
 /// try-conversion surface is a typed-primitive site on [`PerAttemptRegion`]
 /// itself (one `TryFrom<Vec<u8>>` impl routing through the borrowed
 /// [`TryFrom<&[u8]>`] parse peer), not a per-consumer
 /// `PerAttemptRegion::try_from(buf.as_slice())` bridge at every downstream
 /// site that types its parse contract as `impl TryFrom<Vec<u8>>` rather
-/// than [`TryFrom<&[u8]>`] or [`std::str::FromStr`]. THEORY.md §VI.1
-/// one-oracle: the canonical-label grammar is named at one site
+/// than [`TryFrom<&[u8]>`] or [`std::str::FromStr`].
+/// One-oracle: the canonical-label grammar is named at one site
 /// ([`PerAttemptRegion::as_str`]), inverted at one site
 /// ([`PerAttemptRegion::from_str`]), and every parse surface —
 /// [`std::str::FromStr`], [`serde::Deserialize`], [`TryFrom<&str>`],
@@ -3632,7 +3630,7 @@ impl TryFrom<Vec<u8>> for PerAttemptRegion {
 /// across both [`Cow`] branches is pinned by
 /// [`tests::test_per_attempt_region_try_from_cow_bytes_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value [`Cow<'_, [u8]>`]
+/// Typed primitives: the by-value [`Cow<'_, [u8]>`]
 /// try-conversion parse surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one `TryFrom<Cow<'_, [u8]>>` impl
 /// routing through the borrowed [`TryFrom<&[u8]>`] parse peer on
@@ -3640,7 +3638,7 @@ impl TryFrom<Vec<u8>> for PerAttemptRegion {
 /// `PerAttemptRegion::try_from(buf.as_ref())` bridge at every
 /// downstream site that types its parse contract as
 /// `impl TryFrom<Cow<'_, [u8]>>` rather than [`TryFrom<&[u8]>`] or
-/// [`TryFrom<Vec<u8>>`]. THEORY.md §VI.1 one-oracle: the canonical-
+/// [`TryFrom<Vec<u8>>`]. One-oracle: the canonical-
 /// label grammar is named at one site ([`PerAttemptRegion::as_str`]),
 /// inverted at one site ([`PerAttemptRegion::from_str`]), and every
 /// parse surface — [`std::str::FromStr`], [`serde::Deserialize`],
@@ -3706,14 +3704,14 @@ impl<'a> TryFrom<std::borrow::Cow<'a, [u8]>> for PerAttemptRegion {
 /// the strict-rejection contract on non-canonical input is pinned by
 /// [`tests::test_per_attempt_region_try_from_box_bytes_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shrunk-owned
+/// Typed primitives: the by-value shrunk-owned
 /// byte-slice-parse surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one `TryFrom<Box<[u8]>>` impl routing
 /// through the by-reference [`TryFrom<&[u8]>`] parse oracle), not a
 /// per-consumer
 /// `PerAttemptRegion::try_from(std::str::from_utf8(&bytes)?.trim())`
 /// restatement at every downstream site.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// One-oracle: the canonical label grammar is named
 /// at one site ([`PerAttemptRegion::as_str`]), inverted at one site
 /// ([`PerAttemptRegion::from_str`]), and every parse surface —
 /// [`std::str::FromStr`], [`serde::Deserialize`], [`TryFrom<&str>`],
@@ -3782,7 +3780,7 @@ impl TryFrom<Box<[u8]>> for PerAttemptRegion {
 /// the strict-rejection contract on non-canonical input is pinned by
 /// [`tests::test_per_attempt_region_try_from_arc_bytes_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shared-owned
+/// Typed primitives: the by-value shared-owned
 /// byte-slice-parse surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one `TryFrom<Arc<[u8]>>` impl routing
 /// through the by-reference [`TryFrom<&[u8]>`] parse oracle), not a
@@ -3790,7 +3788,7 @@ impl TryFrom<Box<[u8]>> for PerAttemptRegion {
 /// `PerAttemptRegion::try_from(std::str::from_utf8(&bytes)?.trim())`
 /// restatement at every downstream site that types its parse contract
 /// as `impl TryFrom<Arc<[u8]>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// One-oracle: the canonical label grammar is named
 /// at one site ([`PerAttemptRegion::as_str`]), inverted at one site
 /// ([`PerAttemptRegion::from_str`]), and every parse surface —
 /// [`std::str::FromStr`], [`serde::Deserialize`], [`TryFrom<&str>`],
@@ -3864,7 +3862,7 @@ impl TryFrom<std::sync::Arc<[u8]>> for PerAttemptRegion {
 /// the strict-rejection contract on non-canonical input is pinned by
 /// [`tests::test_per_attempt_region_try_from_rc_bytes_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value thread-local
+/// Typed primitives: the by-value thread-local
 /// shared-owned byte-slice-parse surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one `TryFrom<Rc<[u8]>>` impl routing
 /// through the by-reference [`TryFrom<&[u8]>`] parse oracle), not a
@@ -3872,7 +3870,7 @@ impl TryFrom<std::sync::Arc<[u8]>> for PerAttemptRegion {
 /// `PerAttemptRegion::try_from(std::str::from_utf8(&bytes)?.trim())`
 /// restatement at every downstream site that types its parse contract
 /// as `impl TryFrom<Rc<[u8]>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// One-oracle: the canonical label grammar is named
 /// at one site ([`PerAttemptRegion::as_str`]), inverted at one site
 /// ([`PerAttemptRegion::from_str`]), and every parse surface —
 /// [`std::str::FromStr`], [`serde::Deserialize`], [`TryFrom<&str>`],
@@ -3969,13 +3967,12 @@ impl TryFrom<std::rc::Rc<[u8]>> for PerAttemptRegion {
 /// the canonical label at every variant is pinned by
 /// [`tests::test_per_attempt_region_as_ref_osstr_round_trips_through_to_str`].
 ///
-/// THEORY.md §V.4 typed primitives: the OS-string borrowed-view
+/// Typed primitives: the OS-string borrowed-view
 /// surface is a typed-primitive site on [`PerAttemptRegion`] itself
 /// (one `AsRef<std::ffi::OsStr>` impl routing through
 /// [`AsRef<str>`] and [`std::ffi::OsStr::new`]), not a per-consumer
 /// `OsStr::new(region.as_str())` restatement at every downstream
-/// site that accepts `impl AsRef<std::ffi::OsStr>`. THEORY.md
-/// §VI.1 one-oracle: the canonical label is named at one site
+/// site that accepts `impl AsRef<std::ffi::OsStr>`. One-oracle: the canonical label is named at one site
 /// ([`PerAttemptRegion::as_str`]) and every borrowed-view surface —
 /// [`AsRef<str>`] (yields `&str`), [`AsRef<[u8]>`] (yields
 /// `&[u8]`), this [`AsRef<std::ffi::OsStr>`] (yields `&OsStr`) —
@@ -4076,13 +4073,13 @@ impl AsRef<std::ffi::OsStr> for PerAttemptRegion {
 /// the canonical label at every variant is pinned by
 /// [`tests::test_per_attempt_region_as_ref_path_round_trips_through_to_str`].
 ///
-/// THEORY.md §V.4 typed primitives: the filesystem-path borrowed-
+/// Typed primitives: the filesystem-path borrowed-
 /// view surface is a typed-primitive site on [`PerAttemptRegion`]
 /// itself (one `AsRef<std::path::Path>` impl routing through
 /// [`AsRef<str>`] and [`std::path::Path::new`]), not a
 /// per-consumer `Path::new(region.as_str())` restatement at every
 /// downstream site that accepts `impl AsRef<std::path::Path>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at
+/// One-oracle: the canonical label is named at
 /// one site ([`PerAttemptRegion::as_str`]) and every borrowed-view
 /// surface — [`AsRef<str>`] (yields `&str`), [`AsRef<[u8]>`]
 /// (yields `&[u8]`), [`AsRef<std::ffi::OsStr>`] (yields `&OsStr`),
@@ -4143,14 +4140,14 @@ impl AsRef<std::path::Path> for PerAttemptRegion {
 /// recovering the canonical label at every variant is pinned by
 /// [`tests::test_per_attempt_region_from_into_osstring_round_trips_through_into_string`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value owned OS-string
+/// Typed primitives: the by-value owned OS-string
 /// emit surface is a typed-primitive site on [`PerAttemptRegion`]
 /// itself (one `From<PerAttemptRegion> for std::ffi::OsString`
 /// impl routing through [`PerAttemptRegion::as_str`] and
 /// [`std::ffi::OsString::from`]), not a per-consumer
 /// `OsString::from(region.as_str())` restatement at every
 /// downstream site that accepts `impl Into<std::ffi::OsString>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at
+/// One-oracle: the canonical label is named at
 /// one site ([`PerAttemptRegion::as_str`]) and every owned-buffer
 /// emit surface — [`From<T> for String`] (yields [`String`]),
 /// [`From<T> for Vec<u8>`] (yields [`Vec<u8>`]), this
@@ -4247,7 +4244,7 @@ impl From<PerAttemptRegion> for std::ffi::OsString {
 /// canonical label at every variant is pinned by
 /// [`tests::test_per_attempt_region_from_into_pathbuf_round_trips_through_into_os_string`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value owned filesystem-
+/// Typed primitives: the by-value owned filesystem-
 /// path emit surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one
 /// `From<PerAttemptRegion> for std::path::PathBuf` impl routing
@@ -4255,7 +4252,7 @@ impl From<PerAttemptRegion> for std::ffi::OsString {
 /// [`std::path::PathBuf::from`]), not a per-consumer
 /// `PathBuf::from(region.as_str())` restatement at every
 /// downstream site that accepts `impl Into<std::path::PathBuf>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at
+/// One-oracle: the canonical label is named at
 /// one site ([`PerAttemptRegion::as_str`]) and every owned-buffer
 /// emit surface — [`From<T> for String`] (yields [`String`]),
 /// [`From<T> for Vec<u8>`] (yields [`Vec<u8>`]),
@@ -4332,7 +4329,7 @@ impl From<PerAttemptRegion> for std::path::PathBuf {
 /// the canonical label at every variant is pinned by
 /// [`tests::test_per_attempt_region_from_into_static_os_str_round_trips_through_to_str`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value static-lifetime
+/// Typed primitives: the by-value static-lifetime
 /// OS-string emit surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one
 /// `From<PerAttemptRegion> for &'static std::ffi::OsStr` impl
@@ -4340,7 +4337,7 @@ impl From<PerAttemptRegion> for std::path::PathBuf {
 /// [`std::ffi::OsStr::new`]), not a per-consumer
 /// `OsStr::new(region.as_str())` restatement at every downstream
 /// site that accepts `impl Into<&'static std::ffi::OsStr>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at
+/// One-oracle: the canonical label is named at
 /// one site ([`PerAttemptRegion::as_str`]) and every by-value
 /// static-lifetime emit surface — [`From<T> for &'static str`]
 /// (yields `&'static str`), [`From<T> for &'static [u8]`] (yields
@@ -4417,7 +4414,7 @@ impl From<PerAttemptRegion> for &'static std::ffi::OsStr {
 /// the canonical label at every variant is pinned by
 /// [`tests::test_per_attempt_region_from_into_static_path_round_trips_through_to_str`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value static-lifetime
+/// Typed primitives: the by-value static-lifetime
 /// filesystem-path emit surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one
 /// `From<PerAttemptRegion> for &'static std::path::Path` impl
@@ -4425,7 +4422,7 @@ impl From<PerAttemptRegion> for &'static std::ffi::OsStr {
 /// [`std::path::Path::new`]), not a per-consumer
 /// `Path::new(region.as_str())` restatement at every downstream
 /// site that accepts `impl Into<&'static std::path::Path>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at
+/// One-oracle: the canonical label is named at
 /// one site ([`PerAttemptRegion::as_str`]) and every by-value
 /// static-lifetime emit surface — [`From<T> for &'static str`]
 /// (yields `&'static str`), [`From<T> for &'static [u8]`] (yields
@@ -4530,7 +4527,7 @@ impl From<PerAttemptRegion> for &'static std::path::Path {
 /// [`std::borrow::Cow::Owned`]) at every variant is pinned by
 /// [`tests::test_per_attempt_region_into_cow_static_os_str_is_borrowed`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value borrowed/owned-
+/// Typed primitives: the by-value borrowed/owned-
 /// frontier OS-string emit surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one
 /// `From<PerAttemptRegion> for Cow<'static, std::ffi::OsStr>` impl
@@ -4540,7 +4537,7 @@ impl From<PerAttemptRegion> for &'static std::path::Path {
 /// `Cow::Borrowed(std::ffi::OsStr::new(region.as_str()))` restatement
 /// at every downstream site that accepts
 /// `impl Into<Cow<'static, std::ffi::OsStr>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`PerAttemptRegion::as_str`]) and every by-value
 /// borrowed/owned-frontier emit surface —
 /// [`From<T> for std::borrow::Cow<'static, str>`] (yields
@@ -4652,7 +4649,7 @@ impl From<PerAttemptRegion> for std::borrow::Cow<'static, std::ffi::OsStr> {
 /// [`std::borrow::Cow::Owned`]) at every variant is pinned by
 /// [`tests::test_per_attempt_region_into_cow_static_path_is_borrowed`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value borrowed/owned-
+/// Typed primitives: the by-value borrowed/owned-
 /// frontier filesystem-path emit surface is a typed-primitive site
 /// on [`PerAttemptRegion`] itself (one
 /// `From<PerAttemptRegion> for Cow<'static, std::path::Path>` impl
@@ -4662,7 +4659,7 @@ impl From<PerAttemptRegion> for std::borrow::Cow<'static, std::ffi::OsStr> {
 /// `Cow::Borrowed(std::path::Path::new(region.as_str()))`
 /// restatement at every downstream site that accepts
 /// `impl Into<Cow<'static, std::path::Path>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`PerAttemptRegion::as_str`]) and every by-value
 /// borrowed/owned-frontier emit surface —
 /// [`From<T> for std::borrow::Cow<'static, str>`] (yields
@@ -4768,7 +4765,7 @@ impl From<PerAttemptRegion> for std::borrow::Cow<'static, std::path::Path> {
 /// aliasing-mutate the source) is pinned by
 /// [`tests::test_per_attempt_region_into_box_os_str_is_owned_independent`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shrunk-owned OS-
+/// Typed primitives: the by-value shrunk-owned OS-
 /// string emit surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one
 /// `From<PerAttemptRegion> for Box<std::ffi::OsStr>` impl routing
@@ -4776,7 +4773,7 @@ impl From<PerAttemptRegion> for std::borrow::Cow<'static, std::path::Path> {
 /// and [`Box::<std::ffi::OsStr>::from`]), not a per-consumer
 /// `Box::<std::ffi::OsStr>::from(std::ffi::OsStr::new(region.as_str()))`
 /// restatement at every downstream site that accepts
-/// `impl Into<Box<std::ffi::OsStr>>`. THEORY.md §VI.1 one-oracle: the
+/// `impl Into<Box<std::ffi::OsStr>>`. One-oracle: the
 /// canonical label is named at one site ([`PerAttemptRegion::as_str`])
 /// and every OS-string emit surface —
 /// [`From<T> for std::ffi::OsString`],
@@ -4882,7 +4879,7 @@ impl From<PerAttemptRegion> for Box<std::ffi::OsStr> {
 /// string constant table) is pinned by
 /// [`tests::test_per_attempt_region_into_box_path_is_owned_independent`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shrunk-owned
+/// Typed primitives: the by-value shrunk-owned
 /// filesystem-path emit surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one
 /// `From<PerAttemptRegion> for Box<std::path::Path>` impl routing
@@ -4890,7 +4887,7 @@ impl From<PerAttemptRegion> for Box<std::ffi::OsStr> {
 /// and [`Box::<std::path::Path>::from`]), not a per-consumer
 /// `Box::<std::path::Path>::from(std::path::Path::new(region.as_str()))`
 /// restatement at every downstream site that accepts
-/// `impl Into<Box<std::path::Path>>`. THEORY.md §VI.1 one-oracle: the
+/// `impl Into<Box<std::path::Path>>`. One-oracle: the
 /// canonical label is named at one site
 /// ([`PerAttemptRegion::as_str`]) and every filesystem-path emit
 /// surface — [`From<T> for std::path::PathBuf`],
@@ -5000,7 +4997,7 @@ impl From<PerAttemptRegion> for Box<std::path::Path> {
 /// least two after the clone — at every variant is pinned by
 /// [`tests::test_per_attempt_region_into_arc_os_str_shares_label_across_clones`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shared-owned OS-
+/// Typed primitives: the by-value shared-owned OS-
 /// string emit surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one
 /// `From<PerAttemptRegion> for std::sync::Arc<std::ffi::OsStr>` impl
@@ -5009,7 +5006,7 @@ impl From<PerAttemptRegion> for Box<std::path::Path> {
 /// [`std::sync::Arc::<std::ffi::OsStr>::from`]), not a per-consumer
 /// `Arc::<std::ffi::OsStr>::from(std::ffi::OsStr::new(region.as_str()))`
 /// restatement at every downstream site that accepts
-/// `impl Into<Arc<std::ffi::OsStr>>`. THEORY.md §VI.1 one-oracle: the
+/// `impl Into<Arc<std::ffi::OsStr>>`. One-oracle: the
 /// canonical label is named at one site
 /// ([`PerAttemptRegion::as_str`]) and every OS-string emit surface —
 /// [`From<T> for std::ffi::OsString`],
@@ -5129,7 +5126,7 @@ impl From<PerAttemptRegion> for std::sync::Arc<std::ffi::OsStr> {
 /// the clone — at every variant is pinned by
 /// [`tests::test_per_attempt_region_into_arc_path_shares_label_across_clones`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shared-owned
+/// Typed primitives: the by-value shared-owned
 /// filesystem-path emit surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one
 /// `From<PerAttemptRegion> for std::sync::Arc<std::path::Path>`
@@ -5138,7 +5135,7 @@ impl From<PerAttemptRegion> for std::sync::Arc<std::ffi::OsStr> {
 /// [`std::sync::Arc::<std::path::Path>::from`]), not a per-consumer
 /// `Arc::<std::path::Path>::from(std::path::Path::new(region.as_str()))`
 /// restatement at every downstream site that accepts
-/// `impl Into<Arc<std::path::Path>>`. THEORY.md §VI.1 one-oracle:
+/// `impl Into<Arc<std::path::Path>>`. One-oracle:
 /// the canonical label is named at one site
 /// ([`PerAttemptRegion::as_str`]) and every filesystem-path emit
 /// surface — [`From<T> for std::path::PathBuf`],
@@ -5262,7 +5259,7 @@ impl From<PerAttemptRegion> for std::sync::Arc<std::path::Path> {
 /// clone — at every variant is pinned by
 /// [`tests::test_per_attempt_region_into_rc_os_str_shares_label_across_clones`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value thread-local
+/// Typed primitives: the by-value thread-local
 /// shared-owned OS-string emit surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one
 /// `From<PerAttemptRegion> for std::rc::Rc<std::ffi::OsStr>` impl
@@ -5271,7 +5268,7 @@ impl From<PerAttemptRegion> for std::sync::Arc<std::path::Path> {
 /// [`std::rc::Rc::<std::ffi::OsStr>::from`]), not a per-consumer
 /// `Rc::<std::ffi::OsStr>::from(std::ffi::OsStr::new(region.as_str()))`
 /// restatement at every downstream site that accepts
-/// `impl Into<Rc<std::ffi::OsStr>>`. THEORY.md §VI.1 one-oracle:
+/// `impl Into<Rc<std::ffi::OsStr>>`. One-oracle:
 /// the canonical label is named at one site
 /// ([`PerAttemptRegion::as_str`]) and every OS-string emit surface —
 /// [`From<T> for std::ffi::OsString`],
@@ -5403,7 +5400,7 @@ impl From<PerAttemptRegion> for std::rc::Rc<std::ffi::OsStr> {
 /// clone — at every variant is pinned by
 /// [`tests::test_per_attempt_region_into_rc_path_shares_label_across_clones`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value thread-local
+/// Typed primitives: the by-value thread-local
 /// shared-owned filesystem-path emit surface is a typed-primitive
 /// site on [`PerAttemptRegion`] itself (one
 /// `From<PerAttemptRegion> for std::rc::Rc<std::path::Path>` impl
@@ -5412,7 +5409,7 @@ impl From<PerAttemptRegion> for std::rc::Rc<std::ffi::OsStr> {
 /// [`std::rc::Rc::<std::path::Path>::from`]), not a per-consumer
 /// `Rc::<std::path::Path>::from(std::path::Path::new(region.as_str()))`
 /// restatement at every downstream site that accepts
-/// `impl Into<Rc<std::path::Path>>`. THEORY.md §VI.1 one-oracle:
+/// `impl Into<Rc<std::path::Path>>`. One-oracle:
 /// the canonical label is named at one site
 /// ([`PerAttemptRegion::as_str`]) and every filesystem-path emit
 /// surface — [`From<T> for std::path::PathBuf`],
@@ -5497,14 +5494,14 @@ impl From<PerAttemptRegion> for std::rc::Rc<std::path::Path> {
 /// canonical label at every variant is pinned by
 /// [`tests::test_per_attempt_region_as_ref_cstr_round_trips_through_to_str`].
 ///
-/// THEORY.md §V.4 typed primitives: the NUL-terminated C-string
+/// Typed primitives: the NUL-terminated C-string
 /// borrowed-view surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one `AsRef<std::ffi::CStr>` impl
 /// routing through the by-value static-lifetime C-string emit
 /// oracle), not a per-consumer
 /// `<&'static CStr>::from(region)` restatement at every downstream
-/// site that accepts `impl AsRef<std::ffi::CStr>`. THEORY.md §VI.1
-/// one-oracle: the canonical label + trailing-NUL is named at the
+/// site that accepts `impl AsRef<std::ffi::CStr>`.
+/// One-oracle: the canonical label + trailing-NUL is named at the
 /// [`&'static std::ffi::CStr`] emit oracle (which itself reads the
 /// per-variant `c"..."` literals agreeing with
 /// [`PerAttemptRegion::as_str`] byte-for-byte), and every borrowed-
@@ -5605,7 +5602,7 @@ impl AsRef<std::ffi::CStr> for PerAttemptRegion {
 /// variant is pinned by
 /// [`tests::test_per_attempt_region_into_cstring_carries_trailing_nul`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value owned
+/// Typed primitives: the by-value owned
 /// NUL-terminated C-string emit surface is a typed-primitive site
 /// on [`PerAttemptRegion`] itself (one `From<PerAttemptRegion> for
 /// std::ffi::CString` impl routing through
@@ -5613,7 +5610,7 @@ impl AsRef<std::ffi::CStr> for PerAttemptRegion {
 /// not a per-consumer
 /// `std::ffi::CString::new(region.as_str()).unwrap()` restatement
 /// at every downstream site that accepts
-/// `impl Into<std::ffi::CString>`. THEORY.md §VI.1 one-oracle: the
+/// `impl Into<std::ffi::CString>`. One-oracle: the
 /// canonical label is named at one site
 /// ([`PerAttemptRegion::as_str`]) and every by-value owned emit
 /// surface — [`From<T> for String`], [`From<T> for
@@ -5747,7 +5744,7 @@ impl From<PerAttemptRegion> for std::ffi::CString {
 /// variant is pinned by
 /// [`tests::test_per_attempt_region_into_boxed_cstr_carries_trailing_nul`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shrunk-owned
+/// Typed primitives: the by-value shrunk-owned
 /// NUL-terminated C-string emit surface is a typed-primitive site
 /// on [`PerAttemptRegion`] itself (one
 /// `From<PerAttemptRegion> for Box<std::ffi::CStr>` impl routing
@@ -5756,7 +5753,7 @@ impl From<PerAttemptRegion> for std::ffi::CString {
 /// a per-consumer
 /// `std::ffi::CString::new(region.as_str()).unwrap().into_boxed_c_str()`
 /// restatement at every downstream site that accepts
-/// `impl Into<Box<std::ffi::CStr>>`. THEORY.md §VI.1 one-oracle:
+/// `impl Into<Box<std::ffi::CStr>>`. One-oracle:
 /// the canonical label is named at one site
 /// ([`PerAttemptRegion::as_str`]) and every NUL-terminated C-string
 /// emit surface — [`From<T> for std::ffi::CString`], this
@@ -5877,7 +5874,7 @@ impl From<PerAttemptRegion> for Box<std::ffi::CStr> {
 /// clone — at every variant is pinned by
 /// [`tests::test_per_attempt_region_into_arc_cstr_shares_label_across_clones`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shared-owned
+/// Typed primitives: the by-value shared-owned
 /// NUL-terminated C-string emit surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one
 /// `From<PerAttemptRegion> for std::sync::Arc<std::ffi::CStr>` impl
@@ -5886,7 +5883,7 @@ impl From<PerAttemptRegion> for Box<std::ffi::CStr> {
 /// `std::sync::Arc::<std::ffi::CStr>::from(std::ffi::CString::new(
 /// region.as_str()).unwrap())` restatement at every downstream site
 /// that accepts `impl Into<std::sync::Arc<std::ffi::CStr>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`PerAttemptRegion::as_str`]) and every NUL-terminated
 /// C-string emit surface — [`From<T> for std::ffi::CString`],
 /// [`From<T> for Box<std::ffi::CStr>`], this
@@ -6011,7 +6008,7 @@ impl From<PerAttemptRegion> for std::sync::Arc<std::ffi::CStr> {
 /// — at every variant is pinned by
 /// [`tests::test_per_attempt_region_into_rc_cstr_shares_label_across_clones`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value thread-local shared-
+/// Typed primitives: the by-value thread-local shared-
 /// owned NUL-terminated C-string emit surface is a typed-primitive site
 /// on [`PerAttemptRegion`] itself (one `From<PerAttemptRegion> for
 /// std::rc::Rc<std::ffi::CStr>` impl routing through the owned
@@ -6019,8 +6016,7 @@ impl From<PerAttemptRegion> for std::sync::Arc<std::ffi::CStr> {
 /// [`std::rc::Rc::<std::ffi::CStr>::from`]), not a per-consumer
 /// `std::rc::Rc::<std::ffi::CStr>::from(std::ffi::CString::new(
 /// region.as_str()).unwrap())` restatement at every downstream site
-/// that accepts `impl Into<std::rc::Rc<std::ffi::CStr>>`. THEORY.md
-/// §VI.1 one-oracle: the canonical label is named at one site
+/// that accepts `impl Into<std::rc::Rc<std::ffi::CStr>>`. One-oracle: the canonical label is named at one site
 /// ([`PerAttemptRegion::as_str`]) and every NUL-terminated C-string
 /// emit surface — [`From<T> for std::ffi::CString`], [`From<T> for
 /// Box<std::ffi::CStr>`], [`From<T> for std::sync::Arc<std::ffi::CStr>`],
@@ -6129,7 +6125,7 @@ impl From<PerAttemptRegion> for std::rc::Rc<std::ffi::CStr> {
 /// canonical label at every variant is pinned by
 /// [`tests::test_per_attempt_region_from_into_static_cstr_round_trips_through_to_str`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value static-lifetime
+/// Typed primitives: the by-value static-lifetime
 /// NUL-terminated C-string emit surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one `From<PerAttemptRegion> for
 /// &'static std::ffi::CStr` impl matching over the variants at per-
@@ -6137,7 +6133,7 @@ impl From<PerAttemptRegion> for std::rc::Rc<std::ffi::CStr> {
 /// `CStr::from_bytes_with_nul(&{ let mut b = region.as_str().as_bytes()
 /// .to_vec(); b.push(0); b }).unwrap()` restatement at every downstream
 /// site that accepts `impl Into<&'static std::ffi::CStr>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`PerAttemptRegion::as_str`]) and every by-value static-
 /// lifetime emit surface — [`From<T> for &'static str`],
 /// [`From<T> for &'static [u8]`],
@@ -6278,7 +6274,7 @@ impl From<PerAttemptRegion> for &'static std::ffi::CStr {
 /// [`std::borrow::Cow::Owned`]) at every variant is pinned by
 /// [`tests::test_per_attempt_region_into_cow_static_cstr_is_borrowed`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value borrowed/owned-
+/// Typed primitives: the by-value borrowed/owned-
 /// frontier NUL-terminated C-string emit surface is a typed-
 /// primitive site on [`PerAttemptRegion`] itself (one
 /// `From<PerAttemptRegion> for Cow<'static, std::ffi::CStr>` impl
@@ -6287,7 +6283,7 @@ impl From<PerAttemptRegion> for &'static std::ffi::CStr {
 /// `Cow::Borrowed(<&'static CStr>::from(region))` restatement at
 /// every downstream site that accepts
 /// `impl Into<Cow<'static, std::ffi::CStr>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label + trailing-NUL
+/// One-oracle: the canonical label + trailing-NUL
 /// is named at the [`&'static std::ffi::CStr`] emit oracle (which
 /// itself reads the per-variant `c"..."` literals agreeing with
 /// [`PerAttemptRegion::as_str`] byte-for-byte), and every by-value
@@ -6408,7 +6404,7 @@ impl From<PerAttemptRegion> for std::borrow::Cow<'static, std::ffi::CStr> {
 /// NUL-terminated C-string input is pinned by
 /// [`tests::test_per_attempt_region_try_from_cstr_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-reference NUL-terminated
+/// Typed primitives: the by-reference NUL-terminated
 /// C-string parse surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one `TryFrom<&std::ffi::CStr>` impl
 /// routing through [`std::ffi::CStr::to_str`] and the by-reference
@@ -6416,7 +6412,7 @@ impl From<PerAttemptRegion> for std::borrow::Cow<'static, std::ffi::CStr> {
 /// `PerAttemptRegion::try_from(c.to_str().map_err(...)?)` restatement
 /// at every downstream site that types its parse contract as
 /// `impl for<'a> TryFrom<&'a std::ffi::CStr>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at
+/// One-oracle: the canonical label grammar is named at
 /// one site ([`PerAttemptRegion::as_str`]), inverted at one site
 /// ([`PerAttemptRegion::from_str`]), and every parse surface —
 /// [`std::str::FromStr`], [`serde::Deserialize`], [`TryFrom<&str>`],
@@ -6583,7 +6579,7 @@ impl TryFrom<&std::ffi::CStr> for PerAttemptRegion {
 /// NUL-terminated C-string input is pinned by
 /// [`tests::test_per_attempt_region_try_from_cstring_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value owned-buffer
+/// Typed primitives: the by-value owned-buffer
 /// NUL-terminated C-string try-conversion surface is a typed-primitive
 /// site on [`PerAttemptRegion`] itself (one `TryFrom<std::ffi::CString>`
 /// impl routing through the borrowed [`TryFrom<&std::ffi::CStr>`] parse
@@ -6591,7 +6587,7 @@ impl TryFrom<&std::ffi::CStr> for PerAttemptRegion {
 /// `PerAttemptRegion::try_from(c.as_c_str())` bridge at every downstream
 /// site that types its parse contract as `impl TryFrom<std::ffi::CString>`
 /// rather than [`TryFrom<&std::ffi::CStr>`] or [`std::str::FromStr`].
-/// THEORY.md §VI.1 generation over composition: the canonical-label
+/// Generation over composition: the canonical-label
 /// grammar is named at one site ([`PerAttemptRegion::as_str`]), inverted
 /// at one site ([`PerAttemptRegion::from_str`]), and every parse surface —
 /// [`std::str::FromStr`], [`serde::Deserialize`], [`TryFrom<&str>`],
@@ -6694,7 +6690,7 @@ impl TryFrom<std::ffi::CString> for PerAttemptRegion {
 /// shrunk-owned NUL-terminated C-string input is pinned by
 /// [`tests::test_per_attempt_region_try_from_box_cstr_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the shrunk-owned NUL-terminated
+/// Typed primitives: the shrunk-owned NUL-terminated
 /// C-string try-conversion parse surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one `TryFrom<Box<std::ffi::CStr>>`
 /// impl routing through [`std::boxed::Box::<std::ffi::CStr>::as_ref`]
@@ -6702,7 +6698,7 @@ impl TryFrom<std::ffi::CString> for PerAttemptRegion {
 /// per-consumer `PerAttemptRegion::try_from(boxed.as_ref())` bridge
 /// at every downstream site that types its parse contract as
 /// `impl TryFrom<Box<std::ffi::CStr>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// One-oracle: the canonical label grammar is named
 /// at one site ([`PerAttemptRegion::as_str`]), inverted at one site
 /// ([`PerAttemptRegion::from_str`]), and every parse surface —
 /// including this shrunk-owned NUL-terminated C-string peer — reads
@@ -6816,7 +6812,7 @@ impl TryFrom<Box<std::ffi::CStr>> for PerAttemptRegion {
 /// owned NUL-terminated C-string input is pinned by
 /// [`tests::test_per_attempt_region_try_from_arc_cstr_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the shared-owned NUL-terminated
+/// Typed primitives: the shared-owned NUL-terminated
 /// C-string try-conversion parse surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one
 /// `TryFrom<std::sync::Arc<std::ffi::CStr>>` impl routing through
@@ -6825,7 +6821,7 @@ impl TryFrom<Box<std::ffi::CStr>> for PerAttemptRegion {
 /// `PerAttemptRegion::try_from(shared.as_ref())` bridge at every
 /// downstream site that types its parse contract as
 /// `impl TryFrom<std::sync::Arc<std::ffi::CStr>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at
+/// One-oracle: the canonical label grammar is named at
 /// one site ([`PerAttemptRegion::as_str`]), inverted at one site
 /// ([`PerAttemptRegion::from_str`]), and every parse surface —
 /// including this shared-owned NUL-terminated C-string peer — reads
@@ -6959,7 +6955,7 @@ impl TryFrom<std::sync::Arc<std::ffi::CStr>> for PerAttemptRegion {
 /// local shared-owned NUL-terminated C-string input is pinned by
 /// [`tests::test_per_attempt_region_try_from_rc_cstr_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the thread-local shared-owned
+/// Typed primitives: the thread-local shared-owned
 /// NUL-terminated C-string try-conversion parse surface is a
 /// typed-primitive site on [`PerAttemptRegion`] itself (one
 /// `TryFrom<std::rc::Rc<std::ffi::CStr>>` impl routing through
@@ -6968,7 +6964,7 @@ impl TryFrom<std::sync::Arc<std::ffi::CStr>> for PerAttemptRegion {
 /// `PerAttemptRegion::try_from(rc.as_ref())` bridge at every
 /// downstream site that types its parse contract as
 /// `impl TryFrom<std::rc::Rc<std::ffi::CStr>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// One-oracle: the canonical label grammar is named
 /// at one site ([`PerAttemptRegion::as_str`]), inverted at one site
 /// ([`PerAttemptRegion::from_str`]), and every parse surface —
 /// including this thread-local shared-owned NUL-terminated C-string
@@ -7083,7 +7079,7 @@ impl TryFrom<std::rc::Rc<std::ffi::CStr>> for PerAttemptRegion {
 /// across both [`Cow`] branches is pinned by
 /// [`tests::test_per_attempt_region_try_from_cow_cstr_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value [`Cow<'_,
+/// Typed primitives: the by-value [`Cow<'_,
 /// std::ffi::CStr>`] try-conversion parse surface is a typed-primitive
 /// site on [`PerAttemptRegion`] itself (one `TryFrom<Cow<'_,
 /// std::ffi::CStr>>` impl routing through the borrowed
@@ -7092,7 +7088,7 @@ impl TryFrom<std::rc::Rc<std::ffi::CStr>> for PerAttemptRegion {
 /// every downstream site that types its parse contract as `impl
 /// for<'a> TryFrom<Cow<'a, std::ffi::CStr>>` rather than
 /// [`TryFrom<&std::ffi::CStr>`] or [`TryFrom<std::ffi::CString>`].
-/// THEORY.md §VI.1 one-oracle: the canonical-label grammar is named at
+/// One-oracle: the canonical-label grammar is named at
 /// one site ([`PerAttemptRegion::as_str`]), inverted at one site
 /// ([`PerAttemptRegion::from_str`]), and every parse surface —
 /// including this borrowed/owned-frontier NUL-terminated C-string peer
@@ -7192,7 +7188,7 @@ impl<'a> TryFrom<std::borrow::Cow<'a, std::ffi::CStr>> for PerAttemptRegion {
 /// OS-string input is pinned by
 /// [`tests::test_per_attempt_region_try_from_os_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-reference OS-string parse
+/// Typed primitives: the by-reference OS-string parse
 /// surface is a typed-primitive site on [`PerAttemptRegion`] itself
 /// (one `TryFrom<&std::ffi::OsStr>` impl routing through
 /// [`std::ffi::OsStr::to_str`] and the by-reference [`TryFrom<&str>`]
@@ -7200,7 +7196,7 @@ impl<'a> TryFrom<std::borrow::Cow<'a, std::ffi::CStr>> for PerAttemptRegion {
 /// `PerAttemptRegion::try_from(os_str.to_str().ok_or(...)?)`
 /// restatement at every downstream site that types its parse contract
 /// as `impl for<'a> TryFrom<&'a std::ffi::OsStr>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at
+/// One-oracle: the canonical label grammar is named at
 /// one site ([`PerAttemptRegion::as_str`]), inverted at one site
 /// ([`PerAttemptRegion::from_str`]), and every parse surface —
 /// [`std::str::FromStr`], [`serde::Deserialize`], [`TryFrom<&str>`],
@@ -7358,7 +7354,7 @@ impl TryFrom<&std::ffi::OsStr> for PerAttemptRegion {
 /// owned-buffer input is pinned by
 /// [`tests::test_per_attempt_region_try_from_os_string_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.1 typed primitives: the by-value owned-buffer OS-string
+/// Typed primitives: the by-value owned-buffer OS-string
 /// try-conversion surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one `TryFrom<std::ffi::OsString>` impl
 /// routing through the borrowed [`TryFrom<&std::ffi::OsStr>`] parse peer
@@ -7366,8 +7362,8 @@ impl TryFrom<&std::ffi::OsStr> for PerAttemptRegion {
 /// `PerAttemptRegion::try_from(buf.as_os_str())` bridge at every
 /// downstream site that types its parse contract as
 /// `impl TryFrom<std::ffi::OsString>` rather than
-/// [`TryFrom<&std::ffi::OsStr>`] or [`std::str::FromStr`]. THEORY.md §VI.1
-/// generation over composition: the canonical-label grammar is named at
+/// [`TryFrom<&std::ffi::OsStr>`] or [`std::str::FromStr`].
+/// Generation over composition: the canonical-label grammar is named at
 /// one site ([`PerAttemptRegion::as_str`]), inverted at one site
 /// ([`PerAttemptRegion::from_str`]), and every parse surface —
 /// [`std::str::FromStr`], [`serde::Deserialize`], [`TryFrom<&str>`],
@@ -7501,7 +7497,7 @@ impl TryFrom<std::ffi::OsString> for PerAttemptRegion {
 /// filesystem-path input is pinned by
 /// [`tests::test_per_attempt_region_try_from_path_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-reference filesystem-path
+/// Typed primitives: the by-reference filesystem-path
 /// parse surface is a typed-primitive site on [`PerAttemptRegion`] itself
 /// (one `TryFrom<&std::path::Path>` impl routing through
 /// [`std::path::Path::as_os_str`] and the by-reference
@@ -7509,7 +7505,7 @@ impl TryFrom<std::ffi::OsString> for PerAttemptRegion {
 /// `PerAttemptRegion::try_from(path.as_os_str())` bridge at every
 /// downstream site that types its parse contract as
 /// `impl for<'a> TryFrom<&'a std::path::Path>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at
+/// One-oracle: the canonical label grammar is named at
 /// one site ([`PerAttemptRegion::as_str`]), inverted at one site
 /// ([`PerAttemptRegion::from_str`]), and every parse surface —
 /// [`std::str::FromStr`], [`serde::Deserialize`], [`TryFrom<&str>`],
@@ -7629,7 +7625,7 @@ impl TryFrom<&std::path::Path> for PerAttemptRegion {
 /// filesystem-path input is pinned by
 /// [`tests::test_per_attempt_region_try_from_path_buf_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value owned-buffer filesystem-
+/// Typed primitives: the by-value owned-buffer filesystem-
 /// path parse surface is a typed-primitive site on [`PerAttemptRegion`]
 /// itself (one `TryFrom<std::path::PathBuf>` impl routing through
 /// [`std::path::PathBuf::as_path`] and the by-reference
@@ -7637,7 +7633,7 @@ impl TryFrom<&std::path::Path> for PerAttemptRegion {
 /// `PerAttemptRegion::try_from(path_buf.as_path())` bridge at every
 /// downstream site that types its parse contract as
 /// `impl TryFrom<std::path::PathBuf>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at
+/// One-oracle: the canonical label grammar is named at
 /// one site ([`PerAttemptRegion::as_str`]), inverted at one site
 /// ([`PerAttemptRegion::from_str`]), and every parse surface — including
 /// this owned-buffer filesystem-path peer — reads through it.
@@ -7760,7 +7756,7 @@ impl TryFrom<std::path::PathBuf> for PerAttemptRegion {
 /// borrowed/owned OS-string input is pinned by
 /// [`tests::test_per_attempt_region_try_from_cow_os_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the borrowed/owned-frontier OS-
+/// Typed primitives: the borrowed/owned-frontier OS-
 /// string try-conversion parse surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one `TryFrom<Cow<'_, std::ffi::OsStr>>`
 /// impl routing through [`std::borrow::Cow::as_ref`] and the by-
@@ -7768,7 +7764,7 @@ impl TryFrom<std::path::PathBuf> for PerAttemptRegion {
 /// `PerAttemptRegion::try_from(cow.as_ref())` bridge at every downstream
 /// site that types its parse contract as
 /// `impl for<'a> TryFrom<Cow<'a, std::ffi::OsStr>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at
+/// One-oracle: the canonical label grammar is named at
 /// one site ([`PerAttemptRegion::as_str`]), inverted at one site
 /// ([`PerAttemptRegion::from_str`]), and every parse surface — including
 /// this borrowed/owned-frontier OS-string peer — reads through it.
@@ -7904,7 +7900,7 @@ impl<'a> TryFrom<std::borrow::Cow<'a, std::ffi::OsStr>> for PerAttemptRegion {
 /// borrowed/owned filesystem-path input is pinned by
 /// [`tests::test_per_attempt_region_try_from_cow_path_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the borrowed/owned-frontier
+/// Typed primitives: the borrowed/owned-frontier
 /// filesystem-path try-conversion parse surface is a typed-primitive
 /// site on [`PerAttemptRegion`] itself (one `TryFrom<Cow<'_,
 /// std::path::Path>>` impl routing through [`std::borrow::Cow::as_ref`]
@@ -7912,7 +7908,7 @@ impl<'a> TryFrom<std::borrow::Cow<'a, std::ffi::OsStr>> for PerAttemptRegion {
 /// per-consumer `PerAttemptRegion::try_from(cow.as_ref())` bridge at
 /// every downstream site that types its parse contract as
 /// `impl for<'a> TryFrom<Cow<'a, std::path::Path>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at
+/// One-oracle: the canonical label grammar is named at
 /// one site ([`PerAttemptRegion::as_str`]), inverted at one site
 /// ([`PerAttemptRegion::from_str`]), and every parse surface —
 /// including this borrowed/owned-frontier filesystem-path peer — reads
@@ -8000,7 +7996,7 @@ impl<'a> TryFrom<std::borrow::Cow<'a, std::path::Path>> for PerAttemptRegion {
 /// shrunk-owned OS-string input is pinned by
 /// [`tests::test_per_attempt_region_try_from_box_os_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the shrunk-owned OS-string
+/// Typed primitives: the shrunk-owned OS-string
 /// try-conversion parse surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one `TryFrom<Box<std::ffi::OsStr>>` impl
 /// routing through [`std::boxed::Box::<std::ffi::OsStr>::as_ref`] and
@@ -8008,7 +8004,7 @@ impl<'a> TryFrom<std::borrow::Cow<'a, std::path::Path>> for PerAttemptRegion {
 /// per-consumer `PerAttemptRegion::try_from(boxed.as_ref())` bridge at
 /// every downstream site that types its parse contract as
 /// `impl TryFrom<Box<std::ffi::OsStr>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at
+/// One-oracle: the canonical label grammar is named at
 /// one site ([`PerAttemptRegion::as_str`]), inverted at one site
 /// ([`PerAttemptRegion::from_str`]), and every parse surface —
 /// including this shrunk-owned OS-string peer — reads through it.
@@ -8079,7 +8075,7 @@ impl TryFrom<Box<std::ffi::OsStr>> for PerAttemptRegion {
 /// borrowed/owned-frontier filesystem-path parse opening order at this
 /// filesystem-path frontier's borrowed/owned-frontier sibling above.
 ///
-/// THEORY.md §V.4 typed primitives: the shrunk-owned filesystem-path
+/// Typed primitives: the shrunk-owned filesystem-path
 /// try-conversion parse surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one `TryFrom<Box<std::path::Path>>`
 /// impl routing through [`std::boxed::Box::<std::path::Path>::as_ref`]
@@ -8087,7 +8083,7 @@ impl TryFrom<Box<std::ffi::OsStr>> for PerAttemptRegion {
 /// per-consumer `PerAttemptRegion::try_from(boxed.as_ref())` bridge at
 /// every downstream site that types its parse contract as
 /// `impl TryFrom<Box<std::path::Path>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at
+/// One-oracle: the canonical label grammar is named at
 /// one site ([`PerAttemptRegion::as_str`]), inverted at one site
 /// ([`PerAttemptRegion::from_str`]), and every parse surface —
 /// including this shrunk-owned filesystem-path peer — reads through it.
@@ -8176,14 +8172,14 @@ impl TryFrom<Box<std::path::Path>> for PerAttemptRegion {
 /// canonical shared-owned OS-string input is pinned by
 /// [`tests::test_per_attempt_region_try_from_arc_os_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the shared-owned OS-string parse
+/// Typed primitives: the shared-owned OS-string parse
 /// surface is a typed-primitive site on [`PerAttemptRegion`] itself
 /// (one [`TryFrom<Arc<std::ffi::OsStr>>`] impl routing through
 /// [`Arc::<std::ffi::OsStr>::as_ref`] and
 /// [`TryFrom<&std::ffi::OsStr>`]), not a per-consumer
 /// `.as_ref().to_str().parse()` composition at every downstream site
 /// that types its parse contract as
-/// `impl TryFrom<Arc<std::ffi::OsStr>>`. THEORY.md §VI.1 one-oracle:
+/// `impl TryFrom<Arc<std::ffi::OsStr>>`. One-oracle:
 /// the canonical label grammar is named at one site
 /// ([`PerAttemptRegion::as_str`]), inverted at one site
 /// ([`PerAttemptRegion::from_str`]), and every parse surface —
@@ -8276,13 +8272,13 @@ impl TryFrom<std::sync::Arc<std::ffi::OsStr>> for PerAttemptRegion {
 /// canonical shared-owned filesystem-path input is pinned by
 /// [`tests::test_per_attempt_region_try_from_arc_path_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the shared-owned filesystem-path
+/// Typed primitives: the shared-owned filesystem-path
 /// parse surface is a typed-primitive site on [`PerAttemptRegion`]
 /// itself (one [`TryFrom<Arc<std::path::Path>>`] impl routing through
 /// [`Arc::<std::path::Path>::as_ref`] and [`TryFrom<&std::path::Path>`]),
 /// not a per-consumer `.as_ref().as_os_str().to_str().parse()`
 /// composition at every downstream site that types its parse contract
-/// as `impl TryFrom<Arc<std::path::Path>>`. THEORY.md §VI.1 one-oracle:
+/// as `impl TryFrom<Arc<std::path::Path>>`. One-oracle:
 /// the canonical label grammar is named at one site
 /// ([`PerAttemptRegion::as_str`]), inverted at one site
 /// ([`PerAttemptRegion::from_str`]), and every parse surface —
@@ -8385,7 +8381,7 @@ impl TryFrom<std::sync::Arc<std::path::Path>> for PerAttemptRegion {
 /// by
 /// [`tests::test_per_attempt_region_try_from_rc_os_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the thread-local shared-owned
+/// Typed primitives: the thread-local shared-owned
 /// OS-string parse surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one
 /// [`TryFrom<std::rc::Rc<std::ffi::OsStr>>`] impl routing through
@@ -8393,7 +8389,7 @@ impl TryFrom<std::sync::Arc<std::path::Path>> for PerAttemptRegion {
 /// [`TryFrom<&std::ffi::OsStr>`]), not a per-consumer
 /// `.as_ref().to_str().parse()` composition at every downstream site
 /// that types its parse contract as
-/// `impl TryFrom<Rc<std::ffi::OsStr>>`. THEORY.md §VI.1 one-oracle:
+/// `impl TryFrom<Rc<std::ffi::OsStr>>`. One-oracle:
 /// the canonical label grammar is named at one site
 /// ([`PerAttemptRegion::as_str`]), inverted at one site
 /// ([`PerAttemptRegion::from_str`]), and every parse surface —
@@ -8479,14 +8475,14 @@ impl TryFrom<std::rc::Rc<std::ffi::OsStr>> for PerAttemptRegion {
 /// pinned by
 /// [`tests::test_per_attempt_region_try_from_rc_path_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the thread-local shared-owned
+/// Typed primitives: the thread-local shared-owned
 /// filesystem-path parse surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one
 /// [`TryFrom<std::rc::Rc<std::path::Path>>`] impl routing through
 /// [`Rc::<std::path::Path>::as_ref`] and
 /// [`TryFrom<&std::path::Path>`]), not a per-consumer
 /// `.as_ref().as_os_str().to_str().parse()` composition at every
-/// downstream site. THEORY.md §VI.1 one-oracle: the canonical label
+/// downstream site. One-oracle: the canonical label
 /// grammar is named at one site ([`PerAttemptRegion::as_str`]),
 /// inverted at one site ([`PerAttemptRegion::from_str`]), and every
 /// parse surface — including this thread-local shared-owned
@@ -8571,13 +8567,13 @@ impl TryFrom<std::rc::Rc<std::path::Path>> for PerAttemptRegion {
 /// variant × known-bad label pair is pinned by
 /// [`tests::test_per_attempt_region_partial_eq_str_rejects_non_canonical_labels`].
 ///
-/// THEORY.md §V.4 typed primitives: the borrowed UTF-8 comparison
+/// Typed primitives: the borrowed UTF-8 comparison
 /// surface is a typed-primitive site on [`PerAttemptRegion`] itself
 /// (one [`PartialEq<str>`] impl routing through
 /// [`PerAttemptRegion::as_str`]), not a per-consumer
 /// `region.as_str() == label` restatement at every downstream site
 /// that asks whether a [`PerAttemptRegion`] value names a specific
-/// canonical label. THEORY.md §VI.1 one-oracle: the canonical label
+/// canonical label. One-oracle: the canonical label
 /// is named at one site ([`PerAttemptRegion::as_str`]), and every
 /// borrowed UTF-8 surface — the [`AsRef<str>`] borrowed-view sibling
 /// yielding `&str`, this [`PartialEq<str>`] answering a boolean
@@ -8659,14 +8655,14 @@ impl PartialEq<str> for PerAttemptRegion {
 /// variant × known-bad label pair is pinned by
 /// [`tests::test_per_attempt_region_partial_eq_str_ref_rejects_non_canonical_labels`].
 ///
-/// THEORY.md §V.4 typed primitives: the borrowed UTF-8 `&str`-
+/// Typed primitives: the borrowed UTF-8 `&str`-
 /// receiver comparison surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one [`PartialEq<&str>`] impl
 /// routing through [`PerAttemptRegion::as_str`]), not a per-consumer
 /// `region.as_str() == label_ref` restatement at every downstream
 /// site that asks whether a [`PerAttemptRegion`] value names a
 /// specific canonical label through an already-borrowed `&str`
-/// handle. THEORY.md §VI.1 one-oracle: the canonical label is named
+/// handle. One-oracle: the canonical label is named
 /// at one site ([`PerAttemptRegion::as_str`]), and every borrowed
 /// UTF-8 surface — the [`AsRef<str>`] borrowed-view sibling yielding
 /// `&str`, the [`PartialEq<str>`] dereffed-str-receiver sibling
@@ -8750,14 +8746,14 @@ impl PartialEq<&str> for PerAttemptRegion {
 /// every (variant, label) pair is pinned by
 /// [`tests::test_partial_eq_per_attempt_region_symmetric_with_forward_direction`].
 ///
-/// THEORY.md §III typed primitives: the reverse-direction borrowed
+/// Typed primitives: the reverse-direction borrowed
 /// UTF-8 comparison surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one [`PartialEq<PerAttemptRegion>`]
 /// impl on [`str`] routing through [`PerAttemptRegion::as_str`]),
 /// not a per-consumer `label == region.as_str()` restatement at
 /// every downstream site that asks whether a borrowed UTF-8 handle
 /// names the same canonical per-attempt-region label as a
-/// [`PerAttemptRegion`] value. THEORY.md §VI.1 one-oracle: the
+/// [`PerAttemptRegion`] value. One-oracle: the
 /// canonical label is named at one site
 /// ([`PerAttemptRegion::as_str`]), and every borrowed UTF-8
 /// comparison surface — the forward-direction
@@ -8800,7 +8796,7 @@ impl PartialEq<PerAttemptRegion> for str {
 /// == <PerAttemptRegion as PartialEq<&str>>::eq(&region, &label_ref)`
 /// holds by construction at every `(label_ref, region)` pair.
 ///
-/// THEORY.md §III typed primitives: the reverse-direction borrowed
+/// Typed primitives: the reverse-direction borrowed
 /// UTF-8 `&str`-receiver comparison surface is a typed-primitive
 /// site on [`PerAttemptRegion`] itself (one
 /// [`PartialEq<PerAttemptRegion>`] impl on [`&str`] routing through
@@ -8808,7 +8804,7 @@ impl PartialEq<PerAttemptRegion> for str {
 /// `label_ref == region.as_str()` restatement at every downstream
 /// site that asks whether a borrowed `&str` handle names the same
 /// canonical per-attempt-region label as a [`PerAttemptRegion`]
-/// value. THEORY.md §VI.1 one-oracle: the canonical label is named
+/// value. One-oracle: the canonical label is named
 /// at one site ([`PerAttemptRegion::as_str`]), and this reverse-
 /// direction `&str`-receiver surface reads through the same one-
 /// oracle discipline the three sibling comparison surfaces
@@ -8894,14 +8890,13 @@ impl PartialEq<PerAttemptRegion> for &str {
 /// pair is pinned by
 /// [`tests::test_per_attempt_region_partial_eq_string_rejects_non_canonical_labels`].
 ///
-/// THEORY.md §V.4 typed primitives: the owned UTF-8 comparison surface
+/// Typed primitives: the owned UTF-8 comparison surface
 /// is a typed-primitive site on [`PerAttemptRegion`] itself (one
 /// [`PartialEq<String>`] impl routing through [`PerAttemptRegion::as_str`]
 /// and [`String::as_str`]), not a per-consumer
 /// `region.as_str() == owned.as_str()` restatement at every downstream
 /// site that asks whether a [`PerAttemptRegion`] value names a specific
-/// canonical label through a heap-owned [`String`] handle. THEORY.md
-/// §VI.1 one-oracle: the canonical label is named at one site
+/// canonical label through a heap-owned [`String`] handle. One-oracle: the canonical label is named at one site
 /// ([`PerAttemptRegion::as_str`]), and every UTF-8 comparison surface —
 /// the [`PartialEq<str>`] dereffed-str-receiver, the [`PartialEq<&str>`]
 /// borrowed-&str-receiver, this [`PartialEq<String>`] heap-owned-receiver
@@ -8972,14 +8967,14 @@ impl PartialEq<String> for PerAttemptRegion {
 /// same canonical-label oracle at the same borrowed byte-slice
 /// frontier, projected onto the digest-algorithm ladder.
 ///
-/// THEORY.md §III typed primitives: the borrowed byte-slice
+/// Typed primitives: the borrowed byte-slice
 /// comparison surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one [`PartialEq<[u8]>`] impl routing
 /// through [`<PerAttemptRegion as AsRef<[u8]>>::as_ref`]), not a
 /// per-consumer restatement at every downstream site that asks
 /// whether a [`PerAttemptRegion`] value names a specific canonical
-/// label through an already-borrowed `&[u8]` handle. THEORY.md §VI.1
-/// one-oracle: the canonical label is named at one site
+/// label through an already-borrowed `&[u8]` handle.
+/// One-oracle: the canonical label is named at one site
 /// ([`PerAttemptRegion::as_str`], projected onto bytes through
 /// [`str::as_bytes`] at the [`AsRef<[u8]>`] surface), and every
 /// borrowed byte-slice surface — the [`AsRef<[u8]>`] borrowed-view
@@ -9016,14 +9011,14 @@ impl PartialEq<[u8]> for PerAttemptRegion {
 /// bytes as the sibling receiver-shape peer at zero allocation and
 /// zero intermediate buffer.
 ///
-/// THEORY.md §III typed primitives: the borrowed byte-slice
+/// Typed primitives: the borrowed byte-slice
 /// `&[u8]`-receiver comparison surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one [`PartialEq<&[u8]>`] impl routing
 /// through [`<PerAttemptRegion as AsRef<[u8]>>::as_ref`]), not a
 /// per-consumer restatement at every downstream site that asks
 /// whether a [`PerAttemptRegion`] value names a specific canonical
 /// label through an already-borrowed `&[u8]` handle without an
-/// explicit `*` deref. THEORY.md §VI.1 one-oracle: the canonical
+/// explicit `*` deref. One-oracle: the canonical
 /// label is named at one site ([`PerAttemptRegion::as_str`],
 /// projected onto bytes through [`str::as_bytes`] at the
 /// [`AsRef<[u8]>`] surface), and this [`PartialEq<&[u8]>`] receiver-
@@ -9091,7 +9086,7 @@ impl PartialEq<&[u8]> for PerAttemptRegion {
 /// typed sum itself already carries at lines 8586 / 8677 (forward) /
 /// 8770 / 8816 (reverse).
 ///
-/// THEORY.md §III typed primitives: the reverse-direction borrowed byte-
+/// Typed primitives: the reverse-direction borrowed byte-
 /// slice comparison surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one [`PartialEq<PerAttemptRegion>`] impl
 /// on [`[u8]`] routing through
@@ -9099,7 +9094,7 @@ impl PartialEq<&[u8]> for PerAttemptRegion {
 /// `label_bytes == <PerAttemptRegion as AsRef<[u8]>>::as_ref(&region)`
 /// restatement at every downstream site that asks whether an already-
 /// borrowed `&[u8]` handle names the same canonical per-attempt-region
-/// label as a [`PerAttemptRegion`] value. THEORY.md §VI.1 one-oracle:
+/// label as a [`PerAttemptRegion`] value. One-oracle:
 /// the canonical label is named at one site
 /// ([`PerAttemptRegion::as_str`]), and every borrowed byte-slice
 /// comparison surface — the forward-direction
@@ -9145,7 +9140,7 @@ impl PartialEq<PerAttemptRegion> for [u8] {
 /// == <PerAttemptRegion as PartialEq<&[u8]>>::eq(&region, &bytes_ref)`
 /// holds by construction at every `(bytes_ref, region)` pair.
 ///
-/// THEORY.md §III typed primitives: the reverse-direction borrowed byte-
+/// Typed primitives: the reverse-direction borrowed byte-
 /// slice `&[u8]`-receiver comparison surface is a typed-primitive site on
 /// [`PerAttemptRegion`] itself (one [`PartialEq<PerAttemptRegion>`] impl
 /// on [`&[u8]`] routing through
@@ -9153,7 +9148,7 @@ impl PartialEq<PerAttemptRegion> for [u8] {
 /// `label_bytes_ref == <PerAttemptRegion as AsRef<[u8]>>::as_ref(&region)`
 /// restatement at every downstream site that asks whether an already-
 /// borrowed `&[u8]` handle names the same canonical per-attempt-region
-/// label as a [`PerAttemptRegion`] value. THEORY.md §VI.1 one-oracle:
+/// label as a [`PerAttemptRegion`] value. One-oracle:
 /// the canonical label is named at one site
 /// ([`PerAttemptRegion::as_str`]), and this reverse-direction `&[u8]`-
 /// receiver surface reads through the same one-oracle discipline the
@@ -9238,10 +9233,10 @@ impl RetryPolicy {
     /// flag (e.g., `--allow-retry`, a config knob) consumes this
     /// primitive without retyping the conditional.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the safe-mode-conditional
+    /// One-oracle discipline: the safe-mode-conditional
     /// retry-policy partition is named at one site (here), not retyped
-    /// as the inline five-line `if` stanza per consumer. THEORY.md §V.4
-    /// honesty channel: the named constructor surfaces "this is the
+    /// as the inline five-line `if` stanza per consumer.
+    /// Honesty channel: the named constructor surfaces "this is the
     /// boolean-conditional dispatch between the canonical network
     /// schedule and the no-retry shape" as the load-bearing structural
     /// reading at the consumer site, making the choice between the two
@@ -9280,7 +9275,7 @@ impl RetryPolicy {
     /// hand as the `retries: u32` argument to the two
     /// [`crate::infrastructure::attic::AtticClient`] retry-driven methods.
     /// Two identically-shaped bodies past the ≥2 duplication threshold
-    /// forge's CLAUDE.md PRIME DIRECTIVE and THEORY.md §VI.1's
+    /// forge's CLAUDE.md PRIME DIRECTIVE and the
     /// three-times rule enforce for command-module recurrences of a
     /// retry-schedule literal.
     ///
@@ -9427,7 +9422,7 @@ impl RetryPolicy {
     /// (e.g., an upper bound to prevent caller-supplied retry-storm
     /// budgets) gets named at this one typed-primitive site instead of
     /// retyped per consumer — exactly the structural seam
-    /// THEORY §VI.1 one-oracle discipline forecloses.
+    /// one-oracle discipline forecloses.
     ///
     /// Not marked `const fn`: the `.max(1)` clamp via the `Ord` trait
     /// is not const-callable. Same discipline as the sibling
@@ -9466,7 +9461,7 @@ impl RetryPolicy {
     /// `commands/flux.rs::FLUX_POLL_BACKOFF`,
     /// `commands/github_runner_ci.rs::GITHUB_RUNNER_ROLLOUT_POLL_BACKOFF`,
     /// `commands/migrations.rs::SHINKA_MIGRATION_POLL_BACKOFF`).
-    /// Seven identically-shaped bodies past THEORY.md §VI.1's
+    /// Seven identically-shaped bodies past the
     /// three-times-is-a-law threshold — this primitive is the
     /// law-redeeming consolidation for the wall-clock-bounded polling
     /// shape, sibling of [`Self::network`] (the canonical schedule
@@ -9535,7 +9530,7 @@ impl RetryPolicy {
     /// `commands/integration_tests.rs::PRE_DEPLOYMENT_TEST_SUITE_RETRY_BACKOFF`,
     /// `commands/test.rs::TEST_RETRY_BACKOFF`,
     /// `commands/post_deploy_verification.rs::HEALTH_ENDPOINT_BACKOFF`).
-    /// Six identically-shaped bodies past THEORY.md §VI.1's three-times-
+    /// Six identically-shaped bodies past the three-times-
     /// is-a-law threshold — this primitive is the law-redeeming
     /// consolidation for the placeholder-`max_attempts` caller-driven
     /// polling shape, sibling of [`Self::wall_clock_poll`] (the
@@ -9662,7 +9657,7 @@ impl RetryPolicy {
     /// to the schedule axis the direct-equality reading also
     /// discriminates on.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the no-retry structural-
+    /// One-oracle discipline: the no-retry structural-
     /// state partition is named at one typed-primitive site instead of
     /// retyped as the inline `policy.max_attempts <= 1` cascade at
     /// every consumer site that branches on the structural state. Same
@@ -9726,7 +9721,7 @@ impl RetryPolicy {
     /// reading a stale `initial_backoff.is_zero()` shortcut the other
     /// did not) lights up that test.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the will-retry
+    /// One-oracle discipline: the will-retry
     /// structural-state partition is named at one typed-primitive site
     /// instead of retyped as the inline `policy.max_attempts > 1` /
     /// `!policy.is_no_retry()` cascade at every consumer site that
@@ -9822,14 +9817,14 @@ impl RetryPolicy {
     /// RetryPolicy::network().effective_max_attempts();` table at a future
     /// telemetry-label site) is admissible.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the clamped-budget numeric
+    /// One-oracle discipline: the clamped-budget numeric
     /// reading is named at one typed-primitive site instead of retyped as
     /// the inline `if self.max_attempts > 1 { self.max_attempts } else { 1
     /// }` cascade at every consumer site that reads the effective budget
     /// — previously inlined verbatim at two per-attempt peers
     /// ([`is_final_attempt`](Self::is_final_attempt),
     /// [`attempts_remaining`](Self::attempts_remaining)), now grounded
-    /// through one named primitive. THEORY.md §V.4 typed primitives: the
+    /// through one named primitive. Typed primitives: the
     /// reading is a typed-primitive surface on `RetryPolicy` itself (one
     /// named const-fn method) rather than a raw-field-plus-clamp shape
     /// restated at every consumer.
@@ -9941,15 +9936,14 @@ impl RetryPolicy {
     /// RetryPolicy::immediate().is_final_attempt(1);` table at a
     /// future telemetry-label site) is admissible.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the per-attempt retry-
+    /// One-oracle discipline: the per-attempt retry-
     /// budget partition is named at one typed-primitive site instead
     /// of retyped as the inline `attempt >= self.max_attempts.max(1)`
     /// cascade at every consumer site that branches on the structural
     /// state — [`run_with_policy`]'s loop body, [`log_retry_attempt`]'s
     /// warn-while-budget-remains dispatch (the structural complement
     /// `attempt < max_attempts`), and any future per-attempt diagnostic
-    /// /telemetry/attestation consumer at the retry boundary. THEORY.md
-    /// §V.5 total-order discipline: the predicate reads the `>=`
+    /// /telemetry/attestation consumer at the retry boundary. Total-order discipline: the predicate reads the `>=`
     /// comparison on the derived [`u32::Ord`] instance, the same
     /// total-order surface the [`is_no_retry`](Self::is_no_retry) /
     /// [`will_retry`](Self::will_retry) policy-level pair reads its
@@ -10047,14 +10041,14 @@ impl RetryPolicy {
     /// RetryPolicy::network().is_interim_attempt(1);` table at a future
     /// telemetry-label site) is admissible.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the per-attempt "budget-
+    /// One-oracle discipline: the per-attempt "budget-
     /// remaining" partition is named at one typed-primitive site
     /// instead of retyped as the inline `attempt < self.max_attempts`
     /// cascade at every consumer site that branches on the structural
     /// state — [`log_retry_attempt`]'s warn-while-budget-remains
     /// dispatch, and any future per-attempt diagnostic / telemetry /
-    /// attestation consumer at the retry boundary. THEORY.md §V.5
-    /// total-order discipline: the predicate reads the same `>=`
+    /// attestation consumer at the retry boundary.
+    /// Total-order discipline: the predicate reads the same `>=`
     /// comparison on the derived [`u32::Ord`] instance that
     /// [`is_final_attempt`](Self::is_final_attempt) reads, here
     /// complemented at the typed-primitive surface with the clamp-to-≥1
@@ -10150,14 +10144,13 @@ impl RetryPolicy {
     /// u32 = RetryPolicy::network().attempts_remaining(1);` table at a
     /// future telemetry-label site) is admissible.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the per-attempt numeric
+    /// One-oracle discipline: the per-attempt numeric
     /// budget-remaining reading is named at one typed-primitive site
     /// instead of retyped as the inline
     /// `policy.max_attempts.max(1).saturating_sub(attempt)` cascade at
     /// every consumer site that reads the numeric budget — any future
     /// per-attempt diagnostic / telemetry / warn-message-enrichment /
-    /// pre-attempt-escalation consumer at the retry boundary. THEORY.md
-    /// §V.4 typed primitives: the reading is a typed-primitive surface
+    /// pre-attempt-escalation consumer at the retry boundary. Typed primitives: the reading is a typed-primitive surface
     /// on `RetryPolicy` itself (one named const-fn method), not a raw-
     /// field-plus-clamp-plus-saturate shape restated at every consumer.
     #[allow(dead_code)]
@@ -10276,13 +10269,13 @@ impl RetryPolicy {
     /// RetryPolicy::network().is_first_attempt(1);` table at a future
     /// telemetry-label site) is admissible.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the per-attempt-axis
+    /// One-oracle discipline: the per-attempt-axis
     /// floor reading is named at one typed-primitive site instead of
     /// retyped as the inline `attempt <= 1` cascade at every consumer
     /// site — previously inlined verbatim at
     /// [`compute_delay`](Self::compute_delay)'s zero-delay early-return
-    /// guard, now grounded through one named primitive. THEORY.md §V.4
-    /// typed primitives: the reading is a typed-primitive surface on
+    /// guard, now grounded through one named primitive.
+    /// Typed primitives: the reading is a typed-primitive surface on
     /// `RetryPolicy` itself (one named const-fn method), not a raw-
     /// counter-comparison shape restated at every consumer.
     #[allow(dead_code)]
@@ -10407,7 +10400,7 @@ impl RetryPolicy {
     /// !RetryPolicy::network().is_retry_attempt(1);` table at a future
     /// telemetry-label site) is admissible.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the per-attempt-axis
+    /// One-oracle discipline: the per-attempt-axis
     /// "is-this-a-retry" partition is named at one typed-primitive site
     /// instead of retyped as the inline `attempt > 1` or `attempt >= 2`
     /// or `!policy.is_first_attempt(attempt)` cascade at every consumer
@@ -10421,7 +10414,7 @@ impl RetryPolicy {
     /// happy-path guard that skips the "no retries needed" log on
     /// `is_first_attempt(attempt) && op.is_ok()` — all read one named
     /// typed method rather than restating the raw-counter comparison.
-    /// THEORY.md §V.4 typed primitives: the reading is a typed-primitive
+    /// Typed primitives: the reading is a typed-primitive
     /// surface on `RetryPolicy` itself (one named const-fn method), not
     /// a raw-counter-comparison shape restated at every consumer.
     ///
@@ -10541,7 +10534,7 @@ impl RetryPolicy {
     /// RetryPolicy::network().attempts_completed_before(1);` table at
     /// a future telemetry-label site) is admissible.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the prior-attempts count
+    /// One-oracle discipline: the prior-attempts count
     /// is named at one typed-primitive site instead of retyped as the
     /// inline `attempt.saturating_sub(1)` cascade at every consumer
     /// site — a future per-attempt telemetry counter emitting
@@ -10552,7 +10545,7 @@ impl RetryPolicy {
     /// wants to surface the burned-so-far count distinct from the
     /// current 1-indexed attempt number — all read through one named
     /// typed method rather than restating the raw subtraction against
-    /// the counter. THEORY.md §V.4 typed primitives: the reading is a
+    /// the counter. Typed primitives: the reading is a
     /// typed-primitive surface on `RetryPolicy` itself (one named
     /// const-fn method), not a raw-counter-shape restated at every
     /// consumer.
@@ -10700,7 +10693,7 @@ impl RetryPolicy {
     /// RetryPolicy::network().attempts_used_through(1);` table at a
     /// future telemetry-label site) is admissible.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the budget-slots-used
+    /// One-oracle discipline: the budget-slots-used
     /// count is named at one typed-primitive site instead of retyped
     /// as the inline `attempt.min(self.effective_max_attempts())` or
     /// `(attempts_completed_before + 1).min(effective_max_attempts)`
@@ -10713,7 +10706,7 @@ impl RetryPolicy {
     /// wants to surface the "k of n" progress numerator distinct from
     /// the raw 1-indexed attempt counter — all read through one named
     /// typed method rather than restating the clamped-min cascade
-    /// against the counter and the budget. THEORY.md §V.4 typed
+    /// against the counter and the budget. Typed
     /// primitives: the reading is a typed-primitive surface on
     /// `RetryPolicy` itself (one named const-fn method), not a
     /// raw-counter-plus-clamp shape restated at every consumer.
@@ -10859,7 +10852,7 @@ impl RetryPolicy {
     /// RetryPolicy::network().attempts_remaining_including(1);` table at
     /// a future telemetry-label site) is admissible.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the "attempts left
+    /// One-oracle discipline: the "attempts left
     /// including current" count is named at one typed-primitive site
     /// instead of retyped as the inline
     /// `self.effective_max_attempts().saturating_sub(attempt.saturating_sub(1))`
@@ -10876,7 +10869,7 @@ impl RetryPolicy {
     /// progress denominator distinct from the strictly-AFTER
     /// [`attempts_remaining`](Self::attempts_remaining) reading — all
     /// read through one named typed method rather than restating the
-    /// saturating-sub cascade against the budget. THEORY.md §V.4 typed
+    /// saturating-sub cascade against the budget. Typed
     /// primitives: the reading is a typed-primitive surface on
     /// `RetryPolicy` itself (one named const-fn method), not a
     /// raw-budget-minus-prior-count shape restated at every consumer.
@@ -10987,7 +10980,7 @@ impl RetryPolicy {
     /// RetryPolicy::network().is_over_budget(1);` table at a future
     /// telemetry-label site) is admissible.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the "past-the-clamped-
+    /// One-oracle discipline: the "past-the-clamped-
     /// budget" reading is named at one typed-primitive site instead of
     /// retyped as the inline `attempt > self.max_attempts.max(1)` or
     /// `attempt > self.effective_max_attempts()` or
@@ -10999,7 +10992,7 @@ impl RetryPolicy {
     /// distinct from the "at-final-slot" class, a defensive
     /// pre-invocation guard that skips the `op(attempt)` call on
     /// out-of-band attempt indices before they reach the retry loop —
-    /// all read one named typed method. THEORY.md §V.5 total-order
+    /// all read one named typed method. Total-order
     /// discipline: the predicate reads the strict `>` comparison on the
     /// derived [`u32::Ord`] instance, the strict-inequality peer of the
     /// non-strict `>=` comparison [`is_final_attempt`](Self::is_final_attempt)
@@ -11144,7 +11137,7 @@ impl RetryPolicy {
     /// RetryPolicy::network().is_before_first_attempt(0);` table at a
     /// future telemetry-label site) is admissible.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the "strictly-before-first-
+    /// One-oracle discipline: the "strictly-before-first-
     /// attempt" reading is named at one typed-primitive site instead of
     /// retyped as the inline `attempt < 1` or `attempt == 0` or
     /// `self.attempts_used_through(attempt) == 0` cascade at every
@@ -11155,7 +11148,7 @@ impl RetryPolicy {
     /// slot" class, a defensive pre-invocation guard that skips the
     /// `op(attempt)` call on out-of-band pre-invocation indices before
     /// they reach the retry loop — all read one named typed method.
-    /// THEORY.md §V.5 total-order discipline: the predicate reads the
+    /// Total-order discipline: the predicate reads the
     /// strict `<` comparison on the derived [`u32::Ord`] instance, the
     /// strict-inequality peer of the non-strict `<=` comparison
     /// [`is_first_attempt`](Self::is_first_attempt) reads, applied to the
@@ -11235,10 +11228,10 @@ impl RetryPolicy {
     /// RetryPolicy::network().per_attempt_region(1);` table at a future
     /// telemetry-label site) is admissible.
     ///
-    /// THEORY.md §II Language — typed primitives own boundary
+    /// Language — typed primitives own boundary
     /// classification; the FLOOR-then-CEILING boolean cascade is projected
     /// here as ONE typed sum instead of restated at every downstream
-    /// consumer. THEORY.md §VI.1 one-oracle discipline — the 5-way
+    /// consumer. One-oracle discipline — the 5-way
     /// classification is named at ONE typed-primitive site (this method);
     /// downstream telemetry-label surfaces, structured-attestation records,
     /// and defensive pre-invocation guards read the sum instead of
@@ -11356,11 +11349,11 @@ impl RetryPolicy {
     /// [`compute_delay`](Self::compute_delay)'s own const-ness, which
     /// this delegation inherits.
     ///
-    /// THEORY.md §I.5 duplication-budget-zero: the
+    /// Duplication-budget-zero: the
     /// `saturating_add(2)`-then-`compute_delay` two-step composition
     /// is named at ONE typed-primitive site instead of restated at
-    /// every 0-indexed poll-loop consumer. THEORY.md §V.1
-    /// construction-guarantees: a future refinement of the
+    /// every 0-indexed poll-loop consumer.
+    /// Construction-guarantees: a future refinement of the
     /// 0-indexed-to-1-indexed bridge (a different anchor, a
     /// diagnostic-emission hook, a warn on `iteration > threshold`)
     /// lands at this primitive body and reaches every consumer by
@@ -12709,7 +12702,7 @@ pub fn is_transient_network_stderr(stderr: &str) -> bool {
 /// inline with the verbatim two-line incantation
 /// `(output.status.code(), String::from_utf8_lossy(&output.stderr).trim().to_string())`.
 /// Five typed-error producer sites in forge carry that incantation —
-/// well past the three-times threshold (THEORY §VI.1) — so this commit
+/// well past the three-times threshold — so this commit
 /// redeems the duplication: every typed-error producer that wraps an
 /// external-CLI failure now extracts `(exit_code, stderr)` through one
 /// typed conversion, not five drift-prone copies.
@@ -12793,7 +12786,7 @@ impl CapturedFailure {
     /// primitive at the retry boundary now speaks the same
     /// `is_transient()` language.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the
+    /// One-oracle discipline: the
     /// transient/terminal classification rule is named at one site
     /// ([`is_transient_network_stderr`]) and surfaced through one
     /// typed-method per record carrying `stderr`. A future addition
@@ -12837,7 +12830,7 @@ impl CapturedFailure {
     /// the retry boundary now speaks the same `is_terminal()` /
     /// `is_transient()` peer-pair language.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the transient/terminal
+    /// One-oracle discipline: the transient/terminal
     /// retry-dispatch partition is named at one typed-primitive site
     /// with both arms exposed as typed methods, not as one method plus
     /// an implicit `!` at every consumer. Same parallel-axis
@@ -12910,7 +12903,7 @@ impl CapturedFailure {
     /// retries OOM-kills against a beefier builder while failing fast on
     /// auth denials).
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the
+    /// One-oracle discipline: the
     /// exited-normally/signal-killed structural partition is named at one
     /// typed-primitive site (here) instead of retyped as the inline
     /// `cf.exit_code.is_none()` cascade at every consumer site that
@@ -12989,7 +12982,7 @@ impl CapturedFailure {
     /// populated by a canonical structural shape forge's external CLIs
     /// emit. Neither partition collapses into the other.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the exited-normally /
+    /// One-oracle discipline: the exited-normally /
     /// signal-killed structural partition is named at one typed-
     /// primitive site with both arms exposed as typed methods, not as
     /// one method plus an implicit `!` at every consumer. Same
@@ -13030,7 +13023,7 @@ impl CapturedFailure {
 /// `nix.rs::run_nix_build_typed`, and
 /// `infrastructure/registry.rs::create_manifest_index`. Four
 /// identically-shaped bodies past the three-times threshold
-/// (THEORY §VI.1) — this primitive is the law-redeeming consolidation
+/// — this primitive is the law-redeeming consolidation
 /// for the typed-error producer surface, the same way `retry_command`
 /// (commit 26ddcef) consolidated the typed-error retry-driver surface.
 ///
@@ -13103,7 +13096,7 @@ where
 /// `infrastructure/git.rs::GitClient::rev_parse_short`,
 /// `infrastructure/git.rs::GitClient::get_full_sha`,
 /// `infrastructure/registry.rs::RegistryClient::verify_tag_exists`. Four
-/// identically-shaped bodies past the three-times threshold (THEORY §VI.1)
+/// identically-shaped bodies past the three-times threshold
 /// — this primitive is the law-redeeming consolidation for the typed-error
 /// query-shape surface, the dual of [`classify_capture`]'s consolidation
 /// for the typed-error op-shape surface (commit b75a273).
@@ -13201,7 +13194,7 @@ where
 ///   sites that dropped the captured `io::Error::Display` and the args
 ///   entirely.
 /// - Op-failure: `"{cmd} {args:?} failed (exit {exit_code:?}): {stderr}"`
-///   — carries the structural-record tuple THEORY §V.4 Phase 1
+///   — carries the structural-record tuple Phase 1
 ///   attestation records pattern-match on (operation label, exit code,
 ///   trimmed UTF-8-lossy stderr). Pre-migration the op-failure path at
 ///   both sites fused the tuple into a single `bail!("kubectl failed:
@@ -13262,7 +13255,7 @@ pub fn classify_capture_query_anyhow(
 /// `"kubectl"`, three call sites — secret-fetch / `valkey-cli keys` /
 /// `valkey-cli DEL`), and `commands/local.rs::run_command_output`
 /// (parametric `cmd`, two call sites — `docker stop` / `docker rm`).
-/// Three identically-shaped bodies past THEORY §VI.1's three-is-a-law
+/// Three identically-shaped bodies past the three-is-a-law
 /// threshold (PRIME DIRECTIVE: duplication budget is zero); this
 /// primitive is the law-redeeming consolidation.
 ///
@@ -13298,7 +13291,7 @@ pub fn classify_capture_query_anyhow(
 /// spawn-failure surfaces `"Failed to spawn {cmd} {args:?}: {io_error}"`,
 /// op-failure surfaces `"{cmd} {args:?} failed (exit {exit_code:?}):
 /// {stderr}"`. The `(cmd, args, exit_code, stderr)` structural-record
-/// tuple THEORY §V.4 Phase 1 attestation telemetry pattern-matches on
+/// tuple Phase 1 attestation telemetry pattern-matches on
 /// is preserved by construction.
 pub fn run_query_capture_sync(cmd: &str, args: &[&str]) -> anyhow::Result<String> {
     classify_capture_query_anyhow(
@@ -13341,7 +13334,7 @@ pub fn run_query_capture_sync(cmd: &str, args: &[&str]) -> anyhow::Result<String
 /// `commands/federation_tests.rs::run_federation_tests` (async,
 /// `tokio::process::Command` → `kubectl apply -f <manifest>` for
 /// federation test job creation; discards `output.stdout`). Three
-/// identically-shaped bodies past THEORY §VI.1's three-is-a-law
+/// identically-shaped bodies past the three-is-a-law
 /// threshold (PRIME DIRECTIVE: duplication budget is zero); this
 /// primitive is the law-redeeming consolidation for the captured-output
 /// bail-on-non-zero-exit surface — the missing counterpart to
@@ -13527,7 +13520,7 @@ pub async fn run_capture_anyhow(
 ///   from a Mac control plane. Pre-lift the bail spelled
 ///   `"Remote build failed: {stderr}"` and dropped the exit code.
 ///
-/// Three sites past THEORY §VI.1's three-times threshold ("two
+/// Three sites past the three-times threshold ("two
 /// occurrences is a coincidence; three is a law"). Post-migration
 /// every operator log line on the captured-output frontier carries
 /// `(op, exit_code, stderr)` in ONE canonical envelope
@@ -13535,7 +13528,7 @@ pub async fn run_capture_anyhow(
 /// carries `(op, io_error)` in ONE canonical envelope
 /// (`"Failed to spawn {op}: {io_error}"`) — the same load-bearing
 /// exit-code carry that made the sync status-only migration
-/// (THEORY §V.4 Phase 1 attestation records) worth doing.
+/// (Phase 1 attestation records) worth doing.
 pub fn run_capture_anyhow_sync(
     mut cmd: std::process::Command,
     op: &str,
@@ -13549,7 +13542,7 @@ pub fn run_capture_anyhow_sync(
 /// `commands/github_runner_ci.rs`) whose public surface returns
 /// `anyhow::Result<()>` and where a domain-specific error enum
 /// (`RegistryError`, `AtticError`, `GitError`, `NixBuildError`) does not
-/// yet exist. Carries the structural-record tuple THEORY §V.4 Phase 1
+/// yet exist. Carries the structural-record tuple Phase 1
 /// attestation records need: `(operation, attempt, exit_code, stderr,
 /// stdout)`. The hand-rolled retry loops this type displaces all fused
 /// these fields into free-form `anyhow::bail!("…: {}", stderr)` strings;
@@ -13657,7 +13650,7 @@ impl CommandAttemptFailure {
     /// complements at this typed-method surface for the canonical
     /// 2×2 reading at any future post-retry classifier.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the transient/terminal
+    /// One-oracle discipline: the transient/terminal
     /// retry-dispatch partition is named at one typed-primitive site
     /// with both arms exposed as typed methods, not as one method plus
     /// an implicit `!` at every consumer. Same parallel-axis
@@ -13749,7 +13742,7 @@ impl CommandAttemptFailure {
     /// op-failure here — same discipline `is_spawn_failure` already
     /// encodes for that edge case.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the spawn/op partition
+    /// One-oracle discipline: the spawn/op partition
     /// is named at one typed-primitive site with both arms exposed as
     /// typed methods, not as one method plus an implicit `else` at
     /// every consumer. The same generation-over-composition
@@ -13837,7 +13830,7 @@ impl CommandAttemptFailure {
     /// AND terminal. The two axes never collapse and the typed-method
     /// peer makes both quadrants directly readable.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the signal-killed
+    /// One-oracle discipline: the signal-killed
     /// structural shape is named at one typed-primitive site at each
     /// surface of the retry boundary, not retyped as the
     /// `exit_code.is_none() && !stderr.is_empty()` conjunction at
@@ -13934,7 +13927,7 @@ impl CommandAttemptFailure {
     /// is populated by canonical structural shapes forge's external
     /// CLIs emit. Neither partition collapses into the other.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the exited-normally /
+    /// One-oracle discipline: the exited-normally /
     /// (spawn-failure ∪ signal-killed) structural partition is named
     /// at one typed-primitive site with the exited-normally arm
     /// exposed as a typed method, not as `!cf.is_signal_killed() &&
@@ -14069,7 +14062,7 @@ where
 /// `commands/github_runner_ci.rs::attic_command_with_retry`, and
 /// `commands/github_runner_ci.rs::push_with_retry` — each carry verbatim
 /// modulo per-site logging. Three identically-shaped bodies past the
-/// three-times threshold (THEORY §VI.1) — this primitive is the
+/// three-times threshold — this primitive is the
 /// law-redeeming consolidation.
 ///
 /// `spawn(attempt)` returns a future yielding `std::io::Result<Output>`
@@ -14141,7 +14134,7 @@ where
 /// `infrastructure/attic.rs::push_with_retries`,
 /// `commands/github_runner_ci.rs::attic_command_with_retry`,
 /// `commands/github_runner_ci.rs::push_with_retry`. Four identically-shaped
-/// bodies past the three-times threshold (THEORY §VI.1) — this primitive is
+/// bodies past the three-times threshold — this primitive is
 /// the law-redeeming consolidation for the per-attempt warn-on-failure
 /// dispatch shape, sibling of the four canonical retry primitives in this
 /// module ([`RetryPolicy`], [`run_with_policy`], [`retry_command`],
@@ -14238,7 +14231,7 @@ pub fn log_retry_attempt(
 /// `infrastructure/registry.rs::RegistryClient::push_with_retries`,
 /// `commands/push.rs::push_with_retry`,
 /// `commands/github_runner_ci.rs::push_with_retry`. Well past the
-/// three-times threshold (THEORY §VI.1: "two occurrences is a
+/// three-times threshold ("two occurrences is a
 /// coincidence; three is a law"), and the class the duplication opens
 /// is a real defect: a caller that omits the trailing
 /// `log_retry_attempt` silently loses the per-attempt warn on failure
@@ -14485,7 +14478,7 @@ where
 /// ```
 /// that more than a dozen command-module sites in forge carry verbatim modulo
 /// per-site `BIN` / `ARGS` / `SPAWN_CTX` / `FAIL_MSG` — well past the
-/// three-times threshold (THEORY §VI.1: "two occurrences is a coincidence;
+/// three-times threshold ("two occurrences is a coincidence;
 /// three is a law"). The primitive owns the `Stdio::inherit()` wiring, the
 /// `with_context` spawn-error envelope, and the structural failure message
 /// (which now uniformly carries the exit code) so call sites compose down to
@@ -14525,7 +14518,7 @@ where
 /// `"{op} failed (killed by signal)"` for `status.code() == None`) preserves
 /// the exit code at the operator log surface for every migrated site by
 /// construction. A future Phase 1 attestation-record consumer that wants the
-/// terminating shape (THEORY §V.4) can pattern-match on the message format
+/// terminating shape can pattern-match on the message format
 /// produced by this primitive — one shape across every status-only site in
 /// forge, no per-site dialect.
 ///
@@ -14595,7 +14588,7 @@ fn classify_inherited_status(
 /// claim now reconciles across both the async and sync spawn frontiers
 /// instead of holding on one of them.
 ///
-/// The exit-code carry is the load-bearing part (THEORY §V.4): a migrated
+/// The exit-code carry is the load-bearing part: a migrated
 /// site's operator log line goes from `"crossplane xpkg build failed"` to
 /// `"crossplane xpkg build failed (exit 1)"`, and a future Phase 1
 /// attestation-record consumer reading the terminating shape gets ONE
@@ -14654,7 +14647,7 @@ pub fn run_inherited_status_sync(mut cmd: std::process::Command, op: &str) -> an
 /// `rust_dev`'s docker-compose-up, `rust_dev_down`'s docker-compose-down)
 /// and at the three `nix.rs` primitives (`run_crate2nix`,
 /// `run_nix_wrapped_crate2nix`, `run_cargo_update`) — eleven copies of
-/// the same body past THEORY §VI.1's three-times-is-a-law threshold
+/// the same body past the three-times-is-a-law threshold
 /// (PRIME DIRECTIVE: duplication budget is zero). This primitive is the
 /// law-redeeming consolidation for the pre-built-argv inherited-status
 /// frontier — the missing counterpart to [`run_query_capture_sync`],
@@ -14748,7 +14741,7 @@ pub fn run_bin_args_inherited_status_sync(
 /// (in-dir `cargo update` refresh), and
 /// `commands/rust_test_phase.rs::announce_and_run_rust_test_phase`
 /// (`cargo test` per-phase spawn scoped to the service dir) — three
-/// copies at the three-times-is-a-law threshold (THEORY §VI.1, PRIME
+/// copies at the three-times-is-a-law threshold (PRIME
 /// DIRECTIVE: duplication budget is zero). Post-lift a caller composes
 /// the `.args()` slice and the `.current_dir()` scope in ONE call, so
 /// a future refinement (structured cwd logging, an OTLP `spawn.cwd`
@@ -14797,7 +14790,7 @@ pub async fn run_bin_args_at_inherited_status(
 /// `commands/test_ci.rs::{execute (nextest branch, cargo-test fallback),
 /// coverage (tarpaulin run)}` and three sites in
 /// `commands/infra.rs::{up, down, clean}` — six copies past the
-/// three-times-is-a-law threshold (THEORY §VI.1, PRIME DIRECTIVE:
+/// three-times-is-a-law threshold (PRIME DIRECTIVE:
 /// duplication budget is zero). Post-lift a caller composes the
 /// `.args()` slice and the `.current_dir()` scope in ONE call, so a
 /// future refinement (structured cwd logging, an OTLP `spawn.cwd`
@@ -14859,7 +14852,7 @@ pub fn run_bin_args_at_inherited_status_sync(
 /// ps -a --since=15m --filter status=exited / docker images, all three
 /// via `std::process::Command::new(docker_bin())` — the explicit path
 /// override the sibling `tokio::process::Command` top-of-module `use`
-/// forces). Six identically-shaped bodies past THEORY §VI.1's
+/// forces). Six identically-shaped bodies past the
 /// three-is-a-law threshold (PRIME DIRECTIVE: duplication budget is
 /// zero); this primitive is the law-redeeming consolidation for the
 /// best-effort-captured-stdout surface — the missing counterpart to
@@ -14954,7 +14947,7 @@ pub fn probe_stdout_capture_sync(bin: &str, args: &[&str]) -> Option<String> {
 /// `docker rm <name>`, the pre-`docker run` cleanup that removes any
 /// previously-running container of the same name so `docker run -d
 /// --name <name>` cannot fail with a name-conflict). Five identically-
-/// shaped bodies past THEORY §VI.1's three-is-a-law threshold (PRIME
+/// shaped bodies past the three-is-a-law threshold (PRIME
 /// DIRECTIVE: duplication budget is zero); this primitive is the
 /// law-redeeming consolidation for the discard-both-streams surface —
 /// the missing counterpart to [`probe_stdout_capture_sync`] (returns
@@ -19863,13 +19856,13 @@ mod tests {
     /// half grounds through the clamped budget. Both halves are
     /// necessary; the split is the load-bearing structural property.
     ///
-    /// THEORY.md §II Language — typed primitives own boundary
+    /// Language — typed primitives own boundary
     /// classification; the split between "boundary against the fixed
     /// first-attempt literal" and "boundary against the clamped budget"
     /// is a named structural property on the `RetryPolicy` typed-
     /// primitive surface, not a per-predicate coincidence to be
-    /// rediscovered at every downstream consumer. THEORY.md §VI.1
-    /// one-oracle discipline — the FLOOR/CEILING split is pinned at one
+    /// rediscovered at every downstream consumer.
+    /// One-oracle discipline — the FLOOR/CEILING split is pinned at one
     /// structural test rather than as a per-predicate coincidence
     /// distributed across six independent witnesses.
     #[test]
@@ -30791,7 +30784,7 @@ mod tests {
     /// the version-bump magnitude ladder and
     /// `test_admission_tier_meet_distributes_over_join_at_every_triple`
     /// at the admission-tier ladder, here at the per-attempt-axis
-    /// ladder. THEORY.md §V.5: distributivity is the load-bearing
+    /// ladder. Distributivity is the load-bearing
     /// axiom that distinguishes a chain-derived lattice from a general
     /// bounded lattice, and the structural witness the meet/join pair
     /// carries beyond mere absorption.
@@ -34060,7 +34053,7 @@ mod tests {
 
     /// Operation label must surface on the returned
     /// `CommandAttemptFailure` — the structural-record tuple Phase 1
-    /// attestation records (THEORY §V.4) and per-attempt logs depend
+    /// attestation records and per-attempt logs depend
     /// on. Pinning this guards against a future regression where the
     /// helper accidentally drops the caller-supplied operation label
     /// (e.g. by passing an empty string into `from_capture`).
@@ -35082,7 +35075,7 @@ mod tests {
     /// `..._op_failure_carries_structural_tuple` tests this primitive
     /// consolidates. A future regression that re-dropped the exit code
     /// or the args from the message envelope would fail this test
-    /// rather than silently degrade the THEORY §V.4 Phase 1 attestation
+    /// rather than silently degrade the Phase 1 attestation
     /// record shape downstream telemetry pattern-matches on.
     #[cfg(unix)]
     #[test]
@@ -36065,7 +36058,7 @@ mod tests {
     /// as a structural `"killed by signal"` detail, distinct from a normal
     /// non-zero exit. Pinning the discriminator means an operator who
     /// receives the message can immediately distinguish "tool exited 137 on
-    /// OOM" from "tool was killed by SIGKILL mid-run" — same THEORY §V.4
+    /// OOM" from "tool was killed by SIGKILL mid-run" — same
     /// Phase 1 attestation-record discipline the
     /// [`CommandAttemptFailure::is_spawn_failure`] split encodes for the
     /// captured-output sibling shape (`exit_code: None` is the structural
@@ -36140,7 +36133,7 @@ mod tests {
     /// exit code that distinguishes "git add exited 128 (no such repo)"
     /// from "git add exited 1 (path conflict)" — a regression that is
     /// invisible at the call site but load-bearing on the operator
-    /// triage surface (THEORY §V.4 Phase 1 attestation-record discipline).
+    /// triage surface (Phase 1 attestation-record discipline).
     #[tokio::test]
     async fn test_run_inherited_status_chains_with_caller_context_on_nonzero_exit() {
         use anyhow::Context;
@@ -36218,7 +36211,7 @@ mod tests {
     /// operator log would carry the domain narrative but lose the
     /// "Failed to run {op}" structural marker that distinguishes the
     /// spawn-failure path from the non-zero-exit path on the operator
-    /// triage surface (THEORY §V.4 Phase 1 attestation-record discipline).
+    /// triage surface (Phase 1 attestation-record discipline).
     #[tokio::test]
     async fn test_run_inherited_status_chains_with_caller_context_on_spawn_failure() {
         use anyhow::Context;
@@ -36957,7 +36950,7 @@ mod tests {
     /// sibling `commands/status.rs::tests` and
     /// `commands/helm.rs::capture_tests` shields already close against
     /// their `fn make_output` copies (c8a3f55). PRIME DIRECTIVE:
-    /// duplication budget is zero (THEORY §VI.1). All four sites now
+    /// duplication budget is zero. All four sites now
     /// delegate to the ONE `test_support::synthetic_output` body, so a
     /// future reshape (adding a captured signal detail, widening to a
     /// cross-platform builder, tracking the fork-elapsed instant) lands

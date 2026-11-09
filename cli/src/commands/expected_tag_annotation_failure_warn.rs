@@ -31,7 +31,7 @@
 //! Shinka-hinted 1s fast-requeue.
 //!
 //! Two occurrences of a byte-identical label + marker + slot shape past
-//! THEORY §VI.1's three-is-a-law-in-waiting threshold. A single-site
+//! The three-is-a-law-in-waiting threshold. A single-site
 //! drift — a rephrase of `"Failed to set"` to `"Could not set"`, a swap
 //! of the `(non-fatal)` marker to `(warning)`, a rearrangement of the
 //! marker after the colon (`"…annotation: (non-fatal) {}"`) — pre-lift

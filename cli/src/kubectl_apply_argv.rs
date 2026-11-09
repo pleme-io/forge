@@ -25,7 +25,7 @@
 //!    via [`std::process::Stdio::piped`] on the child's stdin, spelling
 //!    `.args(["apply", "-f", "-"])` around line 255).
 //!
-//! Three identically-shaped bodies past THEORY §VI.1's three-is-a-law
+//! Three identically-shaped bodies past the three-is-a-law
 //! threshold (PRIME DIRECTIVE: duplication budget is zero). A kubectl
 //! apply argv drift — a rename of `-f` to `--filename`, an added
 //! `--server-side` for the SSA rollout, a `--field-manager=<name>`

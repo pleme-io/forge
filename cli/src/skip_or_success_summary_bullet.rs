@@ -36,16 +36,16 @@
 //!
 //! # Theory grounding
 //!
-//! - THEORY.md §V.1 (Construction guarantees; Types → Invariants →
+//! - (Construction guarantees; Types → Invariants →
 //!   Proofs → Render Anywhere): the paired byte-oracle sibling
 //!   [`write_skip_or_success_summary_bullet`] is the Render Anywhere
 //!   half — pinning the exact rendered bytes (two-space indent, U+2022
 //!   `•` glyph, `<label>: <status>` body, trailing newline, ABSENCE of
 //!   ANSI palette sequences) as a `cargo test`-verifiable invariant.
-//! - THEORY.md §VI.1 (three-times rule; two-is-a-coincidence
+//! - (three-times rule; two-is-a-coincidence
 //!   threshold): FIVE sibling occurrences past the tripping-point tier,
 //!   so lifting onto ONE construction surface pre-empts the next-phase
-//!   drift THEORY §VI.1 warns against.
+//!   drift warns against.
 
 use std::io;
 
@@ -171,7 +171,7 @@ mod tests {
     /// pre-lift `crate::ui::write_bullet_item(w, &format!("<label>: {}",
     /// if skipped { "SKIPPED" } else { success }))` shape byte-for-byte
     /// on every `(label, skipped, success)` triple the SUMMARY section
-    /// pre-lift emitted. THEORY §V.1 Render Anywhere pin — a future
+    /// pre-lift emitted. Render Anywhere pin — a future
     /// regression that added an ANSI palette, dropped the newline, or
     /// swapped the two-space indent would fail this test at `cargo
     /// test` time rather than at operator readout.

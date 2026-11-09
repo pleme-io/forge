@@ -47,7 +47,7 @@ impl ProductConfig {
 /// commit the three call sites in this module delegated through a
 /// private `kubectl` wrapper; that wrapper was one of three identically
 /// -shaped shape-adapters (`seed.rs::run_command_output`,
-/// `local.rs::run_command_output`) past THEORY §VI.1's three-is-a-law
+/// `local.rs::run_command_output`) past the three-is-a-law
 /// threshold, all collapsed onto `run_query_capture_sync` in one
 /// commit.
 ///
@@ -236,7 +236,7 @@ mod tests {
     /// `"{product}-valkey-0"`, `PASSWORD_SECRET_PATTERN` /
     /// `"{product}-backend-secrets"`, `PASSWORD_KEY` /
     /// `"REDIS_PASSWORD"`) each spelled the identical shape past
-    /// THEORY §VI.1's three-times-is-a-law threshold in one function
+    /// the three-times-is-a-law threshold in one function
     /// body — the same shape [`crate::repo::env_var_or_default`]'s
     /// pre-lift consolidation already closed for the sibling sigils
     /// ([`crate::repo::get_environment`],

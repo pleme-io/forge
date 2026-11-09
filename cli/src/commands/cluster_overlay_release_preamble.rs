@@ -18,7 +18,7 @@
 //! println!();
 //! ```
 //!
-//! Three occurrences of an identical shape past THEORY §VI.1's
+//! Three occurrences of an identical shape past the
 //! three-is-a-law threshold; this module is the law-redeeming extraction.
 //! Post-lift each flow calls [`announce_release_start_and_compute_tag`]
 //! with `(component, image_path, registry)` and inherits the canonical

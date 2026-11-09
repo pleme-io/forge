@@ -46,13 +46,13 @@
 //! addition and a `segment` arm, not an open-string discipline
 //! across every consumer site.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V.1 solve-once-at-the-primitive: the `pkgs/platform` prefix and
+//! Solve-once-at-the-primitive: the `pkgs/platform` prefix and
 //! the closed-enum `<component>` projection each live at ONE code
-//! point. §VI.1 duplication-is-a-bug (PRIME DIRECTIVE): two identical
+//! point. Duplication-is-a-bug (PRIME DIRECTIVE): two identical
 //! `.join("pkgs/platform/...")` bodies past the zero-duplication
-//! threshold, closed at the shared accessor. §II.1 typed-entry: the
+//! threshold, closed at the shared accessor. Typed-entry: the
 //! open-`&str` component-name slot the sibling `hanabi_dir` doc
 //! warned against ("`resolve_platform_component_dir(repo_root, name)`
 //! would force an open `&str` slot") stays closed — the accessor

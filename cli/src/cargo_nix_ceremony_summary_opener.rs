@@ -39,7 +39,7 @@
 //!    generic rust-service update closer, `<X>` = `Update`,
 //!    `<workspace_dir>` = `workspace_root`.
 //!
-//! Three sibling occurrences clear THEORY.md §VI.1's "two is a
+//! Three sibling occurrences clear the "two is a
 //! coincidence, three is a law" threshold. Post-lift the three stanzas
 //! route through [`print_cargo_nix_ceremony_summary_opener`]; a drift
 //! in the (banner → bullets → next-steps) ordering, an inversion of
@@ -108,16 +108,16 @@
 //! headline-first grammar every ceremony closer across forge follows.
 //! The primitive preserves the invariant by construction.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! - THEORY.md §V.1 (Construction guarantees; Types → Invariants →
+//! - (Construction guarantees; Types → Invariants →
 //!   Proofs → Render Anywhere): the closed [`CargoNixCeremony`] enum
 //!   sits at the primitive's boundary so the caller cannot pass an
 //!   ill-typed ceremony tag, and the delegation covariance the
 //!   sibling
 //!   [`crate::cargo_nix_ceremony_banner::CargoNixCeremony::write_files_heading`]
 //!   pins rides through this primitive by construction.
-//! - THEORY.md §VI.1 (three-times rule): three sibling occurrences at
+//! - (three-times rule): three sibling occurrences at
 //!   the "two is a coincidence; three is a law" threshold, so the
 //!   three-call stanza lifts onto ONE typed body.
 

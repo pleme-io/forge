@@ -47,8 +47,7 @@
 //! reports `commit_signed: false` for both a `B` and an `N` cannot
 //! drive a sekiban admission webhook that fails-closed on bad
 //! signatures but admits unsigned commits in dev / staging — both
-//! collapse to the same value at the attestation layer (THEORY §V.2:
-//! attestation is cryptographic evidence, not a wish; the bool that
+//! collapse to the same value at the attestation layer (attestation is cryptographic evidence, not a wish; the bool that
 //! flattens "no evidence" and "evidence of compromise" cannot
 //! substantiate either claim).
 //!
@@ -137,7 +136,7 @@
 //! The pre-fix call site mapped nine worlds to a single bool. The
 //! typed primitive preserves each distinctly so a downstream
 //! verifier or future enrichment commit can recover the
-//! kind-of-claim from the variant alone (THEORY §V.1: make invalid
+//! kind-of-claim from the variant alone (make invalid
 //! states unrepresentable — a `commit_signed: false` that conflates
 //! `B`, `X`, `Y`, `R`, `E`, `N`, and probe-failed is a flat state
 //! that cannot drive a verifier that wants to treat any of them

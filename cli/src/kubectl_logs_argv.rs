@@ -26,7 +26,7 @@
 //!    `.args(&["logs", "-n", namespace, &job_ref, "--tail=100"])` around
 //!    line 378).
 //!
-//! Three identically-shaped bodies past THEORY §VI.1's three-is-a-law
+//! Three identically-shaped bodies past the three-is-a-law
 //! threshold (PRIME DIRECTIVE: duplication budget is zero). A kubectl
 //! logs argv drift — a rename of `--tail=` to `--tail `, an added
 //! `--timestamps` companion, a `--previous` flag flip for restart-crash

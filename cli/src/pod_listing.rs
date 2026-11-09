@@ -45,7 +45,7 @@
 //! -o json` probe RAN and observed an empty `PodList.items` array
 //! (evidence of a rollout whose workloads have not yet been scheduled,
 //! or a deployment step that admitted the `HelmRelease` without ever
-//! materialising any `Pod` — the structural failure THEORY §V.4 Phase 2
+//! materialising any `Pod` — the structural failure Phase 2
 //! names as the post-admission honesty channel) is structurally
 //! indistinguishable from one against a namespace whose probe was never
 //! spawned (no evidence either way). A downstream `sekiban` strict-
@@ -94,7 +94,7 @@
 //!    with `count: 0` is the load-bearing discriminator: a downstream
 //!    verifier reading the typed outcome can distinguish "probe ran and
 //!    namespace is empty" (evidence-of-empty-deployment, a Phase 2
-//!    failure mode THEORY §V.4 / §VII.1 name as post-admission honesty
+//!    failure mode name as post-admission honesty
 //!    that the rollout never materialised any workloads) from "no probe
 //!    ran" (no evidence), where the pre-fix bare usize flattened them
 //!    indistinguishably into `0`.
@@ -143,7 +143,7 @@
 //!
 //! ## Frontier inspiration
 //!
-//! THEORY §V.4 ("Two-phase signature composition") and §VII.1
+//! ("Two-phase signature composition") and
 //! ("Attestation-gated deployments") name the Phase 2 deployment record
 //! as the post-admission honesty channel: the structural evidence that
 //! the deployment actually landed workloads in the cluster the pre-
@@ -264,7 +264,7 @@ crate::impl_probe_outcome!(PodListingOutcome, ProbeAbsent);
 ///    [`PodListingOutcome::Counted`] with `count: items.len()`. The
 ///    array may itself be empty (the namespace is probed and contains
 ///    zero `Pod` resources — `Counted { count: 0 }` carries the
-///    evidence-of-empty-deployment claim THEORY §V.4 / §VII.1 name as
+///    evidence-of-empty-deployment claim name as
 ///    post-admission honesty that the rollout never materialised any
 ///    workloads), or any positive integer length; the structural
 ///    distinction from [`PodListingOutcome::ProbeAbsent`] is that a
@@ -279,11 +279,11 @@ crate::impl_probe_outcome!(PodListingOutcome, ProbeAbsent);
 ///    and [`crate::helm_release_signature::parse_helmrelease_list`]
 ///    carry one and two layers over.
 ///
-/// THEORY §V.1: make invalid states unrepresentable. The two-arm
+/// Make invalid states unrepresentable. The two-arm
 /// codomain `{Counted, ProbeAbsent}` is foreclosed at the type level;
 /// a regression that wanted to introduce a `Malformed` arm would force
 /// every consumer to handle a world the parser does not produce.
-/// THEORY §VI.1: one oracle, not a per-consumer re-derivation. The
+/// One oracle, not a per-consumer re-derivation. The
 /// parser is the one site that walks the `items[]` array for its
 /// length; downstream consumers pattern-match the typed two-arm enum.
 #[allow(dead_code)]
@@ -352,7 +352,7 @@ mod tests {
     /// `usize` at the surface (`0`) but remain structurally distinct at
     /// the enum level — `Counted { count: 0 }` is the "kubectl probe
     /// ran and the namespace contains zero pods" world (evidence-of-
-    /// empty-deployment, a Phase 2 failure mode THEORY §V.4 / §VII.1
+    /// empty-deployment, a Phase 2 failure mode
     /// name as post-admission honesty that the rollout never
     /// materialised any workloads), while `ProbeAbsent` is the "no
     /// kubectl probe ran inside certification" world (no evidence
@@ -470,7 +470,7 @@ mod tests {
 
     /// A canonical `PodList` response with an empty `items[]` array
     /// (the namespace is probed and contains zero `Pod` resources —
-    /// the evidence-of-empty-deployment world THEORY §V.4 / §VII.1
+    /// the evidence-of-empty-deployment world
     /// name as post-admission honesty that the rollout never
     /// materialised any workloads) parses to [`PodListingOutcome::
     /// Counted`] with `count: 0`. The load-bearing discriminator: a

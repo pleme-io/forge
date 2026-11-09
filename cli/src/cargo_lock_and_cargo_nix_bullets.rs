@@ -36,7 +36,7 @@
 //!    the same generic rust-service workspace closer under the
 //!    `Update` ceremony variant.
 //!
-//! Three sibling occurrences clear THEORY.md §VI.1's "two is a
+//! Three sibling occurrences clear the "two is a
 //! coincidence, three is a law" threshold. Post-lift the three stanzas
 //! route through [`print_cargo_lock_and_cargo_nix_bullets_with_blank`];
 //! a drift in the manifest-file catalog (a swap of `Cargo.lock` for
@@ -76,9 +76,9 @@
 //! grammar lands at [`crate::ui::write_bullet_item`] and this
 //! primitive inherits by composition.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! - THEORY.md §V.1 (Construction guarantees; Types → Invariants →
+//! - (Construction guarantees; Types → Invariants →
 //!   Proofs → Render Anywhere): the paired byte-oracle sibling
 //!   [`write_cargo_lock_and_cargo_nix_bullets_with_blank`] is the
 //!   Render Anywhere half — pinning the exact three-line rendered
@@ -86,7 +86,7 @@
 //!   swapped the file-name order, dropped the trailing blank, or
 //!   inserted a variation selector into the bullet glyph fails at
 //!   `cargo test` time rather than at operator readout.
-//! - THEORY.md §VI.1 (three-times rule): three sibling occurrences at
+//! - (three-times rule): three sibling occurrences at
 //!   the "two is a coincidence; three is a law" threshold, so the
 //!   three-line stanza lifts onto ONE typed body.
 

@@ -31,9 +31,9 @@
 //! [`crate::ui::print_nonfatal_warn`]'s writer already paints the `WARN`
 //! prefix yellow).
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the "record one attestation-compute
+//! Solve-once-at-the-primitive: the "record one attestation-compute
 //! outcome" composition (push-on-Ok + ack, warn-on-Err) lives at ONE
 //! surface, so a future refinement — an OTLP
 //! `attestation_compute_outcome` counter wired alongside the print, a
@@ -44,7 +44,7 @@
 //! `Vec<Attestation>` push intrinsically — lands here and reaches both
 //! consumers by construction.
 //!
-//! §VI.1 recurring-shape-to-helper: two sibling stanzas across one
+//! Recurring-shape-to-helper: two sibling stanzas across one
 //! function body meet the recurring-shape criterion. The push-side and
 //! print-side share a load-bearing invariant — a successful
 //! `compute_*_attestation` MUST both accumulate the returned

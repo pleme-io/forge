@@ -17,7 +17,7 @@
 //!   (`commands/e2e.rs::check_image_exists`,
 //!   `commands/product_release.rs::check_local_image_exists`,
 //!   `commands/product_release.rs::push_prebuilt_image`'s inline
-//!   image-id fetch) past THEORY §VI.1's three-is-a-law threshold.
+//!   image-id fetch) past the three-is-a-law threshold.
 //!   Sync + async siblings are both provided because the call sites
 //!   are split across a sync entry point (`e2e.rs`) and an async
 //!   one (`product_release.rs`) — mirrors the

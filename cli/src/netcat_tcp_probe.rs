@@ -90,14 +90,14 @@
 //! `NC_BIN` env-var override, single-point-of-truth resolve, and
 //! sigil-shield discipline all apply unchanged.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V.1 (Types → Invariants → Proofs → Render Anywhere): the closed
+//! (Types → Invariants → Proofs → Render Anywhere): the closed
 //! two-variant `NetcatTcpProbeTarget` enum expresses the target shape
 //! as a type — a caller cannot spawn an nc probe against a target that
 //! isn't K8s-cluster-local or external-host, and the argv and
 //! diagnostic renderers are total functions from the enum onto their
-//! pre-lift byte-shapes. §VI.1 (one-oracle discipline): the whole
+//! pre-lift byte-shapes. (one-oracle discipline): the whole
 //! spawn+extract+diagnostic grammar lives at ONE construction surface
 //! so a future refinement (a per-probe telemetry hook, a switch to
 //! async spawn, a migration onto the `(op, exit_code, stderr)`

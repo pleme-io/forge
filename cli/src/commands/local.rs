@@ -118,10 +118,10 @@ pub fn down(name: &str, compose_file: Option<&str>) -> Result<()> {
     // two sites delegated through a private `run_command_output` wrapper
     // in this module; that wrapper was one of three identically-shaped
     // shape-adapters (`seed.rs::run_command_output`,
-    // `sessions.rs::kubectl`) past THEORY §VI.1's three-is-a-law
+    // `sessions.rs::kubectl`) past the three-is-a-law
     // threshold, all collapsed onto `run_query_capture_sync` in one
     // commit. Both sites bail on non-zero exit with the structural
-    // `(cmd, args, exit_code, stderr)` tuple THEORY §V.4 attestation
+    // `(cmd, args, exit_code, stderr)` tuple attestation
     // records pattern-match on. Binary resolution routes through
     // [`docker_bin`] so `DOCKER_BIN` overrides land here too.
     run_query_capture_sync(&docker_bin(), &["stop", name])?;
@@ -299,7 +299,7 @@ mod discard_spawn_routing_tests {
     /// above, and the sibling `commands/e2e.rs::cleanup_testcontainers`
     /// / `cleanup_e2e_images` block carried three MORE copies past
     /// its own docker-literal shield — five identically-shaped bodies
-    /// past THEORY §VI.1's three-is-a-law threshold (PRIME DIRECTIVE:
+    /// past the three-is-a-law threshold (PRIME DIRECTIVE:
     /// duplication budget is zero). The lift onto
     /// [`crate::retry::run_discard_sync`] preserves the exact
     /// pre-lift semantics — spawn `Err` is swallowed, spawn `Ok`

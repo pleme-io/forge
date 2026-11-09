@@ -46,9 +46,9 @@
 //! of this primitive would need to lift the sync call across an `.await`
 //! that would fabricate a spuriously async caller.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the sync resolve-then-announce
+//! Solve-once-at-the-primitive: the sync resolve-then-announce
 //! composition lives at ONE surface, so a future refinement (a swap to
 //! `Path::join`-based repo-root discovery for callers that spawn from a
 //! non-repo-root working directory, a telemetry sigil separating the
@@ -56,7 +56,7 @@
 //! `substrate::ShortSha` newtype on the return) lands here and reaches
 //! both consumers by construction.
 //!
-//! §VI.1 recurring-shape-to-helper: two sibling stanzas across two
+//! Recurring-shape-to-helper: two sibling stanzas across two
 //! command modules materially match the recurring-shape criterion; the
 //! primitive body is the promotion.
 

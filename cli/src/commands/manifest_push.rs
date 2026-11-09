@@ -14,7 +14,7 @@
 //! 4. `pb.finish_with_message("✅ Pushed to main");`
 //! 5. `println!();`
 //!
-//! Two identical occurrences past THEORY §VI.1's "two occurrences is
+//! Two identical occurrences past the "two occurrences is
 //! a coincidence" threshold — but the shape is a distinctive
 //! visual-grammar fusion of THREE separate primitives (a `tracing`
 //! info line + an indicatif spinner-flavored progress bar + a

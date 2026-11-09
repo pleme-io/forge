@@ -243,7 +243,7 @@ impl NixHooks {
 /// cmd.env("ATTIC_TOKEN", <attic_token>);
 /// ```
 ///
-/// wiring pre-lift, past THEORY §VI.1's three-times-is-a-law
+/// wiring pre-lift, past the three-times-is-a-law
 /// threshold (PRIME DIRECTIVE: duplication budget is zero):
 ///
 /// 1. [`configure_post_build_hook`] itself — the primitive that
@@ -280,14 +280,14 @@ impl NixHooks {
 ///   for its "🚀 Per-derivation caching enabled" message before
 ///   calling this primitive).
 ///
-/// # THEORY grounding
+/// # Grounding
 ///
-/// - §V (solve-once-at-the-primitive): the four-line attic-hook
+/// - (solve-once-at-the-primitive): the four-line attic-hook
 ///   splice now lives at exactly one code line across the crate; a
 ///   future refinement of the hook's env contract lands here and
 ///   reaches all three consumers by construction rather than by
 ///   convention.
-/// - §VI.1 (recurring-shape-to-helper): three byte-similar four-line
+/// - (recurring-shape-to-helper): three byte-similar four-line
 ///   stanzas past the three-times threshold collapse onto ONE body.
 pub(crate) fn wire_post_build_hook_env(
     cmd: &mut Command,
@@ -342,7 +342,7 @@ pub async fn configure_post_build_hook(
     // Configure the command — args + three env vars — through the
     // canonical wire primitive so a future refinement of the hook's
     // env contract lands at ONE body and reaches every consumer by
-    // construction (THEORY §V, §VI.1).
+    // construction.
     wire_post_build_hook_env(cmd, &hook_path, cache_name, cache_url, attic_token);
 
     crate::info_success!("Configured attic post-build-hook: {}", hook_path);

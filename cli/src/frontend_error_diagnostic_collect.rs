@@ -110,18 +110,18 @@
 //!   rows into a `Vec<String>`. Different cap, different color-dispatch
 //!   discipline, print-only — out of scope.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! - `THEORY.md §I.5` (duplication budget zero): two sibling 7-line
+//! - (duplication budget zero): two sibling 7-line
 //!   stanzas across two sibling failure branches in the same command
 //!   module were past the two-occurrence coincidence threshold.
 //!   Post-lift the primitive owns the walk-cap-filter-print-collect
 //!   grammar at ONE construction surface.
-//! - `THEORY.md §V.2` (typed absorption): the
+//! - (typed absorption): the
 //!   "walk-cap-filter-print-collect" composition is a single named
 //!   concept; both callers cite it rather than restating its five
 //!   component steps.
-//! - `THEORY.md §III.1` (typescape as root data structure): the cap
+//! - (typescape as root data structure): the cap
 //!   sits at ONE typed constant so a future adjustment reaches both
 //!   consumers in lockstep, without a caller-side literal drift.
 //!

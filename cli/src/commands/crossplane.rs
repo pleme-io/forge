@@ -85,8 +85,7 @@ fn require_crossplane_yaml_under_package_root(package_root: &str) -> Result<()> 
 /// PATH. Every `crossplane` spawn in this module reads through this sigil
 /// so the resolve happens in exactly one place — mirrors the `helm_bin()`
 /// / `docker_bin()` / `flux_bin()` / `open_bin()` sigil discipline on
-/// sibling command modules. Solve-once at the sigil (THEORY §I.5 —
-/// duplication budget zero; every recurring shape becomes a generator or
+/// sibling command modules. Solve-once at the sigil (duplication budget zero; every recurring shape becomes a generator or
 /// helper before it becomes duplicated code) means a future added
 /// `crossplane` spawn cannot silently repeat the two-argument resolve
 /// string and drift away from `CROSSPLANE_BIN` at exactly the tier the
@@ -149,7 +148,7 @@ fn xpkg_output_file() -> Result<(tempfile::TempDir, PathBuf)> {
     // `commands/e2e.rs::e2e_image_output_symlink` (ab88937),
     // `commands/federation_tests.rs::federation_test_job_manifest_file`
     // (76b256e), and `commands/migrations.rs::migration_job_manifest_file`
-    // (950a0e7) all routed onto it (THEORY §I.3 belief 5 / §V.6 —
+    // (950a0e7) all routed onto it (belief 5 /
     // recurring shape becomes a library before it becomes duplicated
     // code).
     crate::hermetic_scratch::hermetic_scratch_file("xpkg-", "package.xpkg")
@@ -505,8 +504,8 @@ mod tests {
         // ONE place — the `crossplane_bin()` sigil definition — so a
         // future added spawn cannot silently re-copy the resolve inline
         // and drift away from the sigil's single point of truth. Every
-        // consumer must read through `crossplane_bin()`. THEORY §I.5:
-        // duplication budget zero.
+        // consumer must read through `crossplane_bin()`.
+        // Duplication budget zero.
         let resolve_count = body
             .matches("get_tool_path(\"CROSSPLANE_BIN\", \"crossplane\")")
             .count();
@@ -598,7 +597,7 @@ mod tests {
     /// leave the negative scan trivially satisfied by absence. The
     /// sigil definition itself (line reading `fn xpkg_output_file()`)
     /// carries no `?` and is excluded from the count — this pins the
-    /// solve-once discipline (THEORY §I.5): every consumer routes
+    /// solve-once discipline: every consumer routes
     /// through the sigil, never re-copies the tempdir setup inline.
     ///
     /// Negative side: the pre-lift `std::env::temp_dir()` shape must
@@ -784,7 +783,7 @@ mod tests {
     /// Solve-once side: the `.join("crossplane.yaml").exists()` probe
     /// must appear at exactly ONE code line in the module body — the
     /// primitive's own `if !Path::new(package_root).join(
-    /// "crossplane.yaml").exists()` line. THEORY §I.5 (duplication
+    /// "crossplane.yaml").exists()` line. (duplication
     /// budget zero): every consumer routes through the primitive, and
     /// a re-inlined gate at a third release fn cannot silently ride
     /// around the shared envelope.

@@ -39,7 +39,7 @@
 //!    `"Test the build: cargo build"` and step-3 tail is
 //!    `"Commit both files: git add Cargo.lock Cargo.nix && git commit"`.
 //!
-//! Four sibling occurrences clear THEORY.md §VI.1's "two is a
+//! Four sibling occurrences clear the "two is a
 //! coincidence, three is a law" threshold. Post-lift the four stanzas
 //! route through [`print_next_steps_heading_then_review_the_changes`];
 //! a rename of the shared step-1 instruction (say to
@@ -84,9 +84,9 @@
 //! [`crate::ui::write_next_step`] and this primitive inherits by
 //! composition.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! - THEORY.md §V.1 (Construction guarantees; Types → Invariants →
+//! - (Construction guarantees; Types → Invariants →
 //!   Proofs → Render Anywhere): the paired byte-oracle sibling
 //!   [`write_next_steps_heading_then_review_the_changes`] is the
 //!   Render Anywhere half — pinning the exact two-line rendered
@@ -94,7 +94,7 @@
 //!   dropped the heading, inverted the two lines, or misspelled the
 //!   instruction text fails at `cargo test` time rather than at
 //!   operator readout.
-//! - THEORY.md §VI.1 (three-times rule): four sibling occurrences
+//! - (three-times rule): four sibling occurrences
 //!   past the "two is a coincidence; three is a law" threshold, so
 //!   the two-line stanza lifts onto ONE typed body.
 

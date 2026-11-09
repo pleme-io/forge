@@ -23,8 +23,7 @@ use crate::graphql_schema::{extract_graphql_schema_named, SchemaExtractionError}
 /// `commands/developer_tools.rs:114` (ab5a8db) and the broader
 /// `<TOOL>_BIN` / `SERVICE_DIR` env-var sigil family across forge
 /// modules, converging every substrate-declared environment contract
-/// in this module onto the solve-once-at-the-sigil idiom (THEORY §I.5
-/// — duplication budget zero; every recurring shape becomes a helper
+/// in this module onto the solve-once-at-the-sigil idiom (duplication budget zero; every recurring shape becomes a helper
 /// before it becomes duplicated code). Pre-lift the two consumer sites
 /// (`extract_and_validate_schema`, `find_schema_extractor`) each
 /// spelled the same two-line stanza
@@ -118,7 +117,7 @@ pub async fn extract_and_validate_schema(
     // Route through the canonical `extract_graphql_schema_named`
     // primitive — the one-oracle owner of the "run cargo run --bin
     // <name> --quiet in a backend dir, expect non-empty stdout bytes,
-    // fail typed on every failure shape" surface (THEORY §V.1, §VI.1).
+    // fail typed on every failure shape" surface.
     // Pre-lift the four sibling sites in codegen* had already been
     // absorbed by the primitive's fixed-bin-name entry (673e4be); this
     // fifth site is the one that survived because it reads a runtime-
@@ -421,7 +420,7 @@ mod tests {
     /// Pre-lift the two consumer sites (`extract_and_validate_schema`,
     /// `find_schema_extractor`) each spelled the same two-line stanza
     /// verbatim — a byte-identical operator-facing miss wording that
-    /// had drifted only by convention. THEORY §VI.1 admits "two
+    /// had drifted only by convention. Admits "two
     /// occurrences is a coincidence; three is a law" — this shield
     /// closes the drift class at two on the same idiom the sibling
     /// `commands/developer_tools.rs:1107` shield (ab5a8db) landed at

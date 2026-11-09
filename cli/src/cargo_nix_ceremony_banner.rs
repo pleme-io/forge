@@ -84,16 +84,16 @@
 //! under a compact-terminal palette) lands at ONE `const` rather
 //! than at four inline literal `80`s.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the (banner label, heading
+//! Solve-once-at-the-primitive: the (banner label, heading
 //! follow-on) covariance the four pre-lift sites carried out of
 //! band lives here in one closed enum whose projections cannot
-//! desynchronize. §VI.1 three-is-a-law: four sites today —
+//! desynchronize. Three-is-a-law: four sites today —
 //! two per ceremony variant, one variant per repo-shape workflow
 //! (`web_service` for Hanabi's frontend workspace, `developer_tools`
 //! for a generic rust-service workspace) — clearing the duplication
-//! threshold at exactly the point THEORY calls a law.
+//! threshold at exactly the point where it becomes a law.
 
 use std::io;
 

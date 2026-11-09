@@ -61,16 +61,16 @@
 //! diagnostic did surface — a behavioral drift, not an improvement.
 //! The primitive keeps the substring semantics by construction.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! THEORY.md §II Language — typed primitives own boundary
+//! Language — typed primitives own boundary
 //! classification; the "E2E-relevant docker-image row" filter is named
 //! at ONE typed primitive site instead of restated at each diagnostic
-//! sub-section that emits filtered rows. THEORY.md §VI.1 one-oracle —
+//! sub-section that emits filtered rows. One-oracle —
 //! a future refinement of the filter grammar (a third substring, a
 //! configurable predicate list, a swap to a compiled regex) lands at
 //! this one primitive rather than at each `commands/e2e.rs` call site
-//! independently. THEORY.md §V.4 Phase 1 attestation — the sink
+//! independently. Phase 1 attestation — the sink
 //! dispatch is the same closed [`crate::probe_dump::DiagSink`] enum
 //! the surrounding docker-diagnostic sub-sections read, so a future
 //! record-shape addition (e.g. a `DiagSink::Buffered(Vec<u8>)` variant

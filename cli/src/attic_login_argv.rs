@@ -105,9 +105,9 @@
 //! whether the server + cache-name pair collapses into a single
 //! positional or stays split across two.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the attic-login argv shape lives at
+//! Solve-once-at-the-primitive: the attic-login argv shape lives at
 //! ONE construction surface so a future refinement (a rename of the
 //! `login` verb, a promotion of `<token>` to a `--token <token>` flag
 //! pair, a swap onto the `<server>:<cache>` alias shape ahead of a

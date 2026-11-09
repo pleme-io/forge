@@ -71,9 +71,9 @@
 //! caller carried any of them as a named binding); post-lift each has
 //! ONE canonical home the moment a future edit needs to introduce it.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! - `THEORY.md §V.1` (Construction guarantees; Types → Invariants →
+//! - (Construction guarantees; Types → Invariants →
 //!   Proofs → Render Anywhere): the "first token after a SQL keyword,
 //!   stripped of outer identifier quoting" invariant lives at ONE
 //!   construction surface — [`extract_first_sql_identifier_token`] —
@@ -81,7 +81,7 @@
 //!   characters, the whitespace-tokenization semantics, and the empty-
 //!   tail posture as `cargo test`-verifiable invariants rather than as
 //!   consumer-site conventions.
-//! - `THEORY.md §VI.1` (Generation over composition; two-is-a-
+//! - (Generation over composition; two-is-a-
 //!   coincidence, three-is-a-law): two sibling occurrences sit at the
 //!   coincidence threshold. The compounding-directive corollary —
 //!   "every recurring shape becomes a helper before it becomes
@@ -90,7 +90,7 @@
 //!   disjunction from resurfacing inline under `commands/` where the
 //!   third-site drift the two-is-a-coincidence-three-is-a-law theorem
 //!   warns against would land.
-//! - `THEORY.md §III` (Structure): the "SQL identifier token, bracketed
+//! - (Structure): the "SQL identifier token, bracketed
 //!   or bare" concept is a single named terminal in the migration-
 //!   validation typescape; both consumers cite
 //!   [`extract_first_sql_identifier_token`] rather than restating the
@@ -362,7 +362,7 @@ mod tests {
     /// the four-char trim closure `trim_matches(|c: char|
     /// SQL_IDENTIFIER_QUOTE_CHARS.contains(&c))` at exactly one code
     /// line — the primitive body. Pins the one-oracle discipline
-    /// THEORY §VI.1 requires: a future refactor that duplicated the
+    /// requires: a future refactor that duplicated the
     /// trim closure onto a fallback path or a second projection would
     /// surface here.
     ///

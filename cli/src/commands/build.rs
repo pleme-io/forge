@@ -38,8 +38,8 @@ pub async fn execute(
     // shape (a `~/.attic-token` fallback file, a telemetry sigil
     // separating explicit-value from unset paths, a swap to a typed
     // `substrate::AtticToken(String)` newtype) lands at the sigil body
-    // and reaches this consumer by construction — THEORY §V
-    // solve-once-at-the-primitive; §VI.1 recurring-shape-to-helper.
+    // and reaches this consumer by construction —
+    // solve-once-at-the-primitive; recurring-shape-to-helper.
     let attic_token = crate::infrastructure::attic::AtticClient::discover_token()
         .or_else(|| {
             crate::infrastructure::kubectl::fetch_secret_value(
@@ -58,7 +58,7 @@ pub async fn execute(
     // the alias contract (canonicalize hook, known-aliases enum,
     // telemetry sigil, typed `substrate::AtticServerAlias` newtype)
     // lands at the sigil body and reaches this consumer by construction
-    // — THEORY §V solve-once-at-the-primitive; §VI.1 recurring-shape-
+    // — solve-once-at-the-primitive; recurring-shape-
     // to-helper.
     let attic_server = crate::infrastructure::attic::attic_server_alias();
 
@@ -171,7 +171,7 @@ pub async fn execute(
     // Delegate the four-line argv+env splice through the canonical wire
     // primitive `crate::nix_hooks::wire_post_build_hook_env` so a
     // future refinement of the hook's env contract lands at ONE body
-    // and reaches every consumer by construction (THEORY §V, §VI.1).
+    // and reaches every consumer by construction.
     if let Some(ref hook) = hook_path {
         crate::nix_hooks::wire_post_build_hook_env(
             &mut cmd,
@@ -240,7 +240,7 @@ pub async fn execute(
         //      migration the failure surfaces as typed
         //      `NixBuildError::ExecFailed` / `NixBuildError::
         //      PathInfoFailed` carrying the structural-record tuple
-        //      Phase 1 attestation records (THEORY §V.4) pattern-
+        //      Phase 1 attestation records pattern-
         //      match on.
         //   3. `closure_size` derivation — pre-migration each of the
         //      three sites re-derived `.lines().count()`; post-
@@ -260,9 +260,9 @@ pub async fn execute(
                 // Push all derivations via stdin onto the canonical typed
                 // primitive (third sibling of the lifted stanza family —
                 // `commands/rust_service.rs::push_rust_service` AMD64+ARM64
-                // are the other two; THEORY §VI.1 three-is-a-law).
+                // are the other two; three-is-a-law).
                 // Typed-error op-failure path carries (cache, exit_code,
-                // stderr) per THEORY §V.4 Phase 1 attestation record shape.
+                // stderr) Phase 1 attestation record shape.
                 let attic_client =
                     crate::infrastructure::attic::AtticClient::new(cache_ref.clone())
                         .with_token(attic_token.clone());
@@ -310,7 +310,7 @@ mod tests {
     /// [`crate::error::AtticError`] dispatch
     /// (`ExecFailed` vs `LoginFailed` vs `TokenRequired`) the untyped
     /// `Result<ExitStatus>` collapsed away — a distinction Phase 1
-    /// attestation records (THEORY §V.4) rely on so a "cache
+    /// attestation records rely on so a "cache
     /// misconfigured" telemetry entry is separable from an "attic
     /// binary missing" one at the type level.
     ///
@@ -390,7 +390,7 @@ mod tests {
     /// (`infrastructure/attic.rs::resolve_attic_bin`), and the typed
     /// [`crate::error::AtticError`] dispatch (`ExecFailed` vs
     /// `UseFailed`) the untyped `Result<ExitStatus>` collapsed away —
-    /// a distinction Phase 1 attestation records (THEORY §V.4) rely
+    /// a distinction Phase 1 attestation records rely
     /// on so a "wrong server alias" telemetry entry is separable from
     /// an "attic binary missing" one at the type level, and the
     /// `Stdio::null()` stderr suppression that previously erased the
@@ -517,7 +517,7 @@ mod tests {
     /// a3d51eb through 6cb9442) close on the sync frontier. Post-
     /// lift the delegation call routes through the primitive and the
     /// canonical `"nix build failed (exit {code})"` envelope emerges
-    /// at the primitive's ONE body (THEORY.md §VI.1: the three-times
+    /// at the primitive's ONE body (the three-times
     /// rule redeemed by lifting to an archetype rather than
     /// re-spelling the stanza).
     ///
@@ -551,7 +551,7 @@ mod tests {
     /// .unwrap_or_else(|_| "default".to_string())` inline. Pre-lift
     /// this file and `commands/github_runner_ci.rs::execute` each
     /// carried a byte-identical inline stanza; two consumers past
-    /// THEORY §VI.1's three-is-a-law threshold in intent — the pair
+    /// the three-is-a-law threshold in intent — the pair
     /// had to agree on both the env-var spelling AND the string
     /// fallback for their respective `AtticClient` steps (this file:
     /// `login_optional` and `use_cache`; `commands/github_runner_ci.rs`:

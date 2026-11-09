@@ -52,16 +52,16 @@
 //! or vice versa. This primitive owns ONLY the Attic-cache shape;
 //! image references keep their own home.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the `<server>:<cache_name>` shape
+//! Solve-once-at-the-primitive: the `<server>:<cache_name>` shape
 //! lives at ONE construction surface so a future refinement — the
 //! separator swap (`:` → `/`), a v2 attic client accepting the two
 //! slots as separate positionals, or a hyphen-normalization pass on
 //! the cache name — lands in one place rather than in every
 //! consumer.
 //!
-//! §VI.1 three-is-a-law: three sites today (build.rs, rust_service.rs,
+//! Three-is-a-law: three sites today (build.rs, rust_service.rs,
 //! attic.rs::use_cache — plus the sibling `info!` narration at
 //! attic.rs::L781 that restates the composition inline), so the lift
 //! clears the duplication threshold four times over.

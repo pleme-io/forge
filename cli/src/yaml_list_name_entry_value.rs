@@ -27,7 +27,7 @@
 //! line by line looking for `- name:` list entries whose value matches
 //! a caller-supplied service or bootstrap component name so the walker
 //! can rewrite the sibling `newTag:` / `tag:` line one iteration later.
-//! Three identically-shaped bodies past THEORY.md §VI.1's three-times
+//! Three identically-shaped bodies past the three-times
 //! threshold — the PRIME DIRECTIVE duplication budget is zero at three
 //! sibling occurrences.
 //!
@@ -83,19 +83,19 @@
 //! absent-prefix arm; the byte-oracle shields pin the present-prefix
 //! extraction against realistic manifest lines.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the "recognize a `- name:` YAML
+//! Solve-once-at-the-primitive: the "recognize a `- name:` YAML
 //! list entry and lift its trimmed value" projection lives at ONE
 //! construction surface so all three manifest walkers inherit the
 //! same closed prefix and trim discipline.
 //!
-//! §VI.1 three-is-a-law: three sibling occurrences past the coincidence
+//! Three-is-a-law: three sibling occurrences past the coincidence
 //! threshold — the negative caller shield forbids drift by construction
 //! so the PRIME DIRECTIVE duplication budget stays at zero as a fourth
 //! walker (e.g. a future GitOps overlay editor) is added.
 //!
-//! §III typescape: `{"the trimmed value of a `- name:` YAML list entry,
+//! Typescape: `{"the trimmed value of a `- name:` YAML list entry,
 //! if the input line's trimmed form starts with `- name:`; None
 //! otherwise"}` becomes a single named terminal in the manifest-walker
 //! typescape; all three consumers cite the primitive rather than

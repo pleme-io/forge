@@ -35,7 +35,7 @@
 //!
 //! ## Why a typed enum, not a bool
 //!
-//! THEORY §V.4 Phase 1 attestation pattern-matches on the structural
+//! Phase 1 attestation pattern-matches on the structural
 //! record of one external probe to recover the probe shape (probe-absent
 //! vs probe-found-nothing vs probe-found-malformed vs
 //! probe-found-evidence). The prior `false` hardcode discarded all four

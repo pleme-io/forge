@@ -142,7 +142,7 @@ impl GitClient {
     /// The `Command::new(self.resolve_git_bin())` construction and the
     /// `if let Some(ref dir) = self.working_dir { cmd.current_dir(dir); }`
     /// workdir-application stanza were each authored six times — well
-    /// past THEORY §VI.1's three-is-a-law threshold ("two occurrences is
+    /// past the three-is-a-law threshold ("two occurrences is
     /// a coincidence; three is a law"). This primitive is the
     /// law-redeeming consolidation: the binary-resolution + workdir-
     /// application pair lives at ONE body, and each consumer method
@@ -281,7 +281,7 @@ impl GitClient {
     /// retry routing under the op-label `"git push"`, and (4) the
     /// canonical operator-facing envelope
     /// `.context("Failed to push commits to remote")`. Two occurrences
-    /// sit at THEORY.md §VI.1's "two-is-a-coincidence" threshold; the
+    /// sit at the "two-is-a-coincidence" threshold; the
     /// prior fleet-wide `Command::new(self.resolve_git_bin())` lift
     /// on the sibling [`Self::command`] helper — which owned SIX
     /// occurrences of a smaller sub-body — set the precedent that the
@@ -411,7 +411,7 @@ impl GitClient {
     /// .status().await.context(…)?` block with an `if
     /// !status.success() { bail!(…) }` envelope — exactly the
     /// eleven-line stanza that [`crate::retry::run_inherited_status`]
-    /// was carved out to retire. Three occurrences is THEORY §VI.1's
+    /// was carved out to retire. Three occurrences is the
     /// three-is-a-law trigger; this primitive is the law-redeeming
     /// extraction.
     ///
@@ -419,7 +419,7 @@ impl GitClient {
     /// primitive: [`Self::add`] / [`Self::commit`] / [`Self::push_to`]
     /// for the inherited-stdio user-facing ops, [`Self::has_staged_changes`]
     /// for the index predicate. A future Phase 1 attestation-record
-    /// consumer (THEORY §V.4) that wants to seal each release commit
+    /// consumer that wants to seal each release commit
     /// pattern-matches on [`CommitPushOutcome::Pushed`] in one place
     /// instead of three.
     pub async fn stage_commit_push_release(

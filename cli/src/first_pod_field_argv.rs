@@ -21,7 +21,7 @@
 //!    (the same `kubectl_command_async()` frontier used at site 2,
 //!    reading `jsonpath={.items[0].spec.containers[0].image}`).
 //!
-//! Three identically-shaped bodies past THEORY §VI.1's three-is-a-law
+//! Three identically-shaped bodies past the three-is-a-law
 //! threshold (PRIME DIRECTIVE: duplication budget is zero). A first-pod
 //! probe argv drift — a rename of the `-n` short form to `--namespace`,
 //! an argv-order shuffle putting `-l <selector>` before `-n <ns>`, an

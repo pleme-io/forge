@@ -38,9 +38,9 @@
 //! `String` (auto-deref), and a `&String` (auto-deref) all flow through
 //! without a per-caller `.as_str()` intermediate.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V solve-once-at-the-primitive: the `resolve_product_dir` +
+//! Solve-once-at-the-primitive: the `resolve_product_dir` +
 //! `path_to_string_lossy` fusion lives at ONE construction surface so a
 //! future rename of the product-tree layout (a promotion of the standalone
 //! deploy.yaml probe, a swap of the monorepo `pkgs/products/{product}`

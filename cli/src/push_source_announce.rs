@@ -53,9 +53,9 @@
 //! parenthesized phrase baked as a plain literal — no argv join, no
 //! third dimmed slot.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §V.1 knowable-platform construction guarantee: modelling the three
+//! Knowable-platform construction guarantee: modelling the three
 //! push-source variants as a closed enum makes an invalid Phase-1
 //! push-source (a fourth branch someone added to the `if has_local &&
 //! !skip_gates { … } else { if skip_gates { … } else { … } }` ladder
@@ -65,10 +65,10 @@
 //! typed accessor rather than through a fourth inline `println!` a
 //! future edit could omit.
 //!
-//! §VI.1 recurring-shape-to-helper past the three-times threshold:
+//! Recurring-shape-to-helper past the three-times threshold:
 //! three sites today all in `product_release.rs::execute` — clearing
 //! the "three is a law" duplication threshold at exactly the point
-//! THEORY calls a law. A future push-source variant (a fourth
+//! where it becomes a law. A future push-source variant (a fourth
 //! `has_local && skip_gates` corner, a signed-artifact-only sibling
 //! branch) adds ONE enum arm and ONE `phrase()` match arm and reaches
 //! every announce site by construction rather than through a fourth

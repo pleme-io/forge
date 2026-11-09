@@ -107,7 +107,7 @@ fn retrying_message(attempts: u32, max_attempts: u32) -> String {
 /// at line 960 as of d197c04) each spelled the identical two-line stanza
 /// `warn!("   🔄 Retrying ({}/{})", attempts, max_attempts); sleep(
 /// integration_test_retry_delay(attempts)).await;` — three sibling
-/// occurrences past THEORY.md §VI.1's three-times threshold ("two
+/// occurrences past the three-times threshold ("two
 /// occurrences is a coincidence; three is a law"). Fusing the pair here
 /// forecloses three defect classes at the sibling `INTEGRATION_TEST_RETRY_BACKOFF`
 /// docstring above cites for its own retry-delay lift:

@@ -76,10 +76,10 @@
 //! read). This primitive owns ONLY the `<working_dir>/<name>`
 //! filesystem-path shape.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! §VI.1 three-is-a-law: six stanzas across two modules materially
-//! exceed the three-is-a-law threshold. §V solve-once-at-the-
+//! Three-is-a-law: six stanzas across two modules materially
+//! exceed the three-is-a-law threshold. Solve-once-at-the-
 //! primitive: the composition shape lives at ONE construction
 //! surface so a future refinement (e.g. a trailing-slash normalize
 //! for a `working_dir` that operators pass with a trailing `/`, a

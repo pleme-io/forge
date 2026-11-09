@@ -14,7 +14,7 @@ use crate::retry::{run_bin_args_at_inherited_status_sync, run_bin_args_inherited
 /// `commands/prerelease.rs:102` (79e03a5) and the sibling `crossplane_bin()`
 /// / `cosign_bin()` / `jsonnet_bin()` sigil discipline on other command
 /// modules (6b3ac16 / a070a3c / a826ac0). Solve-once at the sigil
-/// (THEORY §I.5 — duplication budget zero; every recurring shape becomes
+/// (duplication budget zero; every recurring shape becomes
 /// a generator or helper before it becomes duplicated code) means a
 /// future added `cargo` spawn cannot silently repeat the two-argument
 /// resolve string and drift away from `CARGO` at exactly the tier the
@@ -137,8 +137,8 @@ mod tests {
     /// the two-argument resolve string appears in EXACTLY one place in
     /// the module body — only the sigil definition — so a future added
     /// spawn cannot silently re-copy the resolve inline and drift away
-    /// from `cargo_bin()`'s single point of truth. THEORY §I.5:
-    /// duplication budget zero.
+    /// from `cargo_bin()`'s single point of truth.
+    /// Duplication budget zero.
     ///
     /// The scan bounds on the whole-module boundary (from the file
     /// start to the `\n#[cfg(test)]\nmod tests {` marker above) so

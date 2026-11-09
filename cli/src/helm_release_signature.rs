@@ -50,7 +50,7 @@
 //! against a namespace whose probe was never spawned (no evidence
 //! either way). A downstream `sekiban` strict-production policy that
 //! fails-closed on evidence of unsigned `HelmRelease` admissions
-//! (THEORY §V.4 Phase 2: only Phase-2-signed resources are admitted
+//! (Phase 2: only Phase-2-signed resources are admitted
 //! into production) cannot express that gate against the pre-fix bare
 //! bool — every Phase 2 record asserts the same negative value
 //! regardless of whether `kubectl get helmrelease` substantiated an
@@ -90,7 +90,7 @@
 //!    resources have no `tameshi::ci::ANNOTATION_SIGNATURE` annotation
 //!    on their `metadata` (the annotation forge's `deploy` step
 //!    injects, which `sekiban` admission verifies before admitting the
-//!    resource into the cluster — THEORY §VII.1: sekiban admission
+//!    resource into the cluster —: sekiban admission
 //!    webhook refuses any resource without a valid Phase 2 signature
 //!    at the K8s API server). In every sub-case, there is no positive
 //!    Phase 2 release-signature evidence; the prior `false` hardcode
@@ -114,7 +114,7 @@
 //!   the no-probe-ran world cannot generate), but the observed state
 //!   failed the release-signature invariant. Collapsing `VerifyFailed`
 //!   into a single boolean would re-introduce the discriminator loss
-//!   the typed primitive exists to prevent (THEORY §V.1: make invalid
+//!   the typed primitive exists to prevent (make invalid
 //!   states unrepresentable — an `all_releases_signed: false` value
 //!   that conflates "no kubectl probe ran" with "probe ran and the
 //!   namespace has unsigned HelmReleases" is a flat state where a
@@ -182,11 +182,11 @@
 //!
 //! ## Frontier inspiration
 //!
-//! THEORY §V.4 ("Two-phase signature composition") names the Phase 2
+//! ("Two-phase signature composition") names the Phase 2
 //! signature as the one `sekiban` admission webhook verifies before
 //! admitting a resource into a production namespace: only Phase-2-
 //! signed `HelmRelease` resources are admitted; Phase-1 records are
-//! refused in production namespaces. THEORY §VII.1 ("Attestation-
+//! refused in production namespaces. ("Attestation-
 //! gated deployments") names the gate as structural rather than a
 //! policy overlay — `sekiban` admission runs in every cluster, refusing
 //! any resource without a valid Phase 2 signature at the K8s API
@@ -332,7 +332,7 @@ crate::impl_verified_outcome!(HelmReleaseSignatureOutcome);
 ///    surfaces upstream as a [`Self::ProbeAbsent`] outcome chosen at
 ///    the shell-out call site rather than as a parser arm.
 ///
-/// THEORY §V.2: attestation is cryptographic evidence, not a wish. The
+/// Attestation is cryptographic evidence, not a wish. The
 /// parser preserves the structural distinction between "probe ran and
 /// observed one or more HelmRelease resources lacking the sekiban
 /// signature annotation" and "no probe ran / no usable evidence" — the

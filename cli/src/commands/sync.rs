@@ -34,7 +34,7 @@ use crate::repo::get_tool_path;
 /// respelling the two-argument `BUN_BIN` resolve inline at its bun
 /// spawns.
 ///
-/// Solve-once at the sigil (THEORY §I.5 — duplication budget zero;
+/// Solve-once at the sigil (duplication budget zero;
 /// every recurring shape becomes a helper before it becomes duplicated
 /// code) means a future added `bun` spawn in this module cannot
 /// silently re-copy the two-argument resolve and drift away from the
@@ -159,7 +159,7 @@ pub async fn execute_drift_check(working_dir: &Path) -> Result<DriftCheckResult>
     println!("Extracting schema...");
 
     // Route through the canonical `extract_graphql_schema` primitive
-    // (THEORY §V.1, §VI.1): pre-lift this site was the sixth raw-spawn
+    //: pre-lift this site was the sixth raw-spawn
     // stanza the 673e4be / b02d4eb sweeps did not catch. Post-lift the
     // three failure shapes (`SpawnFailed` / `Failed` / `EmptyOutput`)
     // are structurally distinct in the primitive AND collapse into the

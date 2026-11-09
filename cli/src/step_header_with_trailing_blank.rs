@@ -43,7 +43,7 @@
 //!
 //! # Duplication signal past the PRIME DIRECTIVE threshold
 //!
-//! Twelve identically-shaped bodies well past the THEORY §VI.1
+//! Twelve identically-shaped bodies well past the
 //! recurring-shape-to-helper cut. Pre-lift, a drift to the framing
 //! blank (a swap for `println!("\n")`, a demotion to an unframed
 //! step-body opener, a promotion to a doubled `println!(); println!();`
@@ -76,17 +76,17 @@
 //! rendered shape without capturing a tracing subscriber and without
 //! racing an ambient logger.
 //!
-//! # THEORY grounding
+//! # Grounding
 //!
-//! - §V solve-once-at-the-primitive: the "step heading + framing
+//! - Solve-once-at-the-primitive: the "step heading + framing
 //!   blank" pair lives at ONE construction surface. A future
 //!   refinement (an OTLP `workflow_step_started` span emitted
 //!   alongside the print, a demotion of the framing blank under a
 //!   compact-log environment variable, a promotion of the pair to a
 //!   [`tracing::Span`] `.entered()` guard) lands in one place.
-//! - §VI.1 three-is-a-law is exceeded fourfold here at N=12.
+//! - Three-is-a-law is exceeded fourfold here at N=12.
 //!   Lifting at N=12 closes a twelve-way lockstep-drift surface.
-//! - §VII types-as-theorems: the `announce_step_header` peer already
+//! - Types-as-theorems: the `announce_step_header` peer already
 //!   enforces `1 <= step <= total` in debug builds; this fusion
 //!   inherits the invariant by delegation rather than by copy.
 

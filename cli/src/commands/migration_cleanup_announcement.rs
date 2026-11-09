@@ -12,7 +12,7 @@
 //! println!("🧹 Cleaning up orphaned migration pods...");  // post-reset pods branch
 //! ```
 //!
-//! Three occurrences of an identical shape past THEORY §VI.1's
+//! Three occurrences of an identical shape past the
 //! three-is-a-law threshold; this module is the law-redeeming extraction.
 //! Post-lift each site calls
 //! [`print_migration_cleanup_announcement`] with a `&str` noun-phrase

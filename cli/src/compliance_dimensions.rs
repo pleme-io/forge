@@ -21,7 +21,7 @@
 //! chart-content [`crate::chart_listing`] layers): (a) the same dimension
 //! set yielded two distinct `compliance_hash` values depending on
 //! construction path (forge bare vs tameshi builder), defeating the
-//! attestation-hash-as-content-identity invariant THEORY §VI.1 names;
+//! attestation-hash-as-content-identity invariant names;
 //! and (b) two structurally different dimension sets — one with a
 //! passing SLSA-provenance dimension, one with a failing one — produced
 //! identical `compliance_hash` values, since the stamp was constant.

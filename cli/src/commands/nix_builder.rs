@@ -36,8 +36,8 @@ use crate::repo::get_tool_path;
 /// `flux_reconcile.rs::flux_bin()` / `flux_get.rs::flux_bin()` /
 /// `infrastructure/attic.rs::attic_bin()` / `nix.rs::nix_bin()`
 /// sibling sigils — the same per-module single-point-of-truth
-/// discipline applied to the NC_BIN surface here. THEORY §I.5
-/// (Generation over composition, duplication budget zero) and §VI.1
+/// discipline applied to the NC_BIN surface here.
+/// (Generation over composition, duplication budget zero) and
 /// (three-times rule).
 fn nc_bin() -> String {
     get_tool_path("NC_BIN", "nc")
@@ -158,7 +158,7 @@ async fn verify_k8s_service(service: &str, namespace: &str, port: u16) -> Result
     // typed `nc_tcp_probe_or_bail_sync` primitive so the spawn+extract+
     // target-specific-diagnostic grammar lives at ONE typed body shared
     // with the external-host probe below (see `crate::netcat_tcp_probe`
-    // for the pre-lift census + THEORY §V.1/§VI.1 grounding).
+    // for the pre-lift census grounding).
     crate::netcat_tcp_probe::nc_tcp_probe_or_bail_sync(
         &nc_bin(),
         crate::netcat_tcp_probe::NetcatTcpProbeTarget::K8sClusterLocal {
@@ -195,8 +195,7 @@ async fn verify_external(hostname: &str, port: u16) -> Result<()> {
     // `nc_tcp_probe_or_bail_sync` primitive so the spawn+extract+
     // target-specific-diagnostic grammar lives at ONE typed body shared
     // with the in-cluster K8s Service probe above (see
-    // `crate::netcat_tcp_probe` for the pre-lift census + THEORY
-    // §V.1/§VI.1 grounding).
+    // `crate::netcat_tcp_probe` for the pre-lift census grounding).
     info!("Checking TCP connectivity to {}:{}", hostname, port);
     crate::netcat_tcp_probe::nc_tcp_probe_or_bail_sync(
         &nc_bin(),
@@ -712,7 +711,7 @@ mod nix_bin_routing_tests {
     /// `(op, exit_code, stderr)` shape the sibling migrated sites
     /// (`commands/dashboards.rs`, `commands/sync.rs`,
     /// `commands/federation_tests.rs`, `commands/codegen.rs`) emit,
-    /// so a future Phase 1 attestation-record consumer (THEORY §V.4)
+    /// so a future Phase 1 attestation-record consumer
     /// reading the terminating shape pattern-matches on ONE envelope
     /// across every captured-output bail in forge.
     ///

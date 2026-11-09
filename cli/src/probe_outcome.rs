@@ -114,7 +114,7 @@
 /// - [`crate::helm_release_signature::parse_helmrelease_list`]
 /// - [`crate::pod_listing::parse_pod_list`]
 ///
-/// Four sibling call sites past THEORY §VI.1's "two is a coincidence;
+/// Four sibling call sites past the "two is a coincidence;
 /// three is a law" threshold. Each pre-lift site spelled the verbatim
 /// five-line stanza:
 /// ```text
@@ -183,7 +183,7 @@ pub fn parse_kubectl_list_items(json_text: &str) -> Option<Vec<serde_json::Value
 /// };
 /// ```
 ///
-/// Five sibling call sites past THEORY.md §VI.1's "two is a coincidence;
+/// Five sibling call sites past the "two is a coincidence;
 /// three is a law" threshold
 /// ([`crate::flux_source_verification::parse_gitrepository_status`],
 /// [`crate::oci_manifest::canonical_manifest_fingerprint`],
@@ -304,11 +304,11 @@ pub trait ProbeOutcome {
     /// `is_breaking` / `is_non_breaking` pair sealed at the version-bump
     /// surface, here at the cross-implementor probe-outcome surface.
     ///
-    /// THEORY.md §V.4 typed primitives: the "probe ran" reading is a
+    /// Typed primitives: the "probe ran" reading is a
     /// typed-trait-surface peer on [`ProbeOutcome`] itself, not a bare
     /// `!outcome.is_probe_absent()` negation re-derived at every
-    /// consumer that wants the positive reading. THEORY.md §VI.1
-    /// one-oracle: the structural-discriminator semantic role
+    /// consumer that wants the positive reading.
+    /// One-oracle: the structural-discriminator semantic role
     /// (probe-ran ⇔ NOT probe-absent) is named at one site (this default
     /// method body), so a consumer that previously read
     /// `!outcome.is_probe_absent()` reads `outcome.is_probe_present()`
@@ -385,14 +385,13 @@ macro_rules! impl_probe_outcome {
 /// substantiated a positive verdict — is structurally unreachable on
 /// every implementor: the probe-absent variant is distinct from the
 /// verified variant in every enum's match shape, so the two
-/// discriminators are mutually exclusive at the positive end. THEORY
-/// §V.4 / §VII.1: the verification-trustworthiness signal is the
+/// discriminators are mutually exclusive at the positive end. The verification-trustworthiness signal is the
 /// honesty channel a downstream `sekiban` strict-production admission
 /// verifier reads alongside the probe-coverage signal — a record whose
 /// every probe ran (`is_probe_absent` false uniformly) but whose
 /// verification-bearing subset rejected (`is_verified` false on the
 /// verified-bearing arms) fails closed on a different gate than a
-/// record whose probes did not run at all. THEORY §VI.1: the
+/// record whose probes did not run at all. The
 /// verification discriminator is derived at one site (the typed enum's
 /// `Verified` arm match), not re-inlined per call site as bool fields
 /// on the downstream attestation struct.
@@ -487,7 +486,7 @@ impl ProbeCoverage {
     /// `total()` directly into a `tracing::info!` field, so a panic
     /// here would propagate through the attestation composition site;
     /// the saturating ceiling keeps the telemetry channel alive under
-    /// every reachable `ProbeCoverage` value. THEORY §VI.1: the monoid
+    /// every reachable `ProbeCoverage` value. The monoid
     /// totality is upheld at every method, not just at `Add` — a
     /// downstream verifier reading `total()` cannot drive a panic the
     /// `Add`-side saturation foreclosed one impl up.
@@ -525,10 +524,10 @@ impl ProbeCoverage {
     /// downstream verifier the prior docstring gestured at to the
     /// composition site, so the three telemetry events forge emits
     /// surface a uniform `*_probes_coverage_ratio` field a `sekiban`
-    /// admission verifier (THEORY §V.4 / §VII.1 honesty channel) /
+    /// admission verifier (honesty channel) /
     /// Prometheus alert rule reads with one field-name pattern across
-    /// build / chart / deployment attestation records. THEORY §VI.1:
-    /// one oracle — the ratio is derived at one site, not
+    /// build / chart / deployment attestation records.
+    /// One oracle — the ratio is derived at one site, not
     /// per-emission-call inlined at each telemetry consumer.
     pub fn coverage_ratio(&self) -> f64 {
         let total = self.total();
@@ -541,7 +540,7 @@ impl ProbeCoverage {
 
     /// True iff every counted probe ran and produced evidence — `ran > 0
     /// && absent == 0`. The typed discriminator for the strict-production
-    /// `sekiban` admission verifier gate (THEORY §VII.1: attestation-
+    /// `sekiban` admission verifier gate (attestation-
     /// gated deployments are structural, not policy overlays): a downstream
     /// reconciliation that fails-closed unless every probe substantiated
     /// its claim reads one bool here rather than re-deriving
@@ -585,9 +584,9 @@ impl ProbeCoverage {
     ///
     /// [`is_saturated`]: ProbeCoverage::is_saturated
     ///
-    /// THEORY §VI.1 one-oracle discipline: the predicate is derived at
+    /// One-oracle discipline: the predicate is derived at
     /// one site (here), not re-inlined as `coverage.ran > 0 &&
-    /// coverage.absent == 0` per consumer. THEORY §V.4 / §VII.1 honesty
+    /// coverage.absent == 0` per consumer. Honesty
     /// channel: the discriminator names "every probe produced evidence,"
     /// the load-bearing precondition the Phase 1 / Phase 2 strict
     /// admission gate fails-closed on.
@@ -669,11 +668,11 @@ impl ProbeCoverage {
     /// [`is_fully_covered`]: ProbeCoverage::is_fully_covered
     /// [`is_saturated`]: ProbeCoverage::is_saturated
     ///
-    /// THEORY §VI.1 one-oracle discipline: the predicate is derived at
+    /// One-oracle discipline: the predicate is derived at
     /// one site (here), not re-inlined as `!coverage.is_empty() &&
     /// coverage.coverage_ratio() == 0.0` per consumer (which would
     /// inherit the IEEE-754 imprecision the float-equality comparison
-    /// admits at the saturated state). THEORY §V.4 / §VII.1 honesty
+    /// admits at the saturated state). Honesty
     /// channel: the discriminator names "every counted probe surfaced
     /// the honest default claim," the load-bearing precondition the
     /// Phase 1 / Phase 2 strict admission gate fails-closed on at
@@ -728,11 +727,11 @@ impl ProbeCoverage {
     /// [`is_fully_covered`]: ProbeCoverage::is_fully_covered
     /// [`is_saturated`]: ProbeCoverage::is_saturated
     ///
-    /// THEORY §VI.1 one-oracle discipline: the predicate is derived at
+    /// One-oracle discipline: the predicate is derived at
     /// one site (here), not re-inlined as `!coverage.is_empty() &&
     /// !coverage.is_all_absent() && !coverage.is_fully_covered()` per
     /// consumer (a three-call composition the typed name forecloses).
-    /// THEORY §V.4 / §VII.1 honesty channel: the discriminator names
+    /// Honesty channel: the discriminator names
     /// "some counted probes ran, some surfaced absent defaults," the
     /// load-bearing precondition the relaxed-staging admission gate
     /// reads to admit partial-coverage progress without admitting the
@@ -802,11 +801,10 @@ impl ProbeCoverage {
     /// [`is_mixed`]: ProbeCoverage::is_mixed
     /// [`is_saturated`]: ProbeCoverage::is_saturated
     ///
-    /// THEORY §VI.1 one-oracle discipline: the predicate is derived at one
+    /// One-oracle discipline: the predicate is derived at one
     /// site (here), not re-inlined as `coverage.is_mixed() ||
     /// coverage.is_fully_covered()` per consumer (which the typed
-    /// primitive surface forecloses at the call-site form). THEORY §V.4 /
-    /// §VII.1 honesty channel: the discriminator names "at least one
+    /// primitive surface forecloses at the call-site form). Honesty channel: the discriminator names "at least one
     /// counted probe ran," the load-bearing precondition the relaxed-
     /// staging admission gate admits and the all-absent-floor /
     /// empty-boundary failure case rejects.
@@ -852,10 +850,10 @@ impl ProbeCoverage {
     /// 64-bit target — unreachable in practice but structurally
     /// foreclosed by the saturating arithmetic the monoid uses).
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the saturation predicate
+    /// One-oracle discipline: the saturation predicate
     /// is derived at one site (here), not re-inlined as `coverage.ran
     /// == usize::MAX || coverage.absent == usize::MAX` per downstream
-    /// telemetry consumer. THEORY.md §V.4 / §VII.1: the honesty channel
+    /// telemetry consumer. The honesty channel
     /// surfaces both the coverage ratio AND its trustworthiness — a
     /// downstream verifier that gated only on `coverage_ratio() >= 0.9`
     /// would silently accept the `{MAX, MAX}` post-saturation state
@@ -909,11 +907,11 @@ impl ProbeCoverage {
     /// panic at any `ran > usize::MAX / 100` in debug and silently
     /// wrap in release — both arms closed at the `u128` cast.
     ///
-    /// THEORY §VI.1 one-oracle discipline: the percent form is derived
+    /// One-oracle discipline: the percent form is derived
     /// at one site (here), not re-inlined as
     /// `(coverage.ran as f64 / coverage.total() as f64 * 100.0) as
     /// u8` per consumer (which would inherit the float-imprecision
-    /// drift at the `0.9_f64` boundary). THEORY §V.4 / §VII.1: the
+    /// drift at the `0.9_f64` boundary). The
     /// honesty channel surfaces both the float and the integer ratio
     /// forms — a downstream verifier reads whichever shape its
     /// admission gate's threshold representation aligns with, without
@@ -990,11 +988,10 @@ impl ProbeCoverage {
     /// [`is_fully_covered`]: ProbeCoverage::is_fully_covered
     /// [`is_saturated`]: ProbeCoverage::is_saturated
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the strict-production
+    /// One-oracle discipline: the strict-production
     /// admission predicate is derived at one site (here), not
     /// re-inlined as `!coverage.is_saturated() &&
-    /// coverage.is_fully_covered()` per downstream consumer. THEORY.md
-    /// §V.4 / §VII.1 honesty channel: the strict gate names "complete
+    /// coverage.is_fully_covered()` per downstream consumer. Honesty channel: the strict gate names "complete
     /// AND trustworthy evidence," the load-bearing precondition the
     /// strict-production admission gate admits and every other arm
     /// (empty, all-absent, mixed, fully-covered-but-saturated) rejects.
@@ -1062,10 +1059,10 @@ impl ProbeCoverage {
     /// [`is_fully_covered`]: ProbeCoverage::is_fully_covered
     /// [`is_saturated`]: ProbeCoverage::is_saturated
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the per-axis strict-
+    /// One-oracle discipline: the per-axis strict-
     /// gate refuse predicate is named at one site (here), not re-
     /// inlined as `!coverage.is_admission_eligible_strict()` per
-    /// downstream consumer. THEORY.md §V.4 / §VII.1 honesty channel:
+    /// downstream consumer. Honesty channel:
     /// the named predicate surfaces "this no-evidence axis alone
     /// refuses the strict-production gate," the load-bearing per-axis
     /// reading the deploy orchestrator's strict-gate decomposition
@@ -1141,16 +1138,16 @@ impl ProbeCoverage {
     /// [`is_admission_eligible_strict`]: ProbeCoverage::is_admission_eligible_strict
     /// [`is_saturated`]: ProbeCoverage::is_saturated
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the per-axis relaxed-
+    /// One-oracle discipline: the per-axis relaxed-
     /// staging admission predicate is derived at one site (here), not
     /// re-inlined as `!coverage.is_saturated() && coverage.has_evidence()`
-    /// per downstream consumer. THEORY.md §V.4 / §VII.1 honesty channel:
+    /// per downstream consumer. Honesty channel:
     /// the named predicate surfaces "some AND trustworthy evidence" at
     /// the per-axis no-evidence surface — the load-bearing Phase 1 / dev-
     /// staging admission precondition the relaxed gate admits, mirroring
     /// the same naming discipline the strict-gate per-axis peer
     /// [`is_admission_eligible_strict`] already established at the
-    /// per-axis production-admission surface. THEORY.md §V.4 two-phase
+    /// per-axis production-admission surface. Two-phase
     /// signature composition: this is the per-axis typed-primitive surface
     /// for the Phase 1 precondition (evidence present AND derived ratios
     /// trustworthy), the dual of the per-axis Phase 2 surface
@@ -1239,10 +1236,10 @@ impl ProbeCoverage {
     /// [`is_saturated`]: ProbeCoverage::is_saturated
     /// [`refuses_admission_strict`]: ProbeCoverage::refuses_admission_strict
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the per-axis relaxed-
+    /// One-oracle discipline: the per-axis relaxed-
     /// gate refuse predicate is named at one site (here), not re-
     /// inlined as `!coverage.is_admission_eligible_relaxed()` per
-    /// downstream consumer. THEORY.md §V.4 / §VII.1 honesty channel:
+    /// downstream consumer. Honesty channel:
     /// the named predicate surfaces "this no-evidence axis alone
     /// refuses the relaxed dev-staging gate," the load-bearing per-
     /// axis reading the relaxed-gate decomposition consults to
@@ -1316,7 +1313,7 @@ impl ProbeCoverage {
     /// band predicate inherits the refinement without a separate
     /// per-tier branch update.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the per-axis
+    /// One-oracle discipline: the per-axis
     /// staging-only band reading is named at one site (here), not
     /// re-typed as `probe.is_admission_eligible_relaxed() &&
     /// probe.refuses_admission_strict()` or
@@ -1326,7 +1323,7 @@ impl ProbeCoverage {
     /// idiom the [`AdmissionTier::is_staging_only`] typed-sum peer
     /// (commit e08b821) established at the typed-sum surface, here
     /// applied at the per-axis bool surface.
-    /// THEORY.md §V.4 honesty channel: the named predicate surfaces
+    /// Honesty channel: the named predicate surfaces
     /// "this axis admits the relaxed gate but refuses the strict gate"
     /// — the load-bearing reading the per-axis attributor consults
     /// to surface "probe axis sits at the staging band" against the
@@ -1411,12 +1408,12 @@ impl ProbeCoverage {
     /// `[probe.admission_tier(), verification.admission_tier()]
     /// .into_iter().min().expect(..)` boilerplate inline.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the per-axis admission-tier
+    /// One-oracle discipline: the per-axis admission-tier
     /// reading is named at one site (here) through the priority-ordered
     /// branch over the four per-axis admit/refuse predicates, not
     /// re-derived as a nested if-else cascade against the four bools per
     /// consumer (which would inherit a drift class on the day a fourth
-    /// per-axis tier is added). THEORY.md §V.4 honesty channel: the
+    /// per-axis tier is added). Honesty channel: the
     /// per-axis tier surface reads one typed value naming the per-axis
     /// three-tier decision (Strict / StagingOnly / Refused) at this axis
     /// alone — the load-bearing reading a downstream per-axis
@@ -1471,8 +1468,7 @@ impl Default for ProbeCoverage {
 /// Phase 1 build / Phase 1 chart / Phase 2 deployment shape) to a single
 /// product-level signal a future emission site can compose with
 /// `[build, chart, deployment].iter().copied().sum::<ProbeCoverage>()`
-/// — one site, not per-field-summed at every downstream verifier (THEORY
-/// §VI.1 one-oracle discipline).
+/// — one site, not per-field-summed at every downstream verifier (one-oracle discipline).
 ///
 /// `saturating_add` rather than the panicking `+` is the load-bearing
 /// arithmetic: a fleet-wide aggregator summing the per-record coverage
@@ -1583,10 +1579,10 @@ where
 /// orthogonality test [`tests::test_probe_absent_and_verified_decompose_
 /// orthogonally`] pins.
 ///
-/// THEORY.md §VI.1 one-oracle discipline: the verification-coverage
+/// One-oracle discipline: the verification-coverage
 /// summary is derived at one site (here), not re-inlined as a per-
 /// implementor `match` at every consumer of the verification-bearing
-/// subset. THEORY.md §V.4 / §VII.1 honesty channel: the
+/// subset. Honesty channel: the
 /// `verified / unverified` split is the typed-primitive surface a
 /// downstream `sekiban` strict-production admission verifier reads
 /// alongside the [`ProbeCoverage`] signal — a record can carry full
@@ -1626,7 +1622,7 @@ impl VerificationCoverage {
     /// positive verification verdict — `verified > 0 && unverified == 0`.
     /// The orthogonal-axis peer of [`ProbeCoverage::is_fully_covered`]: the
     /// typed discriminator for the strict-production `sekiban` admission
-    /// verifier gate (THEORY §VII.1: attestation-gated deployments are
+    /// verifier gate (attestation-gated deployments are
     /// structural, not policy overlays) at the verification-trustworthiness
     /// dimension. A downstream reconciliation that fails-closed unless
     /// every verification-bearing probe substantiated its claim reads one
@@ -1657,10 +1653,10 @@ impl VerificationCoverage {
     ///
     /// [`verification_ratio`]: VerificationCoverage::verification_ratio
     ///
-    /// THEORY §VI.1 one-oracle discipline: the predicate is derived at
+    /// One-oracle discipline: the predicate is derived at
     /// one site (here), not re-inlined as `verification.verified > 0 &&
-    /// verification.unverified == 0` per consumer. THEORY §V.4 / §VII.1
-    /// honesty channel: the discriminator names "every verification-
+    /// verification.unverified == 0` per consumer.
+    /// Honesty channel: the discriminator names "every verification-
     /// bearing probe substantiated a positive verdict," the load-bearing
     /// precondition the Phase 1 / Phase 2 strict admission gate
     /// fails-closed on at the orthogonal axis to [`ProbeCoverage::
@@ -1790,12 +1786,11 @@ impl VerificationCoverage {
     /// [`is_fully_verified`]: VerificationCoverage::is_fully_verified
     /// [`is_saturated`]: VerificationCoverage::is_saturated
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the predicate is derived
+    /// One-oracle discipline: the predicate is derived
     /// at one site (here), not re-inlined as `!verification.is_empty()
     /// && verification.verification_ratio() == 0.0` per consumer (which
     /// would inherit the IEEE-754 imprecision the float-equality
-    /// comparison admits at the saturated state). THEORY.md §V.4 /
-    /// §VII.1 honesty channel: the discriminator names "every counted
+    /// comparison admits at the saturated state). Honesty channel: the discriminator names "every counted
     /// verification-bearing probe surfaced the honest no-substantiation
     /// arm," the load-bearing precondition the Phase 1 / Phase 2
     /// admission gate fails-closed on at today's call-site state,
@@ -1880,13 +1875,12 @@ impl VerificationCoverage {
     /// [`is_fully_verified`]: VerificationCoverage::is_fully_verified
     /// [`is_saturated`]: VerificationCoverage::is_saturated
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the predicate is derived
+    /// One-oracle discipline: the predicate is derived
     /// at one site (here), not re-inlined as `!verification.is_empty()
     /// && !verification.is_all_unverified() && !verification.
     /// is_fully_verified()` per consumer (a three-call composition the
     /// typed name forecloses, mirroring [`ProbeCoverage::is_mixed`]'s
-    /// discipline at the orthogonal axis exactly). THEORY.md §V.4 /
-    /// §VII.1 honesty channel: the discriminator names "some counted
+    /// discipline at the orthogonal axis exactly). Honesty channel: the discriminator names "some counted
     /// verification-bearing outcomes substantiated a positive verdict,
     /// some did not," the load-bearing precondition the relaxed-
     /// staging admission gate reads to admit partial-verification
@@ -1962,14 +1956,14 @@ impl VerificationCoverage {
     /// [`is_empty`]: VerificationCoverage::is_empty
     /// [`is_saturated`]: VerificationCoverage::is_saturated
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the predicate is derived
+    /// One-oracle discipline: the predicate is derived
     /// at one site (here), not re-inlined as `verification.verified > 0`
     /// per downstream consumer (which would inherit a drift class on the
     /// day a third intermediate arm is added — every consumer would need
     /// to extend their composition in lockstep, exactly the structural
     /// seam this helper forecloses, mirroring the discipline
     /// [`ProbeCoverage::has_evidence`] already establishes at the
-    /// orthogonal axis). THEORY.md §V.4 / §VII.1 honesty channel: the
+    /// orthogonal axis). Honesty channel: the
     /// discriminator names "at least one counted verification-bearing
     /// probe substantiated a positive verdict," the load-bearing
     /// precondition the relaxed-staging admission gate admits and the
@@ -2018,11 +2012,11 @@ impl VerificationCoverage {
     /// downstream verifier the prior matrix-column reference gestured
     /// at to the composition site, so a future
     /// `*_verification_coverage_ratio` field a `sekiban` admission
-    /// verifier (THEORY §V.4 / §VII.1 honesty channel) / Prometheus
+    /// verifier (honesty channel) / Prometheus
     /// alert rule reads with one field-name pattern across build /
     /// chart / deployment attestation records — the same emission
     /// shape `*_probe_coverage_ratio` already carries at the orthogonal
-    /// axis. THEORY §VI.1 one-oracle discipline: the ratio is derived
+    /// axis. One-oracle discipline: the ratio is derived
     /// at one site (here), not re-inlined as `verification.verified as
     /// f64 / verification.total() as f64` per consumer (which would
     /// admit the `verification.total() == 0` panic the `if total == 0`
@@ -2110,11 +2104,10 @@ impl VerificationCoverage {
     ///
     /// [`is_admission_eligible_strict`]: VerificationCoverage::is_admission_eligible_strict
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the saturation predicate
+    /// One-oracle discipline: the saturation predicate
     /// is derived at one site (here), not re-inlined as
     /// `verification.verified == usize::MAX || verification.unverified
-    /// == usize::MAX` per downstream telemetry consumer. THEORY.md
-    /// §V.4 / §VII.1 honesty channel: the verification-axis honesty
+    /// == usize::MAX` per downstream telemetry consumer. Honesty channel: the verification-axis honesty
     /// signal surfaces both the verification ratio AND its
     /// trustworthiness — a downstream verifier that gated only on
     /// `verification_ratio() >= 0.9` (or its integer peer
@@ -2187,12 +2180,12 @@ impl VerificationCoverage {
     /// `verified > usize::MAX / 100` in debug and silently wrap in
     /// release — both arms closed at the `u128` cast.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the percent form is
+    /// One-oracle discipline: the percent form is
     /// derived at one site (here), not re-inlined as `(verification.
     /// verified as f64 / verification.total() as f64 * 100.0) as u8`
     /// per consumer (which would inherit the float-imprecision drift at
     /// the `0.9_f64` boundary the no-evidence-axis peer's docstring
-    /// names). THEORY.md §V.4 / §VII.1 honesty channel: the
+    /// names). Honesty channel: the
     /// verification-axis honesty signal now surfaces both the float and
     /// the integer ratio forms — a downstream verifier reads whichever
     /// shape its admission gate's threshold representation aligns with,
@@ -2275,11 +2268,11 @@ impl VerificationCoverage {
     /// [`verification_ratio`]: VerificationCoverage::verification_ratio
     /// [`verification_ratio_pct`]: VerificationCoverage::verification_ratio_pct
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the strict-production
+    /// One-oracle discipline: the strict-production
     /// verification-axis admission predicate is derived at one site
     /// (here), not re-inlined as `!verification.is_saturated() &&
     /// verification.is_fully_verified()` per downstream consumer.
-    /// THEORY.md §V.4 / §VII.1 honesty channel: the strict gate names
+    /// Honesty channel: the strict gate names
     /// "complete AND trustworthy verification," the load-bearing
     /// precondition the strict-production admission gate admits at the
     /// verification axis, mirroring the no-evidence-axis peer's
@@ -2352,10 +2345,10 @@ impl VerificationCoverage {
     /// [`is_fully_verified`]: VerificationCoverage::is_fully_verified
     /// [`is_saturated`]: VerificationCoverage::is_saturated
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the per-axis strict-
+    /// One-oracle discipline: the per-axis strict-
     /// gate refuse predicate is named at one site (here), not re-
     /// inlined as `!verification.is_admission_eligible_strict()` per
-    /// downstream consumer. THEORY.md §V.4 / §VII.1 honesty channel:
+    /// downstream consumer. Honesty channel:
     /// the named predicate surfaces "this verification axis alone
     /// refuses the strict-production gate," the load-bearing per-
     /// axis reading the deploy orchestrator's strict-gate
@@ -2429,16 +2422,15 @@ impl VerificationCoverage {
     /// [`is_admission_eligible_strict`]: VerificationCoverage::is_admission_eligible_strict
     /// [`is_saturated`]: VerificationCoverage::is_saturated
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the per-axis relaxed-
+    /// One-oracle discipline: the per-axis relaxed-
     /// staging verification-axis admission predicate is derived at one
     /// site (here), not re-inlined as `!verification.is_saturated() &&
-    /// verification.has_evidence()` per downstream consumer. THEORY.md
-    /// §V.4 / §VII.1 honesty channel: the named predicate surfaces "some
+    /// verification.has_evidence()` per downstream consumer. Honesty channel: the named predicate surfaces "some
     /// AND trustworthy verification" at the per-axis verification-
     /// trustworthiness surface — the load-bearing Phase 1 / dev-staging
     /// admission precondition the relaxed gate admits at the
     /// verification axis, mirroring the no-evidence-axis peer's
-    /// discipline at the orthogonal axis. THEORY.md §V.4 two-phase
+    /// discipline at the orthogonal axis. Two-phase
     /// signature composition: this is the per-axis typed-primitive
     /// surface for the Phase 1 precondition at the verification axis
     /// (verification present AND derived ratios trustworthy), the dual
@@ -2535,10 +2527,10 @@ impl VerificationCoverage {
     /// [`is_saturated`]: VerificationCoverage::is_saturated
     /// [`refuses_admission_strict`]: VerificationCoverage::refuses_admission_strict
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the per-axis relaxed-
+    /// One-oracle discipline: the per-axis relaxed-
     /// gate refuse predicate is named at one site (here), not re-
     /// inlined as `!verification.is_admission_eligible_relaxed()` per
-    /// downstream consumer. THEORY.md §V.4 / §VII.1 honesty channel:
+    /// downstream consumer. Honesty channel:
     /// the named predicate surfaces "this verification axis alone
     /// refuses the relaxed dev-staging gate," the load-bearing per-
     /// axis reading the relaxed-gate decomposition consults to
@@ -2592,7 +2584,7 @@ impl VerificationCoverage {
     /// underlying [`is_admission_eligible_relaxed`] /
     /// [`refuses_admission_strict`] method bodies.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the per-axis
+    /// One-oracle discipline: the per-axis
     /// verification staging-only band reading is named at one site
     /// (here), not re-typed as `verification.is_admission_eligible_relaxed()
     /// && verification.refuses_admission_strict()` or
@@ -2603,7 +2595,7 @@ impl VerificationCoverage {
     /// [`ProbeCoverage::is_staging_only`] orthogonal-axis peer
     /// established at the probe-coverage surface, here applied at the
     /// verification-coverage surface.
-    /// THEORY.md §V.4 honesty channel: the named predicate surfaces
+    /// Honesty channel: the named predicate surfaces
     /// "this verification axis admits the relaxed gate but refuses the
     /// strict gate" — the load-bearing reading the per-axis attributor
     /// consults to surface "verification axis sits at the staging
@@ -2655,10 +2647,10 @@ impl VerificationCoverage {
     ///   — pinned by
     ///   [`tests::test_verification_coverage_admission_tier_staging_only_equals_relaxed_admit_and_strict_refuse`].
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the per-axis verification
+    /// One-oracle discipline: the per-axis verification
     /// admission-tier reading is named at one site (here), not re-derived
     /// as a nested if-else cascade against the four bools per consumer.
-    /// THEORY.md §V.4 honesty channel: the per-axis tier surface reads
+    /// Honesty channel: the per-axis tier surface reads
     /// one typed value naming the verification-axis three-tier decision —
     /// the load-bearing reading a per-axis attributor consults to surface
     /// "verification axis refused at strict tier" / "verification axis
@@ -2685,8 +2677,7 @@ impl VerificationCoverage {
 /// provenance / cosign / network-policy shape) to a single product-
 /// level signal a downstream verifier can compose with `[build, chart,
 /// deployment].iter().copied().sum::<VerificationCoverage>()` — one
-/// site, not per-field-summed at every downstream consumer (THEORY
-/// §VI.1 one-oracle discipline). The orthogonal-axis peer of the
+/// site, not per-field-summed at every downstream consumer (one-oracle discipline). The orthogonal-axis peer of the
 /// [`ProbeCoverage`] monoid one impl group up: the two monoids compose
 /// in parallel against the same record, surfacing the
 /// no-evidence-dimension aggregate and the verification-trustworthiness-
@@ -2836,13 +2827,13 @@ where
 /// is pinned across the cross product of per-axis representatives
 /// by [`tests::test_compose_admission_eligible_strict_equals_documented_composition`].
 ///
-/// THEORY.md §VI.1 one-oracle discipline: the four-way conjunction is
+/// One-oracle discipline: the four-way conjunction is
 /// derived at one site (here), not re-inlined as `probe.<axis-strict>()
 /// && verification.<axis-strict>()` per downstream consumer (which
 /// would inherit a drift class on the day a third orthogonal axis is
 /// added — every consumer would need to extend their composition in
 /// lockstep, exactly the structural seam this helper forecloses).
-/// THEORY.md §V.4 / §VII.1 honesty channel: the strict-production
+/// Honesty channel: the strict-production
 /// admission verdict surfaces at the typed-primitive surface as a
 /// single bool reading "complete AND trustworthy evidence on BOTH
 /// orthogonal axes" — the load-bearing precondition the strict-
@@ -2934,7 +2925,7 @@ pub fn compose_admission_eligible_strict(
 /// trustworthiness factor reads — pinned at
 /// [`tests::test_compose_is_saturated_negation_matches_strict_trustworthiness_factor`].
 ///
-/// THEORY.md §VI.1 one-oracle discipline: the two-axis
+/// One-oracle discipline: the two-axis
 /// trust-broken disjunction is derived at one site (here), not
 /// re-inlined as `probe.is_saturated() || verification.is_saturated()`
 /// per downstream consumer (which would inherit a drift class on the
@@ -2942,8 +2933,7 @@ pub fn compose_admission_eligible_strict(
 /// to extend their composition in lockstep, exactly the structural
 /// seam this helper forecloses, mirroring the discipline
 /// [`compose_admission_eligible_strict`] establishes for the
-/// complementary `complete AND trustworthy` gate). THEORY.md §V.4 /
-/// §VII.1 honesty channel: the aggregate-trustworthiness surface
+/// complementary `complete AND trustworthy` gate). Honesty channel: the aggregate-trustworthiness surface
 /// reads one bool naming "the derived ratio is unreliable on AT LEAST
 /// ONE orthogonal axis," the load-bearing precondition the
 /// fleet-wide aggregate-ratio emitter consults before publishing a
@@ -3042,7 +3032,7 @@ pub fn compose_is_saturated(probe: &ProbeCoverage, verification: &VerificationCo
 /// is pinned across the cross product of per-axis representatives by
 /// [`tests::test_compose_is_empty_equals_documented_composition`].
 ///
-/// THEORY.md §VI.1 one-oracle discipline: the two-axis
+/// One-oracle discipline: the two-axis
 /// vacuous-aggregate conjunction is derived at one site (here), not
 /// re-inlined as `probe.is_empty() && verification.is_empty()` per
 /// downstream consumer (which would inherit a drift class on the day
@@ -3050,8 +3040,8 @@ pub fn compose_is_saturated(probe: &ProbeCoverage, verification: &VerificationCo
 /// extend their composition in lockstep, exactly the structural seam
 /// this helper forecloses, mirroring the discipline
 /// [`compose_admission_eligible_strict`] and [`compose_is_saturated`]
-/// establish for the complementary gates). THEORY.md §V.4 / §VII.1
-/// honesty channel: the aggregate-vacuous surface reads one bool
+/// establish for the complementary gates).
+/// Honesty channel: the aggregate-vacuous surface reads one bool
 /// naming "the aggregate carries zero records on EVERY orthogonal
 /// axis," the load-bearing precondition the fleet-wide aggregate-
 /// ratio emitter consults before emitting a derived ratio across
@@ -3180,7 +3170,7 @@ pub fn compose_is_empty(probe: &ProbeCoverage, verification: &VerificationCovera
 /// is pinned across the cross product of per-axis representatives by
 /// [`tests::test_compose_is_fully_complete_equals_documented_composition`].
 ///
-/// THEORY.md §VI.1 one-oracle discipline: the two-axis completeness
+/// One-oracle discipline: the two-axis completeness
 /// conjunction is derived at one site (here), not re-inlined as
 /// `probe.is_fully_covered() && verification.is_fully_verified()` per
 /// downstream consumer (which would inherit a drift class on the day a
@@ -3189,7 +3179,7 @@ pub fn compose_is_empty(probe: &ProbeCoverage, verification: &VerificationCovera
 /// helper forecloses, mirroring the discipline
 /// [`compose_admission_eligible_strict`], [`compose_is_saturated`], and
 /// [`compose_is_empty`] establish for the complementary gates).
-/// THEORY.md §V.4 / §VII.1 honesty channel: the aggregate-completeness
+/// Honesty channel: the aggregate-completeness
 /// surface reads one bool naming "every counted record on every
 /// orthogonal axis surfaced its honest-positive arm," the load-bearing
 /// completeness factor the strict-production admission gate integrates
@@ -3319,7 +3309,7 @@ pub fn compose_is_fully_complete(
 /// is pinned across the cross product of per-axis representatives by
 /// [`tests::test_compose_has_evidence_equals_documented_composition`].
 ///
-/// THEORY.md §VI.1 one-oracle discipline: the two-axis
+/// One-oracle discipline: the two-axis
 /// any-axis-has-evidence disjunction is derived at one site (here),
 /// not re-inlined as `probe.has_evidence() ||
 /// verification.has_evidence()` per downstream consumer (which would
@@ -3329,7 +3319,7 @@ pub fn compose_is_fully_complete(
 /// mirroring the discipline [`compose_admission_eligible_strict`],
 /// [`compose_is_saturated`], [`compose_is_empty`], and
 /// [`compose_is_fully_complete`] already established for the
-/// complementary gates). THEORY.md §V.4 / §VII.1 honesty channel: the
+/// complementary gates). Honesty channel: the
 /// aggregate-has-evidence surface reads one bool naming "at least one
 /// counted record on at least one orthogonal axis surfaced its
 /// honest-positive arm," the load-bearing relaxed-staging admission
@@ -3451,7 +3441,7 @@ pub fn compose_has_evidence(probe: &ProbeCoverage, verification: &VerificationCo
 /// Pinned at
 /// [`tests::test_compose_is_mixed_implies_compose_has_evidence`].
 ///
-/// THEORY.md §VI.1 one-oracle discipline: the two-axis both-axes-
+/// One-oracle discipline: the two-axis both-axes-
 /// interior conjunction is derived at one site (here), not re-inlined
 /// as `probe.is_mixed() && verification.is_mixed()` per downstream
 /// consumer (which would inherit a drift class on the day a third
@@ -3462,14 +3452,14 @@ pub fn compose_has_evidence(probe: &ProbeCoverage, verification: &VerificationCo
 /// [`compose_is_empty`], [`compose_is_fully_complete`],
 /// [`compose_has_evidence`], and [`compose_is_all_no_evidence`]
 /// established for the complementary arm-predicates).
-/// THEORY.md §V.4 / §VII.1 honesty channel: the discriminator names
+/// Honesty channel: the discriminator names
 /// "every counted axis has surfaced SOME honest-positive arm AND
 /// SOME no-evidence / unverified arm" — the load-bearing
 /// intermediate-progress state a fleet-wide-aggregate admission
 /// verifier reads to distinguish "partial progress on every axis"
 /// from "partial progress on only one axis" (where the strict gate
 /// refuses but the relaxed gate admits across the asymmetric arm).
-/// THEORY.md §V.1: the four-arm both-axes partition (compose_is_empty,
+/// The four-arm both-axes partition (compose_is_empty,
 /// compose_is_all_no_evidence, compose_is_fully_complete,
 /// compose_is_mixed) is now closed by typed names — a future fifth
 /// arm cannot be introduced without surfacing as a partition-count
@@ -3584,7 +3574,7 @@ pub fn compose_is_mixed(probe: &ProbeCoverage, verification: &VerificationCovera
 /// is pinned across the cross product of per-axis representatives by
 /// [`tests::test_compose_admission_eligible_relaxed_equals_documented_composition`].
 ///
-/// THEORY.md §V.4 two-phase signature composition: the relaxed-staging
+/// Two-phase signature composition: the relaxed-staging
 /// admission predicate is the typed-primitive surface for the Phase 1
 /// dev/staging admission precondition — Phase 1 signatures are produced
 /// the moment the artifact is rendered (evidence present on at least
@@ -3598,7 +3588,7 @@ pub fn compose_is_mixed(probe: &ProbeCoverage, verification: &VerificationCovera
 /// clamp; the relaxed-vs-strict ordering this helper pins
 /// (`strict => relaxed`) mirrors V.4's "Phase 2 admits where Phase 1
 /// admits AND every compliance attestation cleared" decomposition at
-/// the two-axis typed-primitive surface. THEORY.md §VI.1 one-oracle
+/// the two-axis typed-primitive surface. One-oracle
 /// discipline: the two-helper conjunction is derived at one site
 /// (here), not re-inlined as `compose_has_evidence(p, v) &&
 /// !compose_is_saturated(p, v)` per downstream consumer (which would
@@ -3759,13 +3749,13 @@ pub fn compose_admission_eligible_relaxed(
 /// is pinned across the cross product of per-axis representatives by
 /// [`tests::test_compose_is_all_no_evidence_equals_documented_composition`].
 ///
-/// THEORY.md §V.4 honesty channel: the both-axes no-evidence floor
+/// Honesty channel: the both-axes no-evidence floor
 /// surface reads one bool naming "every counted verification-bearing
 /// probe AND every counted no-evidence probe surfaced the honest no-
 /// substantiation arm" — the load-bearing precondition the strict-
 /// production admission gate fails-closed on at today's call-site state
 /// before the five `Verified`-bearing typed outcomes wire real
-/// substantiations. THEORY.md §VI.1 one-oracle discipline: the two-axis
+/// substantiations. One-oracle discipline: the two-axis
 /// no-evidence-floor conjunction is derived at one site (here), not re-
 /// inlined as `(p.is_all_absent() || p.is_empty()) && (v.is_all_unverified()
 /// || v.is_empty())` per downstream consumer (which would inherit a
@@ -3889,14 +3879,14 @@ pub fn compose_is_all_no_evidence(
 /// is pinned across the cross product of per-axis representatives by
 /// [`tests::test_compose_is_all_no_evidence_or_saturated_equals_documented_composition`].
 ///
-/// THEORY.md §V.4 honesty channel: the relaxed-gate fail-closed
+/// Honesty channel: the relaxed-gate fail-closed
 /// disjunction surface reads one bool naming "the fleet-wide aggregate
 /// has either made no progress (every counted record on every axis
 /// collapsed to no-evidence) or lost trust (a derived-ratio axis hit
 /// the saturating-add ceiling)" — the structural fail-closed reason the
 /// Phase 1 admission gate refuses on, decomposable into its two named
-/// per-helper components at the consumer surface. THEORY.md §VI.1
-/// one-oracle discipline: the two-helper disjunction is derived at one
+/// per-helper components at the consumer surface.
+/// One-oracle discipline: the two-helper disjunction is derived at one
 /// site (here), not re-inlined as `compose_is_all_no_evidence(p, v) ||
 /// compose_is_saturated(p, v)` per downstream consumer (which would
 /// inherit a drift class on the day a third orthogonal axis is added —
@@ -4053,7 +4043,7 @@ pub fn compose_is_all_no_evidence_or_saturated(
 /// is pinned across the cross product of per-axis representatives by
 /// [`tests::test_compose_is_incomplete_or_saturated_equals_documented_composition`].
 ///
-/// THEORY.md §V.4 honesty channel: the strict-gate fail-closed
+/// Honesty channel: the strict-gate fail-closed
 /// disjunction surface reads one bool naming "the fleet-wide aggregate
 /// has either failed to surface completeness on at least one axis
 /// (some counted record collapsed to its no-evidence arm, or no
@@ -4061,7 +4051,7 @@ pub fn compose_is_all_no_evidence_or_saturated(
 /// saturating-add ceiling)" — the structural fail-closed reason the
 /// Phase 2 production admission gate refuses on, decomposable into
 /// its two named per-helper components at the consumer surface.
-/// THEORY.md §VI.1 one-oracle discipline: the two-helper disjunction
+/// One-oracle discipline: the two-helper disjunction
 /// is derived at one site (here), not re-inlined as
 /// `!compose_is_fully_complete(p, v) || compose_is_saturated(p, v)`
 /// per downstream consumer (which would inherit a drift class on the
@@ -4216,18 +4206,18 @@ pub fn compose_is_incomplete_or_saturated(
 /// compose_admission_eligible_strict(p, v) == true` is pinned by
 /// [`tests::test_compose_refuses_admission_strict_xor_compose_admission_eligible_strict_partitions`].
 ///
-/// THEORY.md §VI.1 one-oracle discipline: the parallel-axis
+/// One-oracle discipline: the parallel-axis
 /// strict-gate refuse predicate is named at one site (here) through
 /// the per-axis-refuse disjunction form, not re-inlined as
 /// `p.refuses_admission_strict() || v.refuses_admission_strict()`
 /// per downstream consumer.
-/// THEORY.md §V.4 two-phase signature composition: the parallel-axis
+/// Two-phase signature composition: the parallel-axis
 /// strict-refuse predicate is the typed-primitive surface for the
 /// Phase 2 refuse decomposition (Phase 2 refuses iff some axis
 /// carries incomplete coverage OR saturated), the dual of the
 /// per-axis Phase 2 refuse peer carried at each per-axis surface and
 /// the typed-sum Phase 2 refuse peer carried on [`AdmissionTier`].
-/// THEORY.md §VII.1 honesty channel: the named predicate surfaces
+/// Honesty channel: the named predicate surfaces
 /// "at least one axis refuses the strict production gate" at the
 /// parallel-axis surface, the load-bearing aggregate reading the
 /// strict-gate decomposition consults to fail-closed at the strict
@@ -4266,7 +4256,7 @@ pub fn compose_refuses_admission_strict(
 /// [`compose_is_all_no_evidence_or_saturated`] (commit 86d81f7) so the
 /// underlying two-disjunct decomposition `compose_is_all_no_evidence(p,
 /// v) || compose_is_saturated(p, v)` is named at exactly one site
-/// (THEORY.md §VI.1 one-oracle discipline). Reads `true` iff the Phase 1
+/// (one-oracle discipline). Reads `true` iff the Phase 1
 /// relaxed staging admission gate refuses — i.e., no axis surfaced
 /// positive evidence OR at least one axis lost trust through the
 /// `usize::saturating_add` ceiling. The named-refuse-verb peer at the
@@ -4365,13 +4355,13 @@ pub fn compose_refuses_admission_strict(
 /// compose_admission_eligible_relaxed(p, v) == true` is pinned by
 /// [`tests::test_compose_refuses_admission_relaxed_xor_compose_admission_eligible_relaxed_partitions`].
 ///
-/// THEORY.md §VI.1 generation-over-composition (one-oracle discipline):
+/// Generation-over-composition (one-oracle discipline):
 /// the parallel-axis relaxed-gate refuse verb is named at one site
 /// (here), routed through one already-named sibling helper, not
 /// re-typed as `!compose_admission_eligible_relaxed(p, v)` or
 /// `compose_is_all_no_evidence_or_saturated(p, v)` per downstream
 /// consumer.
-/// THEORY.md §V.4 two-phase signature composition: the parallel-axis
+/// Two-phase signature composition: the parallel-axis
 /// relaxed-refuse predicate is the typed-primitive surface for the
 /// Phase 1 refuse decomposition (Phase 1 refuses iff no axis carries
 /// positive evidence OR some axis carries broken trust), the dual of
@@ -4502,14 +4492,14 @@ pub fn compose_refuses_admission_relaxed(
 /// is pinned across the cross product of per-axis representatives by
 /// [`tests::test_compose_relaxed_eligible_strict_refused_equals_documented_composition`].
 ///
-/// THEORY.md §V.4 honesty channel: the staging-only band surface reads
+/// Honesty channel: the staging-only band surface reads
 /// one bool naming "the fleet-wide aggregate has surfaced positive
 /// evidence on at least one axis AND trust intact on both axes AND
 /// failed to surface completeness on at least one axis" — the
 /// structural Phase 1 admit / Phase 2 hold state a two-tier deploy
 /// gate consults to advance staging without releasing production,
 /// decomposable into its three named per-factor components at the
-/// consumer surface for telemetry. THEORY.md §VI.1 one-oracle
+/// consumer surface for telemetry. One-oracle
 /// discipline: the band is derived at one site (here), not re-inlined
 /// as `compose_admission_eligible_relaxed(p, v) &&
 /// !compose_admission_eligible_strict(p, v)` per downstream consumer
@@ -4597,12 +4587,12 @@ pub fn compose_relaxed_eligible_strict_refused(
 /// downstream `match` arm would surface as a missing-arm compile error,
 /// which is exactly the discipline the typed-primitive surface lifts).
 ///
-/// THEORY.md §V.4 honesty channel: the admission-tier surface reads one
+/// Honesty channel: the admission-tier surface reads one
 /// typed value naming the deploy orchestrator's three-tier decision (
 /// Strict = promote to production; StagingOnly = promote to staging,
 /// hold production; Refused = hold at every tier), decomposable into
 /// its three load-bearing per-tier bool components at the consumer
-/// surface for telemetry. THEORY.md §VI.1 one-oracle discipline: the
+/// surface for telemetry. One-oracle discipline: the
 /// three-way partition is encoded at one site (this enum + the
 /// [`compose_admission_tier`] constructor) — not re-derived as a nested
 /// if-else cascade against the three underlying bools per consumer
@@ -4698,7 +4688,7 @@ impl AdmissionTier {
     /// exhaustive `match` against the variant axis to refuse compilation
     /// until the new variant is added to `ALL`), and every property test
     /// that iterates `AdmissionTier::ALL` automatically picks up the new
-    /// variant without per-site edits. Same THEORY.md §VI.1
+    /// variant without per-site edits. Same
     /// generation-over-composition / three-times-rule discipline the
     /// prior typed-method-peer lifts established at this surface
     /// (`admits_relaxed` / `admits_strict` / `refuses_relaxed` /
@@ -4722,11 +4712,11 @@ impl AdmissionTier {
     /// admission stringency) reads `AdmissionTier::ALL` directly without
     /// a per-call-site sort.
     ///
-    /// THEORY.md §V.4 typed primitives: the variant enumeration is a
+    /// Typed primitives: the variant enumeration is a
     /// typed-primitive surface on `AdmissionTier` itself (one named
     /// const), not a `&[AdmissionTier]` shape restated at every
-    /// traversal site that re-derives the enumeration. THEORY.md §VI.1
-    /// generation over composition (three-times rule): a structural
+    /// traversal site that re-derives the enumeration.
+    /// Generation over composition (three-times rule): a structural
     /// pattern that recurs three or more times becomes a named
     /// primitive at one site — here, 14 array-literal restatements
     /// collapse to one const.
@@ -4831,14 +4821,14 @@ impl AdmissionTier {
     /// of this idiom (the third typed sum carrying meet/join + BOTTOM/TOP
     /// + the bounded-lattice axiom pins) will trigger.
     ///
-    /// THEORY.md §V.4 typed primitives: the bounded-lattice floor is a
+    /// Typed primitives: the bounded-lattice floor is a
     /// typed-primitive surface on [`AdmissionTier`] itself (one named
     /// const), not the variant name re-aliased at every join-fold seed
-    /// site. THEORY.md §V.5 total-order discipline:
+    /// site. Total-order discipline:
     /// [`BOTTOM`](Self::BOTTOM) is the global lower bound of the derived
     /// [`Ord`] chain, the structural anchor a downstream `<= BOTTOM` /
     /// `>= BOTTOM` reader consumes through one named oracle rather than
-    /// the variant name. THEORY.md §VI.1 one-oracle /
+    /// the variant name. One-oracle /
     /// generation-over-composition: the bounded-lattice floor semantic
     /// role is named at one site (this const), so a future ladder
     /// refinement that shifts the floor updates one site, not every
@@ -4917,11 +4907,11 @@ impl AdmissionTier {
     /// carrying the bounded-distributive-lattice contract as a load-
     /// bearing trait invariant) will trigger.
     ///
-    /// THEORY.md §V.4 typed primitives: the bounded-lattice ceiling is a
+    /// Typed primitives: the bounded-lattice ceiling is a
     /// typed-primitive surface on [`AdmissionTier`] itself (one named
-    /// const). THEORY.md §V.5 total-order discipline: [`TOP`](Self::TOP)
+    /// const). Total-order discipline: [`TOP`](Self::TOP)
     /// is the global upper bound of the derived [`Ord`] chain.
-    /// THEORY.md §VI.1 one-oracle: the bounded-lattice ceiling semantic
+    /// One-oracle: the bounded-lattice ceiling semantic
     /// role is named at one site, so a future ladder refinement that
     /// shifts the ceiling updates one site.
     #[allow(dead_code)]
@@ -4971,11 +4961,10 @@ impl AdmissionTier {
     /// telemetry/log consumer can assume canonical-snake-case labels
     /// across the repo's typed sums without per-enum casing rules.
     ///
-    /// THEORY.md §V.4 typed primitives: the variant→label rendering is
+    /// Typed primitives: the variant→label rendering is
     /// a typed-primitive surface on [`AdmissionTier`] itself (one named
     /// method), not a per-call-site `match` cascade restated at every
-    /// telemetry/log/CLI site that re-derives the labels. THEORY.md
-    /// §VI.1 generation over composition (three-times rule): the
+    /// telemetry/log/CLI site that re-derives the labels. Generation over composition (three-times rule): the
     /// variant→label mapping recurs at every consumer that surfaces
     /// the tier as a string; centralising it at the typed-primitive
     /// surface forecloses the drift class where two telemetry sites
@@ -5016,10 +5005,10 @@ impl AdmissionTier {
     /// addition that needs to refine "admits the relaxed gate"
     /// updates one method body, not every consumer.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the relaxed-tier admit
+    /// One-oracle discipline: the relaxed-tier admit
     /// reading is named at one site (here), not re-typed as
     /// `tier >= AdmissionTier::StagingOnly` per downstream consumer.
-    /// THEORY.md §V.4 honesty channel: the named predicate surfaces
+    /// Honesty channel: the named predicate surfaces
     /// "this tier admits the Phase 1 gate" — the load-bearing
     /// reading the relaxed-gate fleet-wide aggregator consults to
     /// decide whether the per-tier service advances to staging.
@@ -5062,10 +5051,10 @@ impl AdmissionTier {
     /// at the per-axis bool surface (commit 7d818bd /
     /// 9a9e97a / aa40b8f) hoists to the typed-sum-method surface.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the strict-tier admit
+    /// One-oracle discipline: the strict-tier admit
     /// reading is named at one site (here), not re-typed as
     /// `tier >= AdmissionTier::Strict` per downstream consumer.
-    /// THEORY.md §V.4 honesty channel: the named predicate surfaces
+    /// Honesty channel: the named predicate surfaces
     /// "this tier admits the Phase 2 production gate" — the
     /// load-bearing reading the strict-gate fleet-wide aggregator
     /// consults to decide whether the per-tier service advances to
@@ -5111,13 +5100,13 @@ impl AdmissionTier {
     /// the `<` form across a fourth-tier addition) would surface
     /// here as a partition gap or overlap.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the relaxed-tier
+    /// One-oracle discipline: the relaxed-tier
     /// refuse reading is named at one site (here), not re-typed as
     /// `!tier.admits_relaxed()` or `*tier == AdmissionTier::Refused`
     /// per downstream consumer (each of which inherits a drift
     /// class on the day a fourth tier is added strictly below
     /// `StagingOnly`).
-    /// THEORY.md §V.4 honesty channel: the named predicate surfaces
+    /// Honesty channel: the named predicate surfaces
     /// "this tier refuses the Phase 1 gate" — the load-bearing
     /// reading the deploy orchestrator consults to decide whether
     /// to fail-closed (hold at every environment) rather than
@@ -5172,7 +5161,7 @@ impl AdmissionTier {
     /// the `<` form across a fifth-tier addition strictly above
     /// `Strict`) would surface here as a partition gap or overlap.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the strict-tier
+    /// One-oracle discipline: the strict-tier
     /// refuse reading is named at one site (here), not re-typed as
     /// `!tier.admits_strict()` or `*tier != AdmissionTier::Strict`
     /// per downstream consumer (each of which inherits a drift
@@ -5180,7 +5169,7 @@ impl AdmissionTier {
     /// `Strict` — the literal `!= Strict` would silently misread
     /// the new `StrictPlusAttestation` tier as refusing production
     /// rollout).
-    /// THEORY.md §V.4 honesty channel: the named predicate surfaces
+    /// Honesty channel: the named predicate surfaces
     /// "this tier refuses the Phase 2 production gate" — the
     /// load-bearing reading the deploy orchestrator consults to
     /// decide whether to hold the per-tier service at staging
@@ -5255,11 +5244,11 @@ impl AdmissionTier {
     /// if-else cascade that would inherit a drift class on the day
     /// a fourth tier is added.
     ///
-    /// THEORY.md §VI.1 one-oracle discipline: the staging-only band
+    /// One-oracle discipline: the staging-only band
     /// reading is named at one site (here), not re-typed as
     /// `tier.admits_relaxed() && tier.refuses_strict()` or
     /// `*tier == AdmissionTier::StagingOnly` per downstream consumer.
-    /// THEORY.md §V.4 honesty channel: the named predicate surfaces
+    /// Honesty channel: the named predicate surfaces
     /// "this tier holds at the intermediate staging band" — the
     /// load-bearing reading the deploy orchestrator consults to
     /// decide whether to advance the per-tier service to staging
@@ -5350,7 +5339,7 @@ impl AdmissionTier {
     /// `BumpLevel::is_fix_only XOR is_breaking` already seals at the
     /// magnitude-ladder surface.
     ///
-    /// THEORY.md §V.5 total-order discipline: the admission-tier ladder
+    /// Total-order discipline: the admission-tier ladder
     /// is consumed at named typed-method surfaces, not retyped at every
     /// consumer's match cascade — the floor-identity predicate sits at
     /// the typed-primitive surface alongside the middle-band identity
@@ -5358,7 +5347,7 @@ impl AdmissionTier {
     /// ray predicates ([`admits_relaxed`](Self::admits_relaxed),
     /// [`admits_strict`](Self::admits_strict),
     /// [`refuses_relaxed`](Self::refuses_relaxed),
-    /// [`refuses_strict`](Self::refuses_strict)). THEORY.md §VI.1 one-
+    /// [`refuses_strict`](Self::refuses_strict)). One-
     /// oracle: the refused-floor semantic role (this tier is exactly the
     /// canonical relaxed-refused floor variant) is named at one site
     /// (this method's body), so a downstream consumer that previously
@@ -5465,7 +5454,7 @@ impl AdmissionTier {
     /// ladder against both half-open-ray drift AND variant-identity drift
     /// under future tier insertions adjacent to either extreme.
     ///
-    /// THEORY.md §V.5 total-order discipline: the admission-tier ladder is
+    /// Total-order discipline: the admission-tier ladder is
     /// consumed at named typed-method surfaces, not retyped at every
     /// consumer's match cascade — the ceiling-identity predicate sits at
     /// the typed-primitive surface alongside the floor-identity
@@ -5474,7 +5463,7 @@ impl AdmissionTier {
     /// predicates ([`admits_relaxed`](Self::admits_relaxed),
     /// [`admits_strict`](Self::admits_strict),
     /// [`refuses_relaxed`](Self::refuses_relaxed),
-    /// [`refuses_strict`](Self::refuses_strict)). THEORY.md §VI.1 one-
+    /// [`refuses_strict`](Self::refuses_strict)). One-
     /// oracle: the strict-ceiling semantic role (this tier is exactly the
     /// canonical strict-production ceiling variant) is named at one site
     /// (this method's body), so a downstream consumer that previously
@@ -5529,7 +5518,7 @@ impl AdmissionTier {
     ///    reads "the smaller of the two tiers" — the `min` form is a
     ///    general lattice op shared with arbitrary comparable types, the
     ///    `meet` form names the per-axis-AND-floor reading at the typed-
-    ///    primitive surface. Same THEORY.md §V.4 honesty-channel
+    ///    primitive surface. Same honesty-channel
     ///    discipline [`crate::version::BumpLevel::meet`] established at
     ///    the magnitude-ladder surface, here at the admission-tier
     ///    surface.
@@ -5558,11 +5547,11 @@ impl AdmissionTier {
     /// — the structural witness that the meet of two tiers sits at or
     /// below the strictest of the pair.
     ///
-    /// THEORY.md §V.5 total-order discipline: the per-axis-AND-floor
+    /// Total-order discipline: the per-axis-AND-floor
     /// reading is a lattice operation (`min`) on the derived [`Ord`]
     /// ladder, named at the typed-primitive surface so a downstream
     /// consumer reads `tier_a.meet(tier_b)` once and is automatically
-    /// updated across a future ladder refinement. THEORY.md §VI.1 one-
+    /// updated across a future ladder refinement. One-
     /// oracle / generation-over-composition: the per-axis-AND-floor
     /// idiom is named at one site (this method's body), not retyped at
     /// every consumer's inline `.min()` call.
@@ -5633,7 +5622,7 @@ impl AdmissionTier {
     ///    reads "the larger of the two tiers" — the `max` form is a
     ///    general lattice op shared with arbitrary comparable types, the
     ///    `join` form names the per-axis-OR-ceiling reading at the
-    ///    typed-primitive surface. Same THEORY.md §V.4 honesty-channel
+    ///    typed-primitive surface. Same honesty-channel
     ///    discipline [`meet`](Self::meet) established at the per-axis-AND
     ///    floor surface, here at the lattice-dual per-axis-OR ceiling
     ///    surface.
@@ -5669,11 +5658,11 @@ impl AdmissionTier {
     /// the structural anchor that the meet/join pair forms a LATTICE in
     /// the algebraic sense.
     ///
-    /// THEORY.md §V.5 total-order discipline: the per-axis-OR-ceiling
+    /// Total-order discipline: the per-axis-OR-ceiling
     /// reading is a lattice operation (`max`) on the derived [`Ord`]
     /// ladder, named at the typed-primitive surface so a downstream
     /// consumer reads `tier_a.join(tier_b)` once and is automatically
-    /// updated across a future ladder refinement. THEORY.md §VI.1 one-
+    /// updated across a future ladder refinement. One-
     /// oracle / generation-over-composition: the per-axis-OR-ceiling
     /// idiom is named at one site (this method's body), not retyped at
     /// every consumer's inline `.max()` call. Same one-oracle discipline
@@ -5720,12 +5709,12 @@ impl AdmissionTier {
 /// log-formatting consumer reads the tier through — no per-call-site `match`
 /// cascade that drifts when a fourth variant is inserted.
 ///
-/// THEORY.md §V.4 typed primitives: the per-variant string rendering is a
+/// Typed primitives: the per-variant string rendering is a
 /// typed-primitive surface on [`AdmissionTier`] itself (one `Display` impl
 /// routing through one `as_str` match body), not a per-call-site cascade
 /// restated at every `format!("{:?}", tier)` site that would otherwise emit
 /// `Refused` / `StagingOnly` / `Strict` UpperCamel labels via the derived
-/// `Debug` rendering. THEORY.md §VI.1 one-oracle discipline: the canonical
+/// `Debug` rendering. One-oracle discipline: the canonical
 /// label is named at one site ([`AdmissionTier::as_str`]) and every
 /// surface — `as_str`, `Display`, `serde::Serialize` — reads through it.
 impl std::fmt::Display for AdmissionTier {
@@ -5804,11 +5793,11 @@ impl std::fmt::Display for AdmissionTier {
 /// grammar is named at one site and surface-specific tolerances do not
 /// leak into the typed-primitive oracle.
 ///
-/// THEORY.md §V.4 typed primitives: the label→variant rendering is a
+/// Typed primitives: the label→variant rendering is a
 /// typed-primitive surface on [`AdmissionTier`] itself (one [`FromStr`]
 /// impl inverting one [`as_str`] match body), not a per-call-site
 /// cascade restated at every CLI / config / telemetry consumer that
-/// would otherwise re-derive the grammar. THEORY.md §VI.1 one-oracle
+/// would otherwise re-derive the grammar. One-oracle
 /// discipline: the canonical-label grammar (which strings parse to
 /// which variant) is named at one site (this parser body), inverse to
 /// the one [`as_str`] site that emits them — every surface,
@@ -5867,12 +5856,12 @@ impl std::str::FromStr for AdmissionTier {
 /// the [`crate::retry::PerAttemptRegion`] serde round-trip pin at the
 /// per-attempt-region ladder.
 ///
-/// THEORY.md §V.4 typed primitives: the serialisation surface is a
+/// Typed primitives: the serialisation surface is a
 /// typed-primitive site on [`AdmissionTier`] itself (one `Serialize`
 /// impl routing through the [`as_str`] canonical-label oracle), not a
 /// per-consumer `#[derive(Serialize)]` + `#[serde(rename_all)]` retyping
 /// that would fragment the label-axis definition across every downstream
-/// consumer's struct. THEORY.md §VI.1 one-oracle: the canonical label is
+/// consumer's struct. One-oracle: the canonical label is
 /// named at one site ([`AdmissionTier::as_str`]) and every surface —
 /// `as_str`, `Display`, this `Serialize`, `Deserialize`, `FromStr` —
 /// reads through it.
@@ -5922,11 +5911,11 @@ impl serde::Serialize for AdmissionTier {
 /// The strict-parse behaviour on unknown labels is pinned by
 /// [`tests::test_admission_tier_deserialize_rejects_unknown_string`].
 ///
-/// THEORY.md §V.4 typed primitives: the deserialisation surface is a
+/// Typed primitives: the deserialisation surface is a
 /// typed-primitive site on [`AdmissionTier`] itself (one `Deserialize`
 /// impl routing through the [`std::str::FromStr`] canonical-label
 /// parser), not a per-consumer `#[derive(Deserialize)]` +
-/// `#[serde(rename_all)]` retyping. THEORY.md §VI.1 one-oracle:
+/// `#[serde(rename_all)]` retyping. One-oracle:
 /// canonical-label parsing lives at one site ([`std::str::FromStr`] for
 /// [`AdmissionTier`]) and every read surface — `FromStr`, this
 /// `Deserialize`, a future TOML config loader, a future MessagePack
@@ -5979,11 +5968,11 @@ impl<'de> serde::Deserialize<'de> for AdmissionTier {
 /// every variant is pinned by
 /// [`tests::test_admission_tier_as_ref_str_carries_through_generic_consumer`].
 ///
-/// THEORY.md §V.4 typed primitives: the byte-slice-coercion surface is
+/// Typed primitives: the byte-slice-coercion surface is
 /// a typed-primitive site on [`AdmissionTier`] itself (one `AsRef<str>`
 /// impl routing through [`AdmissionTier::as_str`]), not a per-consumer
 /// `.as_str()` restatement at every downstream site that accepts
-/// `impl AsRef<str>`. THEORY.md §VI.1 one-oracle: the canonical label
+/// `impl AsRef<str>`. One-oracle: the canonical label
 /// is named at one site ([`AdmissionTier::as_str`]) and every surface
 /// — `as_str`, `Display`, `Serialize`, this `AsRef<str>` — reads
 /// through it.
@@ -6056,12 +6045,12 @@ impl AsRef<str> for AdmissionTier {
 /// canonical label at every variant is pinned by
 /// [`tests::test_admission_tier_as_ref_bytes_round_trips_through_from_utf8`].
 ///
-/// THEORY.md §V.4 typed primitives: the byte-slice borrowed-view
+/// Typed primitives: the byte-slice borrowed-view
 /// surface is a typed-primitive site on [`AdmissionTier`] itself
 /// (one `AsRef<[u8]>` impl routing through [`AsRef<str>`] and
 /// [`str::as_bytes`]), not a per-consumer `tier.as_str().as_bytes()`
 /// restatement at every downstream site that accepts
-/// `impl AsRef<[u8]>`. THEORY.md §VI.1 one-oracle: the canonical
+/// `impl AsRef<[u8]>`. One-oracle: the canonical
 /// label is named at one site ([`AdmissionTier::as_str`]) and every
 /// borrowed-view surface — [`AsRef<str>`] (yields `&str`), this
 /// [`AsRef<[u8]>`] (yields `&[u8]`) — reads through it.
@@ -6124,12 +6113,12 @@ impl AsRef<[u8]> for AdmissionTier {
 /// `impl Into<&'static str>` consumer at every variant is pinned by
 /// [`tests::test_admission_tier_into_static_str_carries_through_generic_consumer`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value static-lifetime
+/// Typed primitives: the by-value static-lifetime
 /// conversion surface is a typed-primitive site on [`AdmissionTier`]
 /// itself (one `From<AdmissionTier> for &'static str` impl routing
 /// through [`AdmissionTier::as_str`]), not a per-consumer `.as_str()`
 /// restatement at every downstream site that accepts
-/// `impl Into<&'static str>`. THEORY.md §VI.1 one-oracle: the
+/// `impl Into<&'static str>`. One-oracle: the
 /// canonical label is named at one site ([`AdmissionTier::as_str`])
 /// and every surface — `as_str`, `Display`, `Serialize`,
 /// `AsRef<str>`, this `From<T> for &'static str` — reads through it.
@@ -6198,13 +6187,13 @@ impl From<AdmissionTier> for &'static str {
 /// canonical label at every variant is pinned by
 /// [`tests::test_admission_tier_from_into_static_bytes_round_trips_through_from_utf8`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value static-lifetime
+/// Typed primitives: the by-value static-lifetime
 /// byte-slice-emit surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one `From<AdmissionTier> for
 /// &'static [u8]` impl routing through [`AdmissionTier::as_str`]
 /// and [`str::as_bytes`]), not a per-consumer
 /// `.as_str().as_bytes()` restatement at every downstream site that
-/// accepts `impl Into<&'static [u8]>`. THEORY.md §VI.1 one-oracle:
+/// accepts `impl Into<&'static [u8]>`. One-oracle:
 /// the canonical label is named at one site
 /// ([`AdmissionTier::as_str`]) and every surface — `as_str`,
 /// `Display`, `Serialize`, `AsRef<str>`, `AsRef<[u8]>`,
@@ -6312,14 +6301,13 @@ impl From<AdmissionTier> for &'static [u8] {
 /// [`TryFrom<Vec<u8>>`] at every variant is pinned by
 /// [`tests::test_admission_tier_from_into_owned_bytes_round_trips_through_try_from`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value owned-buffer byte-
+/// Typed primitives: the by-value owned-buffer byte-
 /// slice emit surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one `From<AdmissionTier> for Vec<u8>`
 /// impl routing through [`as_str`] + [`str::as_bytes`] +
 /// [`slice::to_vec`]), not a per-consumer
 /// `tier.as_str().as_bytes().to_vec()` restatement at every
-/// downstream site that accepts `impl Into<Vec<u8>>`. THEORY.md
-/// §VI.1 one-oracle: the canonical label is named at one site
+/// downstream site that accepts `impl Into<Vec<u8>>`. One-oracle: the canonical label is named at one site
 /// ([`AdmissionTier::as_str`]) and every emit surface — `as_str`,
 /// `Display`, `Serialize`, `AsRef<str>`, `AsRef<[u8]>`,
 /// `From<T> for &'static str`, `From<T> for &'static [u8]`,
@@ -6395,14 +6383,14 @@ impl From<AdmissionTier> for Vec<u8> {
 /// contract at the emit boundary is pinned by
 /// [`tests::test_admission_tier_into_cow_static_bytes_is_borrowed`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value
+/// Typed primitives: the by-value
 /// `Cow<'static, [u8]>`-emit surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one `From<AdmissionTier> for
 /// Cow<'static, [u8]>` impl routing through [`AdmissionTier::as_str`]
 /// and [`str::as_bytes`] at the [`Cow::Borrowed`] branch), not a
 /// per-consumer `Cow::Borrowed(tier.as_str().as_bytes())`
 /// restatement at every downstream site that accepts
-/// `impl Into<Cow<'static, [u8]>>`. THEORY.md §VI.1 one-oracle: the
+/// `impl Into<Cow<'static, [u8]>>`. One-oracle: the
 /// canonical label is named at one site ([`AdmissionTier::as_str`])
 /// and every emit surface — `as_str`, `Display`, `Serialize`,
 /// `AsRef<str>`, `AsRef<[u8]>`, `From<T> for &'static str`,
@@ -6487,7 +6475,7 @@ impl From<AdmissionTier> for std::borrow::Cow<'static, [u8]> {
 /// [`AdmissionTier::as_str`] at every variant is pinned by
 /// [`tests::test_admission_tier_from_into_boxed_bytes_round_trips_through_from_utf8`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shrunk-owned
+/// Typed primitives: the by-value shrunk-owned
 /// [`Box<[u8]>`] emit surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one `From<AdmissionTier> for
 /// Box<[u8]>` impl routing through [`as_str`] + [`str::as_bytes`]
@@ -6495,7 +6483,7 @@ impl From<AdmissionTier> for std::borrow::Cow<'static, [u8]> {
 /// per-consumer `Box::<[u8]>::from(tier.as_str().as_bytes())`
 /// restatement at every downstream site that accepts
 /// `impl Into<Box<[u8]>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at
+/// One-oracle: the canonical label is named at
 /// one site ([`AdmissionTier::as_str`]) and every byte-slice emit
 /// surface — [`AsRef<[u8]>`], [`From<T> for &'static [u8]`],
 /// [`From<T> for Vec<u8>`], [`From<T> for Cow<'static, [u8]>`],
@@ -6595,14 +6583,14 @@ impl From<AdmissionTier> for Box<[u8]> {
 /// [`Arc<str>`] surface
 /// ([`tests::test_admission_tier_into_arc_str_shares_label_across_clones`]).
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shared-owned
+/// Typed primitives: the by-value shared-owned
 /// [`Arc<[u8]>`] emit surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one `From<AdmissionTier> for Arc<[u8]>`
 /// impl routing through [`as_str`] + [`str::as_bytes`] composed
 /// with [`std::sync::Arc::<[u8]>::from`]), not a per-consumer
 /// `Arc::<[u8]>::from(tier.as_str().as_bytes())` restatement at
 /// every downstream site that accepts `impl Into<Arc<[u8]>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`AdmissionTier::as_str`]) and every byte-slice emit
 /// surface — [`AsRef<[u8]>`], [`From<T> for &'static [u8]`],
 /// [`From<T> for Vec<u8>`], [`From<T> for Cow<'static, [u8]>`],
@@ -6704,14 +6692,14 @@ impl From<AdmissionTier> for std::sync::Arc<[u8]> {
 /// surface
 /// ([`tests::test_admission_tier_into_rc_str_shares_label_across_clones`]).
 ///
-/// THEORY.md §V.4 typed primitives: the by-value thread-local
+/// Typed primitives: the by-value thread-local
 /// shared-owned [`Rc<[u8]>`] emit surface is a typed-primitive site
 /// on [`AdmissionTier`] itself (one `From<AdmissionTier> for
 /// Rc<[u8]>` impl routing through [`as_str`] + [`str::as_bytes`]
 /// composed with [`std::rc::Rc::<[u8]>::from`]), not a per-consumer
 /// `Rc::<[u8]>::from(tier.as_str().as_bytes())` restatement at
 /// every downstream site that accepts `impl Into<Rc<[u8]>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`AdmissionTier::as_str`]) and every byte-slice emit
 /// surface — [`AsRef<[u8]>`], [`From<T> for &'static [u8]`],
 /// [`From<T> for Vec<u8>`], [`From<T> for Cow<'static, [u8]>`],
@@ -6832,14 +6820,13 @@ impl From<AdmissionTier> for std::rc::Rc<[u8]> {
 /// input is pinned by
 /// [`tests::test_admission_tier_try_from_bytes_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-reference byte-slice
+/// Typed primitives: the by-reference byte-slice
 /// try-conversion surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one `TryFrom<&[u8]>` impl routing
 /// through [`std::str::from_utf8`] + [`FromStr`]), not a per-
 /// consumer `std::str::from_utf8(bytes).and_then(|s|
 /// s.parse::<AdmissionTier>())` restatement at every downstream
-/// site that receives canonical-label byte sequences. THEORY.md
-/// §VI.1 one-oracle: the canonical-label grammar is named at one
+/// site that receives canonical-label byte sequences. One-oracle: the canonical-label grammar is named at one
 /// site ([`AdmissionTier::as_str`]), inverted at one site
 /// ([`AdmissionTier::from_str`]), and every parse surface —
 /// [`std::str::FromStr`], [`serde::Deserialize`], [`TryFrom<&str>`],
@@ -6954,14 +6941,14 @@ impl TryFrom<&[u8]> for AdmissionTier {
 /// input is pinned by
 /// [`tests::test_admission_tier_try_from_vec_bytes_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value owned-buffer byte-slice
+/// Typed primitives: the by-value owned-buffer byte-slice
 /// try-conversion surface is a typed-primitive site on [`AdmissionTier`]
 /// itself (one `TryFrom<Vec<u8>>` impl routing through the borrowed
 /// [`TryFrom<&[u8]>`] parse peer), not a per-consumer
 /// `AdmissionTier::try_from(buf.as_slice())` bridge at every downstream
 /// site that types its parse contract as `impl TryFrom<Vec<u8>>` rather
-/// than [`TryFrom<&[u8]>`] or [`std::str::FromStr`]. THEORY.md §VI.1
-/// one-oracle: the canonical-label grammar is named at one site
+/// than [`TryFrom<&[u8]>`] or [`std::str::FromStr`].
+/// One-oracle: the canonical-label grammar is named at one site
 /// ([`AdmissionTier::as_str`]), inverted at one site
 /// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every parse
 /// surface — [`std::str::FromStr`], [`serde::Deserialize`],
@@ -7055,14 +7042,14 @@ impl TryFrom<Vec<u8>> for AdmissionTier {
 /// owned-frontier input is pinned by
 /// [`tests::test_admission_tier_try_from_cow_bytes_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value borrowed/owned-frontier
+/// Typed primitives: the by-value borrowed/owned-frontier
 /// byte-slice try-conversion surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one `TryFrom<Cow<'_, [u8]>>` impl routing
 /// through the borrowed [`TryFrom<&[u8]>`] parse peer), not a per-consumer
 /// `AdmissionTier::try_from(buf.as_ref())` bridge at every downstream site
 /// that types its parse contract as `impl TryFrom<Cow<'_, [u8]>>` rather
-/// than [`TryFrom<&[u8]>`] or [`TryFrom<Vec<u8>>`]. THEORY.md §VI.1
-/// one-oracle: the canonical-label grammar is named at one site
+/// than [`TryFrom<&[u8]>`] or [`TryFrom<Vec<u8>>`].
+/// One-oracle: the canonical-label grammar is named at one site
 /// ([`AdmissionTier::as_str`]), inverted at one site
 /// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every parse
 /// surface — [`std::str::FromStr`], [`serde::Deserialize`],
@@ -7135,13 +7122,13 @@ impl<'a> TryFrom<std::borrow::Cow<'a, [u8]>> for AdmissionTier {
 /// the strict-rejection contract on non-canonical input is pinned by
 /// [`tests::test_admission_tier_try_from_box_bytes_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shrunk-owned
+/// Typed primitives: the by-value shrunk-owned
 /// byte-slice-parse surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one `TryFrom<Box<[u8]>>` impl routing through
 /// the by-reference [`TryFrom<&[u8]>`] parse oracle), not a per-consumer
 /// `AdmissionTier::try_from(std::str::from_utf8(&bytes)?.trim())`
 /// restatement at every downstream site.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at one
+/// One-oracle: the canonical label grammar is named at one
 /// site ([`AdmissionTier::as_str`]), inverted at one site
 /// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every parse
 /// surface — [`std::str::FromStr`], [`serde::Deserialize`],
@@ -7220,7 +7207,7 @@ impl TryFrom<Box<[u8]>> for AdmissionTier {
 /// the strict-rejection contract on non-canonical input is pinned by
 /// [`tests::test_admission_tier_try_from_arc_bytes_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shared-owned
+/// Typed primitives: the by-value shared-owned
 /// byte-slice-parse surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one `TryFrom<Arc<[u8]>>` impl routing
 /// through the by-reference [`TryFrom<&[u8]>`] parse oracle), not a
@@ -7228,7 +7215,7 @@ impl TryFrom<Box<[u8]>> for AdmissionTier {
 /// `AdmissionTier::try_from(std::str::from_utf8(&bytes)?.trim())`
 /// restatement at every downstream site that types its parse contract
 /// as `impl TryFrom<Arc<[u8]>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// One-oracle: the canonical label grammar is named
 /// at one site ([`AdmissionTier::as_str`]), inverted at one site
 /// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every
 /// parse surface — [`std::str::FromStr`], [`serde::Deserialize`],
@@ -7315,7 +7302,7 @@ impl TryFrom<std::sync::Arc<[u8]>> for AdmissionTier {
 /// the strict-rejection contract on non-canonical input is pinned by
 /// [`tests::test_admission_tier_try_from_rc_bytes_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value thread-local
+/// Typed primitives: the by-value thread-local
 /// shared-owned byte-slice-parse surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one `TryFrom<Rc<[u8]>>` impl routing
 /// through the by-reference [`TryFrom<&[u8]>`] parse oracle), not a
@@ -7323,7 +7310,7 @@ impl TryFrom<std::sync::Arc<[u8]>> for AdmissionTier {
 /// `AdmissionTier::try_from(std::str::from_utf8(&bytes)?.trim())`
 /// restatement at every downstream site that types its parse contract
 /// as `impl TryFrom<Rc<[u8]>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// One-oracle: the canonical label grammar is named
 /// at one site ([`AdmissionTier::as_str`]), inverted at one site
 /// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every
 /// parse surface — [`std::str::FromStr`], [`serde::Deserialize`],
@@ -7409,13 +7396,12 @@ impl TryFrom<std::rc::Rc<[u8]>> for AdmissionTier {
 /// the strict-rejection contract on non-canonical input is pinned by
 /// [`tests::test_admission_tier_try_from_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-reference try-conversion
+/// Typed primitives: the by-reference try-conversion
 /// surface is a typed-primitive site on [`AdmissionTier`] itself
 /// (one `TryFrom<&str>` impl routing through the [`std::str::FromStr`]
 /// parse oracle), not a per-consumer `.parse::<AdmissionTier>()`
 /// bridge at every downstream site that types its parse contract as
-/// `impl TryFrom<&str>` rather than [`std::str::FromStr`]. THEORY.md
-/// §VI.1 one-oracle: the canonical-label grammar is named at one site
+/// `impl TryFrom<&str>` rather than [`std::str::FromStr`]. One-oracle: the canonical-label grammar is named at one site
 /// ([`AdmissionTier::as_str`]), inverted at one site
 /// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every
 /// parse surface — [`std::str::FromStr`], [`serde::Deserialize`], this
@@ -7486,12 +7472,12 @@ impl TryFrom<&str> for AdmissionTier {
 /// consumer at every variant is pinned by
 /// [`tests::test_admission_tier_into_string_carries_through_generic_consumer`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value owned-string emit
+/// Typed primitives: the by-value owned-string emit
 /// surface is a typed-primitive site on [`AdmissionTier`] itself
 /// (one `From<AdmissionTier> for String` impl routing through
 /// [`AdmissionTier::as_str`]), not a per-consumer
 /// `.as_str().to_owned()` restatement at every downstream site that
-/// accepts `impl Into<String>`. THEORY.md §VI.1 one-oracle: the
+/// accepts `impl Into<String>`. One-oracle: the
 /// canonical label is named at one site ([`AdmissionTier::as_str`])
 /// and every emit surface — [`AdmissionTier::as_str`],
 /// [`std::fmt::Display`], [`serde::Serialize`], [`AsRef<str>`],
@@ -7591,14 +7577,14 @@ impl From<AdmissionTier> for String {
 /// by
 /// [`tests::test_admission_tier_try_from_string_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value owned-string
+/// Typed primitives: the by-value owned-string
 /// try-conversion surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one `TryFrom<String>` impl routing through
 /// the [`std::str::FromStr`] parse oracle), not a per-consumer
 /// `.parse::<AdmissionTier>()` bridge at every downstream site that
 /// types its parse contract as `impl TryFrom<String>` rather than
-/// [`std::str::FromStr`] or [`TryFrom<&str>`]. THEORY.md §VI.1
-/// one-oracle: the canonical-label grammar is named at one site
+/// [`std::str::FromStr`] or [`TryFrom<&str>`].
+/// One-oracle: the canonical-label grammar is named at one site
 /// ([`AdmissionTier::as_str`]), inverted at one site
 /// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every
 /// parse surface — [`std::str::FromStr`], [`serde::Deserialize`],
@@ -7691,13 +7677,13 @@ impl TryFrom<String> for AdmissionTier {
 /// the emit boundary is pinned by
 /// [`tests::test_admission_tier_into_cow_static_str_is_borrowed`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value `Cow<'static, str>`
+/// Typed primitives: the by-value `Cow<'static, str>`
 /// emit surface is a typed-primitive site on [`AdmissionTier`] itself
 /// (one `From<AdmissionTier> for Cow<'static, str>` impl routing
 /// through [`as_str`] at the [`Cow::Borrowed`] branch), not a
 /// per-consumer `Cow::Borrowed(tier.as_str())` restatement at every
 /// downstream site that accepts `impl Into<Cow<'static, str>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one site
+/// One-oracle: the canonical label is named at one site
 /// ([`AdmissionTier::as_str`]) and every emit surface — [`as_str`],
 /// [`std::fmt::Display`], [`serde::Serialize`], [`AsRef<str>`],
 /// [`From<AdmissionTier> for &'static str`],
@@ -7799,14 +7785,14 @@ impl From<AdmissionTier> for std::borrow::Cow<'static, str> {
 /// [`Cow`] branches is pinned by
 /// [`tests::test_admission_tier_try_from_cow_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value [`Cow<'_, str>`] parse
+/// Typed primitives: the by-value [`Cow<'_, str>`] parse
 /// surface is a typed-primitive site on [`AdmissionTier`] itself (one
 /// `TryFrom<Cow<'_, str>>` impl routing through
 /// [`<Self as std::str::FromStr>::from_str`] on
 /// [`Cow::as_ref`]), not a per-consumer
 /// `tier_str.parse::<AdmissionTier>()` restatement at every downstream
 /// site that receives a `Cow<'_, str>` label.
-/// THEORY.md §VI.1 one-oracle: the canonical grammar is named at one
+/// One-oracle: the canonical grammar is named at one
 /// site ([`<AdmissionTier as std::str::FromStr>::from_str`]) and every
 /// parse surface — [`FromStr`], [`serde::Deserialize`],
 /// [`TryFrom<&str>`], [`TryFrom<String>`], this [`TryFrom<Cow<'_,
@@ -7895,13 +7881,13 @@ impl<'a> TryFrom<std::borrow::Cow<'a, str>> for AdmissionTier {
 /// the admission-tier ladder against the shared
 /// [`AdmissionTier::as_str`] canonical-label oracle.
 ///
-/// THEORY.md §V.4 typed primitives: the by-value [`Box<str>`] emit
+/// Typed primitives: the by-value [`Box<str>`] emit
 /// surface is a typed-primitive site on [`AdmissionTier`] itself (one
 /// `From<AdmissionTier> for Box<str>` impl routing through [`as_str`]
 /// at the [`Box::<str>::from`] boundary), not a per-consumer
 /// `Box::<str>::from(tier.as_str())` restatement at every downstream
 /// site that receives an [`Into<Box<str>>`] label sink.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one site
+/// One-oracle: the canonical label is named at one site
 /// ([`AdmissionTier::as_str`]) and every emit surface — [`as_str`],
 /// [`Display`], [`serde::Serialize`], [`AsRef<str>`],
 /// [`From<AdmissionTier> for &'static str`],
@@ -8009,14 +7995,14 @@ impl From<AdmissionTier> for Box<str> {
 /// the strict-rejection contract at non-canonical input is pinned by
 /// [`tests::test_admission_tier_try_from_box_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value [`Box<str>`] parse
+/// Typed primitives: the by-value [`Box<str>`] parse
 /// surface is a typed-primitive site on [`AdmissionTier`] itself (one
 /// `TryFrom<Box<str>>` impl routing through
 /// [`<Self as std::str::FromStr>::from_str`] on
 /// [`<Box<str> as AsRef<str>>::as_ref`]), not a per-consumer
 /// `boxed.parse::<AdmissionTier>()` restatement at every downstream
 /// site that receives a [`Box<str>`] label.
-/// THEORY.md §VI.1 one-oracle: the canonical grammar is named at one
+/// One-oracle: the canonical grammar is named at one
 /// site ([`<AdmissionTier as std::str::FromStr>::from_str`]) and every
 /// parse surface — [`FromStr`], [`serde::Deserialize`],
 /// [`TryFrom<&str>`], [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`],
@@ -8124,13 +8110,13 @@ impl TryFrom<Box<str>> for AdmissionTier {
 /// admission-tier ladder against the shared [`AdmissionTier::as_str`]
 /// canonical-label oracle.
 ///
-/// THEORY.md §V.4 typed primitives: the by-value [`Arc<str>`] emit
+/// Typed primitives: the by-value [`Arc<str>`] emit
 /// surface is a typed-primitive site on [`AdmissionTier`] itself (one
 /// `From<AdmissionTier> for Arc<str>` impl routing through [`as_str`]
 /// at the [`std::sync::Arc::<str>::from`] boundary), not a per-consumer
 /// `Arc::<str>::from(tier.as_str())` restatement at every downstream
 /// site that receives an [`Into<Arc<str>>`] label sink.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`AdmissionTier::as_str`]) and every emit surface —
 /// [`as_str`], [`Display`], [`serde::Serialize`], [`AsRef<str>`],
 /// [`From<AdmissionTier> for &'static str`],
@@ -8258,14 +8244,14 @@ impl From<AdmissionTier> for std::sync::Arc<str> {
 /// the strict-rejection contract at non-canonical input is pinned by
 /// [`tests::test_admission_tier_try_from_arc_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value [`Arc<str>`] parse
+/// Typed primitives: the by-value [`Arc<str>`] parse
 /// surface is a typed-primitive site on [`AdmissionTier`] itself (one
 /// `TryFrom<Arc<str>>` impl routing through
 /// [`<Self as std::str::FromStr>::from_str`] on
 /// [`<std::sync::Arc<str> as AsRef<str>>::as_ref`]), not a
 /// per-consumer `shared.parse::<AdmissionTier>()` restatement at every
 /// downstream site that receives an [`Arc<str>`] label.
-/// THEORY.md §VI.1 one-oracle: the canonical grammar is named at one
+/// One-oracle: the canonical grammar is named at one
 /// site ([`<AdmissionTier as std::str::FromStr>::from_str`]) and every
 /// parse surface — [`FromStr`], [`serde::Deserialize`],
 /// [`TryFrom<&str>`], [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`],
@@ -8383,13 +8369,13 @@ impl TryFrom<std::sync::Arc<str>> for AdmissionTier {
 /// commit, sibling of the closed [`Arc<str>`] emit + parse trio directly
 /// above.
 ///
-/// THEORY.md §V.4 typed primitives: the by-value [`Rc<str>`] emit
+/// Typed primitives: the by-value [`Rc<str>`] emit
 /// surface is a typed-primitive site on [`AdmissionTier`] itself (one
 /// `From<AdmissionTier> for Rc<str>` impl routing through [`as_str`] at
 /// the [`std::rc::Rc::<str>::from`] boundary), not a per-consumer
 /// `Rc::<str>::from(tier.as_str())` restatement at every downstream site
 /// that receives an [`Into<Rc<str>>`] label sink.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one site
+/// One-oracle: the canonical label is named at one site
 /// ([`AdmissionTier::as_str`]) and every emit surface — [`as_str`],
 /// [`Display`], [`serde::Serialize`], [`AsRef<str>`],
 /// [`From<AdmissionTier> for &'static str`],
@@ -8532,14 +8518,14 @@ impl From<AdmissionTier> for std::rc::Rc<str> {
 /// the strict-rejection contract at non-canonical input is pinned by
 /// [`tests::test_admission_tier_try_from_rc_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value [`Rc<str>`] parse
+/// Typed primitives: the by-value [`Rc<str>`] parse
 /// surface is a typed-primitive site on [`AdmissionTier`] itself (one
 /// `TryFrom<Rc<str>>` impl routing through
 /// [`<Self as std::str::FromStr>::from_str`] on
 /// [`<std::rc::Rc<str> as AsRef<str>>::as_ref`]), not a per-consumer
 /// `shared.parse::<AdmissionTier>()` restatement at every downstream
 /// site that receives an [`Rc<str>`] label.
-/// THEORY.md §VI.1 one-oracle: the canonical grammar is named at one
+/// One-oracle: the canonical grammar is named at one
 /// site ([`<AdmissionTier as std::str::FromStr>::from_str`]) and every
 /// parse surface — [`FromStr`], [`serde::Deserialize`],
 /// [`TryFrom<&str>`], [`TryFrom<String>`], [`TryFrom<Cow<'_, str>>`],
@@ -8636,13 +8622,12 @@ impl TryFrom<std::rc::Rc<str>> for AdmissionTier {
 /// the canonical label at every variant is pinned by
 /// [`tests::test_admission_tier_as_ref_osstr_round_trips_through_to_str`].
 ///
-/// THEORY.md §V.4 typed primitives: the OS-string borrowed-view
+/// Typed primitives: the OS-string borrowed-view
 /// surface is a typed-primitive site on [`AdmissionTier`] itself
 /// (one `AsRef<std::ffi::OsStr>` impl routing through
 /// [`AsRef<str>`] and [`std::ffi::OsStr::new`]), not a per-consumer
 /// `OsStr::new(tier.as_str())` restatement at every downstream
-/// site that accepts `impl AsRef<std::ffi::OsStr>`. THEORY.md
-/// §VI.1 one-oracle: the canonical label is named at one site
+/// site that accepts `impl AsRef<std::ffi::OsStr>`. One-oracle: the canonical label is named at one site
 /// ([`AdmissionTier::as_str`]) and every borrowed-view surface —
 /// [`AsRef<str>`] (yields `&str`), [`AsRef<[u8]>`] (yields
 /// `&[u8]`), this [`AsRef<std::ffi::OsStr>`] (yields `&OsStr`) —
@@ -8747,13 +8732,13 @@ impl AsRef<std::ffi::OsStr> for AdmissionTier {
 /// the canonical label at every variant is pinned by
 /// [`tests::test_admission_tier_as_ref_path_round_trips_through_to_str`].
 ///
-/// THEORY.md §V.4 typed primitives: the filesystem-path borrowed-
+/// Typed primitives: the filesystem-path borrowed-
 /// view surface is a typed-primitive site on [`AdmissionTier`]
 /// itself (one `AsRef<std::path::Path>` impl routing through
 /// [`AsRef<str>`] and [`std::path::Path::new`]), not a
 /// per-consumer `Path::new(tier.as_str())` restatement at every
 /// downstream site that accepts `impl AsRef<std::path::Path>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at
+/// One-oracle: the canonical label is named at
 /// one site ([`AdmissionTier::as_str`]) and every borrowed-view
 /// surface — [`AsRef<str>`] (yields `&str`), [`AsRef<[u8]>`]
 /// (yields `&[u8]`), [`AsRef<std::ffi::OsStr>`] (yields `&OsStr`),
@@ -8816,14 +8801,14 @@ impl AsRef<std::path::Path> for AdmissionTier {
 /// recovering the canonical label at every variant is pinned by
 /// [`tests::test_admission_tier_from_into_osstring_round_trips_through_into_string`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value owned OS-string
+/// Typed primitives: the by-value owned OS-string
 /// emit surface is a typed-primitive site on [`AdmissionTier`]
 /// itself (one `From<AdmissionTier> for std::ffi::OsString` impl
 /// routing through [`AdmissionTier::as_str`] and
 /// [`std::ffi::OsString::from`]), not a per-consumer
 /// `OsString::from(tier.as_str())` restatement at every
 /// downstream site that accepts `impl Into<std::ffi::OsString>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at
+/// One-oracle: the canonical label is named at
 /// one site ([`AdmissionTier::as_str`]) and every owned-buffer
 /// emit surface — [`From<T> for String`] (yields [`String`]),
 /// [`From<T> for Vec<u8>`] (yields [`Vec<u8>`]), this
@@ -8923,7 +8908,7 @@ impl From<AdmissionTier> for std::ffi::OsString {
 /// canonical label at every variant is pinned by
 /// [`tests::test_admission_tier_from_into_pathbuf_round_trips_through_into_os_string`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value owned filesystem-
+/// Typed primitives: the by-value owned filesystem-
 /// path emit surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one
 /// `From<AdmissionTier> for std::path::PathBuf` impl routing
@@ -8931,7 +8916,7 @@ impl From<AdmissionTier> for std::ffi::OsString {
 /// [`std::path::PathBuf::from`]), not a per-consumer
 /// `PathBuf::from(tier.as_str())` restatement at every
 /// downstream site that accepts `impl Into<std::path::PathBuf>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at
+/// One-oracle: the canonical label is named at
 /// one site ([`AdmissionTier::as_str`]) and every owned-buffer
 /// emit surface — [`From<T> for String`] (yields [`String`]),
 /// [`From<T> for Vec<u8>`] (yields [`Vec<u8>`]),
@@ -9009,7 +8994,7 @@ impl From<AdmissionTier> for std::path::PathBuf {
 /// the canonical label at every variant is pinned by
 /// [`tests::test_admission_tier_from_into_static_os_str_round_trips_through_to_str`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value static-lifetime
+/// Typed primitives: the by-value static-lifetime
 /// OS-string emit surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one
 /// `From<AdmissionTier> for &'static std::ffi::OsStr` impl routing
@@ -9017,7 +9002,7 @@ impl From<AdmissionTier> for std::path::PathBuf {
 /// [`std::ffi::OsStr::new`]), not a per-consumer
 /// `OsStr::new(tier.as_str())` restatement at every downstream
 /// site that accepts `impl Into<&'static std::ffi::OsStr>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at
+/// One-oracle: the canonical label is named at
 /// one site ([`AdmissionTier::as_str`]) and every by-value
 /// static-lifetime emit surface — [`From<T> for &'static str`]
 /// (yields `&'static str`), [`From<T> for &'static [u8]`] (yields
@@ -9096,14 +9081,14 @@ impl From<AdmissionTier> for &'static std::ffi::OsStr {
 /// canonical label at every variant is pinned by
 /// [`tests::test_admission_tier_from_into_static_path_round_trips_through_to_str`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value static-lifetime
+/// Typed primitives: the by-value static-lifetime
 /// filesystem-path emit surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one
 /// `From<AdmissionTier> for &'static std::path::Path` impl routing
 /// through [`AdmissionTier::as_str`] and [`std::path::Path::new`]),
 /// not a per-consumer `Path::new(tier.as_str())` restatement at
 /// every downstream site that accepts
-/// `impl Into<&'static std::path::Path>`. THEORY.md §VI.1 one-oracle:
+/// `impl Into<&'static std::path::Path>`. One-oracle:
 /// the canonical label is named at one site
 /// ([`AdmissionTier::as_str`]) and every by-value static-lifetime
 /// emit surface — [`From<T> for &'static str`] (yields
@@ -9209,7 +9194,7 @@ impl From<AdmissionTier> for &'static std::path::Path {
 /// [`std::borrow::Cow::Owned`]) at every variant is pinned by
 /// [`tests::test_admission_tier_into_cow_static_os_str_is_borrowed`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value borrowed/owned-
+/// Typed primitives: the by-value borrowed/owned-
 /// frontier OS-string emit surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one
 /// `From<AdmissionTier> for Cow<'static, std::ffi::OsStr>` impl
@@ -9219,7 +9204,7 @@ impl From<AdmissionTier> for &'static std::path::Path {
 /// `Cow::Borrowed(std::ffi::OsStr::new(tier.as_str()))` restatement
 /// at every downstream site that accepts
 /// `impl Into<Cow<'static, std::ffi::OsStr>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`AdmissionTier::as_str`]) and every by-value
 /// borrowed/owned-frontier emit surface —
 /// [`From<T> for std::borrow::Cow<'static, str>`] (yields
@@ -9333,7 +9318,7 @@ impl From<AdmissionTier> for std::borrow::Cow<'static, std::ffi::OsStr> {
 /// [`std::borrow::Cow::Owned`]) at every variant is pinned by
 /// [`tests::test_admission_tier_into_cow_static_path_is_borrowed`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value borrowed/owned-
+/// Typed primitives: the by-value borrowed/owned-
 /// frontier filesystem-path emit surface is a typed-primitive site
 /// on [`AdmissionTier`] itself (one
 /// `From<AdmissionTier> for Cow<'static, std::path::Path>` impl
@@ -9343,7 +9328,7 @@ impl From<AdmissionTier> for std::borrow::Cow<'static, std::ffi::OsStr> {
 /// `Cow::Borrowed(std::path::Path::new(tier.as_str()))`
 /// restatement at every downstream site that accepts
 /// `impl Into<Cow<'static, std::path::Path>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`AdmissionTier::as_str`]) and every by-value
 /// borrowed/owned-frontier emit surface —
 /// [`From<T> for std::borrow::Cow<'static, str>`] (yields
@@ -9447,7 +9432,7 @@ impl From<AdmissionTier> for std::borrow::Cow<'static, std::path::Path> {
 /// string constant table) is pinned by
 /// [`tests::test_admission_tier_into_box_os_str_is_owned_independent`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shrunk-owned OS-
+/// Typed primitives: the by-value shrunk-owned OS-
 /// string emit surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one
 /// `From<AdmissionTier> for Box<std::ffi::OsStr>` impl routing
@@ -9455,7 +9440,7 @@ impl From<AdmissionTier> for std::borrow::Cow<'static, std::path::Path> {
 /// [`Box::<std::ffi::OsStr>::from`]), not a per-consumer
 /// `Box::<std::ffi::OsStr>::from(std::ffi::OsStr::new(tier.as_str()))`
 /// restatement at every downstream site that accepts
-/// `impl Into<Box<std::ffi::OsStr>>`. THEORY.md §VI.1 one-oracle: the
+/// `impl Into<Box<std::ffi::OsStr>>`. One-oracle: the
 /// canonical label is named at one site
 /// ([`AdmissionTier::as_str`]) and every OS-string emit surface —
 /// [`From<T> for std::ffi::OsString`],
@@ -9560,7 +9545,7 @@ impl From<AdmissionTier> for Box<std::ffi::OsStr> {
 /// string constant table) is pinned by
 /// [`tests::test_admission_tier_into_box_path_is_owned_independent`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shrunk-owned
+/// Typed primitives: the by-value shrunk-owned
 /// filesystem-path emit surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one
 /// `From<AdmissionTier> for Box<std::path::Path>` impl routing
@@ -9568,7 +9553,7 @@ impl From<AdmissionTier> for Box<std::ffi::OsStr> {
 /// [`Box::<std::path::Path>::from`]), not a per-consumer
 /// `Box::<std::path::Path>::from(std::path::Path::new(tier.as_str()))`
 /// restatement at every downstream site that accepts
-/// `impl Into<Box<std::path::Path>>`. THEORY.md §VI.1 one-oracle: the
+/// `impl Into<Box<std::path::Path>>`. One-oracle: the
 /// canonical label is named at one site
 /// ([`AdmissionTier::as_str`]) and every filesystem-path emit
 /// surface — [`From<T> for std::path::PathBuf`],
@@ -9673,7 +9658,7 @@ impl From<AdmissionTier> for Box<std::path::Path> {
 /// least two after the clone — at every variant is pinned by
 /// [`tests::test_admission_tier_into_arc_os_str_shares_label_across_clones`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shared-owned OS-
+/// Typed primitives: the by-value shared-owned OS-
 /// string emit surface is a typed-primitive site on [`AdmissionTier`]
 /// itself (one `From<AdmissionTier> for std::sync::Arc<std::ffi::OsStr>`
 /// impl routing through [`AdmissionTier::as_str`],
@@ -9681,7 +9666,7 @@ impl From<AdmissionTier> for Box<std::path::Path> {
 /// [`std::sync::Arc::<std::ffi::OsStr>::from`]), not a per-consumer
 /// `Arc::<std::ffi::OsStr>::from(std::ffi::OsStr::new(tier.as_str()))`
 /// restatement at every downstream site that accepts
-/// `impl Into<Arc<std::ffi::OsStr>>`. THEORY.md §VI.1 one-oracle: the
+/// `impl Into<Arc<std::ffi::OsStr>>`. One-oracle: the
 /// canonical label is named at one site ([`AdmissionTier::as_str`])
 /// and every OS-string emit surface —
 /// [`From<T> for std::ffi::OsString`],
@@ -9795,7 +9780,7 @@ impl From<AdmissionTier> for std::sync::Arc<std::ffi::OsStr> {
 /// least two after the clone — at every variant is pinned by
 /// [`tests::test_admission_tier_into_arc_path_shares_label_across_clones`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shared-owned
+/// Typed primitives: the by-value shared-owned
 /// filesystem-path emit surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one
 /// `From<AdmissionTier> for std::sync::Arc<std::path::Path>` impl
@@ -9804,7 +9789,7 @@ impl From<AdmissionTier> for std::sync::Arc<std::ffi::OsStr> {
 /// [`std::sync::Arc::<std::path::Path>::from`]), not a per-consumer
 /// `Arc::<std::path::Path>::from(std::path::Path::new(tier.as_str()))`
 /// restatement at every downstream site that accepts
-/// `impl Into<Arc<std::path::Path>>`. THEORY.md §VI.1 one-oracle: the
+/// `impl Into<Arc<std::path::Path>>`. One-oracle: the
 /// canonical label is named at one site
 /// ([`AdmissionTier::as_str`]) and every filesystem-path emit
 /// surface — [`From<T> for std::path::PathBuf`],
@@ -9940,7 +9925,7 @@ impl From<AdmissionTier> for std::sync::Arc<std::path::Path> {
 /// clone — at every variant is pinned by
 /// [`tests::test_admission_tier_into_rc_os_str_shares_label_across_clones`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value thread-local shared-
+/// Typed primitives: the by-value thread-local shared-
 /// owned OS-string emit surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one
 /// `From<AdmissionTier> for std::rc::Rc<std::ffi::OsStr>` impl routing
@@ -9948,7 +9933,7 @@ impl From<AdmissionTier> for std::sync::Arc<std::path::Path> {
 /// [`std::rc::Rc::<std::ffi::OsStr>::from`]), not a per-consumer
 /// `Rc::<std::ffi::OsStr>::from(std::ffi::OsStr::new(tier.as_str()))`
 /// restatement at every downstream site that accepts
-/// `impl Into<Rc<std::ffi::OsStr>>`. THEORY.md §VI.1 one-oracle: the
+/// `impl Into<Rc<std::ffi::OsStr>>`. One-oracle: the
 /// canonical label is named at one site
 /// ([`AdmissionTier::as_str`]) and every OS-string emit surface —
 /// [`From<T> for std::ffi::OsString`],
@@ -10095,7 +10080,7 @@ impl From<AdmissionTier> for std::rc::Rc<std::ffi::OsStr> {
 /// clone — at every variant is pinned by
 /// [`tests::test_admission_tier_into_rc_path_shares_label_across_clones`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value thread-local
+/// Typed primitives: the by-value thread-local
 /// shared-owned filesystem-path emit surface is a typed-primitive
 /// site on [`AdmissionTier`] itself (one
 /// `From<AdmissionTier> for std::rc::Rc<std::path::Path>` impl
@@ -10104,7 +10089,7 @@ impl From<AdmissionTier> for std::rc::Rc<std::ffi::OsStr> {
 /// [`std::rc::Rc::<std::path::Path>::from`]), not a per-consumer
 /// `Rc::<std::path::Path>::from(std::path::Path::new(tier.as_str()))`
 /// restatement at every downstream site that accepts
-/// `impl Into<Rc<std::path::Path>>`. THEORY.md §VI.1 one-oracle:
+/// `impl Into<Rc<std::path::Path>>`. One-oracle:
 /// the canonical label is named at one site
 /// ([`AdmissionTier::as_str`]) and every filesystem-path emit
 /// surface — [`From<T> for std::path::PathBuf`],
@@ -10188,13 +10173,13 @@ impl From<AdmissionTier> for std::rc::Rc<std::path::Path> {
 /// canonical label at every variant is pinned by
 /// [`tests::test_admission_tier_as_ref_cstr_round_trips_through_to_str`].
 ///
-/// THEORY.md §V.4 typed primitives: the NUL-terminated C-string
+/// Typed primitives: the NUL-terminated C-string
 /// borrowed-view surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one `AsRef<std::ffi::CStr>` impl routing
 /// through the by-value static-lifetime C-string emit oracle), not a
 /// per-consumer `<&'static CStr>::from(tier)` restatement at every
 /// downstream site that accepts `impl AsRef<std::ffi::CStr>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label + trailing-NUL is
+/// One-oracle: the canonical label + trailing-NUL is
 /// named at the [`&'static std::ffi::CStr`] emit oracle (which itself
 /// reads the per-variant `c"..."` literals agreeing with
 /// [`AdmissionTier::as_str`] byte-for-byte), and every borrowed-view
@@ -10293,7 +10278,7 @@ impl AsRef<std::ffi::CStr> for AdmissionTier {
 /// variant is pinned by
 /// [`tests::test_admission_tier_into_cstring_carries_trailing_nul`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value owned
+/// Typed primitives: the by-value owned
 /// NUL-terminated C-string emit surface is a typed-primitive site
 /// on [`AdmissionTier`] itself (one `From<AdmissionTier> for
 /// std::ffi::CString` impl routing through
@@ -10301,7 +10286,7 @@ impl AsRef<std::ffi::CStr> for AdmissionTier {
 /// a per-consumer
 /// `std::ffi::CString::new(tier.as_str()).unwrap()` restatement at
 /// every downstream site that accepts
-/// `impl Into<std::ffi::CString>`. THEORY.md §VI.1 one-oracle: the
+/// `impl Into<std::ffi::CString>`. One-oracle: the
 /// canonical label is named at one site
 /// ([`AdmissionTier::as_str`]) and every by-value owned emit
 /// surface — [`From<T> for String`], [`From<T> for
@@ -10431,7 +10416,7 @@ impl From<AdmissionTier> for std::ffi::CString {
 /// bytes — at every variant is pinned by
 /// [`tests::test_admission_tier_into_boxed_cstr_carries_trailing_nul`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shrunk-owned
+/// Typed primitives: the by-value shrunk-owned
 /// NUL-terminated C-string emit surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one
 /// `From<AdmissionTier> for Box<std::ffi::CStr>` impl routing through
@@ -10440,7 +10425,7 @@ impl From<AdmissionTier> for std::ffi::CString {
 /// consumer
 /// `std::ffi::CString::new(tier.as_str()).unwrap().into_boxed_c_str()`
 /// restatement at every downstream site that accepts
-/// `impl Into<Box<std::ffi::CStr>>`. THEORY.md §VI.1 one-oracle: the
+/// `impl Into<Box<std::ffi::CStr>>`. One-oracle: the
 /// canonical label is named at one site ([`AdmissionTier::as_str`])
 /// and every NUL-terminated C-string emit surface — [`From<T> for
 /// std::ffi::CString`], this [`From<T> for Box<std::ffi::CStr>`] —
@@ -10588,7 +10573,7 @@ impl From<AdmissionTier> for Box<std::ffi::CStr> {
 /// clone — at every variant is pinned by
 /// [`tests::test_admission_tier_into_arc_cstr_shares_label_across_clones`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value shared-owned
+/// Typed primitives: the by-value shared-owned
 /// NUL-terminated C-string emit surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one
 /// `From<AdmissionTier> for std::sync::Arc<std::ffi::CStr>` impl
@@ -10597,7 +10582,7 @@ impl From<AdmissionTier> for Box<std::ffi::CStr> {
 /// `std::sync::Arc::<std::ffi::CStr>::from(std::ffi::CString::new(
 /// tier.as_str()).unwrap())` restatement at every downstream site
 /// that accepts `impl Into<std::sync::Arc<std::ffi::CStr>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`AdmissionTier::as_str`]) and every NUL-terminated
 /// C-string emit surface — [`From<T> for std::ffi::CString`],
 /// [`From<T> for Box<std::ffi::CStr>`], this
@@ -10731,7 +10716,7 @@ impl From<AdmissionTier> for std::sync::Arc<std::ffi::CStr> {
 /// clone — at every variant is pinned by
 /// [`tests::test_admission_tier_into_rc_cstr_shares_label_across_clones`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value thread-local
+/// Typed primitives: the by-value thread-local
 /// shared-owned NUL-terminated C-string emit surface is a
 /// typed-primitive site on [`AdmissionTier`] itself (one
 /// `From<AdmissionTier> for std::rc::Rc<std::ffi::CStr>` impl routing
@@ -10740,7 +10725,7 @@ impl From<AdmissionTier> for std::sync::Arc<std::ffi::CStr> {
 /// `std::rc::Rc::<std::ffi::CStr>::from(std::ffi::CString::new(
 /// tier.as_str()).unwrap())` restatement at every downstream site
 /// that accepts `impl Into<std::rc::Rc<std::ffi::CStr>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`AdmissionTier::as_str`]) and every NUL-terminated C-string
 /// emit surface — [`From<T> for std::ffi::CString`], [`From<T> for
 /// Box<std::ffi::CStr>`], [`From<T> for std::sync::Arc<std::ffi::CStr>`],
@@ -10831,7 +10816,7 @@ impl From<AdmissionTier> for std::rc::Rc<std::ffi::CStr> {
 /// canonical label at every variant is pinned by
 /// [`tests::test_admission_tier_from_into_static_cstr_round_trips_through_to_str`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value static-lifetime
+/// Typed primitives: the by-value static-lifetime
 /// NUL-terminated C-string emit surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one `From<AdmissionTier> for
 /// &'static std::ffi::CStr` impl matching over the variants at per-
@@ -10839,7 +10824,7 @@ impl From<AdmissionTier> for std::rc::Rc<std::ffi::CStr> {
 /// `CStr::from_bytes_with_nul(&{ let mut b = tier.as_str().as_bytes()
 /// .to_vec(); b.push(0); b }).unwrap()` restatement at every
 /// downstream site that accepts `impl Into<&'static std::ffi::CStr>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`AdmissionTier::as_str`]) and every by-value static-
 /// lifetime emit surface — [`From<T> for &'static str`],
 /// [`From<T> for &'static [u8]`],
@@ -10979,7 +10964,7 @@ impl From<AdmissionTier> for &'static std::ffi::CStr {
 /// [`std::borrow::Cow::Owned`]) at every variant is pinned by
 /// [`tests::test_admission_tier_into_cow_static_cstr_is_borrowed`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value borrowed/owned-
+/// Typed primitives: the by-value borrowed/owned-
 /// frontier NUL-terminated C-string emit surface is a typed-primitive
 /// site on [`AdmissionTier`] itself (one
 /// `From<AdmissionTier> for Cow<'static, std::ffi::CStr>` impl routing
@@ -10988,7 +10973,7 @@ impl From<AdmissionTier> for &'static std::ffi::CStr {
 /// `Cow::Borrowed(<&'static CStr>::from(tier))` restatement at every
 /// downstream site that accepts
 /// `impl Into<Cow<'static, std::ffi::CStr>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label + trailing-NUL is
+/// One-oracle: the canonical label + trailing-NUL is
 /// named at the [`&'static std::ffi::CStr`] emit oracle (which itself
 /// reads the per-variant `c"..."` literals agreeing with
 /// [`AdmissionTier::as_str`] byte-for-byte, pinned by
@@ -11106,7 +11091,7 @@ impl From<AdmissionTier> for std::borrow::Cow<'static, std::ffi::CStr> {
 /// NUL-terminated C-string input is pinned by
 /// [`tests::test_admission_tier_try_from_cstr_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-reference NUL-terminated
+/// Typed primitives: the by-reference NUL-terminated
 /// C-string parse surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one `TryFrom<&std::ffi::CStr>` impl
 /// routing through [`std::ffi::CStr::to_str`] and the by-reference
@@ -11114,7 +11099,7 @@ impl From<AdmissionTier> for std::borrow::Cow<'static, std::ffi::CStr> {
 /// `AdmissionTier::try_from(c.to_str().map_err(...)?)` restatement at
 /// every downstream site that types its parse contract as
 /// `impl for<'a> TryFrom<&'a std::ffi::CStr>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at
+/// One-oracle: the canonical label grammar is named at
 /// one site ([`AdmissionTier::as_str`]), inverted at one site
 /// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every
 /// parse surface — [`std::str::FromStr`], [`serde::Deserialize`],
@@ -11277,7 +11262,7 @@ impl TryFrom<&std::ffi::CStr> for AdmissionTier {
 /// NUL-terminated C-string input is pinned by
 /// [`tests::test_admission_tier_try_from_cstring_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value owned-buffer
+/// Typed primitives: the by-value owned-buffer
 /// NUL-terminated C-string try-conversion surface is a typed-primitive
 /// site on [`AdmissionTier`] itself (one `TryFrom<std::ffi::CString>`
 /// impl routing through the borrowed [`TryFrom<&std::ffi::CStr>`] parse
@@ -11285,7 +11270,7 @@ impl TryFrom<&std::ffi::CStr> for AdmissionTier {
 /// `AdmissionTier::try_from(c.as_c_str())` bridge at every downstream
 /// site that types its parse contract as `impl TryFrom<std::ffi::CString>`
 /// rather than [`TryFrom<&std::ffi::CStr>`] or [`std::str::FromStr`].
-/// THEORY.md §VI.1 generation over composition: the canonical-label
+/// Generation over composition: the canonical-label
 /// grammar is named at one site ([`AdmissionTier::as_str`]), inverted at
 /// one site ([`<AdmissionTier as std::str::FromStr>::from_str`]), and
 /// every parse surface — [`std::str::FromStr`], [`serde::Deserialize`],
@@ -11393,7 +11378,7 @@ impl TryFrom<std::ffi::CString> for AdmissionTier {
 /// shrunk-owned NUL-terminated C-string input is pinned by
 /// [`tests::test_admission_tier_try_from_box_cstr_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the shrunk-owned NUL-terminated
+/// Typed primitives: the shrunk-owned NUL-terminated
 /// C-string try-conversion parse surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one `TryFrom<Box<std::ffi::CStr>>` impl
 /// routing through [`std::boxed::Box::<std::ffi::CStr>::as_ref`] and
@@ -11401,7 +11386,7 @@ impl TryFrom<std::ffi::CString> for AdmissionTier {
 /// per-consumer `AdmissionTier::try_from(boxed.as_ref())` bridge at
 /// every downstream site that types its parse contract as
 /// `impl TryFrom<Box<std::ffi::CStr>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// One-oracle: the canonical label grammar is named
 /// at one site ([`AdmissionTier::as_str`]), inverted at one site
 /// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every
 /// parse surface — including this shrunk-owned NUL-terminated
@@ -11523,7 +11508,7 @@ impl TryFrom<Box<std::ffi::CStr>> for AdmissionTier {
 /// owned NUL-terminated C-string input is pinned by
 /// [`tests::test_admission_tier_try_from_arc_cstr_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the shared-owned NUL-terminated
+/// Typed primitives: the shared-owned NUL-terminated
 /// C-string try-conversion parse surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one
 /// `TryFrom<std::sync::Arc<std::ffi::CStr>>` impl routing through
@@ -11532,7 +11517,7 @@ impl TryFrom<Box<std::ffi::CStr>> for AdmissionTier {
 /// `AdmissionTier::try_from(shared.as_ref())` bridge at every
 /// downstream site that types its parse contract as
 /// `impl TryFrom<std::sync::Arc<std::ffi::CStr>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// One-oracle: the canonical label grammar is named
 /// at one site ([`AdmissionTier::as_str`]), inverted at one site
 /// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every
 /// parse surface — including this shared-owned NUL-terminated
@@ -11669,7 +11654,7 @@ impl TryFrom<std::sync::Arc<std::ffi::CStr>> for AdmissionTier {
 /// local shared-owned NUL-terminated C-string input is pinned by
 /// [`tests::test_admission_tier_try_from_rc_cstr_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the thread-local shared-owned
+/// Typed primitives: the thread-local shared-owned
 /// NUL-terminated C-string try-conversion parse surface is a
 /// typed-primitive site on [`AdmissionTier`] itself (one
 /// `TryFrom<std::rc::Rc<std::ffi::CStr>>` impl routing through
@@ -11678,7 +11663,7 @@ impl TryFrom<std::sync::Arc<std::ffi::CStr>> for AdmissionTier {
 /// `AdmissionTier::try_from(rc.as_ref())` bridge at every
 /// downstream site that types its parse contract as
 /// `impl TryFrom<std::rc::Rc<std::ffi::CStr>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// One-oracle: the canonical label grammar is named
 /// at one site ([`AdmissionTier::as_str`]), inverted at one site
 /// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every
 /// parse surface — including this thread-local shared-owned
@@ -11802,7 +11787,7 @@ impl TryFrom<std::rc::Rc<std::ffi::CStr>> for AdmissionTier {
 /// across both [`Cow`] branches is pinned by
 /// [`tests::test_admission_tier_try_from_cow_cstr_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value [`Cow<'_,
+/// Typed primitives: the by-value [`Cow<'_,
 /// std::ffi::CStr>`] try-conversion parse surface is a typed-primitive
 /// site on [`AdmissionTier`] itself (one `TryFrom<Cow<'_,
 /// std::ffi::CStr>>` impl routing through the borrowed
@@ -11811,7 +11796,7 @@ impl TryFrom<std::rc::Rc<std::ffi::CStr>> for AdmissionTier {
 /// every downstream site that types its parse contract as `impl for<'a>
 /// TryFrom<Cow<'a, std::ffi::CStr>>` rather than
 /// [`TryFrom<&std::ffi::CStr>`] or [`TryFrom<std::ffi::CString>`].
-/// THEORY.md §VI.1 one-oracle: the canonical-label grammar is named at
+/// One-oracle: the canonical-label grammar is named at
 /// one site ([`AdmissionTier::as_str`]), inverted at one site
 /// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every
 /// parse surface — including this borrowed/owned-frontier
@@ -11910,7 +11895,7 @@ impl<'a> TryFrom<std::borrow::Cow<'a, std::ffi::CStr>> for AdmissionTier {
 /// OS-string input is pinned by
 /// [`tests::test_admission_tier_try_from_os_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-reference OS-string parse
+/// Typed primitives: the by-reference OS-string parse
 /// surface is a typed-primitive site on [`AdmissionTier`] itself (one
 /// `TryFrom<&std::ffi::OsStr>` impl routing through
 /// [`std::ffi::OsStr::to_str`] and the by-reference [`TryFrom<&str>`]
@@ -11918,7 +11903,7 @@ impl<'a> TryFrom<std::borrow::Cow<'a, std::ffi::CStr>> for AdmissionTier {
 /// `AdmissionTier::try_from(os_str.to_str().ok_or(...)?)` restatement
 /// at every downstream site that types its parse contract as
 /// `impl for<'a> TryFrom<&'a std::ffi::OsStr>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at
+/// One-oracle: the canonical label grammar is named at
 /// one site ([`AdmissionTier::as_str`]), inverted at one site
 /// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every
 /// parse surface — [`std::str::FromStr`], [`serde::Deserialize`],
@@ -12041,7 +12026,7 @@ impl TryFrom<&std::ffi::OsStr> for AdmissionTier {
 /// owned-buffer input is pinned by
 /// [`tests::test_admission_tier_try_from_os_string_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.1 typed primitives: the by-value owned-buffer OS-string
+/// Typed primitives: the by-value owned-buffer OS-string
 /// try-conversion surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one `TryFrom<std::ffi::OsString>` impl
 /// routing through the borrowed [`TryFrom<&std::ffi::OsStr>`] parse
@@ -12049,8 +12034,7 @@ impl TryFrom<&std::ffi::OsStr> for AdmissionTier {
 /// `AdmissionTier::try_from(buf.as_os_str())` bridge at every
 /// downstream site that types its parse contract as
 /// `impl TryFrom<std::ffi::OsString>` rather than
-/// [`TryFrom<&std::ffi::OsStr>`] or [`std::str::FromStr`]. THEORY.md
-/// §VI.1 one-oracle discipline: the canonical-label grammar is named
+/// [`TryFrom<&std::ffi::OsStr>`] or [`std::str::FromStr`]. One-oracle discipline: the canonical-label grammar is named
 /// at one site ([`AdmissionTier::as_str`]), inverted at one site
 /// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every
 /// parse surface — [`std::str::FromStr`], [`serde::Deserialize`],
@@ -12151,7 +12135,7 @@ impl TryFrom<std::ffi::OsString> for AdmissionTier {
 /// filesystem-path input is pinned by
 /// [`tests::test_admission_tier_try_from_path_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-reference filesystem-path
+/// Typed primitives: the by-reference filesystem-path
 /// try-conversion surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one `TryFrom<&std::path::Path>` impl
 /// routing through [`std::path::Path::as_os_str`] and the
@@ -12160,7 +12144,7 @@ impl TryFrom<std::ffi::OsString> for AdmissionTier {
 /// every downstream site that types its parse contract as
 /// `impl for<'a> TryFrom<&'a std::path::Path>` rather than
 /// [`TryFrom<&std::ffi::OsStr>`] or [`std::str::FromStr`].
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// One-oracle: the canonical label grammar is named
 /// at one site ([`AdmissionTier::as_str`]), inverted at one site
 /// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every
 /// parse surface — [`std::str::FromStr`], [`serde::Deserialize`],
@@ -12285,7 +12269,7 @@ impl TryFrom<&std::path::Path> for AdmissionTier {
 /// owned filesystem-path input is pinned by
 /// [`tests::test_admission_tier_try_from_path_buf_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the by-value owned-buffer
+/// Typed primitives: the by-value owned-buffer
 /// filesystem-path try-conversion surface is a typed-primitive site
 /// on [`AdmissionTier`] itself (one `TryFrom<std::path::PathBuf>`
 /// impl routing through [`std::path::PathBuf::as_path`] and the
@@ -12293,7 +12277,7 @@ impl TryFrom<&std::path::Path> for AdmissionTier {
 /// per-consumer `AdmissionTier::try_from(path_buf.as_path())` bridge
 /// at every downstream site that types its parse contract as
 /// `impl TryFrom<std::path::PathBuf>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// One-oracle: the canonical label grammar is named
 /// at one site ([`AdmissionTier::as_str`]), inverted at one site
 /// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every
 /// parse surface — including this by-value owned-buffer
@@ -12409,7 +12393,7 @@ impl TryFrom<std::path::PathBuf> for AdmissionTier {
 /// borrowed/owned OS-string input is pinned by
 /// [`tests::test_admission_tier_try_from_cow_os_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the borrowed/owned-frontier OS-
+/// Typed primitives: the borrowed/owned-frontier OS-
 /// string try-conversion parse surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one `TryFrom<Cow<'_, std::ffi::OsStr>>`
 /// impl routing through [`std::borrow::Cow::as_ref`] and the by-
@@ -12417,7 +12401,7 @@ impl TryFrom<std::path::PathBuf> for AdmissionTier {
 /// `AdmissionTier::try_from(cow.as_ref())` bridge at every downstream
 /// site that types its parse contract as `impl for<'a> TryFrom<Cow<'a,
 /// std::ffi::OsStr>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// One-oracle: the canonical label grammar is named
 /// at one site ([`AdmissionTier::as_str`]), inverted at one site
 /// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every
 /// parse surface — including this borrowed/owned-frontier OS-string
@@ -12542,7 +12526,7 @@ impl<'a> TryFrom<std::borrow::Cow<'a, std::ffi::OsStr>> for AdmissionTier {
 /// borrowed/owned filesystem-path input is pinned by
 /// [`tests::test_admission_tier_try_from_cow_path_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the borrowed/owned-frontier
+/// Typed primitives: the borrowed/owned-frontier
 /// filesystem-path try-conversion parse surface is a typed-primitive
 /// site on [`AdmissionTier`] itself (one `TryFrom<Cow<'_,
 /// std::path::Path>>` impl routing through [`std::borrow::Cow::as_ref`]
@@ -12550,7 +12534,7 @@ impl<'a> TryFrom<std::borrow::Cow<'a, std::ffi::OsStr>> for AdmissionTier {
 /// per-consumer `AdmissionTier::try_from(cow.as_ref())` bridge at
 /// every downstream site that types its parse contract as
 /// `impl for<'a> TryFrom<Cow<'a, std::path::Path>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named at
+/// One-oracle: the canonical label grammar is named at
 /// one site ([`AdmissionTier::as_str`]), inverted at one site
 /// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every
 /// parse surface — including this borrowed/owned-frontier filesystem-
@@ -12626,7 +12610,7 @@ impl<'a> TryFrom<std::borrow::Cow<'a, std::path::Path>> for AdmissionTier {
 /// 315c145 and closed at 336e453), with the shrunk-owned UTF-8/byte-
 /// slice parse peers at the sibling frontiers one and two below.
 ///
-/// THEORY.md §V.4 typed primitives: the shrunk-owned OS-string
+/// Typed primitives: the shrunk-owned OS-string
 /// try-conversion parse surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one `TryFrom<Box<std::ffi::OsStr>>`
 /// impl routing through [`std::boxed::Box::<std::ffi::OsStr>::as_ref`]
@@ -12634,7 +12618,7 @@ impl<'a> TryFrom<std::borrow::Cow<'a, std::path::Path>> for AdmissionTier {
 /// per-consumer `AdmissionTier::try_from(boxed.as_ref())` bridge at
 /// every downstream site that types its parse contract as
 /// `impl TryFrom<Box<std::ffi::OsStr>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// One-oracle: the canonical label grammar is named
 /// at one site ([`AdmissionTier::as_str`]), inverted at one site
 /// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every
 /// parse surface — including this shrunk-owned OS-string peer —
@@ -12711,7 +12695,7 @@ impl TryFrom<Box<std::ffi::OsStr>> for AdmissionTier {
 /// frontiers (`Box<str>` two frontiers below, `Box<[u8]>` three
 /// frontiers below).
 ///
-/// THEORY.md §V.4 typed primitives: the shrunk-owned filesystem-path
+/// Typed primitives: the shrunk-owned filesystem-path
 /// try-conversion parse surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one `TryFrom<Box<std::path::Path>>`
 /// impl routing through [`std::boxed::Box::<std::path::Path>::as_ref`]
@@ -12719,7 +12703,7 @@ impl TryFrom<Box<std::ffi::OsStr>> for AdmissionTier {
 /// per-consumer `AdmissionTier::try_from(boxed.as_ref())` bridge at
 /// every downstream site that types its parse contract as
 /// `impl TryFrom<Box<std::path::Path>>`.
-/// THEORY.md §VI.1 one-oracle: the canonical label grammar is named
+/// One-oracle: the canonical label grammar is named
 /// at one site ([`AdmissionTier::as_str`]), inverted at one site
 /// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every
 /// parse surface — including this shrunk-owned filesystem-path
@@ -12809,14 +12793,14 @@ impl TryFrom<Box<std::path::Path>> for AdmissionTier {
 /// canonical shared-owned OS-string input is pinned by
 /// [`tests::test_admission_tier_try_from_arc_os_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the shared-owned OS-string parse
+/// Typed primitives: the shared-owned OS-string parse
 /// surface is a typed-primitive site on [`AdmissionTier`] itself
 /// (one [`TryFrom<Arc<std::ffi::OsStr>>`] impl routing through
 /// [`Arc::<std::ffi::OsStr>::as_ref`] and
 /// [`TryFrom<&std::ffi::OsStr>`]), not a per-consumer
 /// `.as_ref().to_str().parse()` composition at every downstream site
 /// that types its parse contract as
-/// `impl TryFrom<Arc<std::ffi::OsStr>>`. THEORY.md §VI.1 one-oracle:
+/// `impl TryFrom<Arc<std::ffi::OsStr>>`. One-oracle:
 /// the canonical label grammar is named at one site
 /// ([`AdmissionTier::as_str`]), inverted at one site
 /// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every
@@ -12913,14 +12897,14 @@ impl TryFrom<std::sync::Arc<std::ffi::OsStr>> for AdmissionTier {
 /// canonical shared-owned filesystem-path input is pinned by
 /// [`tests::test_admission_tier_try_from_arc_path_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the shared-owned filesystem-path
+/// Typed primitives: the shared-owned filesystem-path
 /// parse surface is a typed-primitive site on [`AdmissionTier`]
 /// itself (one [`TryFrom<Arc<std::path::Path>>`] impl routing through
 /// [`std::sync::Arc::<std::path::Path>::as_ref`] and
 /// [`TryFrom<&std::path::Path>`]), not a per-consumer
 /// `.as_ref().as_os_str().to_str().parse()` composition at every
 /// downstream site that types its parse contract as
-/// `impl TryFrom<Arc<std::path::Path>>`. THEORY.md §VI.1 one-oracle:
+/// `impl TryFrom<Arc<std::path::Path>>`. One-oracle:
 /// the canonical label grammar is named at one site
 /// ([`AdmissionTier::as_str`]), inverted at one site
 /// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every
@@ -13022,7 +13006,7 @@ impl TryFrom<std::sync::Arc<std::path::Path>> for AdmissionTier {
 /// canonical thread-local shared-owned OS-string input is pinned by
 /// [`tests::test_admission_tier_try_from_rc_os_str_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the thread-local shared-owned
+/// Typed primitives: the thread-local shared-owned
 /// OS-string parse surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one
 /// [`TryFrom<std::rc::Rc<std::ffi::OsStr>>`] impl routing through
@@ -13030,7 +13014,7 @@ impl TryFrom<std::sync::Arc<std::path::Path>> for AdmissionTier {
 /// [`TryFrom<&std::ffi::OsStr>`]), not a per-consumer
 /// `.as_ref().to_str().parse()` composition at every downstream site
 /// that types its parse contract as
-/// `impl TryFrom<Rc<std::ffi::OsStr>>`. THEORY.md §VI.1 one-oracle:
+/// `impl TryFrom<Rc<std::ffi::OsStr>>`. One-oracle:
 /// the canonical label grammar is named at one site
 /// ([`AdmissionTier::as_str`]), inverted at one site
 /// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every
@@ -13118,13 +13102,13 @@ impl TryFrom<std::rc::Rc<std::ffi::OsStr>> for AdmissionTier {
 /// by
 /// [`tests::test_admission_tier_try_from_rc_path_rejects_non_canonical_input`].
 ///
-/// THEORY.md §V.4 typed primitives: the thread-local shared-owned
+/// Typed primitives: the thread-local shared-owned
 /// filesystem-path parse surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one
 /// [`TryFrom<std::rc::Rc<std::path::Path>>`] impl routing through
 /// [`Rc::<std::path::Path>::as_ref`] and [`TryFrom<&std::path::Path>`]),
 /// not a per-consumer `.as_ref().as_os_str().to_str().parse()`
-/// composition at every downstream site. THEORY.md §VI.1 one-oracle:
+/// composition at every downstream site. One-oracle:
 /// the canonical label grammar is named at one site
 /// ([`AdmissionTier::as_str`]), inverted at one site
 /// ([`<AdmissionTier as std::str::FromStr>::from_str`]), and every
@@ -13210,13 +13194,13 @@ impl TryFrom<std::rc::Rc<std::path::Path>> for AdmissionTier {
 /// known-bad label pair is pinned by
 /// [`tests::test_admission_tier_partial_eq_str_rejects_non_canonical_labels`].
 ///
-/// THEORY.md §V.4 typed primitives: the borrowed UTF-8 comparison
+/// Typed primitives: the borrowed UTF-8 comparison
 /// surface is a typed-primitive site on [`AdmissionTier`] itself
 /// (one [`PartialEq<str>`] impl routing through
 /// [`AdmissionTier::as_str`]), not a per-consumer
 /// `tier.as_str() == label` restatement at every downstream site
 /// that asks whether an [`AdmissionTier`] value names a specific
-/// canonical label. THEORY.md §VI.1 one-oracle: the canonical label
+/// canonical label. One-oracle: the canonical label
 /// is named at one site ([`AdmissionTier::as_str`]), and every
 /// borrowed UTF-8 surface — the [`AsRef<str>`] borrowed-view
 /// sibling yielding `&str`, this [`PartialEq<str>`] answering a
@@ -13299,14 +13283,14 @@ impl PartialEq<str> for AdmissionTier {
 /// known-bad label pair is pinned by
 /// [`tests::test_admission_tier_partial_eq_str_ref_rejects_non_canonical_labels`].
 ///
-/// THEORY.md §V.4 typed primitives: the borrowed UTF-8 `&str`-
+/// Typed primitives: the borrowed UTF-8 `&str`-
 /// receiver comparison surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one [`PartialEq<&str>`] impl routing
 /// through [`AdmissionTier::as_str`]), not a per-consumer
 /// `tier.as_str() == label_ref` restatement at every downstream
 /// site that asks whether an [`AdmissionTier`] value names a
 /// specific canonical label through an already-borrowed `&str`
-/// handle. THEORY.md §VI.1 one-oracle: the canonical label is named
+/// handle. One-oracle: the canonical label is named
 /// at one site ([`AdmissionTier::as_str`]), and every borrowed
 /// UTF-8 surface — the [`AsRef<str>`] borrowed-view sibling yielding
 /// `&str`, the [`PartialEq<str>`] dereffed-str-receiver sibling
@@ -13375,14 +13359,14 @@ impl PartialEq<&str> for AdmissionTier {
 /// (variant, label) pair is pinned by
 /// [`tests::test_partial_eq_admission_tier_symmetric_with_forward_direction`].
 ///
-/// THEORY.md §III typed primitives: the reverse-direction borrowed
+/// Typed primitives: the reverse-direction borrowed
 /// UTF-8 comparison surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one [`PartialEq<AdmissionTier>`] impl
 /// on [`str`] routing through [`AdmissionTier::as_str`]), not a
 /// per-consumer `label == tier.as_str()` restatement at every
 /// downstream site that asks whether a borrowed UTF-8 handle names
 /// the same canonical admission-tier label as an [`AdmissionTier`]
-/// value. THEORY.md §VI.1 one-oracle: the canonical label is named
+/// value. One-oracle: the canonical label is named
 /// at one site ([`AdmissionTier::as_str`]), and every borrowed UTF-8
 /// comparison surface — the forward-direction
 /// [`PartialEq<str> for AdmissionTier`] +
@@ -13423,7 +13407,7 @@ impl PartialEq<AdmissionTier> for str {
 /// == <AdmissionTier as PartialEq<&str>>::eq(&tier, &label_ref)`
 /// holds by construction at every `(label_ref, tier)` pair.
 ///
-/// THEORY.md §III typed primitives: the reverse-direction borrowed
+/// Typed primitives: the reverse-direction borrowed
 /// UTF-8 `&str`-receiver comparison surface is a typed-primitive
 /// site on [`AdmissionTier`] itself (one
 /// [`PartialEq<AdmissionTier>`] impl on [`&str`] routing through
@@ -13431,7 +13415,7 @@ impl PartialEq<AdmissionTier> for str {
 /// `label_ref == tier.as_str()` restatement at every downstream site
 /// that asks whether a borrowed `&str` handle names the same
 /// canonical admission-tier label as an [`AdmissionTier`] value.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`AdmissionTier::as_str`]), and this reverse-direction
 /// `&str`-receiver surface reads through the same one-oracle
 /// discipline the three sibling comparison surfaces (forward-str,
@@ -13496,13 +13480,13 @@ impl PartialEq<AdmissionTier> for &str {
 /// variant is pinned by
 /// [`tests::test_admission_tier_partial_eq_bytes_reflexive_at_own_label`].
 ///
-/// THEORY.md §III typed primitives: the borrowed byte-slice comparison
+/// Typed primitives: the borrowed byte-slice comparison
 /// surface is a typed-primitive site on [`AdmissionTier`] itself (one
 /// [`PartialEq<[u8]>`] impl routing through
 /// [`<AdmissionTier as AsRef<[u8]>>::as_ref`]), not a per-consumer
 /// restatement at every downstream site that asks whether an
 /// [`AdmissionTier`] value names a specific canonical label through an
-/// already-dereffed `[u8]` handle. THEORY.md §VI.1 one-oracle: the
+/// already-dereffed `[u8]` handle. One-oracle: the
 /// canonical label is named at one site ([`AdmissionTier::as_str`],
 /// projected onto bytes through [`str::as_bytes`] at the
 /// [`AsRef<[u8]>`] surface), and this [`PartialEq<[u8]>`] surface reads
@@ -13539,14 +13523,14 @@ impl PartialEq<[u8]> for AdmissionTier {
 /// the sibling receiver-shape peer at zero allocation and zero
 /// intermediate buffer.
 ///
-/// THEORY.md §III typed primitives: the borrowed byte-slice
+/// Typed primitives: the borrowed byte-slice
 /// `&[u8]`-receiver comparison surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one [`PartialEq<&[u8]>`] impl routing
 /// through [`<AdmissionTier as AsRef<[u8]>>::as_ref`]), not a
 /// per-consumer restatement at every downstream site that asks whether
 /// an [`AdmissionTier`] value names a specific canonical label through
 /// an already-borrowed `&[u8]` handle without an explicit `*` deref.
-/// THEORY.md §VI.1 one-oracle: the canonical label is named at one
+/// One-oracle: the canonical label is named at one
 /// site ([`AdmissionTier::as_str`], projected onto bytes through
 /// [`str::as_bytes`] at the [`AsRef<[u8]>`] surface), and this
 /// [`PartialEq<&[u8]>`] receiver-shape surface reads through the same
@@ -13659,7 +13643,7 @@ impl PartialEq<&[u8]> for AdmissionTier {
 /// the symmetry axiom against the forward-direction peer is pinned by
 /// [`tests::test_partial_eq_admission_tier_bytes_symmetric_with_forward_direction`].
 ///
-/// THEORY.md §III.1 typescape: the reverse-direction borrowed byte-slice
+/// Typescape: the reverse-direction borrowed byte-slice
 /// dereffed-`[u8]`-receiver comparison surface is a typed-primitive site
 /// on [`AdmissionTier`] itself (one [`PartialEq<AdmissionTier>`] impl on
 /// [`[u8]`] routing through [`<AdmissionTier as AsRef<[u8]>>::as_ref`]),
@@ -13667,7 +13651,7 @@ impl PartialEq<&[u8]> for AdmissionTier {
 /// `*label_bytes_ref == <AdmissionTier as AsRef<[u8]>>::as_ref(&tier)`
 /// restatement at every downstream site that holds an already-dereffed
 /// `[u8]` handle on the left of an equality operator against an
-/// [`AdmissionTier`] value. THEORY.md §VI.1 generation over composition
+/// [`AdmissionTier`] value. Generation over composition
 /// (one-oracle): the canonical label is named at ONE site
 /// ([`AdmissionTier::as_str`]) and every borrowed byte-slice comparison
 /// surface at either direction × either receiver shape reads through it
@@ -13723,7 +13707,7 @@ impl PartialEq<AdmissionTier> for [u8] {
 /// identity contract than [`Vec<u8>`] carries — at the same zero-
 /// allocation comparison cost.
 ///
-/// THEORY.md §III.1 typescape: the reverse-direction borrowed byte-slice
+/// Typescape: the reverse-direction borrowed byte-slice
 /// `&[u8]`-receiver comparison surface is a typed-primitive site on
 /// [`AdmissionTier`] itself (one [`PartialEq<AdmissionTier>`] impl on
 /// [`&[u8]`] routing through
@@ -13731,7 +13715,7 @@ impl PartialEq<AdmissionTier> for [u8] {
 /// `label_bytes_ref == <AdmissionTier as AsRef<[u8]>>::as_ref(&tier)`
 /// restatement at every downstream site that asks whether an already-
 /// borrowed `&[u8]` handle names the same canonical admission-tier
-/// label as an [`AdmissionTier`] value. THEORY.md §VI.1 one-oracle:
+/// label as an [`AdmissionTier`] value. One-oracle:
 /// the canonical label is named at one site ([`AdmissionTier::as_str`]),
 /// and this reverse-direction `&[u8]`-receiver surface reads through
 /// the same one-oracle discipline the three sibling byte-slice
@@ -13867,7 +13851,7 @@ pub fn compose_admission_tier(
 /// surfaces agree on [`AdmissionTier::Strict`] — is pinned by
 /// [`tests::test_per_axis_admission_tier_floor_agrees_with_compose_at_fully_evidenced_ceiling`].
 ///
-/// THEORY.md §VI.1 one-oracle discipline: the per-axis-floor reading is
+/// One-oracle discipline: the per-axis-floor reading is
 /// named at one site (here), not re-typed as the `[probe.admission_tier(),
 /// verification.admission_tier()].into_iter().min().expect(...)` boilerplate
 /// per downstream consumer (which would inherit a drift class on the day
@@ -13876,7 +13860,7 @@ pub fn compose_admission_tier(
 /// helper forecloses by routing the per-axis-floor reading through one
 /// function the third axis is added to once).
 ///
-/// THEORY.md §V.4 honesty channel: the named function surfaces "the
+/// Honesty channel: the named function surfaces "the
 /// worst per-axis admission tier across both axes" as the load-bearing
 /// reading distinct from the parallel-axis evidence-OR floor — the two
 /// readings carry different semantics and the named-function surface
@@ -13965,7 +13949,7 @@ pub fn per_axis_admission_tier_floor(
 /// — the load-bearing total-order bracket that names every per-axis
 /// reading as falling between the worst and best per-axis tiers.
 ///
-/// THEORY.md §VI.1 one-oracle discipline: the per-axis-ceiling reading
+/// One-oracle discipline: the per-axis-ceiling reading
 /// is named at one site (here), not re-typed as the `[probe.admission_tier(),
 /// verification.admission_tier()].into_iter().max().expect(...)`
 /// boilerplate per downstream consumer (which would inherit a drift
@@ -13978,7 +13962,7 @@ pub fn per_axis_admission_tier_floor(
 /// min-fold and max-fold over the per-axis tier surfaces are now both
 /// named typed-primitives at one site each.
 ///
-/// THEORY.md §V.4 honesty channel: the named function surfaces "the best
+/// Honesty channel: the named function surfaces "the best
 /// per-axis admission tier across both axes" as the load-bearing reading
 /// distinct from the per-axis-AND floor — the two readings carry
 /// different semantics (optimistic OR-of-axes vs. conservative AND-of-
@@ -14078,7 +14062,7 @@ pub fn per_axis_admission_tier_ceiling(
 /// admit) and the optimistic per-axis-OR ceiling reading (at least one
 /// axis admits).
 ///
-/// THEORY.md §VI.1 one-oracle discipline: the per-axis-lattice-collapse
+/// One-oracle discipline: the per-axis-lattice-collapse
 /// predicate is named at one site (here), not re-typed as the inline
 /// `probe.admission_tier() == verification.admission_tier()` or
 /// `per_axis_admission_tier_floor(p, v) == per_axis_admission_tier_ceiling(p, v)`
@@ -14089,7 +14073,7 @@ pub fn per_axis_admission_tier_ceiling(
 /// extends at every consumer call site that reads the two-element
 /// pair-equality.
 ///
-/// THEORY.md §V.4 honesty channel: the named predicate surfaces "are
+/// Honesty channel: the named predicate surfaces "are
 /// the per-axis verdicts unambiguous?" as the load-bearing structural-
 /// witness reading at the consumer site, making the choice between the
 /// trivially-collapsed reading (`floor == ceiling`, either surface
@@ -14098,7 +14082,7 @@ pub fn per_axis_admission_tier_ceiling(
 /// AND-of-axes and optimistic OR-of-axes) explicit at the named
 /// predicate site rather than implicit at the inline pair-equality.
 ///
-/// THEORY.md §VII.1 honesty channel: the structural witness that the
+/// Honesty channel: the structural witness that the
 /// per-axis lattice bracket is degenerate (`floor == ceiling`) at the
 /// arms where the per-axis surfaces concur — the boundary cases at
 /// both ends of the tier ladder ([`AdmissionTier::Refused`] floor and
@@ -14206,7 +14190,7 @@ pub fn per_axis_admission_tier_is_uniform(
 /// consumer reaches for whichever reading aligns with the question
 /// being asked at the call site, without needing to invert the other.
 ///
-/// THEORY.md §VI.1 one-oracle discipline: the per-axis-divergence
+/// One-oracle discipline: the per-axis-divergence
 /// predicate is named at one site (here), not re-typed as the inline
 /// `probe.admission_tier() != verification.admission_tier()` or
 /// `!per_axis_admission_tier_is_uniform(p, v)` or
@@ -14218,7 +14202,7 @@ pub fn per_axis_admission_tier_is_uniform(
 /// derived instance surfaces at the cross-product equivalence pin
 /// rather than silently flipping the sign at one consumer call site.
 ///
-/// THEORY.md §V.4 honesty channel: the named predicate surfaces "are
+/// Honesty channel: the named predicate surfaces "are
 /// the per-axis verdicts ambiguous, so the consumer must choose
 /// between the conservative AND-floor and the optimistic OR-ceiling
 /// readings?" as the load-bearing affirmative reading at the consumer
@@ -14234,7 +14218,7 @@ pub fn per_axis_admission_tier_is_uniform(
 /// ([`compose_admission_eligible_strict`] vs.
 /// [`compose_refuses_admission_strict`]).
 ///
-/// THEORY.md §VII.1 honesty channel: the structural witness that the
+/// Honesty channel: the structural witness that the
 /// per-axis lattice bracket is non-degenerate (`floor < ceiling`) at
 /// the arms where the per-axis surfaces disagree — every interior arm
 /// of the tier ladder (Strict-vs-Refused, Strict-vs-StagingOnly,
@@ -14335,7 +14319,7 @@ pub fn per_axis_admission_tier_diverges(
 ///   when both axes admit on their own. Pinned by
 ///   [`tests::test_per_axis_admission_tier_probe_dominates_at_probe_strict_verification_staging_band_arm`].
 ///
-/// THEORY.md §VI.1 one-oracle discipline: the per-axis-probe-dominates
+/// One-oracle discipline: the per-axis-probe-dominates
 /// reading is named at one site (here), not re-typed as the inline
 /// `probe.admission_tier() > verification.admission_tier()` or
 /// `per_axis_admission_tier_ceiling(p, v) == probe.admission_tier()
@@ -14349,7 +14333,7 @@ pub fn per_axis_admission_tier_diverges(
 /// partition pins rather than silently flipping the direction at one
 /// downstream consumer call site.
 ///
-/// THEORY.md §V.4 honesty channel: the named predicate surfaces "is
+/// Honesty channel: the named predicate surfaces "is
 /// the probe axis the per-axis ceiling of a non-degenerate per-axis
 /// tier-pair lattice bracket?" — the load-bearing directional reading
 /// distinct from the symmetric [`per_axis_admission_tier_diverges`]
@@ -14361,7 +14345,7 @@ pub fn per_axis_admission_tier_diverges(
 /// rather than recomposing the per-axis-ceiling collapse pin against
 /// the probe-side tier reading inline.
 ///
-/// THEORY.md §VII.1 honesty channel: the structural witness that the
+/// Honesty channel: the structural witness that the
 /// per-axis lattice bracket's ceiling sits at the probe axis (and the
 /// bracket is non-degenerate) at every reachable per-axis tier-pair
 /// arm where the probe axis strictly dominates — the asymmetric subset
@@ -14483,7 +14467,7 @@ pub fn per_axis_admission_tier_probe_dominates(
 ///   even when both axes admit on their own. Pinned by
 ///   [`tests::test_per_axis_admission_tier_verification_dominates_probe_at_probe_staging_band_verification_strict_arm`].
 ///
-/// THEORY.md §VI.1 one-oracle discipline: the per-axis-verification-
+/// One-oracle discipline: the per-axis-verification-
 /// dominates reading is named at one site (here), not re-typed as the
 /// inline `probe.admission_tier() < verification.admission_tier()` or
 /// `per_axis_admission_tier_ceiling(p, v) ==
@@ -14498,7 +14482,7 @@ pub fn per_axis_admission_tier_probe_dominates(
 /// exclusion pins rather than silently flipping the direction at one
 /// downstream consumer call site.
 ///
-/// THEORY.md §V.4 honesty channel: the named predicate surfaces "is
+/// Honesty channel: the named predicate surfaces "is
 /// the verification axis the per-axis ceiling of a non-degenerate
 /// per-axis tier-pair lattice bracket?" — the structural mirror of
 /// the probe-direction reading. Where `_probe_dominates` surfaces "is
@@ -14509,7 +14493,7 @@ pub fn per_axis_admission_tier_probe_dominates(
 /// stronger — re-attest verifications") reads each direction at one
 /// named surface.
 ///
-/// THEORY.md §VII.1 honesty channel: the structural witness that the
+/// Honesty channel: the structural witness that the
 /// per-axis lattice bracket's ceiling sits at the verification axis
 /// (and the bracket is non-degenerate) at every reachable per-axis
 /// tier-pair arm where the verification axis strictly dominates — the
@@ -14634,7 +14618,7 @@ pub fn per_axis_admission_tier_verification_dominates_probe(
 ///   axis. Pinned by
 ///   [`tests::test_per_axis_admission_tier_cmp_at_probe_refused_verification_strict_arm`].
 ///
-/// THEORY.md §VI.1 one-oracle discipline: the per-axis tier-pair
+/// One-oracle discipline: the per-axis tier-pair
 /// three-way comparison is named at one site (here), not retyped as
 /// the inline `probe.admission_tier().cmp(&verification.admission_tier())`
 /// boilerplate per downstream consumer, and not re-derived as a
@@ -14643,7 +14627,7 @@ pub fn per_axis_admission_tier_verification_dominates_probe(
 /// added — every consumer would need to extend the cascade in
 /// lockstep, exactly the structural seam this typed-sum lift
 /// forecloses).
-/// THEORY.md §V.4 honesty channel: the typed-sum lift surfaces the
+/// Honesty channel: the typed-sum lift surfaces the
 /// trichotomy partition at the stdlib [`std::cmp::Ordering`] enum so
 /// a downstream consumer that wants to route per-direction
 /// remediation (e.g., "verification axis stronger — re-run probes" vs.
@@ -14651,7 +14635,7 @@ pub fn per_axis_admission_tier_verification_dominates_probe(
 /// — no asymmetric remediation needed") reads each arm through an
 /// exhaustive [`std::cmp::Ordering`] `match` rather than a nested
 /// bool cascade.
-/// THEORY.md §VII.1 honesty channel: the structural witness that the
+/// Honesty channel: the structural witness that the
 /// per-axis lattice bracket is fully classified by the three
 /// [`std::cmp::Ordering`] arms is observable through this single
 /// typed-sum surface; the trichotomy partition the three named bool
@@ -15070,7 +15054,7 @@ mod tests {
     }
 
     /// `Default` is the identity of `Add` — `c + default() == c` and
-    /// `default() + c == c` for every `c`. The monoid law THEORY §VI.1
+    /// `default() + c == c` for every `c`. The monoid law
     /// one-oracle discipline depends on: a downstream verifier reading
     /// `product = phases.iter().sum::<ProbeCoverage>()` cannot drift
     /// from `product = phases[0] + phases[1] + ...` because the empty-
@@ -17189,7 +17173,7 @@ mod tests {
     }
 
     /// `Default` is the identity of `Add` — `c + default() == c` and
-    /// `default() + c == c` for every `c`. The monoid law THEORY §VI.1
+    /// `default() + c == c` for every `c`. The monoid law
     /// one-oracle discipline depends on at the orthogonal axis: a
     /// downstream verifier reading `product =
     /// phases.iter().sum::<VerificationCoverage>()` cannot drift from
@@ -22000,7 +21984,7 @@ mod tests {
     /// fully-verified verification representatives (the strict-admitted
     /// subset, deliberately excluding the saturated representatives
     /// the strict gate refuses through its own `!is_saturated()` clamp).
-    /// Mirrors the Phase 1 / Phase 2 ordering THEORY.md §V.4
+    /// Mirrors the Phase 1 / Phase 2 ordering
     /// establishes — Phase 2 admits where Phase 1 admits AND every
     /// compliance attestation cleared. A regression that broke either
     /// helper's structural reading (e.g., a relaxed body that
@@ -22044,7 +22028,7 @@ mod tests {
                     compose_admission_eligible_relaxed(&probe, &verification),
                     "strict admission must imply relaxed admission at \
                      probe={probe:?} verification={verification:?} — \
-                     the Phase 1 / Phase 2 ordering THEORY §V.4 \
+                     the Phase 1 / Phase 2 ordering \
                      establishes is structurally load-bearing",
                 );
             }
@@ -22096,7 +22080,7 @@ mod tests {
                      probe={probe:?} verification={verification:?} — \
                      every per-axis-no-evidence × per-axis-no-evidence \
                      combination is the load-bearing both-axes-no-\
-                     positive-evidence floor THEORY §V.4 names",
+                     positive-evidence floor",
                 );
             }
         }
@@ -33009,7 +32993,7 @@ mod tests {
     /// the pentagon `N5`) would light up here, surfacing the structural
     /// distinction at the lattice-pair site rather than at every
     /// downstream consumer that silently relied on the distributive
-    /// identity. THEORY.md §V.5: distributivity is the load-bearing
+    /// identity. Distributivity is the load-bearing
     /// axiom that distinguishes a chain-derived lattice from a general
     /// bounded lattice, and the structural witness the meet/join pair
     /// carries beyond mere absorption.

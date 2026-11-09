@@ -136,7 +136,7 @@ fn cargo_bin() -> String {
 /// // caller then inspects `output.status.success()` to decide next step
 /// ```
 ///
-/// Five occurrences past THEORY.md §VI.1's three-times threshold ("two
+/// Five occurrences past the three-times threshold ("two
 /// occurrences is a coincidence; three is a law"). Each pre-lift site was one
 /// place a future consumer could drift: forget the `.current_dir(backend_dir)`
 /// and spawn `cargo` in the caller's cwd (silently discovering the wrong
@@ -1949,7 +1949,7 @@ mod tests {
     /// sibling `commands/e2e.rs::print_failure_diagnostics` block
     /// carried three MORE copies (with a bare `Command::new` because
     /// e2e.rs's top-of-module `use` is `std::process::Command`) —
-    /// six identically-shaped bodies past THEORY §VI.1's
+    /// six identically-shaped bodies past the
     /// three-is-a-law threshold (PRIME DIRECTIVE: duplication budget
     /// is zero). Mirrors the sibling shield in
     /// `commands/e2e.rs::docker_bin_routing_tests`, same primitive on

@@ -37,7 +37,7 @@
 //!    the canonical `-n <ns>` before positional `<pod>` order this
 //!    primitive owns).
 //!
-//! Five identically-shaped bodies past THEORY §VI.1's three-is-a-law
+//! Five identically-shaped bodies past the three-is-a-law
 //! threshold (PRIME DIRECTIVE: duplication budget is zero). A `kubectl
 //! exec` argv drift — a rename of the `-n` short form to `--namespace`,
 //! an argv-order shuffle putting `<pod>` before `-n <ns>` (which

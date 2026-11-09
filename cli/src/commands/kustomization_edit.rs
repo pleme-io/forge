@@ -20,7 +20,7 @@
 //! let content = crate::repo::read_text_async(path).await?;
 //! ```
 //!
-//! Four occurrences of an identical shape past THEORY §VI.1's
+//! Four occurrences of an identical shape past the
 //! three-is-a-law threshold; this module is the law-redeeming extraction.
 //! The fifth site in `commands/push.rs::update_kustomization` spelled a
 //! near-identical stanza with the same `"Kustomization file"` label but

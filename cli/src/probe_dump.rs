@@ -211,7 +211,7 @@ pub(crate) fn docker_images_diag_format(indent: &str, third_column: &str) -> Str
 /// (`DiagSink::Stdout`, `"     "` indent) restated the same 6-line
 /// [`probe_and_dump_or_none_sync`] stanza with a copy-pasted
 /// `"{indent}{{.Names}}\t{{.Status}}\t{{.Ports}}"` `--format` template
-/// — two sites past THEORY §VI.1's recurring-shape threshold when
+/// — two sites past the recurring-shape threshold when
 /// paired with the sibling [`probe_and_dump_docker_ps_exited_since_15m`]
 /// (four docker-ps diagnostic stanzas total sharing the same
 /// three-column template family). Post-lift each site collapses to a

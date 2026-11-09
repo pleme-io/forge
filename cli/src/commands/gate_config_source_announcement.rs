@@ -14,7 +14,7 @@
 //! eprintln!("📋 Using default gate configuration");
 //! ```
 //!
-//! Three occurrences of a lockstep shape past THEORY §VI.1's
+//! Three occurrences of a lockstep shape past the
 //! three-is-a-law threshold. Post-lift the three sites reach for
 //! [`print_gate_config_source_announcement`] with a
 //! [`GateConfigSource`] variant naming which of the three
@@ -45,7 +45,7 @@
 //! and destination stay fixed. Making the phrase carrier a closed enum
 //! rather than a caller-supplied `&str` means the operator's
 //! vocabulary at this readout is decided here rather than at every
-//! future consumer site (THEORY §II — "typed contracts turn a
+//! future consumer site ("typed contracts turn a
 //! structural drift into a compile error"). A future addition of a
 //! fourth resolver source (e.g. a `~/.config/forge/gates.yaml` user
 //! override) shows up as a compile failure at every
