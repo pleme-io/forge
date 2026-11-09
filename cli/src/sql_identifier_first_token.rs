@@ -73,16 +73,15 @@
 //!
 //! # Grounding
 //!
-//! - (Construction guarantees; Types → Invariants →
-//!   Proofs → Render Anywhere): the "first token after a SQL keyword,
+//! - Construction guarantee: the "first token after a SQL keyword,
 //!   stripped of outer identifier quoting" invariant lives at ONE
 //!   construction surface — [`extract_first_sql_identifier_token`] —
 //!   and its byte-oracle tests below pin the closed-set of quote
 //!   characters, the whitespace-tokenization semantics, and the empty-
 //!   tail posture as `cargo test`-verifiable invariants rather than as
 //!   consumer-site conventions.
-//! - (Generation over composition; two-is-a-
-//!   coincidence, three-is-a-law): two sibling occurrences sit at the
+//! - Generation over composition; two-is-a-
+//!   coincidence, three-is-a-law: two sibling occurrences sit at the
 //!   coincidence threshold. The compounding-directive corollary —
 //!   "every recurring shape becomes a helper before it becomes
 //!   duplicated code" — is discharged at both consumers by construction,
@@ -90,7 +89,7 @@
 //!   disjunction from resurfacing inline under `commands/` where the
 //!   third-site drift the two-is-a-coincidence-three-is-a-law theorem
 //!   warns against would land.
-//! - (Structure): the "SQL identifier token, bracketed
+//! - Structure: the "SQL identifier token, bracketed
 //!   or bare" concept is a single named terminal in the migration-
 //!   validation typescape; both consumers cite
 //!   [`extract_first_sql_identifier_token`] rather than restating the

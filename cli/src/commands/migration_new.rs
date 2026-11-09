@@ -32,16 +32,15 @@ use std::path::Path;
 /// enum plus one line of `write_scaffold_path_action`, never fanned
 /// across the four call sites.
 ///
-/// # Theory grounding
+/// # Grounding
 ///
-/// - (Construction guarantees; Types → Invariants →
-///   Proofs → Render Anywhere): the paired byte-oracle sibling
+/// - Construction guarantee: the paired byte-oracle sibling
 ///   [`write_scaffold_path_action`] is the Render Anywhere half —
 ///   pinning the exact `<Verb> <path>` rendered bytes as a
 ///   `cargo test`-verifiable invariant, so a fusion that swapped the
 ///   space for a colon or dropped the display projection fails at
 ///   `cargo test` time rather than at operator readout.
-/// - (three-times rule): four sibling occurrences
+/// - Three-times rule: four sibling occurrences
 ///   past the "two is a coincidence; three is a law" threshold, so
 ///   the `format!(...)` stanza lifts onto ONE typed body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

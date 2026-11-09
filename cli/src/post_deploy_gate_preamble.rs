@@ -64,7 +64,7 @@
 //!
 //! # Grounding
 //!
-//! (Construction guarantees): "Define Rust types that
+//! Construction guarantees: "Define Rust types that
 //! make invalid states unrepresentable." The pre-lift shape allowed a
 //! silent divergence between the three sibling gate-entry preambles
 //! — a mis-typed `Gxx` prefix, a heading that named the wrong gate,

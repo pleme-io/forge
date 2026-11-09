@@ -67,12 +67,12 @@
 //!   `"  • {name} - Status: {ready} - {message}"` format string both
 //!   sites emitted verbatim into their per-site failure vectors.
 //!
-//! (Types → Invariants → Proofs): the "flux CLI ran, its
+//! Construction guarantee: the "flux CLI ran, its
 //! stdout parses to a well-formed table, and each row is a typed record"
 //! invariant is proved once at the frontier of this module and carried
 //! by the return type `Result<Vec<KustomizationRow>,
 //! FluxGetKustomizationsError>`, not re-derived at two consumer sites.
-//! (three-times rule / duplication budget zero): the
+//! Three-times rule / duplication budget zero: the
 //! invocation-plus-parse shape is named here and every consumer reads
 //! through it.
 

@@ -50,11 +50,11 @@
 //!    `(kustomization, namespace, with_source, exit_code, stderr)`
 //!    tuple Phase 1 attestation records pattern-match on.
 //!
-//! (Types → Invariants → Proofs): the "flux reconcile
+//! Construction guarantee: the "flux reconcile
 //! ran and returned success" invariant is proved at the reconcile
 //! frontier and carried by the return type `Result<(),
 //! FluxReconcileError>`, not re-derived at four consumer sites.
-//! (one-oracle): the reconcile invocation shape is
+//! One-oracle: the reconcile invocation shape is
 //! named here and every consumer reads through it.
 
 use thiserror::Error;

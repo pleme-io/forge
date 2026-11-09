@@ -45,15 +45,15 @@
 //!
 //! # Grounding
 //!
-//! - (Construction guarantees; make invalid states
-//!   unrepresentable): the correlated `(upper_label, result_symlink)`
+//! - Construction guarantees; make invalid states
+//!   unrepresentable: the correlated `(upper_label, result_symlink)`
 //!   pair lives at ONE construction surface — the closed
 //!   [`crate::target_arch::TargetArch`] enum — and the build-complete
 //!   narration tail now derives both slots from the same
 //!   discriminator, so the drift bug class the enum was landed to
 //!   close cannot re-open through a hard-coded literal here.
-//! - (Generation over composition; recurring shapes
-//!   past duplication become helpers): two sibling `println!` stanzas
+//! - Generation over composition; recurring shapes
+//!   past duplication become helpers: two sibling `println!` stanzas
 //!   at the build-complete tail past the two-times threshold, so the
 //!   display body lifts onto ONE typed body and both consumers cite
 //!   it.

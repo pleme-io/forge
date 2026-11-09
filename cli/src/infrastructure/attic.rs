@@ -83,8 +83,8 @@ fn attic_bin() -> String {
 /// server-alias resolve instead of the binary resolve. Sibling of
 /// [`crate::repo::get_environment`] on the `FORGE_ENV` surface —
 /// same env-var-with-string-fallback shape lifted to one body.
-/// (solve-once-at-the-primitive); (recurring-shape-
-/// to-helper).
+/// Solved once at the primitive: a recurring shape lifted to a
+/// helper.
 pub fn attic_server_alias() -> String {
     crate::repo::env_var_or_default("ATTIC_SERVER_NAME", "default")
 }

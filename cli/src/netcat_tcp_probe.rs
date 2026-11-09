@@ -92,7 +92,7 @@
 //!
 //! # Grounding
 //!
-//! (Types → Invariants → Proofs → Render Anywhere): the closed
+//! Construction guarantee: the closed
 //! two-variant `NetcatTcpProbeTarget` enum expresses the target shape
 //! as a type — a caller cannot spawn an nc probe against a target that
 //! isn't K8s-cluster-local or external-host, and the argv and

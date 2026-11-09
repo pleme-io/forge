@@ -66,12 +66,11 @@
 //! numeric `Check N:` to a fraction `Check N/7:` progress cue —
 //! lands at ONE typed body and reaches every consumer by construction.
 //!
-//! (three-times-is-a-law — "two occurrences is a
-//! coincidence; three is a law"; 6 verbatim sibling sites redeemed
-//! by extraction), (Construction guarantees — a fused
+//! Six verbatim sibling sites are redeemed by extraction ("two
+//! occurrences is a coincidence; three is a law"). A fused
 //! blank+heading stanza is emitted by ONE typed body; a caller
 //! cannot drift the framing blank away from the heading it belongs
-//! to).
+//! to.
 
 use std::io;
 

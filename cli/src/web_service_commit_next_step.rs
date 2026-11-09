@@ -52,15 +52,14 @@
 //!
 //! # Grounding
 //!
-//! - (Construction guarantees; Types → Invariants →
-//!   Proofs → Render Anywhere): the print helper delegates through
+//! - Construction guarantee: the print helper delegates through
 //!   [`crate::ui::print_next_step`], which is the single source of
 //!   truth for the `  <N>. <text>\n` numbered-row grammar. The
 //!   closed enum pins the per-ceremony `chore: <phrase>` verb-phrase
 //!   projection as a `cargo test`-verifiable invariant so a typo,
 //!   a rename, or a drift in the frame composition fails at build
 //!   time rather than at operator readout.
-//! - (three-times rule): two byte-close siblings per
+//! - Three-times rule: two byte-close siblings per
 //!   frame sit at the floor of the duplication class; pinning them
 //!   here forecloses the third-site copy-paste before it lands.
 

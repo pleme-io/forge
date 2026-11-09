@@ -50,15 +50,14 @@
 //!
 //! # Grounding
 //!
-//! - (Construction guarantees; Types → Invariants
-//!   → Proofs → Render Anywhere): the correlated
+//! - Construction guarantee: the correlated
 //!   glyph / glyph-color / env-color / label quartet lives at ONE
 //!   construction surface — [`EnvActivationStatus`]'s per-arm
 //!   projections — and its byte-oracle tests below pin the four
 //!   projections as `cargo test`-verifiable invariants rather than as
 //!   two-site display conventions.
-//! - (Generation over composition; recurring shapes
-//!   past duplication become helpers): two sibling occurrences of the
+//! - Generation over composition; recurring shapes
+//!   past duplication become helpers: two sibling occurrences of the
 //!   five-token `println!` template past the two-sibling threshold,
 //!   so the display body lifts onto ONE typed body and both consumers
 //!   cite it.

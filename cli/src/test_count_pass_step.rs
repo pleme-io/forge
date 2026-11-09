@@ -66,8 +66,8 @@
 //!
 //! # Grounding
 //!
-//! - (duplication budget zero; every recurring shape
-//!   becomes a helper before it becomes duplicated code): two byte-
+//! - Duplication budget zero; every recurring shape
+//!   becomes a helper before it becomes duplicated code: two byte-
 //!   close sibling stanzas past the two-occurrence coincidence
 //!   threshold. The primitive collapses the fusion at ONE
 //!   construction surface.
@@ -76,7 +76,7 @@
 //!   [`crate::repo::msg_with_count_noun_secs_1`] here inherits each
 //!   peer's contract without repetition — a drift at either lands at
 //!   ONE peer and reaches this fusion by construction.
-//! - (typed absorption): the "print-step-pass +
+//! - Typed absorption: the "print-step-pass +
 //!   count-noun-secs render + `test_count.unwrap_or(0)` on `Option<
 //!   usize>`" composition is a single named concept; both callers
 //!   cite it rather than restating the four-argument stanza.

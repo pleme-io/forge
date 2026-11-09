@@ -100,23 +100,22 @@
 //!
 //! # Grounding
 //!
-//! - (Construction guarantees; Types → Invariants →
-//!   Proofs → Render Anywhere): the "read one SQL migration file into
+//! - Construction guarantee: the "read one SQL migration file into
 //!   a `String` under a canonical operator-facing envelope" invariant
 //!   lives at ONE construction surface — [`read_migration_file`] —
 //!   and its byte-oracle tests below pin the envelope wording, the
 //!   file-path interpolation, and the propagation shape as
 //!   `cargo test`-verifiable invariants rather than as consumer-site
 //!   conventions.
-//! - (Generation over composition; two-is-a-
-//!   coincidence, three-is-a-law): two sibling occurrences sit at the
+//! - Generation over composition; two-is-a-
+//!   coincidence, three-is-a-law: two sibling occurrences sit at the
 //!   coincidence threshold; combined with the three near-neighbor
 //!   sites in the same file that spell a similar body with a less
 //!   specific envelope, the shape is well past the "recurring" bar.
 //!   The compounding-directive corollary — "every recurring shape
 //!   becomes a helper before it becomes duplicated code" — is
 //!   discharged at both consumers by construction.
-//! - (Structure): the "SQL migration file at
+//! - Structure: the "SQL migration file at
 //!   `<path>`" concept is a single named terminal in the migration-
 //!   validation typescape; both consumers cite [`read_migration_file`]
 //!   rather than restating the two-line body, so the terminal reads

@@ -54,8 +54,8 @@
 //!
 //! # Grounding
 //!
-//! - (duplication budget zero; every recurring shape
-//!   becomes a helper before it becomes duplicated code): two byte-
+//! - Duplication budget zero; every recurring shape
+//!   becomes a helper before it becomes duplicated code: two byte-
 //!   close sibling stanzas past the two-occurrence coincidence
 //!   threshold. The three-invariant fusion — sink + return-tuple +
 //!   label-shape — collapses to ONE construction surface.
@@ -65,7 +65,7 @@
 //!   tuple carries each peer's contract without repetition — a drift
 //!   at either lands at ONE peer and reaches this fusion by
 //!   construction.
-//! - (typed absorption): the closed
+//! - Typed absorption: the closed
 //!   [`FrontendValidationCleanPassStep`] enum forecloses free-form
 //!   label spelling — a future added frontend-validation step whose
 //!   success arm shares the same three invariants extends the enum

@@ -51,8 +51,8 @@ use crate::retry::{
 /// "tidy-up" to the deriving form cannot silently re-open the
 /// silent-PATH-fallback bug on both `push` and `verify`.
 ///
-/// (Generation over composition, duplication budget
-/// zero); (three-times rule at the sigil-pattern level).
+/// Generation over composition with a zero duplication budget; the
+/// three-times rule applies at the sigil-pattern level.
 fn doca_bin() -> String {
     get_tool_path("DOCA_BIN", "oci-push")
 }
@@ -852,14 +852,13 @@ pub fn doca_creds_env_pairs<'a>(
 /// a borrowed local (a plausible mistake if the pair were built
 /// via `format!`) is a compile error, not a runtime auth failure.
 ///
-/// # Theory grounding
+/// # Grounding
 ///
-/// - (Types → Invariants → Proofs → Render Anywhere):
-///   the paired byte-oracle test pins both env-var names as
+/// - Construction guarantee: the paired byte-oracle test pins both env-var names as
 ///   `cargo test`-verifiable invariants, so a fusion that renamed a
 ///   key or crossed the slot order fails at test time rather than as
 ///   a downstream 401 on the shared runner.
-/// - (three-times rule threshold): two sibling
+/// - Three-times rule threshold: two sibling
 ///   occurrences past the coincidence tier, matched to a directly
 ///   analogous already-lifted destination-side pair, so the
 ///   `.env("INPUT_USER", …).env("INPUT_PASS", …)` stanza lifts onto
@@ -929,14 +928,13 @@ pub fn doca_source_creds_env_pairs<'a>(
 /// `.output().await`) is structurally different and this primitive's
 /// async captured-output return type does not compose there.
 ///
-/// # Theory grounding
+/// # Grounding
 ///
-/// - (Types → Invariants → Proofs → Render Anywhere):
-///   the stdio posture + argv + env-pair triple is pinned by one
+/// - Construction guarantee: the stdio posture + argv + env-pair triple is pinned by one
 ///   typed body so a future stdio-posture drift surfaces as a
 ///   compile error at the primitive rather than as a diverging
 ///   pair of retry-classify sites.
-/// - (three-times rule threshold): two sibling
+/// - Three-times rule threshold: two sibling
 ///   occurrences of an 8-line fused chain, matched to already-lifted
 ///   `doca_push_argv` / `doca_creds_env_pairs` sub-shapes, so the
 ///   full spawn stanza lifts onto ONE typed body.

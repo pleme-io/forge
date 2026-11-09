@@ -242,8 +242,8 @@ impl Drop for RootFlakeEnvSnapshot {
 /// Sibling of the compound [`RootFlakeEnvSnapshot`] (three surfaces:
 /// cwd + `REPO_ROOT` + `SERVICE_DIR`) and the set-then-restore
 /// [`GitBinScope`] (mutates on construction, not just on drop).
-/// (solve-once-at-the-primitive);
-/// (recurring-shape-to-helper).
+/// Solved once at the primitive: a recurring shape lifted to a
+/// helper.
 pub struct EnvVarSnapshot {
     name: &'static str,
     prior: std::result::Result<String, std::env::VarError>,

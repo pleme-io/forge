@@ -180,11 +180,11 @@ impl MigrationValidationResult {
 /// concatenation so drift (a dropped separator, an inverted order) is
 /// caught at `cargo test` time rather than at operator readout.
 ///
-/// # Theory grounding
+/// # Grounding
 ///
-/// (three-times rule): three sibling occurrences past
+/// Three-times rule: three sibling occurrences past
 /// the "two is a coincidence; three is a law" threshold.
-/// (Types → Invariants → Proofs → Render Anywhere): the paired
+/// Construction guarantee: the paired
 /// byte-oracle [`write_migration_issue_report`] is the Render Anywhere
 /// half — pinning the exact rendered bytes as a unit-testable
 /// invariant.
@@ -266,13 +266,12 @@ pub(crate) fn write_migration_issue_report<W: std::io::Write>(
 /// paginated enumeration for a long issue list — lands at ONE typed
 /// body rather than three copy-pasted lockstep edits.
 ///
-/// # Theory grounding
+/// # Grounding
 ///
-/// (three-times rule): three sibling occurrences past
+/// Three-times rule: three sibling occurrences past
 /// the "two is a coincidence; three is a law" threshold; a fourth
 /// gate joining forwards through this primitive by construction.
-/// (Types → Invariants → Proofs → Render Anywhere):
-/// the writer-form sibling [`write_migration_validation_verdict`] is
+/// Construction guarantee: the writer-form sibling [`write_migration_validation_verdict`] is
 /// the Render Anywhere half — the pass-then-nothing / failure-then-
 /// enumeration byte invariant lives in a `#[test]` bytes-in-bytes-out
 /// comparison rather than a captured-stdout dance.

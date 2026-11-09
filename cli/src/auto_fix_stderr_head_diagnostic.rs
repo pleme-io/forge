@@ -82,14 +82,13 @@
 //!
 //! # Grounding
 //!
-//! - (Types → Invariants → Proofs → Render Anywhere):
-//!   the byte-shape invariant lives at ONE construction surface —
+//! - Construction guarantee: the byte-shape invariant lives at ONE construction surface —
 //!   [`write_auto_fix_stderr_head_diagnostic_lines`] — and its
 //!   byte-oracle test pins the exact `"   <line>\n"` rendering of
 //!   every walked row. Both stdout adapters project through the
 //!   same writer, so a future rotation of the per-line grammar
 //!   reaches both consumers in lockstep.
-//! - (typescape as root data structure): the
+//! - Typescape as root data structure: the
 //!   "walk-cap-print-collect" composition is a single named concept;
 //!   both callers cite it rather than restating its four component
 //!   steps.

@@ -89,15 +89,15 @@
 //!
 //! # Grounding
 //!
-//! - (duplication budget zero; every recurring shape
-//!   becomes a helper before it becomes duplicated code): two byte-
+//! - Duplication budget zero; every recurring shape
+//!   becomes a helper before it becomes duplicated code: two byte-
 //!   identical sibling stanzas past the two-occurrence coincidence
 //!   threshold collapse to ONE construction surface.
-//! - (typed absorption): the already-typed
+//! - Typed absorption: the already-typed
 //!   [`RegeneratedLockfilePair`] enum absorbs the (banner-file,
 //!   reminder-pair) correlation so a caller cannot silently type one
 //!   half without the other.
-//! - (solve-once-at-the-primitive): a future rewording
+//! - Solve-once-at-the-primitive: a future rewording
 //!   of the `Pangea <X> regenerated successfully!` banner, promotion
 //!   of the banner from `.bright_green()` to a different palette, or
 //!   addition of an OTLP `pangea_regenerate_completed` observability

@@ -143,8 +143,8 @@
 //!
 //! ## Frontier inspiration
 //!
-//! ("Two-phase signature composition") and
-//! ("Attestation-gated deployments") name the Phase 2 deployment record
+//! Two-phase signature composition and attestation-gated deployments
+//! name the Phase 2 deployment record
 //! as the post-admission honesty channel: the structural evidence that
 //! the deployment actually landed workloads in the cluster the pre-
 //! Phase-2 Phase 1 signatures were composed against. Kubernetes' `Pod`

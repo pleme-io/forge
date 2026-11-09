@@ -87,12 +87,12 @@
 //!
 //! # Grounding
 //!
-//! - (duplication budget zero, generation before
-//!   pattern before duplication): the two sibling fused stanzas were
+//! - Duplication budget zero, generation before
+//!   pattern before duplication: the two sibling fused stanzas were
 //!   past the two-occurrence coincidence threshold post the 59ac6f0
 //!   two-count and 584c20c collection lifts. This primitive collapses
 //!   the fusion at ONE construction surface.
-//! - (typed absorption): the "print-header + print-
+//! - Typed absorption: the "print-header + print-
 //!   and-collect + return details" composition is a single named
 //!   concept; both callers cite it rather than restating its three
 //!   component steps.

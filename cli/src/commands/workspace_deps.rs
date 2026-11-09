@@ -402,14 +402,14 @@ mod tests {
     ///
     /// # Grounding
     ///
-    /// (construction guarantees): the canonical
+    /// Construction guarantees: the canonical
     /// failure envelope is emitted by construction at the primitive's
     /// ONE body, not asserted after the fact at every site.
-    /// (terminating shape): an attestation-record
+    /// Terminating shape: an attestation-record
     /// consumer reading the terminating shape of a failed workspace-
     /// dependency prebuild reads the `(op, exit_code)` structural
     /// tuple the primitive emits, not the ad-hoc pre-lift string.
-    /// (one-oracle discipline): the "what does the
+    /// One-oracle discipline: the "what does the
     /// operator log line for a failed npm spawn look like" question
     /// is answered at ONE typed-primitive body
     /// (`retry.rs::classify_inherited_status`); a future refinement

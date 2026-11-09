@@ -78,15 +78,14 @@
 //!
 //! # Grounding
 //!
-//! - (Construction guarantees; Types → Invariants →
-//!   Proofs → Render Anywhere): the paired byte-oracle sibling
+//! - Construction guarantee: the paired byte-oracle sibling
 //!   [`write_cargo_lock_and_cargo_nix_bullets_with_blank`] is the
 //!   Render Anywhere half — pinning the exact three-line rendered
 //!   bytes as a `cargo test`-verifiable invariant so a fusion that
 //!   swapped the file-name order, dropped the trailing blank, or
 //!   inserted a variation selector into the bullet glyph fails at
 //!   `cargo test` time rather than at operator readout.
-//! - (three-times rule): three sibling occurrences at
+//! - Three-times rule: three sibling occurrences at
 //!   the "two is a coincidence; three is a law" threshold, so the
 //!   three-line stanza lifts onto ONE typed body.
 

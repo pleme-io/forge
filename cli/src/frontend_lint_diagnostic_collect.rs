@@ -74,11 +74,11 @@
 //!
 //! # Grounding
 //!
-//! - (duplication budget zero): two byte-identical
+//! - Duplication budget zero: two byte-identical
 //!   7-line stanzas across two failure branches were past the two-
 //!   occurrence coincidence threshold. Post-lift the primitive owns
 //!   the grammar at ONE construction surface.
-//! - (typed absorption): the "walk-cap-filter-print-
+//! - Typed absorption: the "walk-cap-filter-print-
 //!   collect" composition is a single named concept; both callers cite
 //!   it rather than restating its five component steps.
 //! - Invariant 4 (closed enums are proofs of case-

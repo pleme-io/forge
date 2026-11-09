@@ -986,9 +986,8 @@ pub fn find_repo_root() -> Result<PathBuf> {
 /// canonicalizing the value against a closed enum, a telemetry
 /// sigil separating explicit-value from default-fallback paths, or
 /// a swap to a typed `substrate::EnvVar(String)` newtype) lands at
-/// [`env_var_or_default`] and reaches every sigil by construction
-/// (solve-once-at-the-primitive;
-/// recurring-shape-to-helper).
+/// [`env_var_or_default`] and reaches every sigil by construction: solved once at the
+/// primitive, a recurring shape lifted to a helper.
 ///
 /// # Arguments
 ///
@@ -1278,7 +1277,7 @@ pub fn require_existing_working_dir(working_dir: &str) -> Result<&Path> {
 /// future refinement of the shape — canonicalize hook, a
 /// must-be-a-file check that upgrades the `.exists()` gate to
 /// `.is_file()`, a symlink-resolution branch — lands here and reaches
-/// every consumer by construction (Types → Invariants → Proofs; three-times rule, extract an
+/// every consumer by construction (three-times rule, extract an
 /// archetype and generate from it).
 ///
 /// # Type contract

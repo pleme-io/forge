@@ -37,8 +37,8 @@ use crate::repo::get_tool_path;
 /// `infrastructure/attic.rs::attic_bin()` / `nix.rs::nix_bin()`
 /// sibling sigils — the same per-module single-point-of-truth
 /// discipline applied to the NC_BIN surface here.
-/// (Generation over composition, duplication budget zero) and
-/// (three-times rule).
+/// Generation over composition with a zero duplication budget, and
+/// the three-times rule.
 fn nc_bin() -> String {
     get_tool_path("NC_BIN", "nc")
 }

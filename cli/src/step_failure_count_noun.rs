@@ -60,11 +60,11 @@
 //!
 //! # Grounding
 //!
-//! - (duplication budget zero; every recurring shape
-//!   becomes a helper before it becomes duplicated code): three
+//! - Duplication budget zero; every recurring shape
+//!   becomes a helper before it becomes duplicated code: three
 //!   byte-identical sibling stanzas past the three-times threshold.
 //!   The primitive collapses the fusion at ONE construction surface.
-//! - (Construction guarantees): the "print a red
+//! - Construction guarantees: the "print a red
 //!   step-failure row whose message body carries a single count and
 //!   noun and a one-decimal-place seconds tag" invariant lives at
 //!   ONE construction surface and its byte-oracle tests pin the paren

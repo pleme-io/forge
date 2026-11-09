@@ -73,13 +73,13 @@
 //! artifact write, a metric emitted per phase — lands at ONE body
 //! and reaches every consumer by construction.
 //!
-//! # Theory grounding
+//! # Grounding
 //!
-//! - (typed primitives own their algebra): the phase
+//! - Typed primitives own their algebra: the phase
 //!   axis lives as a closed enum with typed accessors rather than
 //!   parallel `if unit { … } if integration { … }` scaffolding at
 //!   the call site.
-//! - (duplication is a bug — the three-times rule):
+//! - Duplication is a bug, and the three-times rule applies:
 //!   two sibling occurrences hit the compounding-directive threshold,
 //!   and the lift closes them both under one body before a third
 //!   phase copies the stanza a third time.

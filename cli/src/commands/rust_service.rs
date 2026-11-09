@@ -1026,8 +1026,7 @@ impl DeployYamlLookupPurpose {
 /// resolved env, an OTLP `deploy_yaml_resolve` span wired alongside the
 /// read, a promotion of the miss diagnostic to a typed
 /// `DeployYamlError::NotFound` variant — lands at ONE body and reaches
-/// both consumers by construction (Types → Invariants →
-/// Proofs; recurring-shape-to-helper).
+/// both consumers by construction (recurring-shape-to-helper).
 fn load_deploy_yaml_and_resolve_env(
     env: &str,
     purpose: DeployYamlLookupPurpose,

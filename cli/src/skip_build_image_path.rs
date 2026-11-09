@@ -30,18 +30,17 @@
 //! infrastructure component) picks up the same message by
 //! construction.
 //!
-//! # Theory grounding
+//! # Grounding
 //!
-//! - (Construction guarantees; Types → Invariants →
-//!   Proofs → Render Anywhere): the paired byte-oracle sibling
+//! - Construction guarantee: the paired byte-oracle sibling
 //!   [`write_skip_build_image_path_required_message`] is the Render
 //!   Anywhere half — pinning the exact rendered bytes of the operator-
 //!   facing English message as a `cargo test`-verifiable invariant, so
 //!   a fusion that drops a `\n`, swaps two-space indent for a tab, or
 //!   quietly reflows the wording fails at `cargo test` time rather
 //!   than at operator readout.
-//! - (three-times rule; two-is-a-coincidence
-//!   threshold): the pre-lift TWO sibling occurrences sit at the
+//! - Three-times rule; two-is-a-coincidence
+//!   threshold: the pre-lift TWO sibling occurrences sit at the
 //!   threshold-crossing tier — the pair are byte-identical past the
 //!   quoted string boundary, so lifting them onto ONE construction
 //!   surface pre-empts the third-site drift warns

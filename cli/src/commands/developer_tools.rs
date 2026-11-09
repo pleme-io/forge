@@ -152,7 +152,7 @@ fn service_path_from_env() -> Result<PathBuf> {
 /// telemetry span, a swap to a typed
 /// `substrate::WorkspaceRoot(PathBuf)` newtype, or an OTLP
 /// `workspace_resolve` span wired alongside the chdir — lands at ONE
-/// body and reaches both consumers by construction (Types → Invariants → Proofs; recurring-shape-to-helper).
+/// body and reaches both consumers by construction (recurring-shape-to-helper).
 fn read_service_env_and_chdir_to_workspace() -> Result<PathBuf> {
     let service_path = service_path_from_env()?;
     let workspace_root = service_path

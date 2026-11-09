@@ -94,21 +94,20 @@
 //!
 //! # Grounding
 //!
-//! - (Construction guarantees; Types → Invariants →
-//!   Proofs → Render Anywhere): the "schema-bytes → schema.graphql
+//! - Construction guarantee: the "schema-bytes → schema.graphql
 //!   on disk under a canonical envelope" invariant lives at ONE
 //!   construction surface — [`write_graphql_schema_bytes`] — and its
 //!   byte-oracle tests below pin the envelope wording, the destination
 //!   binding, and the propagation shape as `cargo test`-verifiable
 //!   invariants rather than as consumer-site conventions.
-//! - (Generation over composition; three-times
-//!   rule): three sibling occurrences past the "two is a coincidence;
+//! - Generation over composition; three-times
+//!   rule: three sibling occurrences past the "two is a coincidence;
 //!   three is a law" threshold, so the write-then-context body lifts
 //!   onto ONE typed body and all three consumers cite it. The
 //!   compounding-directive corollary — "every recurring shape becomes
 //!   a helper before it becomes duplicated code" — is discharged at
 //!   the three consumers by construction.
-//! - (typescape as root data structure): the
+//! - Typescape as root data structure: the
 //!   destination-path terminal of the SDL byte buffer is a single
 //!   named concept; all three consumers cite [`write_graphql_schema_bytes`]
 //!   rather than each restating the two-line body.

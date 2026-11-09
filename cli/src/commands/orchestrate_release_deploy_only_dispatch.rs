@@ -51,15 +51,14 @@
 //!
 //! # Grounding
 //!
-//! - (Construction guarantees; Types → Invariants →
-//!   Proofs → Render Anywhere): the returned `Result<()>` composes the
+//! - Construction guarantee: the returned `Result<()>` composes the
 //!   three underlying primitives (`product_service_dir_string`,
 //!   `orchestrate_release_deploy_only_single_env_argv`,
 //!   `run_forge_subcommand`) into one typed pipeline — a caller cannot
 //!   skip a step (say, forget the `service_dir` synthesis and pass
 //!   `""`) and still compile.
-//! - (three-times rule; "two occurrences is a
-//!   coincidence, three is a law"): two sibling occurrences at the
+//! - Three-times rule; "two occurrences is a
+//!   coincidence, three is a law": two sibling occurrences at the
 //!   threshold — this lift closes the class before a third caller
 //!   re-inlines the fused stanza.
 

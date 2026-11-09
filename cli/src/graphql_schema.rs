@@ -63,7 +63,7 @@
 //!    extractor binary went sideways without regex-parsing the display
 //!    string.
 //!
-//! (Types → Invariants → Proofs): the "extract-schema
+//! Construction guarantee: the "extract-schema
 //! ran and produced non-empty bytes" invariant is proved at the extract
 //! frontier and carried by the return type `Vec<u8>`, not re-derived at
 //! four consumer sites. (one-oracle): the extract-schema

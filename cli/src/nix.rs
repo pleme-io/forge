@@ -94,7 +94,7 @@ fn nix_bin() -> String {
 /// echo — a `/nix/store/…` with a subpath, an `unknown-*` sentinel, an
 /// empty stdout — past the boundary the parse just proved.
 ///
-/// (Types → Invariants → Proofs): the store-path invariant
+/// Construction guarantee: the store-path invariant
 /// is proved at the frontier ([`run_nix_build_typed`]) and carried by the
 /// return type, not re-derived per consumer. (one-oracle):
 /// the canonical view is named at [`StorePath::as_str`] and every

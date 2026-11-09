@@ -37,9 +37,7 @@
 //! `"workspace prep"` to `"workspace-prep"` for grep-anchoring — lands
 //! at ONE typed body and reaches every consumer by construction.
 //!
-//! (Compounding Directive: solve once),
-//! (three-times-is-a-law — 5 verbatim sibling sites redeemed by
-//! extraction).
+//! Solved once: 5 verbatim sibling sites are redeemed by extraction.
 
 use std::io::Write;
 

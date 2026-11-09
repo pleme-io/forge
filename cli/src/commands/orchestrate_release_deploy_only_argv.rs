@@ -69,11 +69,10 @@
 //!
 //! # Grounding
 //!
-//! - (Construction guarantees; Types → Invariants →
-//!   Proofs → Render Anywhere): the returned `[&'a str; 15]` array
+//! - Construction guarantee: the returned `[&'a str; 15]` array
 //!   pins the argv arity at the type level — a caller cannot
 //!   accidentally omit a flag or a value slot and still compile.
-//! - (three-times rule): two sibling occurrences at
+//! - Three-times rule: two sibling occurrences at
 //!   the "two is a coincidence, three is a law" threshold — this
 //!   lift closes the class before a third caller re-inlines it.
 

@@ -47,25 +47,24 @@
 //! "if we cannot tell, assume not present, and let the rebuild
 //! fallback logic decide."
 //!
-//! # Theory grounding
+//! # Grounding
 //!
-//! - (typescape as root data structure): the pair
+//! - Typescape as root data structure: the pair
 //!   `{"backend", "web"}` becomes a typed dimension of the E2E
 //!   convergence surface rather than two loose call-site literals.
 //!   A future addition (a third image, a rename at the image side)
 //!   is a change to this dimension's construction and every
 //!   projection through it — every caller — inherits by
 //!   construction, per the typescape discipline.
-//! - (Construction guarantees; Types → Invariants →
-//!   Proofs → Render Anywhere): the [`E2eImagePairExistence`] type
+//! - Construction guarantee: the [`E2eImagePairExistence`] type
 //!   makes "both halves present" and "any half missing" typed
 //!   predicates (`both_present`, `any_missing`) rather than inline
 //!   conjunctions the caller composes each time. A future consumer
 //!   that composes the wrong polarity (`!backend && !web` instead of
 //!   `!backend || !web`) reads as a defect on its face against the
 //!   typed predicate.
-//! - (three-times rule; two-is-a-coincidence
-//!   threshold): the pre-lift FOUR occurrences sit past the
+//! - Three-times rule; two-is-a-coincidence
+//!   threshold: the pre-lift FOUR occurrences sit past the
 //!   three-times threshold and past the pair-drift threshold (three
 //!   sites named the second half `frontend_exists`, one named it
 //!   `web_exists`).

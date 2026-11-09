@@ -58,13 +58,12 @@
 //!
 //! # Grounding
 //!
-//! - (Compounding Directive: solve once, load-bearing
-//!   fixes only).
-//! - (three-times-is-a-law — 2 verbatim sibling sites
+//! - Solve once, and make only load-bearing fixes.
+//! - Two verbatim sibling sites are
 //!   redeemed by extraction under the two-strict-siblings ≥2 threshold
 //!   the fleet applies for high-coupling prologues like this one, where
 //!   both flows compose the same discovery + gate + announcement
-//!   sequence and would otherwise silently drift).
+//!   sequence and would otherwise silently drift.
 
 use std::io;
 

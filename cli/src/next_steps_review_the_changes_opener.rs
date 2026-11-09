@@ -86,15 +86,14 @@
 //!
 //! # Grounding
 //!
-//! - (Construction guarantees; Types → Invariants →
-//!   Proofs → Render Anywhere): the paired byte-oracle sibling
+//! - Construction guarantee: the paired byte-oracle sibling
 //!   [`write_next_steps_heading_then_review_the_changes`] is the
 //!   Render Anywhere half — pinning the exact two-line rendered
 //!   bytes as a `cargo test`-verifiable invariant so a fusion that
 //!   dropped the heading, inverted the two lines, or misspelled the
 //!   instruction text fails at `cargo test` time rather than at
 //!   operator readout.
-//! - (three-times rule): four sibling occurrences
+//! - Three-times rule: four sibling occurrences
 //!   past the "two is a coincidence; three is a law" threshold, so
 //!   the two-line stanza lifts onto ONE typed body.
 

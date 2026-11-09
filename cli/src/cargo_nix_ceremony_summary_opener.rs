@@ -110,14 +110,13 @@
 //!
 //! # Grounding
 //!
-//! - (Construction guarantees; Types → Invariants →
-//!   Proofs → Render Anywhere): the closed [`CargoNixCeremony`] enum
+//! - Construction guarantee: the closed [`CargoNixCeremony`] enum
 //!   sits at the primitive's boundary so the caller cannot pass an
 //!   ill-typed ceremony tag, and the delegation covariance the
 //!   sibling
 //!   [`crate::cargo_nix_ceremony_banner::CargoNixCeremony::write_files_heading`]
 //!   pins rides through this primitive by construction.
-//! - (three-times rule): three sibling occurrences at
+//! - Three-times rule: three sibling occurrences at
 //!   the "two is a coincidence; three is a law" threshold, so the
 //!   three-call stanza lifts onto ONE typed body.
 

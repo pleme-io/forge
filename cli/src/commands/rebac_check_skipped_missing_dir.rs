@@ -47,11 +47,10 @@
 //! phrase to a `SKIPPED:` prefix for grep-anchoring — lands at ONE
 //! typed body and reaches every consumer by construction.
 //!
-//! (three-times-is-a-law — "two occurrences is a
-//! coincidence; three is a law"; 6 verbatim sibling sites redeemed
-//! by extraction), (Construction guarantees — an invalid
+//! Six verbatim sibling sites are redeemed by extraction ("two
+//! occurrences is a coincidence; three is a law"). An invalid
 //! reason phrase is refused at compile time by [`Self::label`]'s
-//! exhaustive arms).
+//! exhaustive arms.
 //!
 //! [`RebacValidationConfig`]: super::rebac_validation::RebacValidationConfig
 

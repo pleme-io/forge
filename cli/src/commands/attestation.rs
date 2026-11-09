@@ -155,9 +155,9 @@ fn cosign_bin() -> String {
 ///
 /// [`Add`]: std::ops::Add
 ///
-/// ## Theory grounding
+/// ## Grounding
 ///
-/// (one oracle): the field shape is derived at one site,
+/// One oracle: the field shape is derived at one site,
 /// not retyped per emission. The ten-field
 /// shape surfaces the Phase 1 / Phase 2 honesty channel uniformly at every
 /// per-phase telemetry record a downstream `sekiban` admission verifier

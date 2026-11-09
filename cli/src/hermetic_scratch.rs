@@ -27,8 +27,8 @@
 //!
 //! and varied only in `<prefix>`, `<filename>`, and the surface of the
 //! `context` string — the exact "recurring shape becomes a library
-//! before it becomes duplicated code" trigger (belief 5)
-//! and name a first-order lift for. Four instances is a
+//! before it becomes duplicated code" trigger,
+//! which calls for a first-order lift. Four instances is a
 //! four-fold multiplier on a future `(TempDir, PathBuf)` scratch
 //! consumer inheriting the drift class this primitive forecloses at
 //! its return signature: a `let (_, out) = hermetic_scratch_file(…)?`

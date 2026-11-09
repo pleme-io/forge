@@ -229,7 +229,7 @@ fn federation_test_job_manifest_file(job_name: &str) -> Result<(tempfile::TempDi
     // `commands/crossplane.rs::xpkg_output_file` (220b207),
     // `commands/e2e.rs::e2e_image_output_symlink` (ab88937), and
     // `commands/migrations.rs::migration_job_manifest_file` (950a0e7)
-    // all routed onto it (belief 5 / — recurring
+    // all routed onto it (a recurring
     // shape becomes a library before it becomes duplicated code).
     crate::hermetic_scratch::hermetic_scratch_file(
         "forge-fed-tests-",

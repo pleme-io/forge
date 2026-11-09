@@ -25,8 +25,8 @@
 //!
 //! # Why a closed enum, not two `&str`s
 //!
-//! (make invalid states unrepresentable) and Phase 1
-//! (typed primitives own their claims): a two-`&str` signature admits
+//! Invalid states are made unrepresentable, and typed primitives own
+//! their claims: a two-`&str` signature admits
 //! four combinations, two of which are invalid; a single `TargetArch`
 //! admits exactly two, both valid. `#[non_exhaustive]` reserves the
 //! addition of a third variant (`Riscv64`, `Ppc64le`) as a

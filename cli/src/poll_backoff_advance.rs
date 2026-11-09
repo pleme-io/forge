@@ -64,13 +64,12 @@
 //! bump for cooperative scheduling — lands at ONE typed body rather
 //! than nine copy-pasted lockstep edits.
 //!
-//! # Theory grounding
+//! # Grounding
 //!
-//! (three-times rule): nine sibling occurrences past
+//! Three-times rule: nine sibling occurrences past
 //! the "two is a coincidence; three is a law" threshold — the
 //! sleep-then-bump shape lifts onto one typed body per sleep flavour.
-//! (Types → Invariants → Proofs → Render Anywhere):
-//! the pre-bump-delay-then-saturating-bump ordering invariant lives in
+//! Construction guarantee: the pre-bump-delay-then-saturating-bump ordering invariant lives in
 //! `#[test]` fail-before-pass proofs against a recording schedule
 //! rather than as an unwritten convention each call site restates.
 

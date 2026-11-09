@@ -34,16 +34,15 @@
 //! the same skip sentinel and the same `"  • <label>: <status>\n"`
 //! rendering by construction.
 //!
-//! # Theory grounding
+//! # Grounding
 //!
-//! - (Construction guarantees; Types → Invariants →
-//!   Proofs → Render Anywhere): the paired byte-oracle sibling
+//! - Construction guarantee: the paired byte-oracle sibling
 //!   [`write_skip_or_success_summary_bullet`] is the Render Anywhere
 //!   half — pinning the exact rendered bytes (two-space indent, U+2022
 //!   `•` glyph, `<label>: <status>` body, trailing newline, ABSENCE of
 //!   ANSI palette sequences) as a `cargo test`-verifiable invariant.
-//! - (three-times rule; two-is-a-coincidence
-//!   threshold): FIVE sibling occurrences past the tripping-point tier,
+//! - Three-times rule; two-is-a-coincidence
+//!   threshold: FIVE sibling occurrences past the tripping-point tier,
 //!   so lifting onto ONE construction surface pre-empts the next-phase
 //!   drift warns against.
 

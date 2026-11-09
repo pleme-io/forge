@@ -148,7 +148,7 @@
 //!
 //! ## Frontier inspiration
 //!
-//! ("Two-phase signature composition") names the Phase 1
+//! Two-phase signature composition names the Phase 1
 //! chart record as the pre-admission honesty channel: the structural
 //! evidence that the chart's declared dep graph is content-addressed
 //! and reproducible. Helm's own `Chart.yaml dependencies:` schema

@@ -182,7 +182,7 @@
 //!
 //! ## Frontier inspiration
 //!
-//! ("Two-phase signature composition") names the Phase 2
+//! Two-phase signature composition names the Phase 2
 //! signature as the one `sekiban` admission webhook verifies before
 //! admitting a resource into a production namespace: only Phase-2-
 //! signed `HelmRelease` resources are admitted; Phase-1 records are

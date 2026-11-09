@@ -76,9 +76,9 @@
 //! bumping the diagnostic-burst cadence — lands at ONE typed body
 //! rather than N copy-pasted lockstep edits.
 //!
-//! # Theory grounding
+//! # Grounding
 //!
-//! (constructive substrate): the poll-loop clock is a
+//! Constructive substrate: the poll-loop clock is a
 //! typed value with a single constructor, not three separate locals a
 //! caller re-derives from convention. (three-times
 //! rule): two occurrences is the "coincidence" threshold; the third

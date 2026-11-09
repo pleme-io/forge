@@ -935,7 +935,7 @@ fn e2e_image_output_symlink(name: &str) -> Result<(tempfile::TempDir, PathBuf)> 
     // `commands/crossplane.rs::xpkg_output_file` (220b207),
     // `commands/federation_tests.rs::federation_test_job_manifest_file`
     // (76b256e), and `commands/migrations.rs::migration_job_manifest_file`
-    // (950a0e7) all routed onto it (belief 5 /
+    // (950a0e7) all routed onto it (a
     // recurring shape becomes a library before it becomes duplicated
     // code).
     crate::hermetic_scratch::hermetic_scratch_file("forge-e2e-image-", &format!("{}-image", name))

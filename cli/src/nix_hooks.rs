@@ -282,12 +282,12 @@ impl NixHooks {
 ///
 /// # Grounding
 ///
-/// - (solve-once-at-the-primitive): the four-line attic-hook
+/// - Solve-once-at-the-primitive: the four-line attic-hook
 ///   splice now lives at exactly one code line across the crate; a
 ///   future refinement of the hook's env contract lands here and
 ///   reaches all three consumers by construction rather than by
 ///   convention.
-/// - (recurring-shape-to-helper): three byte-similar four-line
+/// - Recurring-shape-to-helper: three byte-similar four-line
 ///   stanzas past the three-times threshold collapse onto ONE body.
 pub(crate) fn wire_post_build_hook_env(
     cmd: &mut Command,

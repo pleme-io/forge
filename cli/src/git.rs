@@ -503,7 +503,7 @@ pub async fn get_short_sha_async_in(workdir: &Path) -> Result<String> {
 /// the exact class of breakage rather than a generic "failed to get git
 /// SHA".
 ///
-/// (Types → Invariants → Proofs): the "get short SHA
+/// Construction guarantee: the "get short SHA
 /// for image tagging" contract lives as one typed primitive;
 /// (recurring-shape-to-helper).
 pub async fn get_short_sha_async_for_image_tag() -> Result<String> {
@@ -553,13 +553,13 @@ pub async fn get_short_sha_async_for_image_tag() -> Result<String> {
 ///
 /// # Grounding
 ///
-/// - (solve-once-at-the-primitive): the async YAML read-
+/// - Solve-once-at-the-primitive: the async YAML read-
 ///   modify-write shell (including its canonical
 ///   read/parse/serialize/write envelope) now lives at exactly one code
 ///   line across the crate (`yaml_read_modify_write_async` at
 ///   `git.rs`), so every consumer observes the same envelope by
 ///   construction rather than by convention.
-/// - (recurring-shape-to-helper): two byte-similar
+/// - Recurring-shape-to-helper: two byte-similar
 ///   five-line stanzas across two consumer sites in the same module,
 ///   each spelling the same async-fs + serde_yaml round-trip.
 ///
